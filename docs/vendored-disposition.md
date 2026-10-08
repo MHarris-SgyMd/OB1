@@ -48,14 +48,14 @@ features, not upstream parity).
 **87 artifacts** (17 integrations + 51 recipes + 16 schemas + 3 docs/drafts), each with
 exactly one disposition.
 
-- **keep + audited: 77** (78 until `brain-smoke-test` retired, SMD-2103). Two of them — `edge-function-cost-optimization` and
+- **keep + audited: 75** (78 until `brain-smoke-test` retired, SMD-2103; 77 until `open-brain-rest` and `rest-api` retired, SMD-1931). Two of them — `edge-function-cost-optimization` and
   `local-brain-no-mcp` — are struck through as retired by SMD-1800 and stay in this count as
   they did before SMD-2126. The vendored tree is overwhelmingly legitimate community
   content with live in-tree references (CI parity tests, recipes, the fork's ROLE_GRANTS,
   cross-schema deps). The seed "remove" list did not survive the gate — every seed-remove
   integration/schema is load-bearing today (the SMD-1228/1524/1544/1798 audit wired them
   into CI + the shim after the seed was written).
-- **remove: 10.**
+- **remove: 12.**
   - `schemas/text-search-trgm` — index verbatim in migration 011; no fork-side dep.
   - `schemas/recency-boosted-match-thoughts` — `match_thoughts_recency` has zero callers; 020 folded recency into core `match_thoughts`.
   - `schemas/thought-work-claims` — comment-only stub; 015 owns the table.
@@ -66,6 +66,8 @@ exactly one disposition.
   - `recipes/local-ollama-embeddings` — the fork embeds locally by default; `db/reembed.ts` for existing rows (SMD-2126 → SMD-2138).
   - `recipes/brain-smoke-test` — `deploy/smoke.sh` absorbed what applies to the fork; the rest needed PostgREST or a retiring gateway (SMD-2126 → SMD-2103).
   - `schemas/wiki-pages` — the page store is core, migration 064 (SMD-949 → SMD-1812).
+  - `integrations/open-brain-rest` — the REST core serves what a client needs of it; each route's fate is in "The brain's outward surface" (SMD-1931).
+  - `integrations/rest-api` — likewise (SMD-1931).
 - **sub-file removal: 2.** `recipes/email-history-import/rollback-chunking-columns.sql`
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
@@ -86,7 +88,7 @@ exactly one disposition.
   `schemas/typed-reasoning-edges` → SMD-1253; ~~`schemas/wiki-pages` → SMD-949~~ (rebuilt in core as migration 064 and retired, SMD-1812);
   `schemas/smart-ingest` → SMD-1253.
 - **SMD-1798 portability (runtime supabase-js), kept:** `agent-memory-api`, `enhanced-mcp`,
-  `open-brain-rest`, `rest-api`, `ob-graph`, `repo-learning-coach`, `schema-aware-routing`,
+  ~~`open-brain-rest`~~, ~~`rest-api`~~ (both retired, SMD-1931), `ob-graph`, `repo-learning-coach`, `schema-aware-routing`,
   `work-operating-model-activation`, `x-twitter-import` (`local-brain-no-mcp`, also listed
   here, was retired by SMD-1800 instead).
 - **adjacent follow-up filed:** SMD-1929 (purge inherited NBJ brand/funnel assets under
@@ -244,16 +246,17 @@ SMD-2308; the mechanism is SMD-2310) or retires. "A thin adapter" or "a client o
 REST core as its own server" is not an option. This section gives each surface-bearing
 integration its disposition, and each route of the two REST gateways its fate against
 the REST core's operations (`server-portable/rest/routes.ts`; the OpenAPI document at
-`GET /openapi.json`). Neither gateway runs in any `deploy/` compose file; CI runs them
-only inside the suites: `extensions/test-auth.ts` imports both and starts each as
-`bun <file>` on a free port, and `extensions/test-writes.ts` imports both.
+`GET /openapi.json`). Neither gateway ran in any `deploy/` compose file; CI ran them
+only inside the suites (`extensions/test-auth.ts` imported both and started each as
+`bun <file>` on a free port, `extensions/test-writes.ts` imported both). Both are
+retired: their directories and their rows in those suites went with SMD-1931's PR 3.
 
 ### Servers
 
 | Integration | Disposition | Why |
 |---|---|---|
-| `open-brain-rest` | **retire** (SMD-1931) | Every route has a fate below. |
-| `rest-api` | **retire** (SMD-1931) | Every route has a fate below. |
+| `open-brain-rest` | **retired** (SMD-1931) | Every route has a fate below. |
+| `rest-api` | **retired** (SMD-1931) | Every route has a fate below. |
 | `enhanced-mcp` | **retire** (SMD-1931) | Its search (semantic and text), list, get, update, capture and stats tools are core tools. `count_thoughts` is a count filtered on sidecar columns and dates, moved to SMD-2280 with `rest-api`'s `/count`; `ops_capture_status` reads `smart-ingest`'s jobs and goes with that plugin (SMD-2690); `ops_source_monitor` reads three `ops_source_*` views that no `.sql` in the tree defines (`recipes/brain-health-monitoring` has other `ops_*` views), so it is dropped; `graph_search`, `entity_detail` and `related_thoughts` are the entity-graph read the GUI files (SMD-2280). |
 | `delete-thought-mcp` | **retire** (SMD-1931) | The core's `delete_thought` tool and `DELETE /v1/thoughts/{id}` call the `delete_thought` RPC (009, as 036, 042 and 060 replaced it), which answers a cited source with `REFUSED_CITED` and a detach option and records the key as the audit actor. This server's raw delete meets the same citation trigger as a plain error message, with no structured refusal and no detach, and audits with no actor. |
 | `update-thought-mcp` | **retire** (SMD-1931) | The core's `update_thought` tool and `PATCH /v1/thoughts/{id}`. |
@@ -263,7 +266,7 @@ only inside the suites: `extensions/test-auth.ts` imports both and starts each a
 | `smart-ingest` | **plugin** (SMD-2310, port SMD-2690) | Its own tables (`schemas/smart-ingest`); document atomization the core does not do. |
 | `readwise-capture` | **plugin at `/hooks/readwise`** (SMD-2310, port SMD-2690) | An inbound webhook with its own cache (`schemas/readwise-books`). |
 | `slack-capture`, `telegram-capture` | **plugin at `/hooks/<name>`** (SMD-2101) | Inbound webhooks; SMD-2101 already carries them. |
-| `chrome-capture-extension` | **client of `/api`** (SMD-1931) | A browser client, not a server: `POST /v1/thoughts` with a capture key, `GET /v1/whoami` as its key check. |
+| `chrome-capture-extension` | **client of `/api`** (SMD-1931, done in its PR 3) | A browser client, not a server: `POST /v1/thoughts` with a capture key, `GET /v1/whoami` as its key check. |
 
 `entity-extraction-worker` and `consolidation-workers` are workers, not surface; they
 keep their rows below.
@@ -337,20 +340,20 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | Artifact | Disposition | Justification |
 |---|---|---|
 | `agent-memory-api` | keep + audited | Live runtime API: README index, `schemas/agent-memory` deploys from it, CI drives it (`test-auth.ts:189` rest, `test-writes.ts:384`); on the SQL-shim KEEP list. Portability follow-up SMD-1798. **SMD-1931 (2026-10-08): a REST-core plugin, port SMD-2690.** |
-| `chrome-capture-extension` | keep + audited → fold-in **SMD-1867** | Client-side capture source (Claude / ChatGPT / Gemini → `open-brain-rest`). A capture adapter under the SMD-1867 contract, not an ad-hoc integration. **SMD-1931 (2026-10-08): a client of `/api` — `POST /v1/thoughts` with a capture key.** |
+| `chrome-capture-extension` | keep + audited → fold-in **SMD-1867** | Client-side capture source (Claude / ChatGPT / Gemini → the REST core's `POST /v1/thoughts` at `/api`). A capture adapter under the SMD-1867 contract, not an ad-hoc integration. **SMD-1931 (2026-10-08): a client of `/api` — `POST /v1/thoughts` with a capture key.** |
 | `consolidation-workers` | keep + audited *(revises seed "remove")* | Does bio-synthesis + metadata-normalization (LLM enrichment) — migration 029 / SMD-1294 is *supersession proposals*, a different capability, and does not supersede this. Load-bearing: CI `test-auth.ts:200-201` + `test-writes.ts` bio (SMD-1544), `test-auth.ts` imports and starts `metadata-norm` (the deno-check job went with SMD-1800), `package.json` `sync-auth`, on the shim. Fails "verified no references." |
 | `delete-thought-mcp` | keep + audited *(revises seed "remove")* | Migration 009 ported the *RPC* from it into core, but the standalone MCP server stays a live community "add just this one tool" example: CI `test-auth.ts:186`, the whole `skills/deleting-thoughts` pack, `schemas/thought-audit` README. Fails "verified no references." **SMD-1931 (2026-10-08): retire.** |
 | `discord-capture` | keep + audited → fold-in **SMD-1867** | Capture source (Discord bot); sibling to slack/telegram capture. SMD-1867 adapter. **SMD-1931 (2026-10-08): retire (a README with no code).** |
-| `enhanced-mcp` | keep + audited + rebuild-tickets | Load-bearing (CI `test-auth.ts`/`test-writes.ts`, `evals/eval-filtered`, `rest-api` shares its `_shared`). Un-absorbed capabilities ticketed: integer-id read tools broken on the UUID fork → **SMD-1525**; portability → **SMD-1798**. **SMD-1931 (2026-10-08): retire.** |
+| `enhanced-mcp` | keep + audited + rebuild-tickets | Load-bearing (CI `test-auth.ts`/`test-writes.ts`, `evals/eval-filtered`; `rest-api`, which shared its `_shared`, retired with SMD-1931). Un-absorbed capabilities ticketed: integer-id read tools broken on the UUID fork → **SMD-1525**; portability → **SMD-1798**. **SMD-1931 (2026-10-08): retire.** |
 | `entity-extraction-worker` | keep + audited *(revises seed "remove")* | `db/extract-entities.ts` (migration 016 / SMD-947) is the fork's *own-runtime* rebuild; the vendored Edge Function is the community queue-processor still wired to `smart-ingest` (triggers it by URL), `schemas/entity-extraction`, recipes `entity-wiki` / `wiki-compiler` / `brain-health-monitoring` / `typed-edge-classifier`, and CI `test-auth.ts:199`. Fails "verified no references." |
 | `hermes-agent-memory` | keep + audited | Standalone Python `MemoryProvider` plugin depending on the kept `agent-memory-api`. Not superseded / hazard / dead. |
 | `kubernetes-deployment` | keep + audited | Self-hosted K8s + own Postgres deployment path. Raw INSERTs audited under SMD-1524; guard owns `k8s/init.sql` / `openbrain.yml` / `index.ts` (OWN_DATABASE); CI `test-auth.ts:188` + the deploy-stack job's image build (on Bun since SMD-1800; the deno-check job went with it). **SMD-1931 (2026-10-08): retire; removal SMD-2288.** |
-| `open-brain-rest` | keep + audited | REST gateway for the dashboard surfaces; `chrome-capture-extension` POSTs to it. CI `test-auth.ts:192` rest + `test-writes.ts:405`; on the shim; portability SMD-1798. **SMD-1931 (2026-10-08): retire; each route's fate is in "The brain's outward surface" above.** |
+| `open-brain-rest` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the REST gateway for the Next dashboards' surfaces, which `chrome-capture-extension` POSTed to. Every route's fate is in "The brain's outward surface" above; the extension now calls the REST core. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `openclaw-agent-memory` | keep + audited | OpenClaw plugin/publishing package depending on the kept `agent-memory-api` + `schemas/agent-memory`. Live: README index, docs, `.gitignore` (`dist/`), CLAW_HUB publishing. Distinct from the `recipes/openclaw-agent-memory` setup recipe. |
 | `readwise-capture` | keep + audited → fold-in **SMD-1867** | Readwise-highlight webhook capture source. `schemas/readwise-books` is its companion cache; CI `test-auth.ts:205` (webhook) + `test-writes.ts:512` (SMD-1524). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/readwise`, port SMD-2690.** |
-| `rest-api` | keep + audited | Documented general REST gateway (CORS, full CRUD, ingest, entity endpoints); `/ingest` proxies to `smart-ingest`. CI `test-auth.ts:622` + `test-writes.ts:443`; on the shim (`brain-smoke-test`, which probed it, retired in SMD-2103). (Coexists with `open-brain-rest`, the dashboard-specific gateway — a possible future consolidation, not a removal; both referenced.) **SMD-1931 (2026-10-08): retire; each route's fate is in "The brain's outward surface" above.** |
+| `rest-api` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the general REST gateway (CORS, CRUD, an `/ingest` proxy to `smart-ingest`, entity endpoints). Every route's fate is in "The brain's outward surface" above. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `slack-capture` | keep + audited → fold-in **SMD-1867** | Slack quick-capture source. Live: README index, `docs/01-getting-started` step, CI. Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/slack` (SMD-2101).** |
-| `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622`, `rest-api` `/ingest` proxies to it, `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) **SMD-1931 (2026-10-08): a REST-core plugin, port SMD-2690.** |
+| `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622` (`rest-api`'s `/ingest` proxy to it retired with SMD-1931), `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) **SMD-1931 (2026-10-08): a REST-core plugin, port SMD-2690.** |
 | `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`extensions/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-fork-consistency.ts`). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/telegram` (SMD-2101).** |
 | `update-thought-mcp` | keep + audited *(revises seed "remove")* | Twin of `delete-thought-mcp`: migration 009 ported the *RPC* from it into core, but the standalone MCP server stays a live community example — CI `test-auth.ts:187` + `test-writes.ts:315`, `schemas/thought-audit` README. Fails "verified no references." **SMD-1931 (2026-10-08): retire.** |
 
@@ -367,7 +370,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `provenance-chains` | keep + audited *(revises seed "remove")* | Additive derivation columns + own merge functions (granted by `db/config.mjs`); `recipes/provenance-chains` + `typed-edge-classifier` read it. Guard check 7 (line 554) already fences its function set. Distinct from core's 025/026/032 provenance. |
 | `readwise-books` | keep + audited | Own `readwise_books` cache + RPCs; granted by `db/config.mjs`; companion to `integrations/readwise-capture` + `recipes/readwise-import`; CI `test-writes.ts` SIDECARS. Not superseded, not a hazard. |
 | `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-fork-consistency.ts` once carried for it. |
-| `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `enhanced-mcp` / `rest-api` / `brain-health-monitoring` reference it. *(The `schemas/smart-ingest-tables` folder-name drift is resolved; see "Consistency fixes" above.)* Rebuild tracked under SMD-1253. |
+| `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `enhanced-mcp` / `brain-health-monitoring` reference it (`rest-api` did until SMD-1931). *(The `schemas/smart-ingest-tables` folder-name drift is resolved; see "Consistency fixes" above.)* Rebuild tracked under SMD-1253. |
 | `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function the fork replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); referenced by `delete-thought-mcp` / `update-thought-mcp`. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |
 | `thought-work-claims` | **remove** *(no-parity posture)* | Already a **comment-only stub** — all upstream DDL was stripped under SMD-1250 (it would have clobbered 015's `release_thought` / `release_claims_for_worker`). Migration 015 owns the real `thought_work_claims` (evals + `db/config.mjs` grants use it). The stub's only content is upstream documentation. Removal PR: delete the folder; guard check 7 still fences the function names regardless. |
@@ -397,7 +400,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `auto-capture` | keep + audited | Workflow-guidance recipe paired with the reusable auto-capture skill. |
 | `brain-backup` | keep + audited → **on the shim (SMD-2144)** | Standalone export-to-JSON backup utility (`backup-brain.mjs`), read-only; its README names `pg_dump` as the whole-brain backup. |
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` / `smart-ingest` tables. |
-| `brain-smoke-test` | ~~keep + audited → **SMD-2126**: SMD-2103~~ → **retired (SMD-2103)** *(no-parity posture; SMD-2126 → SMD-2103)* | Was the fresh-install smoke harness (`smoke-all.js`), seven categories against a Supabase project. Three needed what the fork lacks: PostgREST and a service-role key for DB Schema and Access Key Enforcement, an anon key for Row-Level Security. REST API pointed at `open-brain-rest`, which retires (SMD-1931). The rest was covered already: `deploy/smoke.sh` checks 5–6 for MCP Server; the server's start gate, `server-portable/preflight.ts`, for the schema; the suites for capture, since smoke.sh is read-only; `server-portable/test-auth.ts` for `?key=`. The one Auth check it lacked, a wrong key refused in-protocol, is now smoke.sh's check 1, which also reads the body for -32001 instead of trusting the 200. |
+| `brain-smoke-test` | ~~keep + audited → **SMD-2126**: SMD-2103~~ → **retired (SMD-2103)** *(no-parity posture; SMD-2126 → SMD-2103)* | Was the fresh-install smoke harness (`smoke-all.js`), seven categories against a Supabase project. Three needed what the fork lacks: PostgREST and a service-role key for DB Schema and Access Key Enforcement, an anon key for Row-Level Security. REST API pointed at `open-brain-rest`, since retired (SMD-1931). The rest was covered already: `deploy/smoke.sh` checks 5–6 for MCP Server; the server's start gate, `server-portable/preflight.ts`, for the schema; the suites for capture, since smoke.sh is read-only; `server-portable/test-auth.ts` for `?key=`. The one Auth check it lacked, a wrong key refused in-protocol, is now smoke.sh's check 1, which also reads the body for -32001 instead of trusting the 200. |
 | `bring-your-own-context` | keep + audited | Portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). |
 | `chatgpt-conversation-import` | keep + audited → SMD-1867 candidate → **SMD-2126**: port onto the ingestion contract (SMD-2147, after SMD-2136) | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
 | `claudeception` | keep + audited | Skills-that-create-skills continuous-learning recipe; searches/captures via the core MCP path. |
