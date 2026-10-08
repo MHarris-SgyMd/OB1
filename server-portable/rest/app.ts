@@ -12,7 +12,7 @@ import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Pr
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
-import { TOOLS, UNLOCKS, visibleToolNames, type ToolName } from "../tools.ts";
+import { mayCall, scopeOf, visibleToolNames, type ToolName } from "../tools.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -62,10 +62,6 @@ export function headerKeys(req: Request): string[] {
  * a forwarder is never read as a caller and a caller's key never as a forwarder.
  */
 export const FORWARDER_HEADER = "x-brain-forwarder";
-
-const scopeOf = (name: ToolName) => TOOLS.find((t) => t.name === name)!.scope;
-/** Whether a key's scope unlocks a tool's group (tools.ts's UNLOCKS, the one statement of the hierarchy). */
-export const mayCall = (principal: Principal, name: ToolName): boolean => UNLOCKS[principal.scope].includes(scopeOf(name));
 
 /** Each field's JSON-schema type, for reading it from a query string: "number", "integer", "boolean", "array", or anything else as text. */
 function queryTypes(name: ToolName): Map<string, string> {

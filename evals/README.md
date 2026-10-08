@@ -6666,8 +6666,11 @@ accepts the bare-path document, whose `issuer` carries `/auth`
   lookup, and caps the body. Measured on Bun 1.4.0: `node:https` dials the
   address that lookup returns, so the address checked is the address dialled
   and DNS rebinding gains nothing; and the library's 2.5 s abort signal ends a
-  request hung before its headers or mid-body. The deploy keeps this guard on
-  any runtime.
+  request hung before its headers or mid-body. It refuses an answer a Response
+  cannot carry: before SMD-2665, a status outside 200–599 threw in a response
+  handler, so one unauthenticated authorization request naming a host that
+  answered 999 stopped the server, and a 101 left the fetch hanging past that
+  abort. The deploy keeps this guard on any runtime.
 - **Its defaults open more than the brain needs.** The kit's first versions
   inherited these, and the server now closes each:
   - **Open registration plus client credentials let anyone hold a working
