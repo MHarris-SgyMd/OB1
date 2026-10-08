@@ -1339,6 +1339,27 @@ export function migrationNameProblem(names) {
   return null;
 }
 
+/**
+ * A plugin's name (SMD-2310): lower-case words joined by single hyphens, at
+ * most 32 characters — server-portable/core/plugins.ts holds a manifest to it,
+ * and the migrator holds OB1_PLUGINS to it before a name reaches an identifier.
+ */
+export const PLUGIN_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+/**
+ * A plugin's own Postgres schema and the role that owns it (SMD-2310): its
+ * name, hyphens read as underscores. The migrator makes both and runs the
+ * plugin's migrations as the role, in the schema; the server's handle
+ * (store-sql.ts's pluginTx) sets the same two, so the plugin's tables are the
+ * role's and the core's are not.
+ * @param {string} name
+ * @returns {{ schema: string, role: string }}
+ */
+export function pluginIdents(name) {
+  const snake = name.replace(/-/g, "_");
+  return { schema: `plugin_${snake}`, role: `ob1_plugin_${snake}` };
+}
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
 
 /**

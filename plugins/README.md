@@ -4,7 +4,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 
 | Plugin | What it does |
 | --- | --- |
-| [example](example/) | The template: one read operation over the core |
+| [example](example/) | The template: a read operation over the core, and notes pinned to thoughts in a table of its own |
 
 ## Turning plugins on
 
@@ -18,8 +18,19 @@ A directory, `plugins/<name>/`, with:
   - **The name** is the directory's: lower-case words joined by hyphens.
   - **Each operation** declares a title, a description and the scope a key needs (`read`, `capture` or `write`). It also declares its REST method and path under the plugin's, an input and an output as zod shapes, and a handler.
   - **The handler** returns `ok(value)` or `refuse(status, CODE, facts)`. A value is held to the output schema; one that does not fit is the plugin's fault, answered as `FAILED`.
+- `migrations/` (optional): the plugin's tables, as `NNN_name.sql` files. See below.
 - `README.md` and `metadata.json` (`"category": "plugins"`), as every contribution has.
 - An entry in [registry.ts](registry.ts). The server runs only plugins built into its image; nothing is loaded by a name the environment gives.
+
+## A plugin's tables
+
+A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned by a role of its own, `ob1_plugin_<name>` (hyphens read as `_`).
+
+- **Migrating.** The migrator applies an enabled plugin's `migrations/` after the core's, each file run as that role with its schema first on the path. It records them in their own ledger, `plugin_migrations` ([db/README.md](../db/README.md), "Plugin migrations"). Run it with the same `OB1_PLUGINS`; the compose migrator reads it from `deploy/.env`.
+- **At runtime.** A handler reaches them through `ctx.db.tx(async (sql) => …)`: one transaction as the same role, in the same schema. Tables are named bare, and each `${value}` is a bound parameter.
+- **The boundary.** The role holds nothing on the core's tables, so Postgres refuses a migration or a handler that reaches for one. The brain's thoughts are reached through `ctx.call` alone.
+- **No foreign keys into the core.** A row that names a thought holds its id, and the operation checks the thought through the core, as the example's `add_note` does.
+- **Turning a plugin off** removes its operations and runs none of its migrations. Its schema, tables and rows are left as they are.
 
 ## The rules a plugin is held to
 
@@ -34,6 +45,7 @@ Checked when the server starts, so a malformed manifest stops it:
 Held by the maintainer's review:
 
 - **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own files, nothing else; zod comes from the SDK.
+- **No role or search-path change in its SQL.** `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it. A `RESET ROLE`, `SET ROLE`, `SET SESSION AUTHORIZATION` or `search_path` change in a migration or a handler is refused in review.
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 

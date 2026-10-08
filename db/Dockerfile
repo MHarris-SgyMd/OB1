@@ -23,10 +23,14 @@ WORKDIR /app
 # `migrate.ts --grant` (SMD-2289).
 COPY db/migrate.ts db/login-role.ts db/config.mjs db/version.mjs db/cli.ts db/connect.ts ./
 COPY db/migrations ./migrations
-# version.mjs resolves releases.json at its parent's parent — / here, as in the
-# server image — so `bun migrate.ts --dry-run` names the release each pending
-# migration belongs to, from the manifest as it stood at this build's commit.
+# version.mjs resolves releases.json at its parent's parent — / here — so
+# `bun migrate.ts --dry-run` names the release each pending migration belongs
+# to, from the manifest as it stood at this build's commit.
 COPY releases.json /releases.json
+# The plugins (SMD-2310), at ../plugins from migrate.ts as in a checkout: a run
+# applies the migrations of those OB1_PLUGINS names, each found by its
+# directory and manifest. Nothing here imports a plugin's code.
+COPY plugins /plugins
 # DATABASE_URL and the OB1_* knobs are injected at runtime (deploy/compose.yaml
 # forwards them); nothing is baked in.
 USER bun

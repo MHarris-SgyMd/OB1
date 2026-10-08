@@ -2078,10 +2078,10 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
-const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "plugins"];
 
 function checkSupabaseIsms() {
   for (const dir of SQL_RULE_DIRS) {
@@ -5676,7 +5676,7 @@ const TIER_ROUTE_TABLE = (() => {
     + "  services:\n"
     + TIERS.map((t) => `    ${t}:\n      loadBalancer:\n        servers:\n          - url: "http://${tierMeshName("mcp", t)}.:8000"\n`).join("");
 })();
-/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
+/** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
 const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
@@ -5717,7 +5717,7 @@ function tierStack(compose: Mapping): Mapping {
     };
     services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...omitKeys(c.migrate?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
     services[`${t}-server`] = tierServer(c.server, "mcp");
     services[`${t}-api`] = tierServer(c.api, "api");
   }

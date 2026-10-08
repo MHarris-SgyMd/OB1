@@ -12,8 +12,10 @@ import type { Scope } from "./auth.ts";
 import type { ToolName } from "./tools.ts";
 import type { CoreAnswer } from "./core/calls.ts";
 import type { SPECS } from "./core/schemas.ts";
+import type { PluginSql } from "./store.ts";
 
 export { z };
+export type { PluginSql };
 
 /** The scope an operation needs, as a core tool's group: read, capture, or write (a forwarder's key is no caller). */
 export type PluginScope = Exclude<Scope, "forward">;
@@ -53,6 +55,15 @@ export interface PluginContext {
    * output schema should declare no more than its caller may see.
    */
   call<K extends ToolName>(name: K, input: CoreInput<K>): Promise<CoreAnswer<K> | CallForbidden | CallRefusedInput>;
+  /**
+   * The plugin's own tables: `db.tx(async (sql) => …)` runs in one
+   * transaction as the plugin's Postgres role (`ob1_plugin_<name>`), its
+   * schema (`plugin_<name>`) first on the path — so a table is named bare,
+   * and a core table is refused by Postgres. `sql` is a tagged template: each
+   * `${value}` is a bound parameter, never text. The tables are the plugin's
+   * migrations', which the migrator applies while the plugin is enabled.
+   */
+  readonly db: { tx<T>(fn: (sql: PluginSql) => Promise<T>): Promise<T> };
 }
 
 export type Method = "GET" | "POST" | "PATCH" | "DELETE";

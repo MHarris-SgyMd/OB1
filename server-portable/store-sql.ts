@@ -26,6 +26,7 @@ import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
+import { PLUGIN_NAME_RE, pluginIdents, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
@@ -57,6 +58,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  PluginSql,
   UpdateProvenance,
   UpdateResult,
   WriteEvent,
@@ -925,6 +927,26 @@ export class SqlStore implements ThoughtStore {
         return rows.length;
       },
     };
+  }
+
+  /**
+   * A plugin's transaction (SMD-2310): SET LOCAL ROLE to the plugin's role and
+   * its schema first on the path (db/config.mjs's pluginIdents, as the
+   * migrator made them), so its tables are named bare and the core's are
+   * Postgres's to refuse — the role holds no privilege on them. The plugin is
+   * handed a tagged template alone: no unsafe(), no second transaction. A
+   * plugin's SQL that resets the role is the checker's to refuse (SET ROLE is
+   * not a boundary against code that undoes it; plugins are curated).
+   */
+  pluginTx<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> {
+    if (!PLUGIN_NAME_RE.test(plugin)) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
+    const { schema, role } = pluginIdents(plugin);
+    return this.sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`);
+      await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
+      const query: PluginSql = (strings, ...values) => tx(strings, ...values) as never;
+      return fn(query);
+    }) as Promise<T>;
   }
 
   async close(): Promise<void> {

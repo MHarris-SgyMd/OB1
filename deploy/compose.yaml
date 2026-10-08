@@ -390,6 +390,10 @@ services:
       # is one batch, for a brain with millions of legacy rows that finishes by
       # hand (023's header). Same no-fallback rule as above.
       OB1_BACKFILL_LIMIT: ${OB1_BACKFILL_LIMIT:-}
+      # The plugins the brain runs (SMD-2310), as the servers read them: a run
+      # applies their migrations after the core's, each in its own schema as
+      # its own role. A plugin not named is left as it is.
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
     depends_on:
       postgres:
         condition: service_healthy
