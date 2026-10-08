@@ -49,8 +49,9 @@ import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
  * mostly a later state of the same thing, not a contradiction, and the 7B read
  * "conflict" as contradiction only. Measured on the dogfood brain's own labels
  * (evals/eval-judge.ts; evals/README.md has the tables): rejected proposals
- * the judge proposes again 119 → 2 of 126, linked tickets read as related
- * 46 → 106 of 126, and the model named a side on all 4 of its outdates.
+ * the judge proposes again 119 → 2 of 126, linked tickets read as neither
+ * unrelated nor proposed 46 → 106 of 126 (85 related, 21 evolves), and the
+ * model named a side on all 4 of its outdates.
  */
 export const CONSOLIDATE_PROMPT_VERSION = 4;
 
@@ -75,6 +76,17 @@ export function actorKindOf(metadata: Record<string, unknown> | null | undefined
   // and would have rendered Object's source on the trusted header line from a
   // row the backfill had not reached yet (first review pass).
   return typeof k === "string" && Object.hasOwn(WRITER_PHRASE, k) ? k : null;
+}
+
+/**
+ * The name of the key that wrote a thought's current text: `metadata.actor_name`,
+ * which 050 stamps from the envelope and never takes from the payload, or null
+ * when the row has none (an unclassified write, one from outside the server).
+ * proposalVerdict reads it to tell one writer's copies from another's.
+ */
+export function actorNameOf(metadata: Record<string, unknown> | null | undefined): string | null {
+  const n = metadata?.actor_name;
+  return typeof n === "string" && n.trim() !== "" ? n : null;
 }
 
 /**
@@ -134,6 +146,8 @@ export type Judgement = {
    * cut short, so the worker can say which (SMD-1873, review pass 1).
    */
   unknownVerdict?: string;
+  /** For a duplicate, the side the model named in `supersedes` though p4 asks for none — kept for the recipe, read by nothing. */
+  duplicateKeeps?: "older" | "newer";
   /**
    * SMD-1873: what the model's own token probabilities say, when the call
    * asked for them (judgePair's `logprobs`) and the endpoint returned them —
@@ -359,8 +373,14 @@ export function parseJudgement(raw: string): Judgement {
     else if (s === "B" || s === "NEWER") supersedes = "newer";
   }
   const reason = typeof parsed.reason === "string" ? cutByCodePoint(oneLine(parsed.reason), REASON_MAX) : "";
-  const evidence = supersedes !== "unknown" && typeof parsed.evidence === "string" ? cutByCodePoint(oneLine(parsed.evidence), REASON_MAX) : "";
-  return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, evidence, malformed: false };
+  // A quote past the bound is cut at a word boundary, so evidenceIn's
+  // whole-word match is not failed by the half word the cut leaves (review pass 3).
+  const quote = supersedes !== "unknown" && typeof parsed.evidence === "string" ? oneLine(parsed.evidence) : "";
+  const evidence = [...quote].length > REASON_MAX ? cutByCodePoint(quote, REASON_MAX).replace(/\s+\S*$/, "") : quote;
+  // A duplicate carries no direction the pass uses; the letter the model gave anyway is kept for the recipe.
+  const letter = verdict === "duplicate" && typeof parsed.supersedes === "string" ? parsed.supersedes.trim().toUpperCase() : "";
+  const keeps = letter === "A" ? "older" : letter === "B" ? "newer" : undefined;
+  return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, evidence, malformed: false, ...(keeps ? { duplicateKeeps: keeps } : {}) };
 }
 
 /**
@@ -573,15 +593,19 @@ export function parseConsolidateKey(key: string): { model: string; version: numb
  * on the dogfood brain the 7B answered it for 20 of the 60 pairs whose writer
  * had set `supersedes` (and for none of 252 pairs that were not), so a
  * reviewer sees it; it is a relation edge as well, which is SMD-1873's next
- * PR. Either thought could go, so the later one, which a reader would
- * look for, is the one proposed to stand — unless the operator wrote the
- * older and someone else the newer: an agent restating what the operator
- * stated never stands over it (SMD-1726's rule, which the prompt states for
- * "outdates" and a "duplicate" would otherwise go round; review pass 1).
+ * PR. It is proposed only when one writer wrote both — `writers` are the two
+ * rows' `actor_name` (actorNameOf), the key's name the database stamps (050),
+ * so a payload cannot claim it — and then the later copy, which a reader would
+ * look for, is proposed to stand. Across writers, or with either unknown, a
+ * duplicate proposes nothing: a capture-only key's near-copy of another key's
+ * thought, accepted, would have let it repoint its copy at text of its own
+ * (review pass 3, the harm SMD-2617 and SMD-2638 closed), and a run of copies
+ * would have filled the queue; an agent restating the operator is the same
+ * case (SMD-1726's rule, review pass 1).
  */
 export function proposalVerdict(j: Judgement, writers?: { older?: string | null; newer?: string | null }): "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected" | null {
   if (j.malformed) return null;
-  if (j.verdict === "duplicate") return writers?.older === "operator" && writers.newer !== "operator" ? "older_supersedes_newer" : "newer_supersedes_older";
+  if (j.verdict === "duplicate") return writers?.older && writers.older === writers.newer ? "newer_supersedes_older" : null;
   if (j.verdict !== SUPERSEDING_VERDICT) return null;
   if (j.supersedes === "newer") return "newer_supersedes_older";
   if (j.supersedes === "older") return "older_supersedes_newer";
@@ -629,17 +653,20 @@ export function proposalReason(j: Judgement): string {
  * stated number, whether the quote naming the current side was found in it,
  * and the token distributions themselves with their coverage.
  */
-export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities } {
+export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; duplicate_keeps?: "older" | "newer"; probabilities?: JudgeProbabilities } {
   return {
     verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence,
     ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}),
+    ...(j.duplicateKeeps ? { duplicate_keeps: j.duplicateKeeps } : {}),
     ...(j.probabilities ? { probabilities: j.probabilities } : {}),
   };
 }
 
 /**
- * Chat endpoints that refused a request carrying `logprobs` (an HTTP 400)
- * and then answered the same request without it, by base URL: judgePair asks
+ * Chat endpoints that refused a request carrying `logprobs` (an HTTP 400, or
+ * a 422 — text-generation-inference's answer to a `top_logprobs` over its
+ * limit; review pass 3) and then answered the same request without it, by
+ * base URL and model: judgePair asks
  * them without it for the rest of the process, so a provider that does not
  * take the field costs one extra call, not a failed pass. A 400 the retry
  * gets too (a context-length overflow, a bad parameter) is about the request,
@@ -667,14 +694,15 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     const gate = mayLeaveBox({ kind: "judge", actor, metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
     if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
   }
-  const logprobs = opts.logprobs && !refusesLogprobs.has(cfg.chat.base) ? opts.logprobs : undefined;
+  const endpoint = `${cfg.chat.base} ${cfg.judgeModel}`;
+  const logprobs = opts.logprobs && !refusesLogprobs.has(endpoint) ? opts.logprobs : undefined;
   let r = await judgeRequest(older, newer, cfg, signal, logprobs);
   let asked = logprobs;
-  if (!r.ok && r.status === 400 && logprobs) {
+  if (!r.ok && (r.status === 400 || r.status === 422) && logprobs) {
     await r.text().catch(() => "");
     r = await judgeRequest(older, newer, cfg, signal, undefined);
     asked = undefined;
-    if (r.ok) refusesLogprobs.add(cfg.chat.base);
+    if (r.ok) refusesLogprobs.add(endpoint);
   }
   if (!r.ok) {
     const msg = await r.text().catch(() => "");

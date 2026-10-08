@@ -3622,9 +3622,10 @@ SMD-2448); a linked pair is related and is neither unrelated nor proposed.
 | qwen2.5:7b, 434 pairs | p3 (agree / unrelated / conflict) | p4 (five verdicts, "outdates") |
 |---|---|---|
 | rejected proposals proposed again | 119 of 126 | 2 of 126 |
-| linked pairs read as related | 46 of 126 | 106 of 126 |
-| pointer + accepted pairs proposed (outdates or duplicate) | 3 of 62 | 22 of 62 |
-| supersessions the model directed | 14 of 128 conflicts (11%) | 4 of 4 outdates, 3 quoting words found in that side and not the other — the other 20 proposals are duplicates, directed by rule (the newer, or the operator's) |
+| linked pairs neither unrelated nor proposed | 46 of 126 (agree) | 106 of 126 (85 related, 21 evolves) |
+| pointer pairs proposed (outdates or duplicate) | 1 of 60 | 22 of 60 |
+| the 2 accepted proposals proposed | 2 of 2 | 0 of 2 (both read as evolves) |
+| supersessions the model directed | 14 of 128 conflicts (11%) | 4 of 4 outdates, 3 quoting words found in that side and not the other — the other 20 proposals are duplicates, directed by rule (the newer) |
 | the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
 | AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.61 |
 | …the same: token P(outdates or duplicate), as the pass records it | — | **0.91** |
@@ -3646,8 +3647,11 @@ thing — a checkpoint and the final summary, a "state of the record" note and
 the release that followed — and the 7B reads "conflict" as contradiction
 only. "outdates" names both. The 7B answered "duplicate" for 20 of the 60
 pointer pairs (and "related" for 32), against 0 of the 252 negatives, so p4
-proposes a duplicate too, the newer standing — or the operator's, when an
-agent's newer thought duplicates what the operator wrote.
+proposes a duplicate too, the newer standing — but only when one writer wrote
+both sides (050's `actor_name`): across two writers a capture-only key's
+near-copy of another key's thought, accepted, would take its standing
+(SMD-1873 review pass 3). Every duplicate in this set was one writer's, so
+the rule changes none of these numbers.
 
 | p4, 140 of the pairs (all 62 true, 40 rejected, 38 linked) | qwen2.5:7b | qwen3.8:27b |
 |---|---|---|

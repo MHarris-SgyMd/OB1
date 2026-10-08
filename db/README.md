@@ -2321,8 +2321,12 @@ evolve from the other, are they a duplicate, or does one outdate the other
 again) — and when one outdates the other, which is current, decided from what
 the texts say and not from the dates, with the words that show it quoted. A
 supersession whose texts do not say is recorded `conflict_undirected` for the
-reviewer to direct. Only `outdates` and `duplicate` become rows (a duplicate
-as the newer standing, its reason starting `duplicate —`); the verdict rides
+reviewer to direct. Only `outdates`, and a `duplicate` one writer wrote both
+sides of (050's `actor_name`, which a payload cannot set), become rows — the
+duplicate as the newer standing, its reason starting `duplicate —`; across two
+writers, or with either unknown, a duplicate proposes nothing, since a
+capture-only key's near-copy of another key's thought, accepted, would take
+its standing (SMD-1873 review pass 3). The verdict rides
 with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
@@ -2332,16 +2336,15 @@ where the number the model wrote was 0.80 on most pairs; over every labelled
 pair the token score told a supersession from the rest at AUROC 0.91, though
 the 7B's proposals held too few false ones to measure how it ranks them),
 else the number it wrote — also when the alternatives naming a verdict held
-under half the token's mass. A duplicate of the operator's thought by another
-writer is proposed with the operator's standing; accepting it points the
-operator's thought at the other, so one that already supersedes something
-answers `ALREADY_SUPERSEDES` (036) and is a reviewer's to settle. The proposal's recipe in
+under half the token's mass. The proposal's recipe in
 `derivations` says which source (`judged.confidence_source`), with the judge's
 verdict word, its token distributions, and whether its quote was found in the
 side it named and not the other; the run summary counts proposals scored each
-way. An endpoint that refuses `logprobs` with a 400 and then answers without
-it is asked without it for the rest of the run; a 400 it gets either way is
-the pair's own. `evals/eval-judge.ts` measures all of this on a
+way. An endpoint and model that refuse `logprobs` with a 400 or a 422 and
+then answer without it are asked without it for the rest of the run; an error
+the retry gets too is the pair's own. A brain upgraded from p3 keeps p3's
+pending rows, at their written 0.80, for a reviewer: the pass never re-judges
+a pair that has one. `evals/eval-judge.ts` measures all of this on a
 brain's own labels. The worker's agent id rides along as 016's mentions carry
 theirs.
 
@@ -3527,7 +3530,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2505 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1135 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1136 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

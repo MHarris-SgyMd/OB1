@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalReason, proposalVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalReason, proposalVerdict, actorNameOf, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -599,6 +599,11 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const quoted = parseJudgement('{"verdict":"outdates","supersedes":"B","evidence":"  the monthly plan\\nis withdrawn ","confidence":0.9,"reason":"r"}');
   assert(quoted.evidence === "the monthly plan is withdrawn", `a directed supersession keeps its evidence on one line (${JSON.stringify(quoted.evidence)})`);
   assert(parseJudgement('{"verdict":"outdates","supersedes":"unknown","evidence":"x y z","confidence":0.9}').evidence === "", "an undirected supersession carries no evidence");
+  const longQuote = parseJudgement(JSON.stringify({ verdict: "outdates", supersedes: "B", evidence: "word ".repeat(100) + "end", confidence: 0.9 })).evidence;
+  assert(longQuote.length <= 400 && /word$/.test(longQuote) && evidenceIn(longQuote, "word ".repeat(100) + "end"), `a quote past the bound is cut at a word boundary, so the whole-word match still finds it (review pass 3; ${longQuote.length})`);
+  const dupLetter = parseJudgement('{"verdict":"duplicate","supersedes":"A","confidence":0.9}');
+  assert(dupLetter.supersedes === "unknown" && dupLetter.duplicateKeeps === "older" && parseJudgement('{"verdict":"duplicate","supersedes":"unknown","confidence":0.9}').duplicateKeeps === undefined,
+         "a duplicate's letter is not a direction the pass uses, but is kept for the recipe");
   assert(evidenceIn('"The monthly plan is withdrawn."', "We bill annually now; the monthly plan\nis WITHDRAWN.") && !evidenceIn("the yearly plan", "the monthly plan is withdrawn"),
          "evidence is found through case, a line break and wrapping quotes, and a quote the text lacks is not");
   assert(!evidenceIn("is", "this is it") && !evidenceIn("", "anything"), "a quote under three characters proves nothing");
@@ -670,11 +675,15 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const jg = (verdict: Judgement["verdict"], supersedes: Judgement["supersedes"], probabilities?: Judgement["probabilities"]): Judgement => ({ verdict, supersedes, confidence: 0.8, reason: "", evidence: "", malformed: false, ...(probabilities ? { probabilities } : {}) });
   assert(proposalVerdict(jg("outdates", "older")) === "older_supersedes_newer" && proposalVerdict(jg("outdates", "unknown")) === "conflict_undirected",
          "outdates proposes in the direction named, or undirected");
-  assert(proposalVerdict(jg("duplicate", "unknown")) === "newer_supersedes_older", "a duplicate is proposed too, the newer standing");
-  assert(proposalVerdict(jg("duplicate", "unknown"), { older: "operator", newer: "agent" }) === "older_supersedes_newer"
-         && proposalVerdict(jg("duplicate", "unknown"), { older: "operator", newer: "operator" }) === "newer_supersedes_older"
-         && proposalVerdict(jg("duplicate", "unknown"), { older: "agent", newer: "operator" }) === "newer_supersedes_older",
-         "…unless the operator wrote the older and another writer the newer: the operator's stands (SMD-1726's rule, review pass 1)");
+  // Review pass 3: a duplicate is proposed only when one writer wrote both —
+  // a capture-only key's copy of another key's thought, accepted, would hand it
+  // that thought's standing.
+  assert(proposalVerdict(jg("duplicate", "unknown"), { older: "claude-code", newer: "claude-code" }) === "newer_supersedes_older", "one writer's two copies: a duplicate is proposed, the newer standing");
+  assert(proposalVerdict(jg("duplicate", "unknown"), { older: "op-key", newer: "capture-hook" }) === null && proposalVerdict(jg("duplicate", "unknown"), { older: "bot", newer: "op" }) === null,
+         "two writers' copies propose nothing, whichever is older");
+  assert(proposalVerdict(jg("duplicate", "unknown")) === null && proposalVerdict(jg("duplicate", "unknown"), { older: null, newer: null }) === null && proposalVerdict(jg("duplicate", "unknown"), { older: "op", newer: null }) === null,
+         "…nor do copies whose writers are not both known — two unknowns are not one writer");
+  assert(actorNameOf({ actor_name: "op-key" }) === "op-key" && actorNameOf({ actor_name: "  " }) === null && actorNameOf({ actor_name: 3 }) === null && actorNameOf(null) === null, "actorNameOf reads 050's name, and nothing blank or not a string");
   assert(proposalReason(jg("duplicate", "unknown")) === "duplicate — the two state the same claims" && proposalReason({ ...jg("duplicate", "unknown"), reason: "same" }) === "duplicate — same"
          && proposalReason({ ...jg("outdates", "newer"), reason: "later" }) === "later", "a duplicate's stored reason says so first; another verdict's is the judge's");
   assert(["unrelated", "related", "evolves"].every((v) => proposalVerdict(jg(v as Judgement["verdict"], "unknown")) === null), "unrelated, related and evolves propose nothing");

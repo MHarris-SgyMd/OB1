@@ -71,11 +71,11 @@
  */
 
 import { SQL } from "bun";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import {
-  actorKindOf, consolidateKey, evidenceIn, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, MIN_COVERED, type Judgement, type PairSide,
+  actorKindOf, actorNameOf, consolidateKey, evidenceIn, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, MIN_COVERED, type Judgement, type PairSide,
 } from "../server-portable/consolidate.ts";
 
 // ── The file shapes ──────────────────────────────────────────────────────────
@@ -98,9 +98,9 @@ export type AnswerLine = { pair: string; ms: number; judgement: Judgement | null
  * `related`, `continues` or `duplicate` is "related" here — so one harness
  * scores p3 and its successor alike.
  */
-export function rightFor(gold: Gold, verdict: string): boolean | null {
+export function rightFor(gold: Gold, verdict: string, proposed: boolean = proposes(verdict)): boolean | null {
   if (gold.source === "candidate") return null;
-  const sup = proposes(verdict);
+  const sup = proposed;
   if (gold.source === "proposal") return gold.label === "accepted" ? sup : !sup;
   if (gold.source === "pointer") return sup;
   return verdict !== "unrelated" && !sup;
@@ -108,8 +108,11 @@ export function rightFor(gold: Gold, verdict: string): boolean | null {
 
 /** The verdict that names a current side: p3's "conflict", p4's "outdates" — so one harness scores both. */
 export const superseding = (verdict: string) => verdict === "conflict" || verdict === "outdates";
-/** A verdict the pass records as a proposal: a superseding one, or p4's "duplicate" (proposalVerdict). */
+/** A verdict the pass may record as a proposal: a superseding one, or p4's "duplicate" — which it records only when one writer wrote both (proposesPair). */
 export const proposes = (verdict: string) => superseding(verdict) || verdict === "duplicate";
+/** Whether the pass records this answer on this pair: proposalVerdict's rule, a duplicate only when one writer (050's actor_name) wrote both sides. */
+export const proposesPair = (p: PairLine, j: Judgement) =>
+  superseding(j.verdict) || (j.verdict === "duplicate" && proposalVerdict(j, { older: actorNameOf(p.older.metadata), newer: actorNameOf(p.newer.metadata) }) !== null);
 
 /**
  * The token mass on the proposing verdicts — p3's word or p4's — or null
@@ -244,6 +247,7 @@ async function exportPairs(out: string, perRelation: number, pointers: number, c
     await sql.end();
   }
   writeFileSync(out, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", { mode: 0o600 });
+  chmodSync(out, 0o600); // an existing file keeps its mode through writeFileSync; it holds the brain's text
   const by = new Map<string, number>();
   for (const l of lines) by.set(`${l.gold.source}:${l.gold.label}`, (by.get(`${l.gold.source}:${l.gold.label}`) ?? 0) + 1);
   console.log(`  ${lines.length} pairs to ${out}: ${[...by].map(([k, n]) => `${k} ${n}`).join(", ")}`);
@@ -255,7 +259,10 @@ async function judgeAll(pairs: PairLine[], out: string, concurrency: number, log
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
   console.log(`  judge ${cfg.judgeModel} at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}; key ${consolidateKey(cfg.judgeModel)}; ${concurrency} at a time${logprobs ? `, top ${logprobs} logprobs` : ""}`);
   const done = new Map<string, AnswerLine>();
-  if (existsSync(out)) for (const l of readFileSync(out, "utf8").split("\n").filter(Boolean)) { const a = JSON.parse(l) as AnswerLine; if (a.judgement) done.set(a.pair, a); }
+  if (existsSync(out)) {
+    chmodSync(out, 0o600); // the answers quote the brain's text (reasons, evidence)
+    for (const l of readFileSync(out, "utf8").split("\n").filter(Boolean)) { const a = JSON.parse(l) as AnswerLine; if (a.judgement) done.set(a.pair, a); }
+  }
   const todo = pairs.filter((p) => !done.has(p.pair));
   if (done.size) console.log(`  ${done.size} answered already in ${out}; ${todo.length} to go`);
   let next = 0, n = 0;
@@ -271,7 +278,7 @@ async function judgeAll(pairs: PairLine[], out: string, concurrency: number, log
       } catch (e) {
         line = { pair: p.pair, ms: Date.now() - t, judgement: null, error: String((e as Error).message ?? e).slice(0, 300) };
       }
-      appendFileSync(out, JSON.stringify(line) + "\n");
+      appendFileSync(out, JSON.stringify(line) + "\n", { mode: 0o600 });
       if (line.judgement) done.set(p.pair, line);
       if (++n % 25 === 0) console.log(`  … ${n}/${todo.length} in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
     }
@@ -298,8 +305,8 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   console.log(`\n  ── verdicts by label ──\n  ${"label".padEnd(24)}${verdicts.map((v) => v.padStart(11)).join("")}   right`);
   for (const g of groups) {
     const rs = rows.filter((r) => `${r.p.gold.source}:${r.p.gold.label}` === g);
-    const right = rs.filter((r) => rightFor(r.p.gold, r.a.judgement.verdict) === true).length;
-    const scored = rs.filter((r) => rightFor(r.p.gold, r.a.judgement.verdict) !== null).length;
+    const right = rs.filter((r) => rightFor(r.p.gold, r.a.judgement.verdict, proposesPair(r.p, r.a.judgement)) === true).length;
+    const scored = rs.filter((r) => rightFor(r.p.gold, r.a.judgement.verdict, proposesPair(r.p, r.a.judgement)) !== null).length;
     console.log(`  ${g.padEnd(24)}${verdicts.map((v) => String(rs.filter((r) => r.a.judgement.verdict === v).length).padStart(11)).join("")}   ${scored ? `${right}/${scored} ${pct(right, scored)}` : "—"}`);
   }
 
@@ -315,7 +322,7 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   }
 
   // 3. Discrimination: does a higher confidence mean a right verdict?
-  const scored = rows.map((r) => ({ r, right: rightFor(r.p.gold, r.a.judgement.verdict) })).filter((x) => x.right !== null) as { r: typeof rows[number]; right: boolean }[];
+  const scored = rows.map((r) => ({ r, right: rightFor(r.p.gold, r.a.judgement.verdict, proposesPair(r.p, r.a.judgement)) })).filter((x) => x.right !== null) as { r: typeof rows[number]; right: boolean }[];
   const tokenP = (r: typeof rows[number]) => { const d = r.a.judgement.probabilities?.verdict; return d ? (d.p as Record<string, number>)[r.a.judgement.verdict] ?? 0 : null; };
   const withTok = scored.filter((x) => tokenP(x.r) !== null);
   console.log(`\n  ── does confidence say when the verdict is right? (AUROC; 0.5 is a coin) ──`);
@@ -333,10 +340,10 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   const supTruth = (g: Gold) => g.source === "pointer" || (g.source === "proposal" && g.label === "accepted") ? true : g.source === "proposal" || g.source === "link" ? false : null;
   const supRows = rows.filter((r) => supTruth(r.p.gold) !== null);
   const supTok = (j: Judgement) => tokenScore(j);
-  const supStated = (j: Judgement) => proposes(j.verdict) ? j.confidence : 1 - j.confidence;
+  const supStated = (r: typeof rows[number]) => proposesPair(r.p, r.a.judgement) ? r.a.judgement.confidence : 1 - r.a.judgement.confidence;
   const tokRows = supRows.filter((r) => supTok(r.a.judgement) !== null);
-  console.log(`  is it a supersession, every labelled pair (${supRows.filter((r) => supTruth(r.p.gold)).length} true, ${supRows.filter((r) => !supTruth(r.p.gold)).length} not; the verdict decides most of it): stated ${f2(auroc(supRows.map((r) => ({ score: supStated(r.a.judgement), right: supTruth(r.p.gold)! }))))}${tokRows.length ? `, token ${f2(auroc(tokRows.map((r) => ({ score: supTok(r.a.judgement)!, right: supTruth(r.p.gold)! }))))}` : ""}`);
-  const proposed = supRows.filter((r) => proposes(r.a.judgement.verdict));
+  console.log(`  is it a supersession, every labelled pair (${supRows.filter((r) => supTruth(r.p.gold)).length} true, ${supRows.filter((r) => !supTruth(r.p.gold)).length} not; the verdict decides most of it): stated ${f2(auroc(supRows.map((r) => ({ score: supStated(r), right: supTruth(r.p.gold)! }))))}${tokRows.length ? `, token ${f2(auroc(tokRows.map((r) => ({ score: supTok(r.a.judgement)!, right: supTruth(r.p.gold)! }))))}` : ""}`);
+  const proposed = supRows.filter((r) => proposesPair(r.p, r.a.judgement));
   const pt = proposed.filter((r) => supTruth(r.p.gold)).length;
   console.log(`  among the ${proposed.length} labelled pair(s) it proposes (${pt} true, ${proposed.length - pt} false), the recorded score (token where there is one): ${f2(auroc(proposed.map((r) => ({ score: recordedScore(r.a.judgement), right: supTruth(r.p.gold)! }))))}, the written number ${f2(auroc(proposed.map((r) => ({ score: r.a.judgement.confidence, right: supTruth(r.p.gold)! }))))}${Math.min(pt, proposed.length - pt) < 10 ? ` — under ten ${pt < proposed.length - pt ? "true" : "false"} ones, too few to say how it ranks proposals` : ""} — the ranking --min-confidence cuts`);
 
@@ -345,19 +352,21 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   const dirOf = (r: typeof rows[number]): Judgement["supersedes"] => {
     const j = r.a.judgement;
     if (j.verdict !== "duplicate") return superseding(j.verdict) ? j.supersedes : "unknown";
-    return proposalVerdict(j, { older: r.p.older.writer, newer: r.p.newer.writer }) === "older_supersedes_newer" ? "older" : "newer";
+    return proposesPair(r.p, j) ? "newer" : "unknown";
   };
-  const props = rows.filter((r) => proposes(r.a.judgement.verdict));
-  const directed = props.filter((r) => dirOf(r) !== "unknown").length;
+  const props = rows.filter((r) => proposesPair(r.p, r.a.judgement));
+  const sups = props.filter((r) => superseding(r.a.judgement.verdict));
+  const supDirected = sups.filter((r) => r.a.judgement.supersedes !== "unknown").length;
   const dups = props.filter((r) => r.a.judgement.verdict === "duplicate").length;
-  console.log(`\n  ── direction ──\n  ${props.length} proposing verdict(s) (${dups} duplicate), ${directed} name a side (${pct(directed, props.length)}), ${props.length - directed} undirected`);
+  const dupsAcross = rows.filter((r) => r.a.judgement.verdict === "duplicate" && !proposesPair(r.p, r.a.judgement)).length;
+  console.log(`\n  ── direction ──\n  ${sups.length} supersession verdict(s), ${supDirected} directed by the model (${pct(supDirected, sups.length)}); ${dups} duplicate(s) proposed, directed by rule (the newer)${dupsAcross ? `; ${dupsAcross} duplicate(s) across two writers or an unknown one, proposed by nothing` : ""}`);
   const quoted = props.filter((r) => superseding(r.a.judgement.verdict) && r.a.judgement.supersedes !== "unknown" && r.a.judgement.evidenceFound !== undefined);
   if (quoted.length) console.log(`  evidence: ${quoted.filter((r) => r.a.judgement.evidenceFound).length} of ${quoted.length} directed outdates quote words found in the side they name and not the other`);
   const goldDirection = (g: Gold) => (g.source === "proposal" && g.label === "accepted") || g.source === "pointer" ? g.direction : undefined;
   for (const src of ["proposal", "pointer"] as const) {
     const truth = rows.filter((r) => r.p.gold.source === src && goldDirection(r.p.gold));
     if (!truth.length) continue;
-    const conf = truth.filter((r) => proposes(r.a.judgement.verdict));
+    const conf = truth.filter((r) => proposesPair(r.p, r.a.judgement));
     const right = conf.filter((r) => dirOf(r) === goldDirection(r.p.gold)).length;
     const unknown = conf.filter((r) => dirOf(r) === "unknown").length;
     const found = conf.filter((r) => r.a.judgement.evidenceFound === true);
@@ -368,7 +377,7 @@ function report(pairs: PairLine[], answers: AnswerLine[], minConfidence: number)
   const cand = rows.filter((r) => r.p.gold.source === "candidate");
   if (cand.length) {
     // The pass's rule (proposes + the recorded score), so a p3 "conflict" counts as the p3 pass counted it.
-    const recorded = cand.filter((r) => proposes(r.a.judgement.verdict) && recordedScore(r.a.judgement) >= minConfidence);
+    const recorded = cand.filter((r) => proposesPair(r.p, r.a.judgement) && recordedScore(r.a.judgement) >= minConfidence);
     const und = recorded.filter((r) => dirOf(r) === "unknown").length;
     console.log(`\n  ── the pass's own population: ${cand.length} candidate pair(s) ──\n  ${recorded.length} would be recorded at --min-confidence ${minConfidence} (${pct(recorded.length, cand.length)}), ${und} of them undirected`);
   }

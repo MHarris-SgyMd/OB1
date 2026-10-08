@@ -420,6 +420,26 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400 && await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400,
          "a 400 the retry without logprobs gets too is the caller's error, twice");
   assert(JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true, false, true, false]), `…and the second call still asks with logprobs: one overflowing pair does not move the rest of the pass onto the written number (${JSON.stringify(seen)})`);
+  // Review pass 3: a 422 is retried as a 400 — text-generation-inference's
+  // answer to a top_logprobs past its limit — and remembered once the retry answers.
+  const tgi: boolean[] = [];
+  const tgiServer = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      tgi.push(body.logprobs === true);
+      if (body.logprobs) return Response.json({ error: "Input validation error: top_n_tokens must be <= 5" }, { status: 422 });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "related", supersedes: "unknown", confidence: 0.8, reason: "r" }) } }] });
+    },
+  });
+  const tgiCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${tgiServer.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const viaTgi = await judgePair(older, newer, tgiCfg, undefined, undefined, { logprobs: 10 });
+  await judgePair(older, newer, tgiCfg, undefined, undefined, { logprobs: 10 });
+  const otherModel = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${tgiServer.port}/v1`, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "another-judge" });
+  await judgePair(older, newer, otherModel, undefined, undefined, { logprobs: 10 });
+  assert(viaTgi.verdict === "related" && JSON.stringify(tgi) === JSON.stringify([true, false, false, true, false]),
+         `a 422 refusing logprobs is retried without them and remembered — for that model, not for another judge on the same endpoint (${JSON.stringify(tgi)})`);
+  tgiServer.stop();
   seen.length = 0;
   status = 503;
   assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 503 && JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true]),

@@ -150,7 +150,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalReason, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, actorNameOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalReason, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -1165,8 +1165,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         continue;
       }
       totals[j.verdict]++;
-      // Review pass 1: a duplicate of the operator's thought by another writer leaves the operator's standing.
-      const verdict = proposalVerdict(j, { older: actorKindOf(older.metadata), newer: actorKindOf(row.metadata) });
+      // Review pass 3: a duplicate is proposed only when one writer wrote both (050's actor_name).
+      const verdict = proposalVerdict(j, { older: actorNameOf(older.metadata), newer: actorNameOf(row.metadata) });
       // SMD-1873: the token probability of a proposing verdict when the
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);

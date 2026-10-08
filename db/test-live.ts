@@ -6315,11 +6315,11 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
 
-  // SMD-1873, review pass 2: the worker hands proposalVerdict each side's
-  // writer. A duplicate of the operator's thought, written through an agent's
-  // key, is proposed with the operator's standing — the older; swapping the
-  // sides the worker passes would propose the agent's. And an answer in p3's
-  // words fails its thought, naming the word.
+  // SMD-1873, review passes 2 and 3: the worker hands proposalVerdict each
+  // side's writer (050's actor_name). A duplicate across two keys proposes
+  // nothing — another key's copy, accepted, would take the original's
+  // standing — and one key's two copies are proposed, the newer standing. And
+  // an answer in p3's words fails its thought, naming the word.
   {
     await sql`SELECT set_agent_kind('op-1873', 'operator')`;
     await sql`SELECT set_agent_kind('bot-1873', 'agent')`;
@@ -6331,13 +6331,18 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     };
     const rotaOld = await seedAs("op-1873", "The on-call rota is weekly.", 11, 4, ["rota"]);
     const rotaNew = await seedAs("bot-1873", "The rota for on-call runs weekly.", 11, 0, ["rota"]);
+    const shiftOld = await seedAs("bot-1873", "The rota's shift starts at nine.", 13, 4, ["rota-shift"]);
+    const shiftNew = await seedAs("bot-1873", "The rota shift starts at nine.", 13, 0, ["rota-shift"]);
     await seed("The relic note, the first.", 12, 4, ["relic"]);
     const relicNew = await seed("The relic note, the second.", 12, 0, ["relic"]);
     const kinds = (await sql`SELECT metadata->>'actor_kind' AS k FROM thoughts WHERE id IN (${rotaOld}::uuid, ${rotaNew}::uuid) ORDER BY created_at`).map((r: { k: string }) => r.k);
     const run = await consolidate();
-    const [rota] = await sql`SELECT verdict, reason FROM supersession_proposals WHERE older_id = ${rotaOld}::uuid AND newer_id = ${rotaNew}::uuid`;
-    assert(kinds.join() === "operator,agent" && rota?.verdict === "older_supersedes_newer" && /^duplicate — /.test(String(rota?.reason)),
-           `an agent's duplicate of the operator's thought is proposed with the operator's, the older, standing, its reason saying duplicate (${kinds.join()}: ${JSON.stringify(rota)})`);
+    const rota = await sql`SELECT verdict FROM supersession_proposals WHERE older_id = ${rotaOld}::uuid AND newer_id = ${rotaNew}::uuid`;
+    const [shift] = await sql`SELECT verdict, reason FROM supersession_proposals WHERE older_id = ${shiftOld}::uuid AND newer_id = ${shiftNew}::uuid`;
+    assert(kinds.join() === "operator,agent" && rota.length === 0 && seen.some((p) => /on-call rota is weekly/.test(p.a) && /rota for on-call/.test(p.b)),
+           `an agent's duplicate of the operator's thought is judged and proposes nothing: two keys' copies are not one writer's (${kinds.join()}: ${JSON.stringify(rota)})`);
+    assert(shift?.verdict === "newer_supersedes_older" && /^duplicate — /.test(String(shift?.reason)),
+           `one key's two copies are proposed, the newer standing, the reason saying duplicate (${JSON.stringify(shift)})`);
     const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
     assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
            `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);
