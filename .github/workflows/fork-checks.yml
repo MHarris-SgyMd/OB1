@@ -1182,15 +1182,10 @@ jobs:
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
-          # SMD-2294: the proxy dials every backend by a rooted mesh name — the
-          # server, the canary's and working tier's servers and the
-          # authorization server — never a service name, which a tier of
-          # another project on the mesh answers to as well.
-          docker compose -f compose.yaml config --format json \
-            | jq -e '[.configs["proxy-routes"].content | scan("url: \"([^\"]*)\"")[]] | . == ["http://mcp.ob1.internal.:8000", "http://mcp.canary.ob1.internal.:8000", "http://mcp.working.ob1.internal.:8000", "http://auth.ob1.internal.:3000"]'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is; it dials the REST
-          # core by its rooted mesh name too (SMD-2294).
+          # core by its rooted mesh name (SMD-2294; the table is check 28's
+          # API_ROUTE_TABLE).
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-api-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
@@ -1235,6 +1230,112 @@ jobs:
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
+
+      # SMD-2658. check-fork-consistency's checks 27 and 28 hold each route
+      # table as Bun.YAML reads its file, and what each file may set on the
+      # proxy; this holds what compose makes of the files together, which no
+      # Bun.YAML read can (a `!override`, a merge). compose.yaml's own proxy
+      # reads its routes from one file provider directory, with no command (a
+      # command makes Traefik drop every TRAEFIK_* setting, measured on the
+      # pin), volume or other provider; the rest of it is its reviewers'. Then
+      # for each overlay named with -f (compose.canary.yaml under the canary's
+      # project name), and the three-brain stack, the proxy as compose renders
+      # it is compose.yaml's, key for key — image, environment, user, hooks,
+      # secrets, hosts — but for its mounts, its labels and its depends_on,
+      # and it mounts exactly the held tables, each copied into its label and
+      # equal, by cmp, to its file's as Bun.YAML reads it; and the overlays
+      # leave the project's name and the networks the proxy joins as the first
+      # file alone defines them, under the same -p — compose's reading, not
+      # Bun.YAML's, so a key Bun.YAML reads otherwise (`!!binary`, review pass
+      # 5) cannot hide a renamed mesh. Each holds with variables substituted
+      # and again with none (--no-interpolate), so a value that matches under
+      # CI's settings and moves under an operator's fails (pass 6), the
+      # tables' text included (pass 7). No config is defined but the held
+      # tables, each its content and name alone, so an overlay cannot leave a
+      # table for a file order CI does not render to pick up (pass 7) — an
+      # unmounted one shows only in the --no-interpolate render, since compose
+      # drops it from a substituted one. The release's generated overlay is a
+      # combination too, in a rehearsal's form and a tag's; release.yml holds
+      # the overlay a release ships. Review pass 1 mounted a second route
+      # file from an overlay, and pass 2 got keys past the list of forbidden
+      # keys pass 1 added. A compose file here that no combination renders
+      # fails the step, so a new overlay gets one.
+      - name: The proxy loads only the held route tables
+        working-directory: deploy
+        run: |
+          list="$(docker compose -f compose.yaml config --profiles)"
+          profiles=()
+          while read -r p; do if [ -n "$p" ]; then profiles+=("--profile=$p"); fi; done <<<"$list"
+          base="$(docker compose -f compose.yaml "${profiles[@]}" config --format json | jq -c .services.proxy)"
+          base_raw="$(docker compose -f compose.yaml "${profiles[@]}" config --no-interpolate --format json | jq -c .services.proxy)"
+          jq -e '([.command, .entrypoint, .volumes, .volumes_from, .env_file] | all(. == null))
+            and ([.environment | keys[] | select(startswith("TRAEFIK_PROVIDERS"))] == ["TRAEFIK_PROVIDERS_FILE_DIRECTORY"])
+            and .environment.TRAEFIK_PROVIDERS_FILE_DIRECTORY == "/etc/traefik/dynamic"' <<<"$base" >/dev/null
+          # proxy_loads WANT ARGS...: WANT is [{source, target, label, file}].
+          # Each file named with -f is kept in `rendered`, held to the
+          # directory's compose files at the end.
+          rendered=()
+          # What each render must hold. Labels are held on the substituted
+          # render alone: --no-interpolate leaves two files' labels a list.
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          held='. as $r | .services.proxy as $p
+            | ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
+            and $p.configs == [$want[] | {source, target}]
+            and (($r.configs // {}) | keys) == ([$want[].source] | sort)
+            and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
+            and $r.name == $alone.name
+            and all($p.networks | keys[]; $r.networks[.] == $alone.networks[.])'
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
+          proxy_loads() {
+            local want="$1" render raw alone row r prev="" first="" project=()
+            shift
+            for a in "$@"; do
+              if [ "$prev" = -f ]; then rendered+=("$a"); if [ -z "$first" ]; then first="$a"; fi; fi
+              if [ "$prev" = -p ]; then project=(-p "$a"); fi
+              prev="$a"
+            done
+            render="$(docker compose "$@" config --format json)"
+            alone="$(docker compose "${project[@]}" -f "$first" config --format json)"
+            jq -e --argjson want "$want" --argjson base "$base" --argjson alone "$alone" "$labelled" <<<"$render" >/dev/null
+            # The same, with no variable substituted: a value that matched under
+            # CI's settings and moved under an operator's (pass 6) differs here.
+            raw="$(docker compose "$@" config --no-interpolate --format json)"
+            alone="$(docker compose "${project[@]}" -f "$first" config --no-interpolate --format json)"
+            jq -e --argjson want "$want" --argjson base "$base_raw" --argjson alone "$alone" "$held" <<<"$raw" >/dev/null
+            while read -r row; do
+              for r in "$render" "$raw"; do
+                cmp <(jq -j --arg s "$(jq -r .source <<<"$row")" '.configs[$s].content' <<<"$r") \
+                  <(bun -e 'process.stdout.write(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text()).configs[process.argv.at(-1)].content)' "$(jq -r .file <<<"$row")" "$(jq -r .source <<<"$row")")
+              done
+            done < <(jq -c '.[]' <<<"$want")
+          }
+          routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
+          api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
+          tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
+          proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
+          proxy_loads "[$tiers]" -f compose.tiers.yaml --profile local-models
+          # The release's overlay, on the install path deploy/README.md gives:
+          # as a rehearsal renders it, and as renderComposeOverlay does with a
+          # tag and digests (the CLI refuses tag mode on a tree that is not the
+          # cut). release.yml holds the overlay a release actually ships.
+          trap 'rm -f compose.release.yaml' EXIT
+          for mode in rehearsal tag; do
+            if [ "$mode" = rehearsal ]; then
+              bun ../scripts/release-artifacts.ts compose --rehearsal --owner "$GITHUB_REPOSITORY_OWNER" --ollama-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 > compose.release.yaml
+            else
+              bun -e 'import { renderComposeOverlay } from "../scripts/release-artifacts.ts"; const z = "sha256:" + "0".repeat(64); process.stdout.write(renderComposeOverlay({ version: "9.9.9", tag: "v9.9.9", rendered: "ci", images: { server: { ref: "ghcr.io/example/ob1-server:v9.9.9", digest: z }, migrate: { ref: "ghcr.io/example/ob1-migrate:v9.9.9", digest: z } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: z }))' > compose.release.yaml
+            fi
+            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
+            proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
+          done
+          files="$(printf '%s\n' * | grep -iE '^(docker-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
+          named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
+          [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
@@ -1952,9 +2053,9 @@ jobs:
       # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
       # (only a 502 is the proxy's 404). From the mesh, `server` then names
       # more than one container: the collision the route table's mesh names
-      # avoid while no tier claims stable's own names, which the static check
-      # in "Every published port binds loopback" holds. Gone, each is a 404,
-      # and the proxy logged no route-table error.
+      # avoid while no tier claims stable's own names, which check 28's
+      # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
+      # each is a 404, and the proxy logged no route-table error.
       - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
         working-directory: deploy
         run: |
