@@ -109,22 +109,28 @@ function thoughtUrl(id: string): string {
 
 // --- Embedding & Metadata Extraction ---
 
+/** server-portable/embed.ts's, held equal by extensions/test-auth.ts. */
+const DEFAULT_LLM_TIMEOUT_S = 120;
+
+/** A provider call that ran past OB1_LLM_TIMEOUT, its message naming the knob. */
+class ProviderTimeout extends Error {}
+
 /**
  * A provider call under the core server's deadline (SMD-2692): OB1_LLM_TIMEOUT
- * seconds, 120 unless set to a positive number (server-portable/embed.ts
- * DEFAULT_LLM_TIMEOUT_S), over the answer's headers and body both. Until then
- * Bun's own 300 s fetch cut was the only bound, and since SMD-2001 keeps the
- * reply alive a client sat through all of it. Read per call, as the keys are.
+ * seconds, DEFAULT_LLM_TIMEOUT_S unless set to a positive number (embed.ts's
+ * rule), over the answer's headers and body both. Until then Bun's own 300 s
+ * fetch cut was the only bound, and since SMD-2001 keeps the reply alive a
+ * client sat through all of it. Read per call, as the keys are.
  */
 async function withDeadline<T>(what: string, base: string, call: (deadline: { signal: AbortSignal; timeout: false }) => Promise<T>): Promise<T> {
   const raw = Number(process.env.OB1_LLM_TIMEOUT || NaN);
-  const seconds = Number.isFinite(raw) && raw > 0 ? raw : 120;
+  const seconds = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LLM_TIMEOUT_S;
   try {
     // `timeout: false` makes this the one deadline: Bun's fetch would otherwise
     // cut the call at its 300 s idle timeout, so a longer value never applied (embed.ts).
     return await call({ signal: AbortSignal.timeout(seconds * 1000), timeout: false });
   } catch (e) {
-    if ((e as Error).name === "TimeoutError") throw new Error(`${what} request to ${base} timed out after ${seconds} s (OB1_LLM_TIMEOUT)`);
+    if ((e as Error).name === "TimeoutError") throw new ProviderTimeout(`${what} request to ${base} timed out after ${seconds} s (OB1_LLM_TIMEOUT)`);
     throw e;
   }
 }
@@ -153,36 +159,62 @@ async function getEmbedding(text: string): Promise<number[]> {
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const d = await withDeadline("Chat completion", CHAT_API_BASE, async (deadline) => {
-    const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${CHAT_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: CHAT_MODEL,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content: `Extract metadata from the user's captured thought. Return JSON with:
+  // The capture goes on without its tags when the chat call times out, is
+  // refused or answers something not JSON, the embedding being what it needs:
+  // logged, and recorded on the thought in the core server's reasons
+  // (server-portable/metadata.ts). A deadline that failed the capture instead
+  // would lose one that a model slower than it had always completed (review pass 1).
+  const fallback = (reason: string, why: string): Record<string, unknown> => {
+    console.error(`extractMetadata: ${why}`);
+    return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: reason };
+  };
+  let answer: { status: number; text: string };
+  try {
+    answer = await withDeadline("Chat completion", CHAT_API_BASE, async (deadline) => {
+      const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CHAT_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: CHAT_MODEL,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content: `Extract metadata from the user's captured thought. Return JSON with:
 - "people": array of people mentioned (empty if none)
 - "action_items": array of implied to-dos (empty if none)
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
 Only extract what's explicitly there.`,
-          },
-          { role: "user", content: text },
-        ],
-      }),
-      ...deadline,
+            },
+            { role: "user", content: text },
+          ],
+        }),
+        ...deadline,
+      });
+      if (!r.ok) {
+        await r.body?.cancel().catch(() => {});
+        return { status: r.status, text: "" };
+      }
+      return { status: r.status, text: await r.text() };
     });
-    return r.json();
-  });
+  } catch (e) {
+    if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);
+    throw e;
+  }
+  if (answer.status < 200 || answer.status > 299) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} answered ${answer.status}`);
+  let d: { choices?: [{ message?: { content?: string } }] };
   try {
-    return JSON.parse(d.choices[0].message.content);
+    d = JSON.parse(answer.text);
+  } catch {
+    return fallback("invalid_response_body", `Chat completion request to ${CHAT_API_BASE} answered a body that is not JSON`);
+  }
+  try {
+    return JSON.parse(d.choices![0].message!.content!);
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
@@ -572,6 +604,8 @@ function buildServer(principal: Principal): McpServer {
           confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
         if (Array.isArray(meta.action_items) && meta.action_items.length)
           confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+        if (meta.metadata_extraction_failed)
+          confirmation += ` | Tags not extracted: ${meta.metadata_extraction_failed}`;
 
         return {
           content: [{ type: "text" as const, text: confirmation }],

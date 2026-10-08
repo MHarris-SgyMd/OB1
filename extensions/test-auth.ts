@@ -582,23 +582,35 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
 // ── A provider that never answers ────────────────────────────────────────────
 //
 // SMD-2692: kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, as
-// the core server's do, and the tool's error names the knob. The provider is a
-// real server that stalls, and the server's fetch reaches it with its init as
-// given, so the deadline under test is the real fetch's signal: search_thoughts'
-// embedding stalls after its headers (the body read), capture_thought's chat
-// call before any answer. Until then Bun's 300 s fetch cut was the only bound,
-// and SMD-2001's keepalive let a client sit through it.
+// the core server's do. The provider is a real server, and the server's fetch
+// reaches it with its init as given, so the deadline under test is the real
+// fetch's signal. search_thoughts' embedding stalls after its headers (the body
+// read), and the tool fails naming the knob. capture_thought's chat call stalls
+// before any answer, or answers 502, or HTML: each is logged and the capture
+// goes on to its write without tags, as the core's does (review pass 1) — here
+// the write is refused, there being no database, which is how it is seen to have
+// been reached. Until then Bun's 300 s fetch cut was the only bound, and
+// SMD-2001's keepalive let a client sit through it.
 console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1_LLM_TIMEOUT, naming it (SMD-2692)]`);
 {
   const handler = handlers[SERVERS.indexOf(K8S)];
+  assert(handler !== undefined, "the module imported above");
+  const own = /const DEFAULT_LLM_TIMEOUT_S = (\d+);/.exec(readFileSync(join(ROOT, K8S.file), "utf8"))?.[1];
+  const core = /export const DEFAULT_LLM_TIMEOUT_S = (\d+);/.exec(readFileSync(join(ROOT, "server-portable/embed.ts"), "utf8"))?.[1];
+  assert(own !== undefined && own === core, `its default deadline is the core server's (${own} s, embed.ts ${core} s)`);
   if (handler) {
     env(K8S, KEYS);
     const realFetch = globalThis.fetch;
     let embedStalls = true;
+    let chat: "stall" | "502" | "html" = "stall";
     const provider = Bun.serve({
       port: 0,
       fetch(req) {
-        if (new URL(req.url).pathname !== "/embeddings") return new Promise<Response>(() => {});
+        if (new URL(req.url).pathname !== "/embeddings") {
+          if (chat === "502") return new Response("bad gateway", { status: 502 });
+          if (chat === "html") return new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } });
+          return new Promise<Response>(() => {});
+        }
         if (!embedStalls) return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
         return new Response(new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode('{"data":')); } }), { headers: { "content-type": "application/json" } });
       },
@@ -608,30 +620,49 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       const to = /\/(embeddings|chat\/completions)$/.exec(url);
       return realFetch(to ? `http://127.0.0.1:${provider.port}/${to[1]}` : input, init);
     }) as typeof fetch;
-    /** One tool call, its error text and how long it took; given up on at 8 s, so a call with no deadline fails here rather than hanging the suite. */
+    /** One tool call: its error text, the extractor's log lines, and how long it took; given up on at 8 s, so a call with no deadline fails here rather than hanging the suite. */
     const tool = async (key: string, id: number, name: string, args: Record<string, string>) => {
       const t0 = performance.now();
       const req = new Request("http://extension.test/mcp", { method: "POST", headers: { ...RPC, "x-access-key": key },
         body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) });
-      const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), Bun.sleep(8_000).then(() => null)]);
-      return { ms: performance.now() - t0, error: reply?.json?.result?.isError === true ? String(reply.json.result.content?.[0]?.text) : `no error reply (${reply ? reply.text.slice(0, 80) : "none in 8 s"})` };
+      const logged: string[] = [];
+      const realError = console.error;
+      console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      try {
+        const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), Bun.sleep(8_000).then(() => null)]);
+        return { ms: performance.now() - t0, lines: logged.filter((l) => l.startsWith("extractMetadata: ")),
+          error: reply?.json?.result?.isError === true ? String(reply.json.result.content?.[0]?.text) : `no error reply (${reply ? reply.text.slice(0, 80) : "none in 8 s"})` };
+      } finally {
+        console.error = realError;
+      }
     };
     process.env.OB1_LLM_TIMEOUT = "2";
-    let search = { ms: 0, error: "not run" };
-    let capture = search;
+    const notRun = { ms: 0, lines: [] as string[], error: "not run" };
+    let search = notRun, slow = notRun, refused = notRun, html = notRun;
     try {
       search = await tool(READ_KEY, 60, "search_thoughts", { query: "a query whose embedding never finishes" });
       embedStalls = false;
-      capture = await tool(WRITE_KEY, 61, "capture_thought", { content: "a thought whose metadata never comes" });
+      slow = await tool(WRITE_KEY, 61, "capture_thought", { content: "a thought whose tags never come" });
+      chat = "502";
+      refused = await tool(WRITE_KEY, 62, "capture_thought", { content: "a thought whose tags are refused" });
+      chat = "html";
+      html = await tool(WRITE_KEY, 63, "capture_thought", { content: "a thought whose tags are a web page" });
     } finally {
       delete process.env.OB1_LLM_TIMEOUT;
       globalThis.fetch = realFetch;
       provider.stop(true);
     }
-    assert(search.error === "Error: Embeddings request to https://openrouter.ai/api/v1 timed out after 2 s (OB1_LLM_TIMEOUT)" && search.ms >= 1_900 && search.ms < 4_000,
+    const BASE = "https://openrouter.ai/api/v1";
+    /** The capture went on past its tags: its error is the write's, not the provider's. */
+    const wrote = (r: typeof notRun) => !r.error.startsWith("no error reply") && !/Chat completion|timed out|Unexpected token/.test(r.error);
+    assert(search.error === `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)` && search.ms >= 1_900 && search.ms < 6_000,
       `an embedding whose body stalls fails search_thoughts at OB1_LLM_TIMEOUT=2, naming it (${Math.round(search.ms)} ms: ${search.error})`);
-    assert(capture.error === "Error: Chat completion request to https://openrouter.ai/api/v1 timed out after 2 s (OB1_LLM_TIMEOUT)" && capture.ms >= 1_900 && capture.ms < 4_000,
-      `a chat call that never answers fails capture_thought the same way (${Math.round(capture.ms)} ms: ${capture.error})`);
+    assert(slow.lines.join() === `extractMetadata: Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)` && slow.ms >= 1_900 && slow.ms < 6_000 && wrote(slow),
+      `a chat call that never answers is logged at the deadline, naming it, and the capture goes on to its write (${Math.round(slow.ms)} ms: ${slow.lines.join(" / ")}; ${slow.error.slice(0, 80)})`);
+    assert(refused.lines.join() === `extractMetadata: Chat completion request to ${BASE} answered 502` && wrote(refused),
+      `a chat call answered 502 is logged with its status, and the capture goes on (${refused.lines.join(" / ")}; ${refused.error.slice(0, 80)})`);
+    assert(html.lines.join() === `extractMetadata: Chat completion request to ${BASE} answered a body that is not JSON` && wrote(html),
+      `a chat call answered with a page that is not JSON is logged, and the capture goes on (${html.lines.join(" / ")}; ${html.error.slice(0, 80)})`);
   }
 }
 
