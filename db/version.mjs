@@ -39,12 +39,13 @@ export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
  * `1.4.0` the fifth (063..072, a minor: nine additive migrations);
  * `1.5.0` the sixth (073..076, a minor: three additive migrations);
  * `1.6.0` the seventh (077..081, a minor: four additive migrations);
+ * `1.7.0` the eighth (082..083, a minor: one additive migration);
  * before any, 044 wrote the pre-first-release baseline `0.0.0`.
  * The highest migration that upserts ob1_config.schema_version writes this
- * exact string (081 today); check-fork's 17d holds the two equal, and
+ * exact string (083 today); check-fork's 17d holds the two equal, and
  * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const FORK_VERSION = `1.6.0+upstream.${UPSTREAM_PIN}`;
+export const FORK_VERSION = `1.7.0+upstream.${UPSTREAM_PIN}`;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -196,7 +197,7 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0+upstream.9543c29", "1.0.0+upstream.deadbee")), 0, "build metadata ignored");
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
-  bad += eq(sign(semverCompare("1.6.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.6.0 (the seventh release)");
+  bad += eq(sign(semverCompare("1.7.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.7.0 (the eighth release)");
   const rel = [{ version: "1.0.0", range: [1, 44] }];
   bad += eq(versionForMigration(44, rel), "1.0.0", "44 is in 1.0.0's range");
   bad += eq(versionForMigration(45, rel), null, "45 is unreleased");
