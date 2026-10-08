@@ -10303,7 +10303,12 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     slowExtract = 1500;
-    const once = await sleepRun();
+    // Bounded: a sleep that never finds both pools drained would wait for ever.
+    const acOnce = new AbortController();
+    const onceRun = sleepRun({ signal: acOnce.signal });
+    const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
+    if (onceRace === "hung") { acOnce.abort(); await onceRun; }
+    const once = onceRace === "hung" ? -1 : onceRace;
     slowExtract = 0;
     await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
     const sessionsAfter = await sessions();
