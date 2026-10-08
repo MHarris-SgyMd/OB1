@@ -96,7 +96,29 @@ export type Judgement = {
   reason: string;
   /** True when the model's answer was not parseable JSON of the expected shape. */
   malformed: boolean;
+  /**
+   * SMD-1873: what the model's own token probabilities say, when the call
+   * asked for them (judgePair's `logprobs`) and the endpoint returned them —
+   * absent otherwise. `confidence` stays the number the model wrote.
+   */
+  probabilities?: JudgeProbabilities;
 };
+
+/**
+ * The model's probability over each answer field's words, read at the token
+ * where the field's value starts (valueDistribution). Each is normalised over
+ * the words the top alternatives name; `covered` is the raw mass they held
+ * before that, so a reader can tell a confident distribution from one the
+ * top-k cut short. A field is absent when its token could not be found.
+ */
+export type JudgeProbabilities = {
+  verdict?: ValueDistribution<Verdict>;
+  supersedes?: ValueDistribution<"A" | "B" | "unknown">;
+};
+export type ValueDistribution<W extends string> = { p: Record<W, number>; covered: number };
+
+/** One position of an OpenAI-shaped `logprobs.content` array. */
+export type TokenLogprob = { token: string; logprob: number; top_logprobs?: { token: string; logprob: number }[] };
 
 /**
  * One side of a pair as the prompt presents it: the text and the row's own
@@ -297,6 +319,53 @@ export function parseJudgement(raw: string): Judgement {
   return { verdict: verdict as Verdict, supersedes, confidence: clampConfidence(parsed.confidence), reason, malformed: false };
 }
 
+/**
+ * The model's probability over `words` for the JSON string value of `field`
+ * in `content`, read from the token where that value starts (SMD-1873). The
+ * value's first token is where the model chose among the words, so its top
+ * alternatives are the distribution the written number only claims to
+ * report. Every word must start with a different first token for this to
+ * separate them; a token two words share ("con" for conflict and continues)
+ * counts toward neither and lowers `covered`.
+ *
+ * The token holding the value's first character may begin earlier — a `"`
+ * or ` "` is often one token with the value's head — so that leading text is
+ * taken off each alternative before it is read, and an alternative that does
+ * not begin with it is not a value of this field. Null when the tokens do not
+ * spell `content` (a provider that rewrote them), the field is not there, or
+ * no alternative names a word.
+ */
+export function valueDistribution<W extends string>(content: string, tokens: TokenLogprob[], field: string, words: readonly W[]): ValueDistribution<W> | null {
+  if (tokens.map((t) => t.token).join("") !== content) return null;
+  const m = new RegExp(`"${field}"\\s*:\\s*"`).exec(content);
+  if (!m) return null;
+  const at = m.index + m[0].length;
+  let start = 0;
+  for (const t of tokens) {
+    const end = start + t.token.length;
+    if (at < end) {
+      const lead = content.slice(start, at);
+      const p = Object.fromEntries(words.map((w) => [w, 0])) as Record<W, number>;
+      let covered = 0;
+      for (const alt of t.top_logprobs?.length ? t.top_logprobs : [t]) {
+        if (!alt.token.startsWith(lead)) continue;
+        const head = alt.token.slice(lead.length).toLowerCase();
+        if (!head) continue;
+        const hits = words.filter((w) => { const lw = w.toLowerCase(); return lw.startsWith(head) || head.startsWith(`${lw}"`); });
+        if (hits.length !== 1) continue;
+        const q = Math.exp(alt.logprob);
+        p[hits[0]] += q;
+        covered += q;
+      }
+      if (covered === 0) return null;
+      for (const w of words) p[w] = Math.round((p[w] / covered) * 10000) / 10000;
+      return { p, covered: Math.round(covered * 10000) / 10000 };
+    }
+    start = end;
+  }
+  return null;
+}
+
 /** The pass's key: the model and the prompt version, so a change to either is a new pool. */
 export function consolidateKey(model: string): string {
   return `${CONSOLIDATE_KEY_PREFIX}${model}@p${CONSOLIDATE_PROMPT_VERSION}`;
@@ -430,7 +499,7 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
  * two thoughts, and the more restricted one decides for both. `actor` is the
  * worker's key name, when it has one, for an `actor:` term.
  */
-export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal, actor?: string): Promise<Judgement> {
+export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal, actor?: string, opts: JudgeOptions = {}): Promise<Judgement> {
   for (const side of [older, newer]) {
     const gate = mayLeaveBox({ kind: "judge", actor, metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
     if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
@@ -450,6 +519,7 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
       messages: buildJudgeMessages(older, newer),
+      ...(opts.logprobs ? { logprobs: true, top_logprobs: opts.logprobs } : {}),
     }),
   });
   if (!r.ok) {
@@ -458,8 +528,22 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }
-  const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
+  const d = (await r.json()) as { choices?: [{ message?: { content?: string }; logprobs?: { content?: TokenLogprob[] } | null }] };
   const text = d?.choices?.[0]?.message?.content;
   if (typeof text !== "string") return { verdict: "unrelated", supersedes: "unknown", confidence: 0, reason: "", malformed: true };
-  return parseJudgement(text);
+  const j = parseJudgement(text);
+  const tokens = d.choices?.[0]?.logprobs?.content;
+  if (!opts.logprobs || j.malformed || !Array.isArray(tokens)) return j;
+  const verdict = valueDistribution(text, tokens, "verdict", VERDICTS);
+  const supersedes = valueDistribution(text, tokens, "supersedes", ["A", "B", "unknown"] as const);
+  return verdict || supersedes ? { ...j, probabilities: { ...(verdict ? { verdict } : {}), ...(supersedes ? { supersedes } : {}) } } : j;
 }
+
+/**
+ * judgePair's options. `logprobs`: ask the endpoint for that many top
+ * alternatives per token and read the verdict's and the direction's
+ * distributions from them (SMD-1873's measurement; the worker does not ask).
+ * An endpoint that ignores the field answers as before, with no
+ * `probabilities`.
+ */
+export type JudgeOptions = { logprobs?: number };

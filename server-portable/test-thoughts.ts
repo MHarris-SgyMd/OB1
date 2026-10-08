@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, wrapSide } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, valueDistribution, VERDICTS, wrapSide, type TokenLogprob } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -604,6 +604,23 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const cut = judged("a" + emoji.repeat(450));
   assert(cut === "a" + emoji.repeat(399) && judged(emoji.repeat(400)) === emoji.repeat(400),
     "the reason is cut at 400 code points: an emoji at the bound is kept or dropped whole, never half a surrogate pair, and 400 emoji (800 UTF-16 units) are not cut");
+
+  // SMD-1873: the verdict's distribution is read at the token where its value
+  // starts, from that token's top alternatives — a lead-in quote taken off
+  // each, an alternative that is not this field's value skipped, and the mass
+  // normalised over the words named.
+  const lpTok = (token: string, top: [string, number][] = [[token, 1]]): TokenLogprob => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
+  const answer = '{"verdict": "conflict", "supersedes": "B"}';
+  const toks = [lpTok('{"'), lpTok("verdict"), lpTok('":'), lpTok(' "con', [[' "con', 0.6], [' "ag', 0.3], [' "un', 0.05], ["\n", 0.05]]), lpTok('flict"'), lpTok(", "), lpTok('"super'), lpTok('sedes'), lpTok('":'), lpTok(' "'), lpTok("B", [["B", 0.7], ["unknown", 0.2], ["A", 0.1]]), lpTok('"}')];
+  const vd = valueDistribution(answer, toks, "verdict", VERDICTS);
+  assert(vd !== null && vd.p.conflict === 0.6316 && vd.p.agree === 0.3158 && vd.p.unrelated === 0.0526 && vd.covered === 0.95,
+         `the verdict's alternatives behind a lead-in quote are read, a token that is no value skipped, and the rest normalised (${JSON.stringify(vd)})`);
+  const sd = valueDistribution(answer, toks, "supersedes", ["A", "B", "unknown"] as const);
+  assert(sd !== null && sd.p.B === 0.7 && sd.p.unknown === 0.2 && sd.p.A === 0.1, `a value whose token starts at the value is read whole (${JSON.stringify(sd)})`);
+  assert(valueDistribution(answer.replace("conflict", "conflicts"), toks, "verdict", VERDICTS) === null, "tokens that do not spell the answer are not read");
+  assert(valueDistribution('{"verdict": "con"}', [lpTok('{"verdict": "'), lpTok("con", [["con", 1]]), lpTok('"}')], "verdict", ["conflict", "continues"] as const) === null,
+         "a first token two words share counts toward neither");
+  assert(valueDistribution('{"reason": "x"}', [lpTok('{"reason": "x"}')], "verdict", VERDICTS) === null, "a missing field is no distribution");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.
