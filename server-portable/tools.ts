@@ -67,8 +67,12 @@ export const UNLOCKS: Readonly<Record<Scope, readonly ToolScope[]>> = {
 };
 
 const SCOPE_OF: ReadonlyMap<ToolName, ToolScope> = new Map(TOOLS.map((t) => [t.name, t.scope]));
-/** A tool's group, from its manifest entry. */
-export const scopeOf = (name: ToolName): ToolScope => SCOPE_OF.get(name) as ToolScope;
+/** A tool's group, from its manifest entry; a name the manifest lacks is a bug, and throws. */
+export const scopeOf = (name: ToolName): ToolScope => {
+  const scope = SCOPE_OF.get(name);
+  if (!scope) throw new Error(`"${name}" is not in the tool manifest (tools.ts)`);
+  return scope;
+};
 
 /**
  * Whether a key's scope unlocks a tool — the one gate both surfaces ask
@@ -76,7 +80,7 @@ export const scopeOf = (name: ToolName): ToolScope => SCOPE_OF.get(name) as Tool
  * core refuses a route with FORBIDDEN where it does not, so a tool's scope is
  * stated once, here, and not again beside either registration.
  */
-export const mayCall = ({ scope }: { scope: Scope }, name: ToolName): boolean => UNLOCKS[scope].includes(scopeOf(name));
+export const mayCall = ({ scope }: { scope: Scope }, name: ToolName): boolean => (UNLOCKS[scope] ?? []).includes(scopeOf(name));
 
 /** Every tool name a write-scoped key sees, sorted — derived from UNLOCKS, not restated (eleventh review pass: it was every manifest entry, a second statement of the hierarchy). */
 export const TOOL_NAMES: ToolName[] = namesIn(UNLOCKS.write);

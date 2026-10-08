@@ -440,8 +440,11 @@ console.log("\n[10a] MCP tools/list and the REST core's OpenAPI document are two
   const tools = await listed(KEY);
   assert(tools.length > 0 && JSON.stringify(tools.map((t) => t.name).sort()) === JSON.stringify([...ops.keys()].sort()),
     `a write key's tools are the document's operations, one for one (${tools.length} tools, ${ops.size} operations)`);
+  // Key order is the converter's, not the contract's: compare with keys sorted.
+  const canon = (v: unknown): string => JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
   for (const tool of tools) {
     const at = ops.get(tool.name);
+    assert(at, `${tool.name}: an operation of the same name`);
     if (!at) continue;
     const { op, path, method } = at;
     // A path's {field} rides the URL; every other field is in the query
@@ -452,7 +455,7 @@ console.log("\n[10a] MCP tools/list and the REST core's OpenAPI document are two
     const query = (op.parameters ?? []).filter((p) => p.in === "query");
     const apiProps = readsQuery(method) ? Object.fromEntries(query.map((p) => [p.name, p.schema])) : (body?.properties ?? {});
     const apiRequired = readsQuery(method) ? query.filter((p) => p.required).map((p) => p.name) : (body?.required ?? []);
-    assert(JSON.stringify(Object.fromEntries(Object.entries(props).filter(([k]) => !fields.includes(k)))) === JSON.stringify(apiProps), `${tool.name}: its input fields are the operation's, schema for schema`);
+    assert(canon(Object.fromEntries(Object.entries(props).filter(([k]) => !fields.includes(k)))) === canon(apiProps), `${tool.name}: its input fields are the operation's, schema for schema`);
     const required = (tool.inputSchema.required ?? []).filter((k) => !fields.includes(k)).sort();
     assert(JSON.stringify(required) === JSON.stringify([...apiRequired].sort()), `${tool.name}: the same fields are required`);
     if (!readsQuery(method)) assert(op.requestBody?.required === required.length > 0, `${tool.name}: a body is required exactly when a body field is`);

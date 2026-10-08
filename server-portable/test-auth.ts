@@ -15,7 +15,7 @@
 import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, presentedKeys, queryOf, secretMatches, CLIENT_SCOPES, SCOPES } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert, RuntimeUrl } from "../db/test-support.ts";
-import { mayCall, visibleToolNames, READ_TOOL_NAMES, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
+import { mayCall, visibleToolNames, READ_TOOL_NAMES, UNLOCKS, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
 
 const { assert, report } = createAssert();
 
@@ -146,6 +146,14 @@ console.log("\n[4] Scopes");
   const f = { name: "mcp-forwarder", scope: "forward", keyHash: hashKey(FORWARD_KEY) } as const;
   assert(!canWrite(f) && !canRead(f) && !canCapture(f), "forward scope may not write, read or capture — it grants nothing (SMD-2284)");
   assert(visibleToolNames({ scope: "forward" }).length === 0, "…and unlocks no tool");
+  // canRead, canCapture and canWrite restate the hierarchy for callers without a
+  // tool name and for auth.ts's copies, which have no manifest: each agrees with
+  // UNLOCKS, tools.ts's one statement of it, for every scope (SMD-1931).
+  for (const scope of SCOPES) {
+    const p = { name: "k", scope, keyHash: "h" } as const;
+    assert(canRead(p) === UNLOCKS[scope].includes("read") && canCapture(p) === UNLOCKS[scope].includes("capture") && canWrite(p) === UNLOCKS[scope].includes("write"),
+      `${scope}: canRead, canCapture and canWrite say what UNLOCKS.${scope} unlocks`);
+  }
 }
 
 console.log("\n[5] Independent revocation");

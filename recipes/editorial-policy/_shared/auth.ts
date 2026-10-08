@@ -24,8 +24,10 @@
  *   one or remove one. The core servers ask tools.ts's mayCall, which reads a
  *   tool's group from the manifest (SMD-1931); canRead, canCapture and
  *   canWrite below state the same three groups for a caller without a tool
- *   name — the REST core's capture reply, which tells a key that cannot
- *   read less, and the copies. The vendored servers (the copies
+ *   name — whether a capture's writer may read (core/writes.ts, and the REST
+ *   core's capture reply, which tells a key that cannot read less) — and for
+ *   the copies of this file, which have no manifest; test-auth.ts holds the
+ *   three to UNLOCKS. The vendored servers (the copies
  *   of this file) ask only canWrite and register their read tools for every
  *   authenticated key — so authenticate() ADMITS only the scopes its caller
  *   names, and a caller that names none admits read and write: to a vendored

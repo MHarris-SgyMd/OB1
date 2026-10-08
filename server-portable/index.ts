@@ -86,8 +86,9 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
 
   // The read tools: each is its operation in core/reads.ts — the search op
   // with its egress gate and query log, the store reads, the probes — and its
-  // words in render.ts, for a key that may read; a fault is `Error: <message>`
-  // with the tool's hint where it has one, FAILED beside it.
+  // words in render.ts, behind the manifest's gate like every tool (each is in
+  // the read group); a fault is `Error: <message>` with the tool's hint where it
+  // has one, FAILED beside it.
   const readTool = <K extends ToolName>(name: K, run: (input: Input<K>) => Promise<say.Reply>, hint?: (input: Input<K>) => ((msg: string) => string) | undefined): void =>
     registerOp(name, run, (err, input) => say.failed(err, { hint: hint?.(input) }));
 
