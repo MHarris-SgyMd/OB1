@@ -3592,6 +3592,99 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   later build (601 by that afternoon) changes the candidate table and can make
   the entity dump's fingerprints stale for edited issues.
 
+## The judge on a brain's own labels: prompt 4 (SMD-1873)
+
+`eval-judge.ts`. The corpus `eval-consolidate.ts` needs is gone with /tmp, and
+a brain the pass has run on already holds labels for the pairs its judge sees:
+the proposals a reviewer accepted or rejected, the board's links between two
+tickets (053's `link` facets — 079 keeps those pairs from the judge, so they
+are asked directly), and the writers' own `supersedes` pointers (most are the
+session hook's later summary replacing its earlier one: a supersession with a
+known direction). `--export` reads them, and a sample of today's candidates, in
+one repeatable-read read-only transaction; the judging is offline.
+
+```bash
+DATABASE_URL=… bun eval-judge.ts --export /private/tmp/judge-pairs.jsonl     # the brain's text: keep it local
+bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --logprobs 10        # judge, then report
+bun eval-judge.ts --pairs … --replay /private/tmp/judge-pairs.answers.jsonl   # re-score, no model
+```
+
+**The set** (dogfood stable, 2026-10-08, 1,657 thoughts): 126 rejected and 2
+accepted proposals, 126 linked ticket pairs (8 duplicate_of, 40 child_of, 39
+blocks, 39 relates_to), 60 pointer pairs, 120 candidates — 434 pairs. Ollama
+0.33.3 on this Mac, temperature 0, three at a time.
+
+**What a verdict is scored against.** An accepted proposal and a pointer pair
+are supersessions, which the judge is right to propose (p3's "conflict", p4's
+"outdates"); a rejected proposal is not (most were two tickets, SMD-2448); a
+linked pair is related and is neither unrelated nor proposed. A p4
+"duplicate" is a relation (a relation edge, SMD-1873's next PR), not a
+proposal.
+
+| qwen2.5:7b, 434 pairs | p3 (agree / unrelated / conflict) | p4 (five verdicts, "outdates") |
+|---|---|---|
+| rejected proposals proposed again | 119 of 126 | 2 of 126 |
+| linked pairs neither unrelated nor proposed | 46 of 126 (agree) | 106 of 126 (85 related, 21 evolves) |
+| pointer pairs proposed | 1 of 60 | 2 of 60 (and 20 read as duplicate) |
+| the 2 accepted proposals proposed | 2 of 2 | 0 of 2 (both read as evolves) |
+| supersessions the model directed | 14 of 128 (11%) | 4 of 4, 3 quoting words found in that side and not the other |
+| the written confidence | 6 values, 0.80 on 160 | 5 values, 0.80 on 368 |
+| AUROC, is it a supersession, over all 314 labelled pairs: written number | 0.12 | 0.28 |
+| …the same: token P(outdates), as the pass records it | — | 0.59 |
+| proposals among the labelled pairs (true / false) | 127 (3 / 124) | 4 (2 / 2): too few to measure a ranking |
+| candidates the pass would record | 1 of 120 | 0 of 120 |
+| median seconds per pair | 7.5 | 9.2 |
+
+What p4 buys on the 7B is the false proposals gone — 119 of the 126 pairs a
+reviewer had rejected proposed again under p3, 2 under p4 — and every
+supersession it does propose naming a side. It does not find more: 2 of the
+62 true pairs against p3's 3, and neither of the two a reviewer accepted.
+Whether its token score ranks proposals is unmeasured with four of them;
+SMD-2705 measures it on p4's own queue. p3's confidence was a constant on the
+reviewed proposals (AUROC 0.53 among them, a coin) — 0.80 was the model's
+answer, not a parse default — and its token probability was no better
+(0.39): p3 was sure of the wrong thing.
+
+An intermediate draft that kept the word "conflict" for the supersession cut
+the false proposals to 8 of 126 and called 2 of the 62 true ones a conflict:
+the pairs that make a thought out of date on this brain are mostly a later
+state of the same thing — a checkpoint and the final summary, a "state of the
+record" note and the release that followed — and the 7B reads "conflict" as
+contradiction only. "outdates" names both. The 7B answered "duplicate" for 20
+of the 60 pointer pairs (and "related" for 32), against 0 of the 252
+negatives; for a while p4 proposed a duplicate too, and the token mass on
+outdates plus duplicate ranked supersessions over all pairs at AUROC 0.91.
+Three review passes each found a way for a proposed duplicate to hand one
+writer's copy the standing of another's thought, and every duplicate it
+caught was a pointer pair — a pair the pass never judges, since a superseded
+thought leaves the pool. A duplicate is a relation now.
+
+| p4, 140 of the pairs (all 62 true, 40 rejected, 38 linked) | qwen2.5:7b | qwen3.8:27b |
+|---|---|---|
+| pointer + accepted pairs proposed | 2 of 62 | 20 of 62 |
+| rejected proposals proposed | 0 of 40 | 6 of 40 |
+| linked pairs proposed | 0 of 38 | 5 of 38, all duplicate_of |
+| proposals naming the right side, where labelled | 2 of 2 | 15 of 20 (with the quote found: 15 of 18) |
+| token confidence | yes | no — Ollama returns the first token's logprobs only for this model, so the pass records the written number (0.95 on 129 of 140) |
+| AUROC among the pairs it proposes, by the score it records | 2 proposed, none false | 0.39 (31 proposed, 11 false): the written number ranks them worse than a coin |
+| seconds per pair, three at a time | ≈ 3.1 | ≈ 12.5 |
+
+The 27B proposes ten times the true supersessions of the 7B for 11 false
+ones, at four times the time, and with a confidence that orders its proposals
+no better than chance; it also answered "duplicate" for 40 pointer pairs.
+`OB1_JUDGE_MODEL` is the operator's choice (SMD-1901); the default stays the
+metadata model, and SMD-2705 decides between them or a cascade.
+
+Caveats:
+* 28 of the 128 proposals have a side edited since they were judged; their
+  label is the reviewer's on the older text.
+* A linked pair is related by a person's link; an unlinked pair is not
+  thereby unrelated, so the candidates carry no label and are reported only
+  as the pass's own rates.
+* The pointer pairs are mostly one writer's (the session hook); the set has
+  two accepted proposals. Recall on supersessions other writers would set is
+  not measured here.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
@@ -6666,8 +6759,11 @@ accepts the bare-path document, whose `issuer` carries `/auth`
   lookup, and caps the body. Measured on Bun 1.4.0: `node:https` dials the
   address that lookup returns, so the address checked is the address dialled
   and DNS rebinding gains nothing; and the library's 2.5 s abort signal ends a
-  request hung before its headers or mid-body. The deploy keeps this guard on
-  any runtime.
+  request hung before its headers or mid-body. It refuses an answer a Response
+  cannot carry: before SMD-2665, a status outside 200–599 threw in a response
+  handler, so one unauthenticated authorization request naming a host that
+  answered 999 stopped the server, and a 101 left the fetch hanging past that
+  abort. The deploy keeps this guard on any runtime.
 - **Its defaults open more than the brain needs.** The kit's first versions
   inherited these, and the server now closes each:
   - **Open registration plus client credentials let anyone hold a working

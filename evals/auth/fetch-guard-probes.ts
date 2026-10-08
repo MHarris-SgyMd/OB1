@@ -11,7 +11,9 @@
  * census for that reason.
  */
 import type { LookupAddress } from "node:dns";
-import { guardedLookup, refusedName, refusedUrl, specialUse } from "../../deploy/auth/fetch-guard.ts";
+import { request } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
+import { answerOf, BODY_CAP, guardedLookup, refusedName, refusedUrl, specialUse } from "../../deploy/auth/fetch-guard.ts";
 
 export function guardProbes(expect: (what: string, ok: boolean) => void): void {
   const special = ["0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.254", "127.0.0.1", "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.168.1.1", "192.0.2.1", "198.18.0.1", "224.0.0.1", "255.255.255.255",
@@ -46,4 +48,64 @@ export function guardProbes(expect: (what: string, ok: boolean) => void): void {
   expect("one private answer among public ones refuses the name, and logs it", mixed.err !== null && mixed.logs.some((l) => l.includes("10.0.0.5")));
   expect("a loopback answer is refused", lookedUp(["127.0.0.1"], false).err !== null);
   expect("no answer is refused", lookedUp([], true).err !== null);
+  let unread: Error | null = null;
+  guardedLookup(() => {}, "https://x.test/", ((_h: string, _o: unknown, cb: (e: Error | null, a: unknown) => void) => cb(null, undefined)) as never)("x.test", { all: true }, (e) => {
+    unread = e;
+  });
+  expect("an answer that cannot be read is refused, not thrown (SMD-2665)", /fetch refused: an answer could not be checked/.test((unread as Error | null)?.message ?? ""));
+}
+
+/**
+ * How the guard reads a peer's answer (answerOf), against peers on loopback
+ * that answer as told (SMD-2665). A throw in one of its handlers ended the
+ * process; one that escapes is counted here instead, so a row can say so.
+ */
+export async function answerProbes(expect: (what: string, ok: boolean) => void): Promise<void> {
+  const answers: Record<string, string | null> = {
+    ok: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    s999: "HTTP/1.1 999 Odd\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    s600: "HTTP/1.1 600 Odd\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    s101: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: upgrade\r\n\r\n",
+    s204: "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+    big: `HTTP/1.1 200 OK\r\nContent-Length: ${BODY_CAP + 1}\r\nConnection: close\r\n\r\n${"x".repeat(BODY_CAP + 1)}`,
+    hangup: null,
+  };
+  const escaped: string[] = [];
+  const escape = (e: unknown) => void escaped.push(e instanceof Error ? e.message : "a throw");
+  process.on("uncaughtException", escape);
+  process.on("unhandledRejection", escape);
+  const peer = createServer((s) => {
+    s.on("error", () => {});
+    s.once("data", (d) => {
+      const answer = answers[d.toString("latin1").split(" ")[1].slice(1)];
+      if (answer === null) s.destroy();
+      else s.end(answer);
+    });
+  });
+  await new Promise<void>((resolve) => peer.listen(0, "127.0.0.1", resolve));
+  const port = (peer.address() as AddressInfo).port;
+  // What the fetch settled as, or "unsettled" when it has not within 3 s (the 101 did not, before).
+  const got = (which: string) =>
+    new Promise<string>((resolve) => {
+      const req = request(`http://127.0.0.1:${port}/${which}`, { agent: false });
+      const timer = setTimeout(() => {
+        req.destroy();
+        resolve("unsettled");
+      }, 3000);
+      answerOf(req, which, () => {}).then(
+        async (r) => resolve(`${r.status} ${await r.text()}`),
+        (e: Error) => resolve(`refused: ${e.message}`),
+      ).finally(() => clearTimeout(timer));
+      req.end();
+    });
+  const said: Record<string, string> = {};
+  for (const which of Object.keys(answers)) said[which] = await got(which);
+  peer.close();
+  process.off("uncaughtException", escape);
+  process.off("unhandledRejection", escape);
+  expect("an answer is read as a Response", said.ok === "200 {}" && said.s204 === "204 ");
+  expect("a status a Response cannot carry (999, 600) is refused, not thrown: it stopped the server (SMD-2665)", said.s999 === "refused: fetch refused: status 999 is not one a Response can carry" && said.s600 === "refused: fetch refused: status 600 is not one a Response can carry");
+  expect("a switch of protocol (101) is refused, where it left the fetch unsettled", said.s101 === "refused: fetch refused: the peer switched protocols");
+  expect("a body over the cap is cut, and a peer that hangs up refuses the fetch", said.big === `refused: fetch refused: body over ${BODY_CAP} bytes` && said.hangup.startsWith("refused: "));
+  expect(`no throw escaped while reading the answers${escaped.length ? ` (${escaped.join("; ")})` : ""}`, !escaped.length);
 }

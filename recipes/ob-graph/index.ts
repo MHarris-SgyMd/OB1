@@ -34,13 +34,15 @@
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
-// it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
+// it with _shared/auth.ts and _shared/sse.ts (the reply keepalive, SMD-2001) beside it
+// (supabase/functions/_shared/), as the README says.
 import { Hono, type Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { mcpReply } from "../_shared/sse.ts";
 
 const app = new Hono();
 
@@ -553,7 +555,8 @@ app.all("*", async (c) => {
 
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
-  return transport.handleRequest(c);
+  // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 export default {

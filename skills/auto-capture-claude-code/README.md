@@ -7,7 +7,7 @@
 > Claude Code adapter for the [auto-capture](../auto-capture/) skill, adding automatic session-end thought capture via Claude Code hooks.
 
 > [!NOTE]
-> **Fork note (SMD-1298).** This adapter POSTs the formatted transcript to a Supabase REST ingest endpoint with a full-access key, and its parser reads a `Human:`/`Assistant:` text format Claude Code does not write. The fork's replacement is [`recipes/session-capture-hook`](../../recipes/session-capture-hook/): one summary thought over MCP, the session's retrieved thoughts as `derived_from`, a capture-only key, a secret scan, and support for Codex. This adapter's fate belongs with the Supabase retirement (SMD-1795 / SMD-1802).
+> **Fork note (SMD-1298).** This adapter POSTs the formatted transcript to a Supabase REST ingest endpoint with a full-access key, and its parser reads a `Human:`/`Assistant:` text format Claude Code does not write. The fork's replacement is [`recipes/session-capture-hook`](../../recipes/session-capture-hook/): one summary thought over MCP, the session's retrieved thoughts as `derived_from`, a capture-only key, a secret scan, and support for Codex. The endpoint it posts to, `open-brain-rest`'s `/ingest`, is retired too (SMD-1931): on the fork this adapter reaches nothing. Its fate belongs with the Supabase retirement (SMD-1795 / SMD-1802).
 
 ## Relationship to Upstream Skill
 
@@ -31,7 +31,7 @@ The adapter installs as a Claude Code `Stop` hook. When a session ends:
 - Claude Code installed and configured
 - Node.js 18+ (for native `fetch` support)
 - `SUPABASE_URL` and `MCP_ACCESS_KEY` environment variables set (via `.env.local` or system environment)
-- Open Brain REST API deployed (from `integrations/rest-api/`) or smart-ingest edge function deployed (from `integrations/smart-ingest/`)
+- Upstream's Open Brain REST ingest endpoint (`/functions/v1/open-brain-rest/ingest` on a Supabase project). The fork retired its gateway (SMD-1931); use [`recipes/session-capture-hook`](../../recipes/session-capture-hook/) there
 
 ## Steps
 
