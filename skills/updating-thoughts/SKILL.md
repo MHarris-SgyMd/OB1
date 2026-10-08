@@ -47,8 +47,10 @@ outdated or wrong, prefer updating or tagging it `superseded` over deleting
    - Both → pass both; they compose in one call.
 3. **Guard read-modify-write (optional).** If you read the thought, reasoned,
    then write back — and other writers may exist — pass `if_unchanged_since` set
-   to the `updated_at` you read. The write is rejected with `STALE_READ` if the
-   row changed underneath you; re-fetch and retry.
+   to the `updated_at` you read. If the row changed underneath you the write is
+   refused — the reply begins `Refused:` and says the thought changed after the
+   `if_unchanged_since` you passed (the REST core's code is
+   `REFUSED_STALE_READ`); re-fetch and retry.
 
 ## Quick Reference
 
@@ -75,7 +77,7 @@ re-embedded, and/or metadata merged), and the new `updated_at`.
 
 ## Notes
 
-- A restricted/sensitive thought may refuse a content update by policy.
+- New text that is already another thought's is refused (`Refused: that text already exists as another thought`; `REFUSED_DUPLICATE_CONTENT`): edit one of the two, or delete the other first.
 - Connector: the core Open Brain connector, with a write-scoped key (a read or
   capture key does not see `update_thought`). The standalone
   `update-thought-mcp` server retired with SMD-1931.

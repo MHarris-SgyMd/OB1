@@ -53,12 +53,13 @@ Solution: That is expected — it should search first. Point it at
 Solution: Use `metadata_patch`, not `content`. Only `content` triggers
 re-embedding.
 
-**Issue: `STALE_READ` returned.**
+**Issue: "Refused: … changed after the if_unchanged_since you passed".**
 Solution: Another writer changed the row since your `if_unchanged_since`
-timestamp. Re-fetch the thought and retry.
+timestamp (the REST core's code is `REFUSED_STALE_READ`). Re-fetch the thought
+and retry.
 
 ## Notes for Other Clients
 
-The skill is client-agnostic — it names the tool (`update_thought`) and the
-connector (`open-brain-update-thought`), not a specific client. Adapt only the
+The skill is client-agnostic — it names the tool (`update_thought`) on the core
+Open Brain connector, not a specific client. Adapt only the
 skills-directory path per client.

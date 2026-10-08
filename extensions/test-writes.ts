@@ -323,9 +323,10 @@ Bun.plugin({
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
-// and those still on a constant-time compare accept as their only key. And
+// and smart-ingest, on a constant-time compare, accepts as its only key. And
 // a second, NAMED key in MCP_ACCESS_KEYS, which only the servers on the module
-// know: one write through each of them runs under it (SMD-1541), the arm that
+// know — agent-memory-api is the one this suite drives since SMD-1931, so the
+// arm has one witness: one write through it runs under that key (SMD-1541), the arm that
 // tells `principal.name` on the audit row from a constant that happens to
 // spell the legacy key's name — every other arm runs under the legacy key,
 // whose name smart-ingest's in-place compare records too.

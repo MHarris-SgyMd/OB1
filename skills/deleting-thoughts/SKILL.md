@@ -43,7 +43,8 @@ If the thought is merely outdated, wrong, or superseded, **update it or tag it**
    and get explicit confirmation that this specific thought should be removed.
    - **Check for derivatives first.** Before deleting, run `find_derivatives`
      on the thought where the provenance-chains recipe's tools are connected.
-     (The delete itself refuses a thought other thoughts cite as a source.) If other thoughts were derived
+     (The delete itself refuses only a thought whose statements other thoughts
+     cite; it does not look at `derived_from`, so derivatives are yours to check.) If other thoughts were derived
      from it, deleting orphans their provenance chain — those derivatives lose
      the source they point back to. Prefer deprecating over deleting in that
      case. Tool names may carry a connector prefix; use whatever the environment

@@ -62,7 +62,7 @@ Solution: That is an update, not a delete — tag it `superseded` via the
 
 ## Notes for Other Clients
 
-Client-agnostic: it names the tool (`delete_thought`) and connector
-(`open-brain-delete-thought`), not a specific client. Adapt only the
+Client-agnostic: it names the tool (`delete_thought`) on the core Open Brain
+connector, not a specific client. Adapt only the
 skills-directory path per client. Pairs with **updating-thoughts** for the
 non-destructive path.
