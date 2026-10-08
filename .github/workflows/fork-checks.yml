@@ -242,6 +242,13 @@ jobs:
         working-directory: evals
         run: bun eval-write-path.ts --self-check
 
+      # The consolidation judge's eval (SMD-1873): the AUROC arithmetic and
+      # what is right per label — p3's words and p4's, a duplicate a relation.
+      # No database, no model; the measurement itself runs against a brain.
+      - name: Judge eval rules
+        working-directory: evals
+        run: bun eval-judge.ts --self-check
+
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
       # hand-known corpus, the sample, the cost arithmetic, the verdict against

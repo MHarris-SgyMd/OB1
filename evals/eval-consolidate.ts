@@ -174,7 +174,9 @@ const sideOf = async (issue: string): Promise<Side | null> => {
   const rows = (await sql`SELECT id, content, created_at FROM thoughts WHERE id = ${linearThoughtId(issue)}::uuid`) as Side[];
   return rows[0] ?? null;
 };
-type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
+type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; score?: number; reason: string; evidence?: string; recorded: string | null };
+/** A dump line's verdict in p4's words: a p3 dump's "conflict" is p4's "outdates", its "agree" p4's "related" (SMD-1873). */
+const verdictOf = (l: DumpLine): Judgement["verdict"] => (l.verdict === "conflict" ? "outdates" : l.verdict === "agree" ? "related" : l.verdict) as Judgement["verdict"];
 // A dump written before SMD-2536 can hold a reason parseJudgement no longer
 // lets through (a NEL, a C1 control): its breaks and controls are cleaned here,
 // so the replayed verdicts and the proposals re-recorded from them carry one
@@ -188,7 +190,7 @@ const judgeOne = async (older: Side, newer: Side): Promise<Judgement | null> => 
   if (REPLAY) {
     const l = replayByPair.get(`${older.id}|${newer.id}`);
     if (!l) return null;
-    return { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
+    return { verdict: verdictOf(l), supersedes: l.supersedes as Judgement["supersedes"], confidence: l.score ?? l.confidence, reason: l.reason, evidence: String(l.evidence ?? ""), malformed: false };
   }
   return judgePair({ content: older.content, createdAt: older.created_at },
                    { content: newer.content, createdAt: newer.created_at },
@@ -211,7 +213,8 @@ if (!NO_JUDGE && labels.pairs.length) {
     judgeMs += Date.now() - t;
     if (!j) { skipped++; rows.push(`  · ${p.older} → ${p.newer}: not in the dump`); continue; }
     if (j.malformed) { malformed++; rows.push(`  ✗ ${p.older} → ${p.newer}: malformed answer (label ${p.label})`); continue; }
-    const saidConflict = j.verdict === "conflict";
+    // p4 (SMD-1873): what the pass would propose — an outdates — is the label's "conflict".
+    const saidConflict = proposalVerdict(j) !== null;
     const isConflict = p.label === "conflict";
     if (saidConflict && isConflict) {
       tp++;
@@ -250,7 +253,7 @@ if (FULL || REPLAY) {
   } else {
     // Replay: re-record the dump's conflicts so the queue below is the pass's.
     for (const l of replayLines) {
-      const j: Judgement = { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
+      const j: Judgement = { verdict: verdictOf(l), supersedes: l.supersedes as Judgement["supersedes"], confidence: l.score ?? l.confidence, reason: l.reason, evidence: String(l.evidence ?? ""), malformed: false };
       const v = proposalVerdict(j);
       if (v && l.recorded === "proposed") {
         // Under the key the dump line carries — the judge that made the verdict — not this run's.
