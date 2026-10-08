@@ -1534,8 +1534,8 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   } finally {
     await sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`;
   }
-  // …and so is one whose taken read cannot be made (081's ob1_thought_taken
-  // missing — a brain before 081 under this server): the same retry, never a
+  // …and so is one whose taken read cannot be made (082's ob1_thought_taken
+  // missing — a brain before 082 under this server): the same retry, never a
   // target read as not taken (SMD-2638 review pass 2: a swallowed read passed).
   await sql`ALTER FUNCTION ob1_thought_taken(uuid) RENAME TO ob1_thought_taken_away`;
   try {
@@ -1644,7 +1644,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const t: Record<string, string> = { missing: "00000000-0000-4000-8000-0000000000cc" };
     const ownFresh = await K({ content: "[13b] hook-two's summary, attributed", source: "codex" });
     t.attributedOwn = await landedId(ownFresh, "hook-two's own thought");
-    // 081 lets a capture-only key point at a thought nothing yet supersedes
+    // 082 lets a capture-only key point at a thought nothing yet supersedes
     // (SMD-2638): each leg below that writes a pointer names its own target.
     const ownForSources = await landedId(await K({ content: "[13b] hook-two's summary, named with a source beside it", source: "codex" }), "hook-two's thought for the sourced leg");
     const ownForUpper = await landedId(await K({ content: "[13b] hook-two's summary, named in upper case", source: "codex" }), "hook-two's thought for the upper-case leg");
@@ -1688,7 +1688,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const relinkedOwn = await landedId(await K({ content: "[13b] hook-two's next summary, its pointer cleared by a delete", source: "codex", supersedes: relinkBase }), "hook-two's next summary");
     const [linked] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${relinkedOwn}::uuid`;
     // …nor does an operator's metadata backfill, which writes with no agent id
-    // and no `issue` (backfill_thought_actors' shape): 081's rule leaves it out.
+    // and no `issue` (backfill_thought_actors' shape): 082's rule leaves it out.
     const restampedOwn = await landedId(await K({ content: "[13b] hook-two's summary an operator's backfill restamps", source: "codex" }), "hook-two's thought to restamp");
     await sql`SELECT update_thought(p_id := ${restampedOwn}::uuid, p_metadata_patch := ${{ enriched: true }}::jsonb, p_actor := ${{ name: "backfill", via: "backfill_thought_actors" }}::jsonb)`;
     await call("delete_thought", { id: relinkBase });
@@ -1772,7 +1772,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       for (const [name, target] of Object.entries({ ...t, attributedOwn: ownForSources })) withSources[name] = await cell(`[13b] hook-two names ${name} as supersedes, with a source beside it`, target, { derived_from: [t.attributedOwn] });
       upper = await cell("[13b] hook-two names its own thought as supersedes, in upper case", ownForUpper.toUpperCase());
       // Its own thought once more, now that the writing cell supersedes it: the
-      // server's reads find it its own and untaken, and 081's check at the
+      // server's reads find it its own and untaken, and 082's check at the
       // write refuses the second superseder — the capture lands without it,
       // in the writing cell's words.
       capped = await cell("[13b] hook-two names its own thought something already supersedes", t.attributedOwn);
@@ -1859,7 +1859,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // refuses the first insert naming a supersedes with the constraint's words.
   // The write goes again without the pointer and lands, as the check would
   // have answered (SMD-2473); unmended it is the one cell that said UNKNOWN.
-  // A target of its own that nothing supersedes, so 081's check at the write passes and the self-FK is the refusal met.
+  // A target of its own that nothing supersedes, so 082's check at the write passes and the self-FK is the refusal met.
   const raceTarget = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a summary deleted between the check and the write", source: "claude-code" } })));
   await sql`CREATE SEQUENCE fk_race_seq`;
   await sql.unsafe(`CREATE FUNCTION fk_race() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.supersedes IS NOT NULL AND nextval('fk_race_seq') = 1 THEN RAISE EXCEPTION 'insert or update on table "thoughts" violates foreign key constraint "thoughts_supersedes_fkey"'; END IF; RETURN NEW; END $$`);
@@ -1971,7 +1971,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(ranked.text.includes(summary) && !/references settled work \(TKT-2617\)/.test(ranked.text), "…and prefer_current does not demote the summary");
   }
 
-  // [13e] The reverse order (SMD-2638, migration 081): the capture key
+  // [13e] The reverse order (SMD-2638, migration 082): the capture key
   // supersedes its own thought first, while it is still only its own, and a
   // write key or board-sync lands on that thought after. The pointer lapses,
   // an event on the pointing thought under the key whose write took the

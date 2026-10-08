@@ -523,7 +523,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // (min_trust on the hybrid and the current read, SMD-1724), 077 (the
   // current read by the tickets a thought names, SMD-2271), 079 (two
   // tickets Linear links never paired for judgement, SMD-2448), 080 (a
-  // capture-only key's re-capture leaves the row, SMD-2539) and 081 (a
+  // capture-only key's re-capture leaves the row, SMD-2539) and 082 (a
   // capture-only key's pointer lapses when another takes its target,
   // SMD-2638) stay recorded and
   // are never tried. 030 is the right one to make pending because its
@@ -623,14 +623,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // on its own body and adds a predicate and a count beside it, refusing by
   // name without 025, 029, 053 or 063 ([20ac]); 080 redefines the three
   // upsert_thought forms on 073's and 061's bodies, refusing by name without
-  // 060, 061 or 073 ([20ad]); 081 adds the taking rule, its two reads, the
-  // re-capture note and the lapse trigger on 008's thought_audit, refusing by
-  // name without 060 or 061 ([20ae]) — all recorded by the
+  // 060, 061 or 073 ([20ad]); 081 upserts ob1_config.schema_version for the
+  // 1.6.0 cut, needing only 006's table; 082 adds the taking rule, its two
+  // reads, the re-capture note and the lapse and write-time triggers on
+  // 008's thought_audit, refusing by name without 060 or 061 ([20ae]) — all
+  // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 52, `030 is among the last fifty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 53, `030 is among the last fifty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3608,17 +3610,17 @@ console.log("\n[20ad] Migration 080: refused by name without 073; onto a populat
   await sql.close();
 }
 
-console.log("\n[20ae] Migration 081: refused by name without 060; onto a populated brain at the file before it — the rule, its reads, the note, the lapse and the check at the write, no row and no audit row moved; a capture-scoped pointer written before the upgrade lapses when a write key takes its target after it, by a merge or by a re-capture that changes nothing, and an unmarked one stands; a re-apply a no-op (SMD-2638)");
+console.log("\n[20ae] Migration 082: refused by name without 060; onto a populated brain at the file before it — the rule, its reads, the note, the lapse and the check at the write, no row and no audit row moved; a capture-scoped pointer written before the upgrade lapses when a write key takes its target after it, by a merge or by a re-capture that changes nothing, and an unmarked one stands; a re-apply a no-op (SMD-2638)");
 {
-  const the081 = MIGRATIONS.find((f) => f.endsWith("_capture_pointer_lapse.sql"))!;  // by name: renumbered when main takes its number
+  const the082 = MIGRATIONS.find((f) => f.endsWith("_capture_pointer_lapse.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "060" });
-  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the081 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 081 needs 060 and 061 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_agent_id); this schema lacks it",
-    `081 on a schema stopped before 060 is refused up front, naming what it needs (${refused})`);
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 082 needs 060 and 061 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_agent_id); this schema lacks it",
+    `082 on a schema stopped before 060 is refused up front, naming what it needs (${refused})`);
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the081 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the082 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const agent = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
@@ -3631,9 +3633,9 @@ console.log("\n[20ae] Migration 081: refused by name without 060; onto a populat
   // A brain at 080: three chains the hook key wrote — two under the capture
   // scope's mark, one by a server that sent none.
   const chain = async (what: string, actor: Record<string, unknown>) => {
-    const t = await cap(`upgrade 081: the hook's summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep" });
-    const n = await cap(`upgrade 081: the hook's next summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep", supersedes: t.id });
-    return { t: t.id, s: n.id, text: `upgrade 081: the hook's summary ${what}` };
+    const t = await cap(`upgrade 082: the hook's summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep" });
+    const n = await cap(`upgrade 082: the hook's next summary ${what}`, { metadata: { source: "codex" }, actor, recapture: "keep", supersedes: t.id });
+    return { t: t.id, s: n.id, text: `upgrade 082: the hook's summary ${what}` };
   };
   const merged = await chain("a write key merges onto", HOOK);
   const noop = await chain("a write key re-captures unchanged", HOOK);
@@ -3642,7 +3644,7 @@ console.log("\n[20ae] Migration 081: refused by name without 060; onto a populat
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const before = await rows(), auditBefore = await audits();
   assert((await pointerOf(merged.s)) === merged.t && (await pointerOf(noop.s)) === noop.t && (await pointerOf(unmarked.s)) === unmarked.t, "[20ae] setup: the hook's three pointers are written at 080");
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the081 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 });
   const [made] = await sql`SELECT
       (SELECT count(*)::int FROM pg_proc WHERE proname IN ('ob1_takes_thought', 'ob1_capturer_of', 'ob1_thought_taken', 'ob1_note_recapture', 'ob1_lapse_capture_pointers', 'ob1_check_capture_pointer')) AS fns,
       (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('thought_audit_lapse_capture_pointers', 'thought_audit_check_capture_pointer') AND tgrelid = 'thought_audit'::regclass) AS trg,
@@ -3660,9 +3662,9 @@ console.log("\n[20ae] Migration 081: refused by name without 060; onto a populat
   assert((await pointerOf(unmarked.s)) === unmarked.t, "…while a pointer whose capture row carries no scope stands");
   // A re-apply moves nothing.
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the081 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 });
   const [{ trg }] = await sql`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname IN ('thought_audit_lapse_capture_pointers', 'thought_audit_check_capture_pointer')`;
-  assert(trg === 2 && (await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 081 is a no-op: two triggers, and no row or audit row moved");
+  assert(trg === 2 && (await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 082 is a no-op: two triggers, and no row or audit row moved");
   await sql.close();
 }
 

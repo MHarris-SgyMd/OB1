@@ -152,7 +152,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // one thing the scope promises it cannot do. Ownership is the target's
     // capture audit row (008/010) carrying this key's agent id, the thought
     // still standing, and no other key or board-sync having taken it since
-    // (migration 081, SMD-2638). A pointer that is not provably so is dropped
+    // (migration 082, SMD-2638). A pointer that is not provably so is dropped
     // before the write, and the reply says nothing of it, as derived_from's
     // trim above (SMD-2473): any answer that differed by target told a key
     // that cannot read something it may not know — whether an id exists,
@@ -208,7 +208,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // Nor is one another key or board-sync has since taken (SMD-2638): a
       // write key's capture of the same text lands on the row, and board-sync
       // adopts it in place, so capturing a text first does not keep it this
-      // key's. Migration 081's one rule says what takes it (takenFromCapturer),
+      // key's. Migration 082's one rule says what takes it (takenFromCapturer),
       // and its lapse clears a pointer this key wrote before the taking.
       const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;
       if (!own) pointer = undefined;
@@ -285,7 +285,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // The gate's decisions for this write, on the audit row (SMD-1903);
         // absent when both endpoints are declared local and nothing was judged.
         ...(gate.record ? { egress: gate.record } : {}),
-        // A key that cannot read, said on its capture row: 081's lapse clears
+        // A key that cannot read, said on its capture row: 082's lapse clears
         // a pointer such a key wrote once another key takes the thought it
         // points at; a write key's pointer it leaves (SMD-2638).
         ...(reader ? {} : { scope: "capture" as const }),
@@ -327,7 +327,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         if (reader) throw e;
         const msg = String((e as Error)?.message ?? e);
         // The pointer's target gone mid-write (the self-FK), or no longer this
-        // key's alone by the time the write ran — 081's check at the write,
+        // key's alone by the time the write ran — 082's check at the write,
         // which waits for a taking the reads above could not see (SMD-2638):
         // either way the capture lands without it, as the reads would have.
         if (pointer !== undefined && /thoughts_supersedes_fkey|ob1_check_capture_pointer/.test(msg)) pointer = undefined;

@@ -301,7 +301,7 @@ const FUNCTIONS = [
   // older forms among SUPERSEDED_SIGNATURES; the index drops with thoughts.
   "ob1_trust_rank(text)",
   "ob1_min_trust_rank(text)",
-  // 081 (SMD-2638): the taking rule, its two reads, the re-capture note and
+  // 082 (SMD-2638): the taking rule, its two reads, the re-capture note and
   // the two triggers' functions; the triggers go with thought_audit.
   "ob1_takes_thought(jsonb, uuid, uuid)",
   "ob1_capturer_of(uuid)",

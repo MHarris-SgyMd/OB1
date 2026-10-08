@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2535]
-migrations: []
----
-
-## Changelog
-
-A request whose `Host` the URL parser refuses (`x:99999`, `[::1`, `brain.example.test:abc`), or that comes with no `Host` at all, now gets the answer a request at any `Host` but the public origin's gets: the -32001 refusal at `/mcp`, `ok` at `/health`, the REST core's 401. Before this fix it got a 500, through the stack's proxy too, which forwards those three as sent; a request with no `Host`, which reaches the server only off the proxy, was also routed wrong (a 405 at `/health`) (SMD-2535).
-
-## FORK
-
-A `Host` the URL parser refuses, or none — answered as at any `Host` but the public origin's, not a 500 or a wrong route (SMD-2535)
+# 268. A `Host` the URL parser refuses, or none — answered as at any `Host` but the public origin's, not a 500 or a wrong route (SMD-2535)
 
 **What changed.**
 - **`auth.ts` `queryOf(url)`** reads the query string without parsing the rest of the URL. For any URL Bun builds, it gives the same parameters as `searchParams` (`??key=` is a `?key` parameter in both). It is used by:

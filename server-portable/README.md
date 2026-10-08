@@ -591,7 +591,7 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
   own is dropped, not refused, SMD-2473, and a thought another key or board-sync
   has since taken, or that something already supersedes, is not its own, a
-  pointer written before the taking lapsing, migration 081, SMD-2638), and
+  pointer written before the taking lapsing, migration 082, SMD-2638), and
   `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
   edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
   `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's

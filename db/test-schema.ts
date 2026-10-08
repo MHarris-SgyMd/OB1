@@ -12315,7 +12315,7 @@ console.log("\n[71] Migration 080: p_payload.recapture = 'keep' — a capture-on
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[72] Migration 081: one rule for when a capture-only key's thought is taken from it — a re-capture by a key that can read, a text edit, the metadata gaining a ticket's issue; not a metadata move alone, a vector, a pointer — the re-capture note on a capture-only key's rows, the lapse of a capture-scoped pointer no one has re-pointed, and the check at the write (SMD-2638)");
+console.log("\n[72] Migration 082: one rule for when a capture-only key's thought is taken from it — a re-capture by a key that can read, a text edit, the metadata gaining a ticket's issue; not a metadata move alone, a vector, a pointer — the re-capture note on a capture-only key's rows, the lapse of a capture-scoped pointer no one has re-pointed, and the check at the write (SMD-2638)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12331,10 +12331,10 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
   const body = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'ob1_lapse_capture_pointers'`)).s);
   const checkBody = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'ob1_check_capture_pointer'`)).s);
   assert(shape.fns === 6 && /AFTER INSERT ON (public\.)?thought_audit FOR EACH ROW WHEN/.test(shape.trg ?? "") && /AFTER INSERT ON (public\.)?thought_audit FOR EACH ROW WHEN/.test(String(shape.chk ?? "")) && /ob1:capture-pointer-lapses/.test(body) && /ob1:capture-pointer-checked-at-write/.test(checkBody),
-    `081's six functions, the lapse and the check AFTER INSERT row triggers on thought_audit with their WHENs, each sentinel in its body (${shape.fns}; ${shape.trg}; ${shape.chk})`);
+    `082's six functions, the lapse and the check AFTER INSERT row triggers on thought_audit with their WHENs, each sentinel in its body (${shape.fns}; ${shape.trg}; ${shape.chk})`);
   for (const sig of ["ob1_takes_thought(jsonb, uuid, uuid)", "ob1_capturer_of(uuid)", "ob1_thought_taken(uuid)", "ob1_note_recapture(uuid, jsonb)", "ob1_lapse_capture_pointers()", "ob1_check_capture_pointer()"]) {
     const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
-    assert(/081/.test(c) && /SMD-2638/.test(c), `${sig}'s comment names 081 and the ticket`);
+    assert(/082/.test(c) && /SMD-2638/.test(c), `${sig}'s comment names 082 and the ticket`);
   }
 
   // The rule, cell by cell.
@@ -12435,9 +12435,9 @@ console.log("\n[72] Migration 081: one rule for when a capture-only key's though
     "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own, and a write key's re-captured note not taken");
 
   // A re-apply moves nothing.
-  await reapply("081");
+  await reapply("082");
   const [{ trg }] = await q<{ trg: number }>(`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`);
-  assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "081 re-applied: one trigger, and the standing pointer still stands");
+  assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "082 re-applied: one trigger, and the standing pointer still stands");
   await db.exec(`DELETE FROM thoughts`);
 }
 

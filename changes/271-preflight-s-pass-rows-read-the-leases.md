@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2423]
-migrations: []
----
-
-## Changelog
-
-Preflight no longer calls a running re-embed or consolidation pass "stopped before it finished": a key a worker holds a live lease under reads as running, with no remedy that would start a second worker, and one whose only leases expired names a worker that died holding them, which the next pass reclaims (SMD-2423).
-
-## FORK
-
-Preflight's pass rows read the leases and the heartbeats (SMD-2423)
+# 271. Preflight's pass rows read the leases and the heartbeats (SMD-2423)
 
 **What changed.** `server-portable/preflight.ts`'s `re-embed pass` and `consolidate pass` rows count each key's claimed rows by lease: live, and expired by the rule `release_stale_leases` and `worker_status` use (`ttl_expires_at < now()`), so the three cannot disagree on what a stale lease is.
 - **Running:** a live lease. The row is ok, unless failed rows sit beside it: a worker never retries those (a follower's `--retry-failed` runs once, before it follows), so then it warns, naming them and the `retry_failed` tool for the key, which puts them back to pending for the running worker to take — any key, no second worker. Otherwise it reads — "a pass under this key is running: N in flight (leases live until HH:MM UTC), M pending" — with no "Finish it", the remedy that would have started a second worker. For consolidation, a fresh, not-ended `heartbeat:<key>` (SMD-2261's PR 2) reads running too: "a follower is running this key (stamped N ago): M pending between its polls", since a follower between polls holds no lease. That is SMD-2261's item 7.

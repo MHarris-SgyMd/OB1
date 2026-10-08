@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 081: a capture-only key's thought stops being its own once
+-- Migration 082: a capture-only key's thought stops being its own once
 --                another key or board-sync takes it — one rule says what
 --                takes it, a write key's re-capture that changes nothing is
 --                recorded, a pointer the key had already written onto the
@@ -114,7 +114,7 @@ BEGIN
      OR to_regprocedure('ob1_project_thought_event(uuid, vector, text, boolean)') IS NULL
      OR to_regprocedure('ob1_actor_agent_id()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 081 needs 060 and 061 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_agent_id); this schema lacks it',
+      MESSAGE = 'migration 082 needs 060 and 061 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_agent_id); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -149,7 +149,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_takes_thought(jsonb, uuid, uuid) IS
-  'Whether an update event (its diff and its canonical agent id) takes a thought from the agent that captured it: another agent, or none, that records a re-capture (`recaptured`) or moves the text, or no agent giving the metadata an `issue` it lacked (board-sync''s adoption) — someone else then holds the text. A key''s metadata edit, a vector, a pointer and a fingerprint do not. False for a thought nobody attributable captured, and for a diff that is not an object. Read by ob1_thought_taken and the lapse trigger. Migration 081 / SMD-2638.';
+  'Whether an update event (its diff and its canonical agent id) takes a thought from the agent that captured it: another agent, or none, that records a re-capture (`recaptured`) or moves the text, or no agent giving the metadata an `issue` it lacked (board-sync''s adoption) — someone else then holds the text. A key''s metadata edit, a vector, a pointer and a fingerprint do not. False for a thought nobody attributable captured, and for a diff that is not an object. Read by ob1_thought_taken and the lapse trigger. Migration 082 / SMD-2638.';
 
 CREATE OR REPLACE FUNCTION ob1_capturer_of(p_id uuid)
 RETURNS uuid
@@ -165,7 +165,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_capturer_of(uuid) IS
-  'The canonical agent id (010) on a thought''s first capture audit row, or NULL — none, or captured without one. Migration 081 / SMD-2638.';
+  'The canonical agent id (010) on a thought''s first capture audit row, or NULL — none, or captured without one. Migration 082 / SMD-2638.';
 
 CREATE OR REPLACE FUNCTION ob1_thought_taken(p_id uuid)
 RETURNS boolean
@@ -180,7 +180,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_thought_taken(uuid) IS
-  'Whether any update event on the thought takes it from the agent that captured it (ob1_takes_thought). The server reads it for every target of a capture-only key''s `supersedes`, and the write-time check reads it again under a lock: a taken thought is not the key''s, and the pointer is dropped. Migration 081 / SMD-2638.';
+  'Whether any update event on the thought takes it from the agent that captured it (ob1_takes_thought). The server reads it for every target of a capture-only key''s `supersedes`, and the write-time check reads it again under a lock: a taken thought is not the key''s, and the pointer is dropped. Migration 082 / SMD-2638.';
 
 -- ---------------------------------------------------------------------------
 -- 2. A re-capture by a key that can read, recorded.
@@ -235,7 +235,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_note_recapture(uuid, jsonb) IS
-  'Records that a key that can read captured text a capture-only key''s thought holds: called by the stores after a capture without p_payload.recapture = ''keep'' lands on an existing row. Sets ob1.actor from p_actor (008''s envelope), locks the row, and — when its capture row carries "scope": "capture", it is not yet taken and the caller is another agent — appends one update event with diff {"recaptured": true} and projects it (updated_at moves, nothing else). Returns whether it recorded one. The event takes the thought from its capturer (ob1_takes_thought), and its append fires the lapse. Migration 081 / SMD-2638.';
+  'Records that a key that can read captured text a capture-only key''s thought holds: called by the stores after a capture without p_payload.recapture = ''keep'' lands on an existing row. Sets ob1.actor from p_actor (008''s envelope), locks the row, and — when its capture row carries "scope": "capture", it is not yet taken and the caller is another agent — appends one update event with diff {"recaptured": true} and projects it (updated_at moves, nothing else). Returns whether it recorded one. The event takes the thought from its capturer (ob1_takes_thought), and its append fires the lapse. Migration 082 / SMD-2638.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The lapse.
@@ -279,7 +279,7 @@ BEGIN
     -- check holds each row to its own latest event. The projector clears
     -- its settings on the way out; the write that fired this projects its
     -- own event after, and sets them again. The write-time check below keeps
-    -- this to one row for a pointer written since 081.
+    -- this to one row for a pointer written since 082.
     v_ev := ob1_append_thought_event(s.id, 'update', s.metadata->>'source',
               jsonb_build_object('supersedes', jsonb_build_object('before', NEW.thought_id, 'after', NULL)), NULL);
     IF v_ev IS NOT NULL THEN
@@ -291,7 +291,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_capture_pointers() IS
-  'The lapse (AFTER INSERT on thought_audit, update events): when one takes a thought from the agent that captured it (ob1_takes_thought), every thought that names it as `supersedes`, was captured by that agent with that pointer under a capture-only key (its capture row''s actor_context has "scope": "capture") and has not been re-pointed by any update since, has the pointer cleared — an update event of its own under the current actor, appended and projected. A pointer a write key set is never lapsed. Migration 081 / SMD-2638.';
+  'The lapse (AFTER INSERT on thought_audit, update events): when one takes a thought from the agent that captured it (ob1_takes_thought), every thought that names it as `supersedes`, was captured by that agent with that pointer under a capture-only key (its capture row''s actor_context has "scope": "capture") and has not been re-pointed by any update since, has the pointer cleared — an update event of its own under the current actor, appended and projected. A pointer a write key set is never lapsed. Migration 082 / SMD-2638.';
 
 DROP TRIGGER IF EXISTS thought_audit_lapse_capture_pointers ON thought_audit;
 CREATE TRIGGER thought_audit_lapse_capture_pointers
@@ -341,7 +341,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_check_capture_pointer() IS
-  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): takes an advisory lock on the target (two such captures naming one target are serialised), locks it FOR SHARE, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the capture names no agent or the target is not that agent''s alone — captured by another, taken (ob1_thought_taken), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 081 / SMD-2638.';
+  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): takes an advisory lock on the target (two such captures naming one target are serialised), locks it FOR SHARE, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the capture names no agent or the target is not that agent''s alone — captured by another, taken (ob1_thought_taken), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 082 / SMD-2638.';
 
 DROP TRIGGER IF EXISTS thought_audit_check_capture_pointer ON thought_audit;
 CREATE TRIGGER thought_audit_check_capture_pointer

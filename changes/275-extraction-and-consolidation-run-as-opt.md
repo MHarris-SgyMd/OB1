@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2424]
-migrations: []
----
-
-## Changelog
-
-An opt-in `workers` compose profile runs entity extraction and consolidation as services: `extract` (`db/extract-entities.ts --follow`) and `consolidate` (`db/consolidate.ts --follow`), one worker each, attributed to `OB1_WORKER_KEY`, which they refuse to start without. `OB1_EXTRACT_FOLLOW`, `OB1_EXTRACT_WORKERS`, `OB1_CONSOLIDATE_FOLLOW` and `OB1_CONSOLIDATE_WORKERS` set the poll interval and worker count. Consolidation still only proposes (SMD-2424).
-
-## FORK
-
-Extraction and consolidation run as opt-in services — the `workers` profile (SMD-2424)
+# 275. Extraction and consolidation run as opt-in services — the `workers` profile (SMD-2424)
 
 **What changed.**
 - **Two services in `deploy/compose.yaml`, profile `workers`.** `extract` and `consolidate` take board-sync's shape: `oven/bun:1.4.0-alpine`, `db/` and `server-portable/` mounted read-only (the workers import nothing from `node_modules`, checked by loading both in a bare container), the server's environment through `<<: *server-env`, the host alias, `depends_on` postgres healthy and migrate done, and `restart: on-failure:3`.

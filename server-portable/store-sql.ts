@@ -635,12 +635,12 @@ export class SqlStore implements ThoughtStore {
     const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;
     const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
-    // 081: a key that can read landed on a row that already held the text —
+    // 082: a key that can read landed on a row that already held the text —
     // recorded, so the row stops being its capturer's (SMD-2638), even when
     // the merge changed nothing and wrote no event. A second statement: a
     // pooler in statement mode passes it, and a failure here throws after the
     // capture landed, so the caller's retry lands on the row again and the
-    // note is made then. A database before 081 has no such function, and the
+    // note is made then. A database before 082 has no such function, and the
     // capture stands without it.
     if (r?.existed === true && opts.recapture !== "keep") {
       try {

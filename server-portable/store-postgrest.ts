@@ -399,10 +399,10 @@ export class PostgrestStore implements ThoughtStore {
       const r = atomic as { id?: string; existed?: unknown; supersedes?: unknown } | null;
       const id = r?.id;
       if (!id) throw new Error("upsert_thought returned no id.");
-      // 081: a key that can read landed on a row that already held the text —
+      // 082: a key that can read landed on a row that already held the text —
       // recorded, as the SQL store records it (SMD-2638). A second call: a
       // failure throws after the capture landed, and the caller's retry makes
-      // the note. A database before 081 has no such function.
+      // the note. A database before 082 has no such function.
       if (r?.existed === true && opts.recapture !== "keep") {
         const { error: noteError } = await this.client.rpc("ob1_note_recapture", { p_id: id, p_actor: actorPayload(opts.actor) });
         if (noteError && !(noteError.code === "PGRST202" || noteError.code === "42883" || /Could not find the function/i.test(noteError.message ?? ""))) throw new Error(noteError.message);

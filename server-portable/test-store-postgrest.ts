@@ -139,7 +139,7 @@ console.log("\n[8b] captureActorOf reads the capture row's actor, the lower id f
   await sql.close();
 }
 
-console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migration 081's one rule (SMD-2638)");
+console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migration 082's one rule (SMD-2638)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const resolved = async (label: string, scope: string, seed: string) => {
@@ -255,7 +255,7 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   try { await capture("[8c] the hook names a taken thought at the write", hook, { supersedes: lapsedNoop.t }); } catch (e) { refusal = (e as Error).message; }
   assert(/ob1_check_capture_pointer/.test(refusal), `a capture-scoped capture naming a taken thought is refused at the write (${refusal.slice(0, 90)})`);
   // The reads fail closed: the taken read throws when it cannot be made, and so does a note that fails —
-  // save a database before 081, where the capture stands without one.
+  // save a database before 082, where the capture stands without one.
   await sql`ALTER FUNCTION ob1_thought_taken(uuid) RENAME TO ob1_thought_taken_away`;
   let readError = "";
   try { await store.takenFromCapturer(own.id); } catch (e) { readError = (e as Error).message; }
@@ -263,7 +263,7 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   assert(/ob1_thought_taken/.test(readError), `takenFromCapturer throws when the read cannot be made, never answering not-taken (${readError.slice(0, 80)})`);
   await sql`ALTER FUNCTION ob1_note_recapture(uuid, jsonb) RENAME TO ob1_note_recapture_away`;
   let missing = "";
-  try { await capture("[8c] the hook's thought the writer re-captures before 081", hook); await capture("[8c] the hook's thought the writer re-captures before 081", writer); } catch (e) { missing = (e as Error).message; }
+  try { await capture("[8c] the hook's thought the writer re-captures before 082", hook); await capture("[8c] the hook's thought the writer re-captures before 082", writer); } catch (e) { missing = (e as Error).message; }
   await sql`ALTER FUNCTION ob1_note_recapture_away(uuid, jsonb) RENAME TO ob1_note_recapture`;
   assert(missing === "", `a database without the note: the capture stands (${missing.slice(0, 80)})`);
   await sql.unsafe(`CREATE OR REPLACE FUNCTION ob1_note_recapture_failing() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the note failed for [8c]'; END $$`);
