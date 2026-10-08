@@ -1,17 +1,4 @@
----
-type: security
-bump: patch
-tickets: [SMD-2617]
-migrations: []
----
-
-## Changelog
-
-A capture-only key can no longer set how another key's thoughts read through a ticket's status. Before, its capture could carry `issue`, `status`, `status_type` and a far-future `linear_updated_at` in `metadata`, and become that ticket's head. Every thought filed under the ticket then read the forged status, the board-synced ticket row included, and a session summary centred on the ticket was ranked as that status says: a started ticket read done and was ranked down by `prefer_current`, or a done one read open. Now `capture_thought`, over MCP and over REST's `POST /v1/thoughts`, refuses a capture-only key any of those four keys with `REFUSED_METADATA_SHAPE`, naming the key, before either model call. A capture-only client that uses `issue` or `status` for its own meaning is refused too: rename the key, or give it a write key. A write key still sets them. The refusal's structured reply (REST's JSON body, MCP's `structuredContent`) now also carries its `problem` and the `key`, unless the key itself is malformed. No schema change (SMD-2617).
-
-## FORK
-
-A capture-only key cannot state a ticket's lifecycle — other keys' thoughts no longer read a status it forged (SMD-2617)
+# 272. A capture-only key cannot state a ticket's lifecycle — other keys' thoughts no longer read a status it forged (SMD-2617)
 
 **What changed.**
 - **The refusal.** `core/writes.ts`' `metadataProblem` refuses a key that cannot read (the capture scope) the four ticket keys, `TICKET_META_KEYS` in `core/refusal.ts`: `issue`, `status`, `status_type` and `linear_updated_at`. The code is `REFUSED_METADATA_SHAPE` with the new problem `ticket_key`, checked with the other metadata shapes, before the embedding and extraction calls. The text names the key and the four: "Refused: `metadata.issue` states a ticket's lifecycle, which a capture-only key may not set (…) — drop it, or capture with a key that can write."

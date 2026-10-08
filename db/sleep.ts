@@ -61,8 +61,8 @@
  *
  * ── Heartbeat ───────────────────────────────────────────────────────────────
  * `heartbeat:sleep` in ob1_config (db/pass-stamp.ts, SMD-2261): running while
- * asleep, re-stamped at least every minute awake or asleep, a pass counted
- * per sleep, and its outcome `failed` while a pass's last word was (a
+ * asleep, re-stamped at least every minute awake or asleep, its outcome a
+ * sleep's: `failed` while a pass's last word was (a
  * provider still failing). The passes stamp through it, not their own rows,
  * so a wake does not end a follower's row for preflight to warn about.
  * Only --follow stamps: one sleep leaves no row to go stale, as a one-shot

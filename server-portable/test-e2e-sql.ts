@@ -2041,10 +2041,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // against its five-minute interval, in the keyed body and the tool's row.
   const noBeats = ((await health("e2e-key")) as Record<string, any>).database ?? {};
   assert(JSON.stringify(noBeats.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }), `no worker ran here: no heartbeat, none ignored (${JSON.stringify(noBeats.workers)})`);
-  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped", passes: 7 })}, now() - interval '20 minutes')`;
+  await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "stopped" })}, now() - interval '20 minutes')`;
   const beats = ((await health("e2e-key")) as Record<string, any>).database?.workers;
   const hb = beats?.heartbeats?.[0];
-  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && hb.passes === 7 && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
+  assert(beats?.heartbeats?.length === 1 && hb.worker === "board-sync" && hb.job === null && hb.stale === true && hb.outcome === "stopped" && !("passes" in hb) && hb.everyS === 300 && hb.ageS >= 1199 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(hb.at),
     `keyed /health carries the heartbeat, stale past three intervals (${JSON.stringify(hb)})`);
   const workersRow = (await call("brain_info")).split("\n").find((l) => l.startsWith("Workers"));
   assert(/^Workers: +board-sync stopped \(last stamped 20 min ago, every 300 s\)$/.test(workersRow ?? ""), `the tool's Workers row says the same (${workersRow})`);
@@ -2053,7 +2053,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // from Postgres's own total (review pass 2: only a fake's total was read).
   for (let n = 0; n < 51; n++) {
     const job = `consolidate:j${String(n).padStart(2, "0")}@p3`;
-    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", passes: 1 })})`;
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok" })})`;
   }
   const many = ((await health("e2e-key")) as Record<string, any>).database?.workers;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:consolidate:j%'`;
