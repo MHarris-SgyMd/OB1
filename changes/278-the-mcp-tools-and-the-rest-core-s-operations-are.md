@@ -1,17 +1,4 @@
----
-type: removed
-bump: patch
-tickets: [SMD-1931]
-migrations: []
----
-
-## Changelog
-
-A tool's scope is stated once, in the manifest: the MCP server registers a tool, the REST core admits its route and the MCP server's keyed HTTP mirrors (`/health`, `/worker-*`, `/jobs/`) admit a key through the same gate, and a test holds MCP `tools/list` and the REST core's OpenAPI document to one contract — names, titles, descriptions, input fields and which keys reach each. The two REST gateways, `integrations/open-brain-rest` and `integrations/rest-api`, are retired against the REST core, each route given its fate in `docs/vendored-disposition.md`; the Chrome capture extension (0.7.0) and the `ob1-local-http` skill call the REST core at `/api`, and an upgraded extension asks for that URL once. `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture` retire too: the core's tools do what the first three did, and the fourth was a README with no code (SMD-1931).
-
-## FORK
-
-The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it (SMD-1931)
+# 278. The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it (SMD-1931)
 
 **What changed.**
 - **One gate.** `tools.ts` gains `scopeOf` and `mayCall`, moved from `rest/app.ts`: whether a key's scope unlocks a tool's group (`UNLOCKS`). `index.ts` registers each MCP tool only where `mayCall` holds, in place of a hand-written `canRead`/`canCapture`/`canWrite` beside each registration, and its keyed HTTP mirrors ask `mayCall` for the tool each mirrors (the keyed `/health` body for `brain_info`, `/worker-status`, the three `/worker-*` actions, `/jobs/<id>` for `job_status`), so a tool's scope is stated once, in the manifest, for every route that serves it. `openapi.ts` reads its `x-ob1-scope` through `scopeOf` too. The surface each scope sees is unchanged, on every route: read tools for a read or write key, `capture_thought` for a capture or write key, the write tools for a write key alone.

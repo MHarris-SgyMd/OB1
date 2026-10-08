@@ -1,17 +1,4 @@
----
-type: security
-bump: minor
-tickets: [SMD-2638]
-migrations: ["082"]
----
-
-## Changelog
-
-A capture-only key can no longer mark superseded a thought that another key or board-sync has taken — a key that can read captured the same text, someone edited its text, or board-sync adopted it as a ticket's row: a pointer the key names after the taking is dropped, and one it wrote before lapses. Migration 082 holds the rule in the database and re-checks the key's pointer at its own write, where it is also dropped if something already supersedes the target; a vector filled in later or a key's metadata edit (a tag, an operator's backfill) does not take a thought, so the session hook still supersedes its own earlier summaries, and a write key's pointers are never touched (SMD-2638).
-
-## FORK
-
-A capture-only key's thought stops being its own once another key or board-sync takes it, a pointer it wrote onto it lapses, and its pointer is re-checked at its own write (SMD-2638)
+# 276. A capture-only key's thought stops being its own once another key or board-sync takes it, a pointer it wrote onto it lapses, and its pointer is re-checked at its own write (SMD-2638)
 
 **What changed.**
 - **The rule** (migration 082, `ob1_takes_thought`). An update event takes a thought from the agent that captured it when it comes from another agent (or none) and it does one of these:

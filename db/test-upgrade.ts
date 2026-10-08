@@ -626,13 +626,15 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 060, 061 or 073 ([20ad]); 081 upserts ob1_config.schema_version for the
   // 1.6.0 cut, needing only 006's table; 082 adds the taking rule, its two
   // reads, the re-capture note and the lapse and write-time triggers on
-  // 008's thought_audit, refusing by name without 060 or 061 ([20ae]) — all
+  // 008's thought_audit, refusing by name without 060 or 061 ([20ae]); 083
+  // upserts ob1_config.schema_version for the 1.7.0 cut, needing only 006's
+  // table — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 53, `030 is among the last fifty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 54, `030 is among the last fifty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
