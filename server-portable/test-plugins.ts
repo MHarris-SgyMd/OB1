@@ -86,6 +86,15 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
   } });
   const shadow = manifestProblems([shadowed]);
   assert(shadow.length === 1 && /"latest".*GET \/items\/latest matches a request operation "by_id"'s does/.test(shadow[0]), `a static segment a {field} would hide is refused, and only that: another method or depth is its own route (${shadow.join("; ")})`);
+  const staticFirst = definePlugin({ name: "crm", title: "T", description: "D", operations: {
+    latest: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/latest", input: {}, output: {}, handler: async () => ok({}) }),
+    by_id: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/items/{id}", input: { id: z.string() }, output: {}, handler: async () => ok({}) }),
+  } });
+  assert(/"by_id".*matches a request operation "latest"'s does/.test(manifestProblems([staticFirst]).join()), "the same overlap declared the other way round is refused too: the static route first would hide the field's 'latest'");
+  assert(/its path names \{id\} twice/.test(manifestProblems([withOp("crm", "get", { path: "/x/{id}/{id}", input: { id: z.string() } })]).join()), "a path naming one field twice is refused");
+  assert(/\{id\} is optional or defaulted/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().optional() } })]).join()), "an optional path field is refused: MCP could call without it");
+  assert(/\{id\} is optional or defaulted/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().default("x") } })]).join()), "a defaulted path field is refused too");
+  assert(/is over 64 characters/.test(manifestProblems([withOp("a".repeat(32), "b".repeat(32))]).join()) && manifestProblems([withOp("a".repeat(31), "b".repeat(32))]).length === 0, "a tool name over 64 characters is refused, and one of 64 is sound");
   const numberPath = withOp("crm", "get", { path: "/items/{n}", input: { n: z.number().int() } });
   assert(/its path's \{n\} is not a string field/.test(manifestProblems([numberPath]).join()), "a path field that is not a string is refused: a segment is text, and REST could never reach it");
   const transformed = withOp("crm", "len", { output: { len: z.string().transform((s) => s.length) } });
@@ -274,6 +283,18 @@ console.log("\n[5] ctx.call: a core operation as the caller, behind the caller's
   let thrown = "";
   try { await runOperation(ops.find((o) => o.key === "wrong_shape")!, { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
   assert(/probe_kit_wrong_shape answered a value its output schema refuses: count/.test(thrown), `an answer its output schema refuses is the plugin's fault, thrown (${thrown})`);
+  // A step the load check cannot see — a pipe after a transform, a
+  // preprocess that is not idempotent — changes the answer past its schema;
+  // the MCP SDK would refuse what REST answered, so neither answers it.
+  for (const [label, output, value] of [
+    ["a transform piped into a typed schema", { v: z.string().transform((s) => s.length).pipe(z.number()) }, { v: "abc" }],
+    ["a preprocess that is not idempotent", { v: z.preprocess((x) => `${String(x)}!`, z.string().max(3)) }, { v: "ab" }],
+  ] as const) {
+    const changing = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: output as never, async handler() { return ok(value as never); } }) } });
+    thrown = "";
+    try { await runOperation(loadPlugins("probe-kit", [changing])[0].operations[0], { core, principal: reader }, {}); } catch (e) { thrown = (e as Error).message; }
+    assert(/changes into one it refuses/.test(thrown), `${label}: the held answer, held again, is refused — a fault on both transports (${thrown || "answered"})`);
+  }
   thrown = "";
   try { await runOperation(ops.find((o) => o.key === "bad_refusal")!, { core, principal: writer }, {}); } catch (e) { thrown = (e as Error).message; }
   assert(/refused with status 500 and code "lower case"/.test(thrown), `a refusal at no refusal status, or with no code, is the plugin's fault (${thrown})`);

@@ -702,7 +702,7 @@ those its own way.
 bun test-server.ts        # 832 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
 bun test-auth.ts          # 187 — scoped, hashed, named keys
 bun test-rest.ts          # 306 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
-bun test-plugins.ts       # 92 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
+bun test-plugins.ts       # 99 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
 bun run test:local        # 193 — fully local provider, no credential
 bun run test:sql          # 237 — store conformance, real Postgres in a container
 bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset

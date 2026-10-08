@@ -97,6 +97,8 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
       const tool = toolNameOf(m.name, key);
       const holder = tools.get(tool);
       if (holder) problems.push(`${where}: its tool name ${tool} is ${holder}'s`);
+      // The Claude API's tool names are at most 64 characters (^[a-zA-Z0-9_-]{1,64}$).
+      if (tool.length > 64) problems.push(`${where}: its tool name ${tool} is over 64 characters`);
       else tools.set(tool, at);
       if (!SCOPES.includes(op.scope)) problems.push(`${where}: scope ${JSON.stringify(op.scope)} is not read, capture or write`);
       if (!METHODS.includes(op.method)) problems.push(`${where}: method ${JSON.stringify(op.method)} is not GET, POST, PATCH or DELETE`);
@@ -108,11 +110,15 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
       if (clash) problems.push(`${where}: its route ${op.method} ${op.path} matches a request operation ${JSON.stringify(clash.key)}'s does`);
       routes.push({ key, method: op.method, segments });
       if (!op.title?.trim() || !op.description?.trim()) problems.push(`${where}: a title and a description are required`);
-      for (const f of pathFields(op.path ?? "")) {
+      const fields = pathFields(op.path ?? "");
+      for (const [i, f] of fields.entries()) {
         const field = (op.input ?? {})[f];
-        if (!field) problems.push(`${where}: its path's {${f}} is no input field`);
+        if (fields.indexOf(f) !== i) problems.push(`${where}: its path names {${f}} twice`);
+        else if (!field) problems.push(`${where}: its path's {${f}} is no input field`);
         // A path segment is text: a field of another type could never be reached over REST.
         else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
+        // A path segment is always there: a field that may be absent is one MCP could call without.
+        else if (field.safeParse(undefined).success) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
       }
       // The output is held to its schema once, here, and the MCP SDK holds the
       // held value to it again: a transform would answer REST and fail MCP.
@@ -208,6 +214,12 @@ export async function runOperation(op: LoadedOp, deps: OpDeps, input: unknown): 
     return { ok: false, refusal: { ...out.refusal, retryable: false } };
   }
   const value = op.output.safeParse(out.value);
-  if (!value.success) throw new Error(`${op.tool} answered a value its output schema refuses: ${value.error.issues.map((i) => `${i.path.map(String).join(".") || "(value)"} ${i.message}`).join("; ")}`);
+  const refused = (error: z.ZodError) => error.issues.map((i) => `${i.path.map(String).join(".") || "(value)"} ${i.message}`).join("; ");
+  if (!value.success) throw new Error(`${op.tool} answered a value its output schema refuses: ${refused(value.error)}`);
+  // The MCP SDK holds the held value to the schema again; one a step changed
+  // past it (a pipe, a codec, a preprocess the load check cannot see) would
+  // answer REST and fail MCP. Held twice here, both transports answer alike.
+  const again = op.output.safeParse(value.data);
+  if (!again.success) throw new Error(`${op.tool} answered a value its output schema changes into one it refuses: ${refused(again.error)}`);
   return { ok: true, value: value.data };
 }
