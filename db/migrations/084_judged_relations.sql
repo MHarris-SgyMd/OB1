@@ -64,6 +64,16 @@
 --     `consolidate.ts --list relations` flags it stale (its lineage
 --     fingerprint no longer the text's).
 --   * A reader outside db/consolidate.ts: search, fetch and a read tool.
+--     Until then rebuild_derived counts a relation's lineage row among the
+--     rows it keeps — its ELSE arm, whose word means a person's decision
+--     elsewhere.
+--   * A relation whose side is later superseded, or that a former judge key
+--     wrote: the candidate rule no longer pairs a superseded thought, and a
+--     new key re-judges only the pairs it reaches, so such a relation stands;
+--     --list relations marks it, and --status counts the other key's.
+--   * Restoring a closed relation by INSERT: refused (a relation is inserted
+--     standing); 042's detached citation is the shape a restore inserts whole,
+--     a relation has no such shape.
 --
 -- Idempotent: CREATE OR REPLACE, the constraint dropped by shape and added
 -- again (064's way), each trigger dropped by name first, the indexes IF NOT
@@ -88,8 +98,9 @@ $qc$;
 -- ---------------------------------------------------------------------------
 -- 1. The `relation` facet kind — thought_facets_validate extended
 --
--- 053's body verbatim but the kind check, which names three kinds now, and
--- the new branch above the link's.
+-- 053's body verbatim but the kind-keeping check (no facet changes its kind
+-- on UPDATE), the kind check, which names three kinds now, and the new branch
+-- above the link's.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thought_facets_validate()
 RETURNS trigger
@@ -317,7 +328,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. Migrations 042, 053, 084.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. Migrations 042, 053, 084.';
 
 -- One active relation per pair (the newer thought, the older target): the
 -- set is the index's, not a writer's discipline. Closed rows are history.
@@ -558,6 +569,8 @@ CREATE TRIGGER thought_facets_drop_relation_derivation
   FOR EACH ROW WHEN (OLD.kind = 'relation') EXECUTE FUNCTION ob1_drop_relation_derivation();
 
 -- 042's comments named one kind; the catalog's copy follows the three.
+COMMENT ON COLUMN thought_facets.payload IS
+  'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case); after the source is deleted, source_id null with source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source. link (053): relation, system, target (an identity in the system), origin structured. relation (084): relation (related | evolves | duplicate), target (the older thought''s id), judge_key, confidence, origin judged; inserted standing only, so a restore re-inserts a closed relation as standing or not at all.';
 COMMENT ON TABLE thought_facets IS
   'Typed rows on a thought, three kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084 / SMD-1712, SMD-1867, SMD-1873.';
 COMMENT ON COLUMN thought_facets.kind IS

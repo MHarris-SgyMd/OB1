@@ -6406,6 +6406,16 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     } finally {
       await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
     }
+    // Review pass 3: a relation the pass will not judge again is said so —
+    // one under another judge key, and one whose older side is superseded
+    // (the candidate rule leaves a superseded thought out).
+    await sql`SELECT record_thought_relation(${rotaNew}::uuid, ${rotaOld}::uuid, 'related', 0.6, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
+    const superseder = await seed("The on-call rota, as of this week.", 14, 0, ["rota-replacement"]);
+    await sql`UPDATE thoughts SET supersedes = ${rotaOld}::uuid WHERE id = ${superseder}::uuid`;
+    const marked = await consolidate("--list", "relations");
+    const statusOther = await consolidate("--status");
+    assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
+      `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
   }
 
   judge.stop(true);

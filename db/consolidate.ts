@@ -805,7 +805,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              n.id::text AS newer_id, n.content AS newer_content, n.created_at AS newer_created_at,
              o.id::text AS older_id, o.content AS older_content, o.created_at AS older_created_at,
              (d.id IS NOT NULL AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
-                                    OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edited
+                                    OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2])) AS edited,
+             -- A superseded side leaves the candidate rule, so the pass never judges the pair again (review pass 3).
+             EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = o.id) AS older_superseded,
+             EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = n.id) AS newer_superseded
         FROM thought_facets f
         JOIN thoughts n ON n.id = f.thought_id
         JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
@@ -814,7 +817,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
        ORDER BY f.created_at DESC, f.id
        LIMIT ${limit}`) as {
         id: string; relation: string; confidence: number | null; judge_key: string; created_at: Stamp;
-        newer_id: string; newer_content: string; newer_created_at: Stamp; older_id: string; older_content: string; older_created_at: Stamp; edited: boolean }[];
+        newer_id: string; newer_content: string; newer_created_at: Stamp; older_id: string; older_content: string; older_created_at: Stamp; edited: boolean;
+        older_superseded: boolean; newer_superseded: boolean }[];
     if (rows.length === 0) {
       out("  no relations");
       return 0;
@@ -822,7 +826,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const phrase: Record<string, string> = { related: "related", evolves: "the NEWER evolves from the older", duplicate: "duplicates" };
     out(`  ${rows.length} relation(s), newest first${rows.length === limit ? ` — the first ${limit}; --status counts them all` : ""}:\n`);
     rows.forEach((r, i) => {
-      out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${r.edited ? "  EDITED SINCE JUDGED" : ""}`);
+      const marks = [r.edited && "EDITED SINCE JUDGED", r.older_superseded && "OLDER SUPERSEDED", r.newer_superseded && "NEWER SUPERSEDED", r.judge_key !== JOB && "ANOTHER JUDGE KEY"].filter(Boolean);
+      out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${marks.length ? `  ${marks.join("  ")}` : ""}`);
       out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
       out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
       out(`     relation ${r.id}  judged by ${r.judge_key} on ${day(r.created_at)}\n`);
@@ -881,9 +886,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const [r] = (await sql`
         SELECT count(*) FILTER (WHERE payload->>'relation' = 'related')::int AS related,
                count(*) FILTER (WHERE payload->>'relation' = 'evolves')::int AS evolves,
-               count(*) FILTER (WHERE payload->>'relation' = 'duplicate')::int AS duplicate
-          FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`) as { related: number; evolves: number; duplicate: number }[];
-      out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate) — --list relations shows them`);
+               count(*) FILTER (WHERE payload->>'relation' = 'duplicate')::int AS duplicate,
+               count(*) FILTER (WHERE payload->>'judge_key' IS DISTINCT FROM ${JOB})::int AS other_key
+          FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; other_key: number }[];
+      // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
+      out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}) — --list relations shows them`);
     } else {
       out("  relations: not stored — this brain lacks migration 084, so related, evolves and duplicate verdicts are counted only (cd db && bun migrate.ts --url <url>)");
     }
@@ -951,16 +958,22 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * the capture group's. Without either, the verdicts are counted and the run
    * says why, rather than failing every thought on a permission error.
    */
-  const RELATIONS_OFF: string | null = !(await has084())
-    ? "this brain lacks migration 084 (cd db && bun migrate.ts --url <url>)"
-    : await (async () => {
-        const [g] = (await sql`
-          SELECT has_table_privilege('thought_facets', 'INSERT') AS fi, has_table_privilege('thought_facets', 'UPDATE') AS fu,
-                 has_table_privilege('thoughts', 'UPDATE') AS tu, has_table_privilege('derivations', 'INSERT') AS di`) as { fi: boolean; fu: boolean; tu: boolean; di: boolean }[];
-        const missing = [!g.fi && "INSERT on thought_facets (the structure group)", !(g.fu && g.tu && g.di) && "UPDATE on thought_facets and thoughts and INSERT on derivations (the capture group)"].filter(Boolean);
-        return missing.length ? `this role lacks ${missing.join(" and ")} — cd db && bun migrate.ts --url <url> --grant <role> --groups structure (which also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)` : null;
-      })();
-  const HAS_084 = RELATIONS_OFF === null;
+  async function relationsOff(): Promise<string | null> {
+    if (!(await has084())) return "this brain lacks migration 084 (cd db && bun migrate.ts --url <url>)";
+    // ob1_record_derivation upserts (INSERT … ON CONFLICT DO UPDATE … RETURNING),
+    // so derivations needs all three (review pass 3).
+    const [g] = (await sql`
+      SELECT has_table_privilege('thought_facets', 'INSERT') AS fi, has_table_privilege('thought_facets', 'UPDATE') AS fu,
+             has_table_privilege('thoughts', 'UPDATE') AS tu, has_table_privilege('derivations', 'INSERT') AS di,
+             has_table_privilege('derivations', 'UPDATE') AS du, has_table_privilege('derivations', 'SELECT') AS ds`) as Record<string, boolean>[];
+    const structure = !g.fi, capture = !(g.fu && g.tu && g.di && g.du && g.ds);
+    if (!structure && !capture) return null;
+    const what = [structure && "INSERT on thought_facets (the structure group)", capture && "UPDATE on thought_facets and thoughts and the writes on derivations (the capture group)"].filter(Boolean).join(" and ");
+    const groups = [capture && "capture", structure && "structure"].filter(Boolean).join(",");
+    return `this role lacks ${what} — cd db && bun migrate.ts --url <url> --grant <role> --groups ${groups}${structure ? " (the structure group also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)" : ""}`;
+  }
+  let RELATIONS_OFF: string | null = await relationsOff();
+  let HAS_084 = RELATIONS_OFF === null;
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
     const [r] = (await sql.unsafe(`
@@ -990,6 +1003,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     printCounts(c, STATUS_ONLY ? "status" : "before");
     if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) out(describeHolder(h));
     await printQueue();
+    // 084 present but this role cannot write relations: say so before a run drops them (review pass 3).
+    if (RELATIONS_OFF && (await has084())) out(`  relations: a run under this role would store none — ${RELATIONS_OFF}`);
     if (c.thoughts > 0) await printTicketCalls();
     if (c.thoughts === 0) out("  no thought has extracted entities yet — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share");
     if (c.failed > 0) {
@@ -1785,12 +1800,22 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
   }
 
+  // A verdict counted but not stored is lost to this key — its claim ends
+  // succeeded — so the run says so first, not only in its summary (review pass 3).
+  if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
   let after = await followedPass();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
+      // A follower sees a migration or a grant applied while it runs.
+      const off = await relationsOff().catch(() => RELATIONS_OFF);
+      if (off !== RELATIONS_OFF) {
+        out(off === null ? "  relations: stored from this poll on" : `  relations: not stored from this poll on — ${off}`);
+        RELATIONS_OFF = off;
+        HAS_084 = off === null;
+      }
       after = await followedPass();
       await stamper?.stamp(passOutcome);
     }

@@ -556,7 +556,7 @@ SMD-2117's.
 Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
 SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
 table, `derivations`: a row per artifact per producing pass — `artifact_kind`
-in chunks / entities / proposal / vector / metadata (and section since 064), `artifact_id` (the
+in chunks / entities / proposal / vector / metadata (and section since 064, relation since 084), `artifact_id` (the
 thought's id, or the proposal's), `input_ids` and `input_fingerprints`
 (parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
 with a boolean `deterministic`, what 063's rebuild reads, and the
@@ -2340,8 +2340,15 @@ or under the floor (a malformed or timed-out pair leaves it standing); the other
 thought's delete closes it too, and the newer thought's takes it and its
 lineage. `--status` counts the relations standing and `--list relations`
 lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
-(closing it then is SMD-2726's `rebuild_derived` arm). On a brain without 084
-the verdicts are counted only, and the run says so. The verdict rides
+(closing it then is SMD-2726's `rebuild_derived` arm), one whose side is
+superseded or that another judge key wrote marked so — the pass judges such a
+pair no more. On a brain without 084, or under a role that cannot write them,
+the verdicts are counted only, and the run says so at its start and in
+`--status`; a follower re-checks on every poll. A pair judged then gets no
+relation until its claim is cleared — so for a brain that ran prompt 4 before
+084, `DELETE FROM thought_work_claims WHERE work_type = '<the p4 key>' AND
+status = 'succeeded'` and a run judges every pair again (a full pass's model
+cost) and records their relations. The verdict rides
 with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
@@ -3545,7 +3552,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2559 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1146 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1147 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
