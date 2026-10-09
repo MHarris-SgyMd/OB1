@@ -177,25 +177,38 @@ named in `OB1_PLUGINS`, which the compose migrator reads from `deploy/.env` as
 the servers do. A plain run applies their migrations **after the core's**, and
 only when the core's are clean:
 
+- **The login role.** Every plugin's SQL runs on a connection logged in as
+  `ob1_plugins`: LOGIN, NOINHERIT, no superuser, holding `SET` on each plugin's
+  role and nothing on the core. A run makes it with `OB1_PLUGIN_DB_PASSWORD`
+  when it is missing, and never changes an existing role's password: the
+  servers log in with the one it was made with. A run that would apply a
+  plugin's file without the password is refused before anything runs (exit 2).
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
-  hyphen in the name reads as `_`). Both are made by any run that names the
-  plugin, even with nothing pending (a brain restored into a new cluster has
-  no roles), and are never dropped. A migrator that is no superuser takes
-  membership in the role it made (`WITH SET TRUE, INHERIT FALSE` on PG 16),
-  so it may hand it the schema and run as it.
-- **Between files.** After each file the migrator discards the session's temp
-  tables and restores its search path, so one plugin's leftovers never meet
-  the next plugin's SQL.
-- **How a file runs.** Each file runs in its own transaction under
-  `SET LOCAL ROLE ob1_plugin_<name>`, with the plugin's schema first on the
-  path. A table the plugin creates is its own, named bare. The role holds
-  nothing on the core's tables, so a migration that reads or writes one is
-  refused by Postgres (`permission denied`) and records nothing.
+  hyphen in the name reads as `_`).
+  - **When they are made.** Any run that names the plugin and finds the role,
+    the schema or the login role's `SET` on it missing makes them, even with
+    nothing pending: a brain restored into a new cluster has no roles. A run
+    with all three in place and nothing pending asks the migrator no privilege.
+    None is ever dropped.
+  - **A migrator that is no superuser** takes `SET` on a role it made
+    (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand the role its
+    schema.
+- **How a file runs.** Each file runs in its own transaction on the login
+  connection, under `SET LOCAL ROLE ob1_plugin_<name>` with the plugin's
+  schema first on the path. A table the plugin creates is its own, named bare.
+  Neither role holds anything on the core's tables, so a migration that reads
+  or writes one is refused by Postgres (`permission denied`). That holds even
+  for SQL that undoes the plugin's role (`END;`, `RESET ROLE`): it lands on
+  `ob1_plugins`, not on the migrator. After each file the login connection's
+  temp tables are discarded.
 - **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
-  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`.
-  Nothing that reads the core's ledger sees it. An edited file is a drift and
-  exits 1, as a core file does.
+  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`,
+  by the migrator's own connection once the file has committed. Nothing that
+  reads the core's ledger sees it. If that write fails after the file
+  committed, the file runs again on the next run, which is why a plugin's
+  migration says `IF NOT EXISTS`. An edited file is a drift and exits 1, as a
+  core file does.
 - **A plugin not named** is not read. Its schema, tables and ledger rows stay
   as they are.
 
@@ -205,23 +218,29 @@ and the role and schema each would run as. It makes nothing. `--baseline` and
 or one given twice, is refused before anything runs (exit 2).
 
 ```bash
-OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL" --dry-run
+OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_URL" --dry-run
 ```
 
 The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
-`SET ROLE` to what it creates; the compose stack's `postgres` can. The server
-reaches a plugin's tables as the same role (`ctx.db`), so its own role must be
-able to `SET ROLE` to it (the `SET` option on PG 16). Preflight's `plugin
-tables` row checks that, the role, the schema, that both the schema and every
-table in it are the plugin role's (a restore with `--no-owner` leaves them
-another's), and every file recorded at its sha. `--grant` does not yet give a
-non-superuser server role that membership: SMD-2728. The server runs each
-plugin's transactions on a small pool of their own, so what a plugin's SQL
-leaves on a session, such as a temp table (which Postgres searches before any
-schema) or a session setting, never meets a core query. `SET ROLE` holds a
-plugin's SQL to its own tables only while that SQL does not undo the role, so
-role changes, transaction control and session settings in a plugin's code are
-the consistency checker's to refuse, and a plugin is curated.
+grant a plugin's role to `ob1_plugins`; the compose stack's `postgres` can.
+
+**Preflight.** The servers' plugin pools log in as `ob1_plugins` too, one small
+pool per plugin, so what a plugin's SQL leaves on a session never meets a core
+query. A temp table, for one, is searched before any schema. Preflight's
+`plugin tables` row checks:
+
+- that `ob1_plugins` exists, can log in with the server's
+  `OB1_PLUGIN_DB_PASSWORD`, is no superuser and NOINHERIT, and holds no
+  privilege on a core relation;
+- that it holds `SET` on each plugin's role;
+- the plugin's role and schema, and that both the schema and every table in it
+  are the plugin role's (a restore with `--no-owner` leaves them another's);
+- every file recorded at its sha.
+
+The server's own role needs no membership. What holds hostile plugin code is
+curation: a plugin's TypeScript runs in the server's process. The database's
+roles hold its SQL whatever that SQL does. Check 28 of the consistency checker
+guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 

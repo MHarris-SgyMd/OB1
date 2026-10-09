@@ -135,6 +135,7 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
     // Its GUI pages: each a path of plain segments under the plugin's, once, with a label a nav entry can show.
     const pages = new Set<string>();
     for (const page of m.gui?.pages ?? []) {
+      if (!page || typeof page !== "object") { problems.push(`${at}: a page is { path, label }`); continue; }
       const where = `${at} page ${JSON.stringify(page.path)}`;
       if (!GUI_PATH.test(page.path ?? "")) problems.push(`${where}: a page's path is segments of lower-case words and hyphens`);
       if (pages.has(page.path)) problems.push(`${where}: two pages share the path`);

@@ -266,6 +266,10 @@ export function migrationNameProblem(names: string[]): string | null;
 export const PLUGIN_NAME_RE: RegExp;
 /** A plugin's own Postgres schema and the role that owns it: `plugin_<name>`, `ob1_plugin_<name>`, hyphens read as underscores (SMD-2310). */
 export function pluginIdents(name: string): { schema: string; role: string };
+/** The login role every plugin's SQL runs on: NOINHERIT, SET on each plugin role, nothing on the core (SMD-2310). */
+export const PLUGIN_LOGIN_ROLE: string;
+/** `url` as PLUGIN_LOGIN_ROLE with `password`, every other part kept. */
+export function pluginLoginUrl(url: string, password: string): string;
 /** The SET list that returns a claim row to its pool — requeue()'s. */
 export const REQUEUE_SET_SQL: string;
 

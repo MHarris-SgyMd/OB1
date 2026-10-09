@@ -202,6 +202,12 @@ export type Env = {
    * start — preflight first, then the entry (plugins.ts).
    */
   OB1_PLUGINS?: string;
+  /**
+   * The password of the login role plugins' SQL runs on, `ob1_plugins`
+   * (SMD-2310): the migrator makes the role with it, and the servers' plugin
+   * pools log in with it. Required while an enabled plugin keeps tables.
+   */
+  OB1_PLUGIN_DB_PASSWORD?: string;
 };
 
 let ENV: Env | null = null;

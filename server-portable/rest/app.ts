@@ -225,20 +225,18 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // The enabled plugins (SMD-2310), for the operator GUI's nav (SMD-2280):
   // each plugin's name, title and description, its pages (a path under the
   // plugin's and a label), and the operations of it this key may call. Any
-  // caller's key; a disabled plugin is not listed. Before the operations'
+  // caller's key; a disabled plugin is not listed, nor one the key can call nothing of. Before the operations'
   // route below, which takes every other path under /v1/plugins.
   app.get("/v1/plugins", async (c) => {
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
+    // A plugin none of whose operations the key may call is not listed: its pages would be a nav entry to nothing the key can use.
     return c.json({
-      plugins: (deps.plugins?.() ?? []).map((pl) => ({
-        name: pl.name,
-        title: pl.title,
-        description: pl.description,
-        pages: pl.pages,
-        operations: pl.operations.filter((op) => unlocks(p, op.scope)).map((op) => op.tool),
-      })),
+      plugins: (deps.plugins?.() ?? [])
+        .map((pl) => ({ pl, operations: pl.operations.filter((op) => unlocks(p, op.scope)).map((op) => op.tool) }))
+        .filter(({ operations }) => operations.length > 0)
+        .map(({ pl, operations }) => ({ name: pl.name, title: pl.title, description: pl.description, pages: pl.pages, operations })),
     });
   });
 

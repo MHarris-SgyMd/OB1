@@ -139,7 +139,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - Its tables, if any, as `migrations/NNN_name.sql`, which the migrator runs as the plugin's own role in its own schema
 - A README saying how to turn it on (`OB1_PLUGINS`) and what each operation answers
 - Tests over the REST core with the plugin enabled, as `server-portable/test-plugins.ts` and `test-plugins-sql.ts` drive the example
-- Check 28 of `scripts/check-fork-consistency.ts` passing: no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no `fetch`, `process` or `Bun`
+- Check 28 of `scripts/check-fork-consistency.ts` passing (an accident guard, not a sandbox: review is the control): no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no global past `ctx` (`fetch`, `process`, `Bun` and their kin)
 
 **Primitives** additionally require:
 - **"Extensions That Use This"** section listing which extensions reference this primitive
@@ -389,6 +389,6 @@ Every PR is checked against these rules. All must pass before human review.
 11. **LLM clarity review** — *(Planned for v2)* Automated check that instructions are clear and complete
 12. **Scope check** — All changes are within the contribution folder(s)
 13. **Internal links** — All relative links in READMEs resolve to existing files
-14. **Plugins and the remote MCP pattern** — New operations are a plugin (`plugins/<name>/`), held by check 28: its SQL stays in its own schema and role, its code imports the SDK and its own files alone. Every vendored extension and integration server still to port is one HTTP process that runs under `bun <file>` and is reached by URL; its tests import it (an entry in `extensions/test-auth.ts`'s `SERVERS` list — the suite refuses a server it does not start). No `claude_desktop_config.json`, no stdio servers, no `Deno` (check 11). See [plugins/README.md](plugins/README.md) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/)
+14. **Plugins and the remote MCP pattern** — New operations are a plugin (`plugins/<name>/`): its SQL runs as roles that hold nothing on the core, and check 28 guards its code (no core table or other schema in its SQL, no role or transaction change, no import past the SDK and its own files). Every vendored extension and integration server still to port is one HTTP process that runs under `bun <file>` and is reached by URL; its tests import it (an entry in `extensions/test-auth.ts`'s `SERVERS` list — the suite refuses a server it does not start). No `claude_desktop_config.json`, no stdio servers, no `Deno` (check 11). See [plugins/README.md](plugins/README.md) and [Run a Remote MCP Server](primitives/deploy-remote-mcp/)
 15. **Tool audit link** — Extensions and integrations must link to the [MCP Tool Audit & Optimization Guide](docs/05-tool-audit.md) in their README. This ensures users are aware of tool surface area management as they add capabilities
 16. **MCP tool annotations** — Read-only tools include `readOnlyHint: true`; write tools include `readOnlyHint: false`, `openWorldHint`, and `destructiveHint`

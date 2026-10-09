@@ -37,7 +37,7 @@ import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { pluginIdents } from "../db/config.mjs";
+import { PLUGIN_LOGIN_ROLE, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -68,8 +68,40 @@ const pluginMigrationFiles = (name: string): string[] => {
  * A plugin with no migrations has no tables to lack. The files are the
  * image's plugins/, as the migrator reads them.
  */
-async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>, names: string[]): Promise<string[]> {
+async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>, names: string[], url: string, password: string | undefined): Promise<string[]> {
   const problems: string[] = [];
+  if (!names.some((n) => pluginMigrationFiles(n).length > 0)) return problems;
+  // The login role every plugin's SQL runs on (PR 3 review pass 1): there,
+  // able to log in with the password this server holds, no superuser, NOINHERIT,
+  // and holding nothing on the core — SQL that undoes a plugin's role lands on
+  // it, so its privileges are the boundary's.
+  const login = PLUGIN_LOGIN_ROLE;
+  const [l] = (await sql`
+    SELECT r.rolcanlogin AS can_login, r.rolsuper AS superuser, r.rolinherit AS inherit,
+           (SELECT string_agg(c.relname, ', ' ORDER BY c.relname)
+              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+               AND (has_table_privilege(${login}, c.oid, 'SELECT') OR has_table_privilege(${login}, c.oid, 'INSERT')
+                 OR has_table_privilege(${login}, c.oid, 'UPDATE') OR has_table_privilege(${login}, c.oid, 'DELETE')
+                 OR has_table_privilege(${login}, c.oid, 'TRUNCATE'))) AS reaches
+      FROM pg_roles r WHERE r.rolname = ${login}`) as { can_login: boolean; superuser: boolean; inherit: boolean; reaches: string | null }[];
+  if (!l) return [`no role ${login}: the migrator makes it, with OB1_PLUGIN_DB_PASSWORD, when it applies a plugin's migrations`];
+  if (!l.can_login) problems.push(`${login} cannot log in`);
+  if (l.superuser) problems.push(`${login} is a superuser: a plugin's SQL that undoes its role would hold the database (ALTER ROLE ${login} NOSUPERUSER)`);
+  if (l.inherit) problems.push(`${login} inherits its plugin roles' rights: every plugin's SQL would reach every plugin's tables (ALTER ROLE ${login} NOINHERIT)`);
+  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login})`);
+  if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
+  else {
+    const { SQL } = await import("bun");
+    const probe = new SQL({ url: pluginLoginUrl(url, password), max: 1 });
+    try {
+      await probe`SELECT 1`;
+    } catch (e) {
+      problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
+    } finally {
+      await probe.close().catch(() => {});
+    }
+  }
   const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
   const recorded = new Map<string, string>(
     ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
@@ -81,19 +113,20 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
     const { schema, role } = pluginIdents(name);
     // SET ROLE needs the SET option from PG 16, which MEMBER does not read: a
     // `GRANT … WITH SET FALSE` is membership a SET ROLE refuses (review pass 1).
+    // The login role's, not this connection's: the plugins' pools log in as it.
     const [r] = (await sql`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) AS role_present,
              EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS schema_present,
              CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
-                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(current_user, ${role}, 'SET')
-                  ELSE pg_has_role(current_user, ${role}, 'MEMBER') END AS can_set,
+                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(${login}, ${role}, 'SET')
+                  ELSE pg_has_role(${login}, ${role}, 'MEMBER') END AS can_set,
              (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner,
              (SELECT string_agg(c.relname || ' (' || pg_get_userbyid(c.relowner) || ')', ', ' ORDER BY c.relname)
                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S') AND pg_get_userbyid(c.relowner) <> ${role}) AS foreign_owned`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null; foreign_owned: string | null }[];
     if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
     if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
-    if (!r.can_set) problems.push(`${name}: this server's role cannot SET ROLE ${role} (GRANT ${role} TO the server's role, WITH SET TRUE on PG 16 and later)`);
+    if (!r.can_set) problems.push(`${name}: ${login} cannot SET ROLE ${role} (the migrator grants it; GRANT ${role} TO ${login}, WITH SET TRUE, INHERIT FALSE on PG 16 and later)`);
     // Owned by another role — a restore with --no-owner, say — the plugin's
     // role reaches none of it, and every ctx.db call is refused.
     if (r.schema_owner !== role) problems.push(`${name}: schema ${schema} is owned by ${r.schema_owner}, not ${role} (ALTER SCHEMA ${schema} OWNER TO ${role})`);
@@ -4112,15 +4145,16 @@ if (configFailed) {
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
 
-        // An enabled plugin's tables (SMD-2310): its role, its schema, this
-        // role's right to SET ROLE to it, and each of its migration files
+        // An enabled plugin's tables (SMD-2310): the login role the plugins'
+        // SQL runs on, its role, its schema, the login role's right to SET
+        // ROLE to it, and each of its migration files
         // recorded in plugin_migrations at the file's sha. Failed, not warned:
         // the server would list operations that fail at their first call.
         // Silent with no plugin enabled, or one with no migrations; an
         // unknown name is the plugins row's.
         if (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null) {
           try {
-            const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS));
+            const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS), conn.url, env.OB1_PLUGIN_DB_PASSWORD);
             if (problems.length)
               add("plugin tables", "fail", problems.join("; "),
                   "Apply them: the compose migrator reads OB1_PLUGINS from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");

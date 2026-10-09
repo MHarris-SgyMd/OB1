@@ -22,13 +22,14 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
 
 ## Turn it on
 
-1. Add the plugin to `deploy/.env`:
+1. Add the plugin to `deploy/.env`, with a password for `ob1_plugins`, the login role every plugin's SQL runs on (generate one with `openssl rand -hex 32`, and back it up with `POSTGRES_PASSWORD`):
 
    ```
    OB1_PLUGINS=example
+   OB1_PLUGIN_DB_PASSWORD=<the generated password>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes the plugin's role and schema and applies `001_notes.sql`, and the servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
@@ -44,7 +45,8 @@ Copy this directory to `plugins/<name>/` and set `name` in `index.ts` to the dir
 ## Troubleshooting
 
 - **The server refuses to start: "OB1_PLUGINS names … which is no plugin in this build".** The name is not in `plugins/registry.ts` in the image that is running. Check the spelling, or rebuild the image after adding a plugin.
-- **Preflight's `plugin tables` row fails with "migration(s) not applied".** The migrator has not run with `OB1_PLUGINS` set. Recreate it as in step 2, or run `OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL"` in `db/`.
+- **Preflight's `plugin tables` row says the server "cannot log in as ob1_plugins".** `OB1_PLUGIN_DB_PASSWORD` is not the password the role was made with: the migrator never changes an existing role's password. Set the variable back, or change both together (`ALTER ROLE ob1_plugins PASSWORD '…'` as the database owner).
+- **Preflight's `plugin tables` row fails with "migration(s) not applied".** The migrator has not run with `OB1_PLUGINS` set. Recreate it as in step 2, or run `OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_URL"` in `db/`.
 - **`403 FORBIDDEN` with `needs: "write"` or `"read"`.** The key's scope does not reach the operation: a read key cannot pin a note, and a capture-only key cannot read.
 - **`404 NO_SUCH_THOUGHT`.** The thought is not there, or the key cannot read it.
 - **`422 CORE_REFUSED`.** The core refused the `list_thoughts` call `recent` made; the message names the core's code.

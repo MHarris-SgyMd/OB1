@@ -75,6 +75,7 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     ["two pages on one path", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "A" }, { path: "/items", label: "B" }] } }], /two pages share the path/],
     ["a page label of two lines", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "Items\nSecond" }] } }], /a label is one line of at most 40 characters/],
     ["a page label over 40 characters", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "x".repeat(41) }] } }], /a label is one line of at most 40 characters/],
+    ["a page that is no object", [{ ...withOp("crm", "list"), gui: { pages: [null as never] } }], /a page is \{ path, label \}/],
   ];
   for (const [label, manifests, want] of cases) {
     const problems = manifestProblems(manifests).join("; ");
@@ -190,12 +191,14 @@ console.log("\n[3] Enabled, the operation is in whoami for the scopes that reach
   assert(on.paths["/v1/plugins"]?.get?.operationId === "plugins", "the document lists the plugin registry");
   // The GUI's nav registry: an enabled plugin, its pages, the operations of it the key may call.
   type Listed = { plugins: { name: string; title: string; pages: { path: string; label: string }[]; operations: string[] }[] };
-  for (const [key, scope] of [["read-raw", "read"], ["write-raw", "write"], ["cap-raw", "capture"]] as const) {
+  for (const [key, scope] of [["read-raw", "read"], ["write-raw", "write"]] as const) {
     const listed = (await (await hit(enabled, "/v1/plugins", { key })).json()) as Listed;
     const ex = listed.plugins.find((pl) => pl.name === "example");
     assert(listed.plugins.length === 1 && ex?.title === "Example plugin" && JSON.stringify(ex.pages) === '[{"path":"/notes","label":"Notes"}]', `a ${scope} key reads the enabled plugin and its nav page`);
     assert(JSON.stringify([...(ex?.operations ?? [])].sort()) === JSON.stringify(exampleTools(scope)), `with the operations of it a ${scope} key may call (${ex?.operations.join(", ") || "none"})`);
   }
+  const forCapture = (await (await hit(enabled, "/v1/plugins", { key: "cap-raw" })).json()) as Listed;
+  assert(forCapture.plugins.length === 0, "a capture key, which can call none of the example's operations, is listed no plugin: no nav entry to nothing it can use");
   const offList = (await (await hit(disabled, "/v1/plugins", { key: "read-raw" })).json()) as Listed;
   assert(offList.plugins.length === 0, "disabled, the registry lists nothing: the GUI's nav shows no page of it");
   assert((await hit(enabled, "/v1/plugins")).status === 401, "the registry needs a key");

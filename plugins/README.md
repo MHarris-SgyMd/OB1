@@ -25,11 +25,11 @@ A directory, `plugins/<name>/`, with:
 
 ## A plugin's tables
 
-A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned by a role of its own, `ob1_plugin_<name>` (hyphens read as `_`).
+A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned by a role of its own, `ob1_plugin_<name>` (hyphens read as `_`). Every plugin's SQL runs on a connection logged in as `ob1_plugins`: a login role that is NOINHERIT and no superuser, holding `SET` on each plugin's role and nothing on the core. The operator sets its password, `OB1_PLUGIN_DB_PASSWORD`, in `deploy/.env`.
 
-- **Migrating.** The migrator applies an enabled plugin's `migrations/` after the core's, each file run as that role with its schema first on the path. It records them in their own ledger, `plugin_migrations` ([db/README.md](../db/README.md), "Plugin migrations"). Run it with the same `OB1_PLUGINS`; the compose migrator reads it from `deploy/.env`.
-- **At runtime.** A handler reaches them through `ctx.db.tx(async (sql) => …)`: one transaction as the same role, in the same schema. Tables are named bare, and each `${value}` is a bound parameter.
-- **The boundary.** The role holds nothing on the core's tables, so Postgres refuses a migration or a handler that reaches for one. The brain's thoughts are reached through `ctx.call` alone.
+- **Migrating.** The migrator applies an enabled plugin's `migrations/` after the core's. Each file runs on that login connection, as the plugin's role with its schema first on the path. It records them in their own ledger, `plugin_migrations` ([db/README.md](../db/README.md), "Plugin migrations"). Run it with the same `OB1_PLUGINS` and `OB1_PLUGIN_DB_PASSWORD`; the compose migrator reads both from `deploy/.env`.
+- **At runtime.** A handler reaches them through `ctx.db.tx(async (sql) => …)`: one transaction on a pool of the plugin's own, logged in the same way. Tables are named bare, and each `${value}` is a bound parameter.
+- **The boundary is Postgres's.** Neither role holds anything on the core's tables, so Postgres refuses a migration or a handler that reaches for one. SQL that undoes the plugin's role (`RESET ROLE`, `END;`) lands on `ob1_plugins`, which is refused the same. The brain's thoughts are reached through `ctx.call` alone. What the two roles do hold is PUBLIC's defaults: `USAGE` on the `public` schema (its types and functions; every core function runs as its caller), and `TEMP` on the database, which the plugin's own pool keeps away from every other connection.
 - **No foreign keys into the core.** A row that names a thought holds its id, and the operation checks the thought through the core, as the example's `add_note` does.
 - **Turning a plugin off** removes its operations and runs none of its migrations. Its schema, tables and rows are left as they are.
 
@@ -43,14 +43,17 @@ Checked when the server starts, so a malformed manifest stops it:
 - An output schema does not transform: MCP holds the answer to it a second time.
 - A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
 
-Held by check 28 of `scripts/check-fork-consistency.ts`, on every push:
+Held by check 28 of `scripts/check-fork-consistency.ts`, on every push. It is an accident guard in front of the database's boundary, not a sandbox: a plugin's TypeScript runs in the server's own process, where it could reach anything the server can, so what holds hostile code is curation. The check makes code that would read like an attempt to leave the boundary fail a push, so review sees it.
 
-- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own directory's files, nothing else; zod comes from the SDK. It loads nothing by name at run time, and calls no `fetch`, `Bun`, `process`, `Deno` or `eval`.
-- **Its SQL stays in its schema and its role.** A migration file, or a template literal in its code, names no core table and no schema but its own. It also runs no role, session or transaction change. `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it, so these are refused:
-  - `RESET ROLE`, `SET ROLE` or `SET SESSION AUTHORIZATION`;
-  - a `search_path` change or `set_config`;
-  - `COMMIT`, `ROLLBACK` or `BEGIN` as a statement (a migration file that commits leaves the rest running as the migrator);
-  - a temp object, a session advisory lock, a cursor `WITH HOLD`, `PREPARE`, `LISTEN` or `DISCARD`.
+- **Its directory** holds TypeScript, `migrations/*.sql`, a `README.md` and a `metadata.json`, nothing else.
+- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own directory's `.ts` files (static, re-exported or bare), nothing else; zod comes from the SDK. Code that runs in the server imports no test file.
+- **Globals.** It names none that reach past `ctx`, aliased or not: `fetch`, `eval`, `Function`, `Reflect`, `globalThis`, `self`, `Bun`, `process`, `Deno`, `require`, `Worker`, `WebSocket`, `XMLHttpRequest`, `EventSource`, or `import()`. A local of one of those names is renamed.
+- **Its SQL** is a migration file or a tagged template literal (`` sql`…` ``); an untagged template is text, not SQL.
+  - It names no core table anywhere, and no schema but its own (`public.`, another plugin's, `pg_temp`). This holds even for a plugin's own table: one may not be called `jobs` or `pages`.
+  - It spells nothing with `U&` escapes.
+  - It sets or resets no role, `session_authorization` or `search_path` (quoted or not), runs no `RESET ALL`, `set_config` or `SET SESSION`, and makes no temp object.
+  - It takes no session advisory lock, holds no cursor `WITH HOLD`, and runs no `LISTEN` or `DISCARD`.
+  - Outside a plpgsql body, it runs no `BEGIN`, `END`, `ABORT`, `COMMIT`, `ROLLBACK` (`ROLLBACK TO` aside), `START TRANSACTION`, `PREPARE` or `EXECUTE` as a statement. Inside one, it runs no `EXECUTE` (dynamic SQL this check cannot read), `COMMIT` or `ROLLBACK`.
 - **The registry and the directories agree.** `plugins/registry.ts` imports and lists exactly the plugin directories, and a manifest's name is its directory's.
 
 Held by the maintainer's review:
@@ -58,4 +61,4 @@ Held by the maintainer's review:
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 
-Plugins are **curated**: they run in the brain's process with its privileges, so a new one needs maintainer review.
+Plugins are **curated**: they run in the brain's process with its privileges, so a new one needs maintainer review. That review is the control; the roles and check 28 catch what review misses by accident.

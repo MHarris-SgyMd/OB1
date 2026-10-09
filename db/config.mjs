@@ -1360,6 +1360,30 @@ export function pluginIdents(name) {
   return { schema: `plugin_${snake}`, role: `ob1_plugin_${snake}` };
 }
 
+/**
+ * The login role every plugin's SQL runs on (SMD-2310): NOINHERIT, no
+ * superuser, holding SET on each plugin's role and nothing on the core. The
+ * servers' plugin pools and the migrator's plugin phase connect as it, then
+ * SET LOCAL ROLE to the plugin's own; SQL that undoes that role lands here,
+ * where Postgres still refuses it the core's tables. Its password is the
+ * operator's secret, OB1_PLUGIN_DB_PASSWORD.
+ */
+export const PLUGIN_LOGIN_ROLE = "ob1_plugins";
+
+/**
+ * The connection string for PLUGIN_LOGIN_ROLE: `url` with its user and
+ * password replaced, every other part kept.
+ * @param {string} url
+ * @param {string} password
+ * @returns {string}
+ */
+export function pluginLoginUrl(url, password) {
+  const u = new URL(url);
+  u.username = PLUGIN_LOGIN_ROLE;
+  u.password = password;
+  return u.toString();
+}
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
 
 /**

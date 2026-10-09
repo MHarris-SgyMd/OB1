@@ -394,6 +394,9 @@ services:
       # applies their migrations after the core's, each in its own schema as
       # its own role. A plugin not named is left as it is.
       OB1_PLUGINS: ${OB1_PLUGINS:-}
+      # The password the migrator makes ob1_plugins with, the login role the
+      # plugins' migrations and the servers' plugin pools run on.
+      OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -554,6 +557,9 @@ services:
       # both servers serve the same set; preflight refuses a name that is no
       # plugin. The three-tier stack leaves it out (check 27's TIER_OMITTED_ENV).
       OB1_PLUGINS: ${OB1_PLUGINS:-}
+      # The password of ob1_plugins, the login role every plugin's SQL runs on
+      # (SMD-2310): the plugins' pools log in with it, never as postgres.
+      OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at

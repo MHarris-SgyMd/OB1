@@ -180,13 +180,13 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
 
 - **Where.** A plugin is `plugins/<name>/`, a curated category. `plugins/registry.ts` imports each one by name, so the set a server can run is fixed when its image is built, and `OB1_PLUGINS` picks from it. The manifest is built with `server-portable/plugin-sdk.ts`.
 - **Projection.** An operation is a REST route `/v1/plugins/<name>/<path>` and an MCP tool `<name>_<operation>`. Both servers serve it, the MCP server in-process as it does the core's operations. It sits behind the gate a core operation of its scope sits behind (`tools.ts`'s `unlocks`).
-- **Tables.** Each plugin has a schema, `plugin_<name>`, owned by a NOLOGIN role, `ob1_plugin_<name>`.
-  - **Migrations** run as that role in that schema, recorded in `plugin_migrations` beside `schema_migrations`.
-  - **At runtime** the handle `ctx.db` runs as the same role, on a connection pool of the plugin's own.
-  - **Grants** are the role's ownership of its schema. The planned list of grants per plugin is not needed: the role holds nothing else.
-  - **The boundary:** Postgres refuses the role the core's tables. Check 28 of the consistency checker refuses the code that could undo that: a role, session or transaction change; a core table or another schema named; an import past the SDK; `fetch`, `process` or `Bun`.
+- **Tables.** Each plugin has a schema, `plugin_<name>`, owned by a NOLOGIN role, `ob1_plugin_<name>`. Every plugin's SQL runs on a connection logged in as `ob1_plugins` (LOGIN, NOINHERIT, no superuser, its password `OB1_PLUGIN_DB_PASSWORD`), which holds `SET` on each plugin's role and nothing on the core.
+  - **Migrations** run on that connection as the plugin's role in its schema, recorded in `plugin_migrations` beside `schema_migrations`.
+  - **At runtime** the handle `ctx.db` runs the same way, on a connection pool of the plugin's own.
+  - **Grants** are the role's ownership of its schema; the planned list of grants per plugin is not needed. Beyond it, both roles hold only PUBLIC's defaults: `USAGE` on `public` (every core function runs as its caller) and `TEMP`, which the plugin's own pool keeps from every other connection.
+  - **The boundary is Postgres's.** Neither role reaches a core table, so SQL that undoes the plugin's role still cannot. The plugin's TypeScript runs in the server's process and could reach anything the server can, so curation is what holds hostile code. Check 28 of the consistency checker is the accident guard in front of both: a role, session or transaction change, a core table or another schema named, an import past the SDK, or a global past `ctx` fails a push so that review sees it.
 - **GUI pages.** The manifest declares each page (a path and a label), and the REST core lists the enabled plugins and their pages at `GET /v1/plugins`. That is the registry the GUI's nav reads; the pages themselves are SMD-2280's to render.
-- **Egress.** A plugin makes no outbound call of its own (check 28). A model call through the shared gate, offered as a core service, comes with the first plugin that needs one: smart-ingest's port, SMD-2690.
+- **Egress.** A plugin is given no outbound call (check 28 refuses `fetch` and its kin). A model call through the shared gate, offered as a core service, comes with the first plugin that needs one: smart-ingest's port, SMD-2690.
 
 ## Migration order
 

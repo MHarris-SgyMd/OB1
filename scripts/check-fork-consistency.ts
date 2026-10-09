@@ -5688,7 +5688,7 @@ const TIER_ROUTE_TABLE = (() => {
     + TIERS.map((t) => `    ${t}:\n      loadBalancer:\n        servers:\n          - url: "http://${tierMeshName("mcp", t)}.:8000"\n`).join("");
 })();
 /** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS"];
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -5894,30 +5894,36 @@ function checkTierStack() {
 }
 checkTierStack();
 
-// ── Check 28: a plugin stays inside its own schema and its own process role (SMD-2310) ──
+// ── Check 28: a plugin's code stays in its schema, its role and the SDK (SMD-2310) ──
 //
-// A plugin runs in the brain's servers, and the migrator and the server run
-// its SQL under SET LOCAL ROLE to its own role, its schema first on the path
-// (db/migrate.ts, store-sql.ts's pluginTx). Postgres refuses that role the
-// core's tables — but SET ROLE holds SQL only while the SQL does not undo it,
-// and a plugin's code could reach past the SDK. So the code is read:
-//  - its SQL (a migration file, a template literal in its TypeScript) names
-//    no core table (the CREATE TABLEs of db/migrations/ and the two ledgers),
-//    no schema but its own (`public.`, another plugin's), and runs no role,
-//    session or transaction change — RESET/SET ROLE, SESSION AUTHORIZATION, a
-//    search_path or set_config, COMMIT/ROLLBACK/BEGIN as a statement, a temp
-//    object, a session advisory lock, a cursor WITH HOLD, PREPARE, LISTEN,
-//    DISCARD — each of which outlives the transaction or leaves the role;
-//  - its TypeScript imports server-portable/plugin-sdk.ts and its own
-//    directory's files alone, loads nothing by name at run time, and calls no
-//    fetch, Bun, process, Deno or eval: the brain's thoughts through ctx.call,
-//    its tables through ctx.db, nothing else;
-//  - plugins/registry.ts imports exactly the plugin directories, each by its
-//    index.ts, and lists each in PLUGINS; a manifest's name is its
-//    directory's; its migration files are named by the core's rule.
-// What it does not see: a table name built at run time (a plugin's template
-// literal holds its SQL whole, and its values are bound parameters), and SQL
-// in a plain string — the SDK hands a plugin a tagged template alone.
+// A plugin runs in the brain's servers. Its SQL runs on a connection logged
+// in as ob1_plugins, then under SET LOCAL ROLE to its own role with its schema
+// first on the path (db/migrate.ts, store-sql.ts's pluginTx), and Postgres
+// refuses both roles the core's tables: that is the boundary. This check is
+// the accident guard in front of it — code that would read like an attempt
+// to leave it fails a push, so it is seen in review — not a sandbox: a
+// plugin's TypeScript runs in the server's process, and curation is what
+// holds hostile code (plugins/README.md). It reads:
+//  - its SQL, a migration file or a TAGGED template literal in its
+//    TypeScript (found by a lexer, `${…}` and nested templates included):
+//    no core table's name anywhere (db/migrations/' CREATE TABLEs and the two
+//    ledgers), no schema but its own (`public.`, another plugin's, pg_temp),
+//    no Unicode-escaped name; no role, session or transaction change — SET or
+//    RESET of role, session_authorization or search_path (quoted or not),
+//    RESET ALL, set_config, SET SESSION, a temp object, a session advisory
+//    lock, a cursor WITH HOLD, LISTEN, DISCARD, and outside a plpgsql body
+//    BEGIN, END, ABORT, COMMIT, ROLLBACK (but ROLLBACK TO), START
+//    TRANSACTION, PREPARE and EXECUTE as statements; inside one, EXECUTE
+//    (dynamic SQL this check cannot read), COMMIT and ROLLBACK;
+//  - its TypeScript: imports of the SDK and its own directory's files alone
+//    (static, re-exported or bare), none of a test file from code that is not
+//    one, and no global that reaches past ctx — fetch, eval, Function,
+//    Reflect, globalThis, self, Bun, process, Deno, require, Worker,
+//    WebSocket, XMLHttpRequest, EventSource, import() — by name, aliased or not;
+//  - its directory: TypeScript, its migrations, a README and metadata.json,
+//    nothing else; plugins/registry.ts imports and lists exactly the plugin
+//    directories; a manifest's name is its directory's; migration files are
+//    named by the core's rule.
 
 /** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
 function coreTables(): Set<string> {
@@ -5929,71 +5935,213 @@ function coreTables(): Set<string> {
   return names;
 }
 
-/** What a plugin's SQL reaches past its schema or its role for, one phrase per hit with its line. Pure over a text. */
-function pluginSqlProblems(sqlText: string, core: ReadonlySet<string>, firstLine = 1): { line: number; what: string }[] {
-  const code = sqlUncommented(sqlText);
-  const hits: { line: number; what: string }[] = [];
-  const at = (index: number) => firstLine + code.slice(0, index).split("\n").length - 1;
-  for (const m of code.matchAll(/\b(FROM|JOIN|INTO|UPDATE|TABLE|REFERENCES|TRUNCATE|LOCK|COPY|ON)\s+(?:ONLY\s+)?(?:"?public"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?/gi)) {
-    if (core.has(m[2].toLowerCase())) hits.push({ line: at(m.index!), what: `names the core table ${m[2]} (${m[1].toUpperCase()} ${m[2]})` });
+/** A plugin SQL hit: its line and what it does. */
+type PluginHit = { line: number; what: string };
+
+/** SQL with its comments and single-quoted strings blanked (sqlUncommented), its quoted identifiers read bare, and each dollar-quoted body marked: [start, end) spans. */
+function pluginSqlCode(sqlText: string): { code: string; bodies: [number, number][] } {
+  // A quoted identifier is its name: "role" is role, and "public"."thoughts" public.thoughts. Same length, so lines keep.
+  const code = sqlUncommented(sqlText).replace(/"([^"]*)"/g, (_m, name: string) => ` ${name} `);
+  const bodies: [number, number][] = [];
+  const open = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/g;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(code))) {
+    const close = code.indexOf(m[0], m.index + m[0].length);
+    if (close < 0) break;
+    bodies.push([m.index + m[0].length, close]);
+    open.lastIndex = close + m[0].length;
   }
-  for (const m of code.matchAll(/\b("?public"?|"?plugin_[a-z0-9_]+"?)\s*\.\s*"?[a-z_]/gi)) hits.push({ line: at(m.index!), what: `qualifies a name with the schema ${m[1].replace(/"/g, "")}: a plugin names its own tables bare, and no other schema's` });
-  const SESSION = /\b(RESET\s+ROLE|SET\s+(?:LOCAL\s+|SESSION\s+)?ROLE|SESSION\s+AUTHORIZATION|search_path|set_config|COMMIT|ROLLBACK|START\s+TRANSACTION|TEMP|TEMPORARY|pg_advisory_lock|pg_advisory_lock_shared|pg_try_advisory_lock|pg_advisory_unlock|pg_advisory_unlock_all|WITH\s+HOLD|PREPARE|LISTEN|DISCARD)\b/gi;
-  for (const m of code.matchAll(SESSION)) hits.push({ line: at(m.index!), what: `runs ${m[1].replace(/\s+/g, " ").toUpperCase()}, which leaves the plugin's role or outlives its transaction` });
-  // BEGIN as a statement; a plpgsql block's BEGIN (DO $$ BEGIN …) is followed by its body.
-  for (const m of code.matchAll(/(?:^|;)\s*(BEGIN)\s*(?:;|$|TRANSACTION\b|WORK\b|ISOLATION\b)/gim)) hits.push({ line: at(m.index! + m[0].indexOf(m[1])), what: "runs BEGIN as a statement, which ends the transaction the plugin's role holds in" });
+  return { code, bodies };
+}
+
+/** What a plugin's SQL reaches past its schema or its role for, one hit per finding. Pure over a text. */
+function pluginSqlProblems(sqlText: string, core: ReadonlySet<string>, firstLine = 1): PluginHit[] {
+  const { code, bodies } = pluginSqlCode(sqlText);
+  const hits: PluginHit[] = [];
+  const at = (index: number) => firstLine + code.slice(0, index).split("\n").length - 1;
+  const inBody = (index: number) => bodies.some(([a, b]) => index >= a && index < b);
+  const hit = (index: number, what: string) => hits.push({ line: at(index), what });
+  // A Unicode-escaped name or string spells anything; nothing a plugin needs.
+  // Read after the quotes are gone (pluginSqlCode), so the prefix alone: U& before a name or a string.
+  for (const x of code.matchAll(/\bU&/gi)) hit(x.index!, "spells a name or string with U& escapes, which this check cannot read");
+  for (const x of code.matchAll(/(?<![\w$.])([a-z_][a-z0-9_]*)(?![\w$])/gi)) {
+    if (core.has(x[1].toLowerCase())) hit(x.index!, `names the core table ${x[1]}`);
+  }
+  for (const x of code.matchAll(/(?<![\w$])(public|plugin_[a-z0-9_]+|pg_temp[a-z0-9_]*)\s*\.\s*[a-z_]/gi)) hit(x.index!, `qualifies a name with the schema ${x[1]}: a plugin names its own tables bare, and no other schema's`);
+  const SESSION: [RegExp, string][] = [
+    [/\b(?:SET|RESET)\s+(?:LOCAL\s+|SESSION\s+)?(?:ROLE|SESSION_AUTHORIZATION|SESSION\s+AUTHORIZATION|SEARCH_PATH)\b/gi, "changes the role or the search path"],
+    [/\bRESET\s+ALL\b/gi, "resets every setting, the role among them"],
+    [/\bset_config\b/gi, "calls set_config, which sets the role or the path by name"],
+    [/\bSET\s+SESSION\b/gi, "sets a setting for the session, past the transaction"],
+    [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:GLOBAL\s+|LOCAL\s+)?(?:TEMP|TEMPORARY)\b/gi, "makes a temp object, which outlives the transaction and is searched before any schema"],
+    [/\bpg_(?:try_)?advisory_(?:lock|unlock)(?:_shared|_all)?\b/gi, "takes or drops a session advisory lock, which outlives the transaction"],
+    [/\bWITH\s+HOLD\b/gi, "holds a cursor past the transaction"],
+    [/\bLISTEN\b/gi, "listens on the session, past the transaction"],
+    [/\bDISCARD\b/gi, "discards session state"],
+  ];
+  for (const [re, what] of SESSION) for (const x of code.matchAll(re)) hit(x.index!, what);
+  // Statements outside a plpgsql body; a body's BEGIN … END is its block.
+  for (const x of code.matchAll(/(?:^|;)\s*(BEGIN|END|ABORT|COMMIT|ROLLBACK(?!\s+TO\b)|START\s+TRANSACTION|PREPARE|EXECUTE)\b/gi)) {
+    const i = x.index! + x[0].indexOf(x[1]);
+    if (!inBody(i)) hit(i, `runs ${x[1].replace(/\s+/g, " ").toUpperCase()} as a statement, which ends or works around the transaction the plugin's role holds in`);
+  }
+  // Inside a body: dynamic SQL, which this check cannot read, and a procedure's transaction control.
+  for (const x of code.matchAll(/\b(EXECUTE|COMMIT|ROLLBACK(?!\s+TO\b))\b/gi)) {
+    if (inBody(x.index!)) hit(x.index!, `runs ${x[1].toUpperCase()} in a plpgsql body: dynamic SQL or a transaction change this check cannot read`);
+  }
   return hits;
+}
+
+/** A tagged template literal in TypeScript: its text, `${…}` read as one placeholder, and where it starts. Untagged ones (UI and log text) are not SQL. */
+function taggedTemplates(text: string): { body: string; index: number }[] {
+  const found: { body: string; index: number }[] = [];
+  const NOT_TAGS = new Set(["return", "typeof", "case", "in", "of", "yield", "await", "new", "throw", "else", "do", "void", "delete", "instanceof"]);
+  let i = 0;
+  // Scans from i to the end of one template (i at its opening backtick); returns its body and the index after it.
+  const template = (start: number): { body: string; end: number } => {
+    let body = "";
+    let j = start + 1;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\\") { body += text.slice(j, j + 2); j += 2; continue; }
+      if (ch === "`") return { body, end: j + 1 };
+      if (ch === "$" && text[j + 1] === "{") { body += "$1"; j = expression(j + 2); continue; }
+      body += ch;
+      j++;
+    }
+    return { body, end: j };
+  };
+  // Scans a `${…}` expression from j to just past its closing brace, reading the templates inside it too.
+  const expression = (from: number): number => {
+    let depth = 1;
+    let j = from;
+    while (j < text.length && depth > 0) {
+      const ch = text[j];
+      if (ch === "'" || ch === '"') { j = quoted(j); continue; }
+      if (ch === "`") { const t = template(j); record(j, t.body); j = t.end; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    return j;
+  };
+  const quoted = (from: number): number => {
+    const q = text[from];
+    let j = from + 1;
+    while (j < text.length && text[j] !== q && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const record = (index: number, body: string) => {
+    const before = text.slice(0, index).replace(/\s+$/, "");
+    const word = before.match(/[A-Za-z_$][\w$]*$/)?.[0];
+    // A tag is a name, a call or index result, or a name with type arguments (sql<Row>`…`).
+    const tagged = word ? !NOT_TAGS.has(word) : /[)\]>]$/.test(before);
+    if (tagged) found.push({ body, index });
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "/" && text[i + 1] === "/") { while (i < text.length && text[i] !== "\n") i++; continue; }
+    if (ch === "/" && text[i + 1] === "*") { const e = text.indexOf("*/", i + 2); i = e < 0 ? text.length : e + 2; continue; }
+    if (ch === "'" || ch === '"') { i = quoted(i); continue; }
+    if (ch === "`") { const t = template(i); record(i, t.body); i = t.end; continue; }
+    i++;
+  }
+  return found;
 }
 
 /** The SDK, the one module outside its directory a plugin may import. */
 const PLUGIN_SDK = "../../server-portable/plugin-sdk.ts";
+/** A test file, by the tree's spelling. */
+const PLUGIN_TEST_FILE = /(^|\/)(test-[^/]+|[^/]+\.test)\.ts$/;
+/** The globals that reach past ctx — by name, so an alias of one is caught where it is taken. */
+const PLUGIN_GLOBALS = /(?<![\w$.])(fetch|eval|Function|Reflect|globalThis|self|Bun|process|Deno|require|Worker|SharedWorker|WebSocket|XMLHttpRequest|EventSource)(?![\w$])|(?<![\w$.])import\s*\(/g;
 
-/** What a plugin's TypeScript reaches for, one phrase per hit with its line. Pure over a text. */
-function pluginTsProblems(text: string, core: ReadonlySet<string>): { line: number; what: string }[] {
-  const hits: { line: number; what: string }[] = [];
+/** What a plugin's TypeScript reaches for, one hit per finding. `registry`: plugins/registry.ts, which imports each plugin's index.ts. Pure over a text. */
+function pluginTsProblems(text: string, core: ReadonlySet<string>, opts: { registry?: boolean; testFile?: boolean } = {}): PluginHit[] {
+  const hits: PluginHit[] = [];
   const lineAt = (index: number) => text.slice(0, index).split("\n").length;
   const code = blanked(text, true);
   const commentsGone = blanked(text, false);
-  for (const m of commentsGone.matchAll(/\b(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/g)) {
+  const imports = [
+    ...[...commentsGone.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']/g)],
+    ...[...commentsGone.matchAll(/(?<![\w$.])import\s*["']([^"']+)["']/g)],
+  ];
+  for (const m of imports) {
     const spec = m[1];
-    if (spec !== PLUGIN_SDK && !(spec.startsWith("./") && !spec.includes("..")) ) hits.push({ line: lineAt(m.index!), what: `imports ${spec}: a plugin imports ${PLUGIN_SDK} and its own directory's files alone` });
+    const allowed = opts.registry
+      ? spec === "../server-portable/plugin-sdk.ts" || /^\.\/[a-z0-9-]+\/index\.ts$/.test(spec)
+      : spec === PLUGIN_SDK || (spec.startsWith("./") && !spec.includes("..") && spec.endsWith(".ts"));
+    if (!allowed) hits.push({ line: lineAt(m.index!), what: `imports ${spec}: a plugin imports ${PLUGIN_SDK} and its own directory's .ts files alone` });
+    else if (!opts.testFile && PLUGIN_TEST_FILE.test(spec)) hits.push({ line: lineAt(m.index!), what: `imports the test file ${spec} from code that runs in the server` });
   }
-  for (const m of code.matchAll(/\b(fetch|eval|require)\s*\(|\bimport\s*\(|\b(Bun|process|Deno|globalThis)\s*\.|\bnew\s+Function\b/g)) {
-    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else` });
+  for (const m of code.matchAll(PLUGIN_GLOBALS)) {
+    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else (a local of that name is renamed)` });
   }
-  // Its SQL: each template literal's text, comments aside, read as SQL at its line.
-  for (const m of commentsGone.matchAll(/`([^`]*)`/g)) {
-    for (const h of pluginSqlProblems(m[1].replace(/\$\{[^}]*\}/g, "$1"), core, lineAt(m.index!))) hits.push(h);
+  for (const t of taggedTemplates(commentsGone)) {
+    for (const h of pluginSqlProblems(t.body, core, lineAt(t.index))) hits.push(h);
   }
   return hits;
 }
 
 const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
+  // Its SQL, in a handler's tagged template.
   ["const r = await sql`SELECT count(*) FROM thoughts`;", "ts", true],
   ["const r = await sql`SELECT * FROM notes WHERE id = ${id}`;", "ts", false],
+  ["const rows = await q<{ n: number }>`SELECT count(*) FROM thoughts`;", "ts", true],
+  ["const r = await sql`SELECT * FROM notes n, ${\"x\"} WHERE ${`a ${b}`} = 1 AND id IN (SELECT id FROM thought_audit)`;", "ts", true],
   ["// SELECT * FROM thoughts\nconst x = 1;", "ts", false],
+  ["const tick = \"`\";\nawait sql`RESET ROLE`;", "ts", true],
   ["await sql`INSERT INTO public.notes VALUES (1)`;", "ts", true],
   ["await sql`RESET ROLE`;", "ts", true],
-  ["await sql`SELECT set_config('search_path', 'public', false)`;", "ts", true],
+  ["await sql`SET \"role\" = 'postgres'`;", "ts", true],
+  ["await sql`SELECT pg_catalog.set_config('role', 'none', true)`;", "ts", true],
+  ["await sql`SET session_authorization = DEFAULT`;", "ts", true],
+  ["await sql`END; SELECT 1`;", "ts", true],
+  ["await sql`ABORT`;", "ts", true],
+  ["await sql`SELECT * FROM notes, U&\"\\0074houghts\"`;", "ts", true],
+  ["await sql`DO $$ BEGIN EXECUTE 'RES' || 'ET ROLE'; END $$`;", "ts", true],
+  // Text that is not SQL: an untagged template is UI or log text.
+  ["log(`could not commit ${id}: prepare your notes, then listen`);", "ts", false],
+  ["throw new Error(`skipped ${n} rows from jobs`);", "ts", false],
+  ["return `FROM thoughts`;", "ts", false],
+  // Its imports and globals.
   ["import { db } from \"../../server-portable/root.ts\";", "ts", true],
+  ["import \"../../server-portable/store-sql.ts\";", "ts", true],
+  ["export * from \"../../server-portable/root.ts\";", "ts", true],
   ["import { definePlugin, z } from \"../../server-portable/plugin-sdk.ts\";\nimport { helper } from \"./helper.ts\";", "ts", false],
+  ["import { helper } from \"./helper.js\";", "ts", true],
+  ["import { reset } from \"./test-backdoor.ts\";", "ts", true],
   ["import x from \"../other/index.ts\";", "ts", true],
   ["const r = await fetch(\"https://example.com\");", "ts", true],
-  ["const k = process.env.SECRET;", "ts", true],
+  ["const f = fetch;", "ts", true],
+  ["const g = globalThis[\"fe\" + \"tch\"];", "ts", true],
+  ["const { env } = process;", "ts", true],
+  ["(0, eval)(\"1\");", "ts", true],
+  ["new Worker(\"./w.ts\");", "ts", true],
   ["const m = await import(name);", "ts", true],
   ["const s = \"fetch( is only text\";", "ts", false],
+  ["const n = ctx.caller.name; const r = await ctx.call(\"fetch\", { id });", "ts", false],
+  // Its migrations.
   ["CREATE TABLE IF NOT EXISTS notes (id uuid PRIMARY KEY);", "sql", false],
   ["-- FROM thoughts, in a comment\nCREATE TABLE IF NOT EXISTS notes (id int);", "sql", false],
   ["CREATE TABLE IF NOT EXISTS peek AS SELECT id FROM thoughts;", "sql", true],
   ["CREATE TABLE x (id uuid REFERENCES thought_audit (id));", "sql", true],
+  ["SELECT * FROM notes, thoughts;", "sql", true],
+  ["SELECT * FROM notes JOIN \"thoughts\" t ON true;", "sql", true],
   ["DO $$ BEGIN RAISE NOTICE 'x'; END $$;", "sql", false],
+  ["CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $fn$\nBEGIN\n  NEW.updated_at := now();\n  RETURN NEW;\nEND;\n$fn$;", "sql", false],
+  ["DO $$ BEGIN EXECUTE 'RESET ROLE'; END $$;", "sql", true],
   ["CREATE TABLE a (id int);\nCOMMIT;\nDROP TABLE thoughts;", "sql", true],
+  ["CREATE TABLE a (id int);\nEND;\nSELECT 1;", "sql", true],
   ["BEGIN;\nCREATE TABLE a (id int);", "sql", true],
   ["CREATE TEMP TABLE shadow (x int);", "sql", true],
   ["SELECT pg_advisory_lock(1);", "sql", true],
   ["SELECT pg_advisory_xact_lock(1);", "sql", false],
+  ["CREATE TABLE readings (temp numeric, prepared boolean);", "sql", false],
+  ["SAVEPOINT a; ROLLBACK TO SAVEPOINT a;", "sql", false],
   ["CREATE TABLE b (id int); SELECT * FROM plugin_other.items;", "sql", true],
   ["SELECT 'FROM thoughts' AS text;", "sql", false],
+  ["RESET \"role\";", "sql", true],
 ];
 
 async function checkPlugins() {
@@ -6001,23 +6149,21 @@ async function checkPlugins() {
   const core = coreTables();
   if (!core.has("thoughts") || core.size < 10) fail(SELF, `check 28 reads ${core.size} core tables from db/migrations/ (thoughts ${core.has("thoughts") ? "among them" : "missing"}) — the reader is broken, not the plugins clean`);
   for (const [probe, kind, hit] of PLUGIN_PROBES) {
-    const n = (kind === "sql" ? pluginSqlProblems(probe, core) : pluginTsProblems(probe, core)).length;
-    if (hit && n === 0) fail(SELF, `check 28 no longer catches its probe: ${JSON.stringify(probe)}`);
-    if (!hit && n > 0) fail(SELF, `check 28 catches a non-probe: ${JSON.stringify(probe)} — ${(kind === "sql" ? pluginSqlProblems(probe, core) : pluginTsProblems(probe, core)).map((h) => h.what).join("; ")}`);
+    const found = kind === "sql" ? pluginSqlProblems(probe, core) : pluginTsProblems(probe, core);
+    if (hit && found.length === 0) fail(SELF, `check 28 no longer catches its probe: ${JSON.stringify(probe)}`);
+    if (!hit && found.length > 0) fail(SELF, `check 28 catches a non-probe: ${JSON.stringify(probe)} — ${found.map((h) => h.what).join("; ")}`);
   }
   const base = join(ROOT, "plugins");
   if (!existsSync(base)) return;
   const dirs = readdirSync(base).filter((d) => statSync(join(base, d)).isDirectory() && !d.startsWith(".") && d !== "node_modules");
-  // The registry: exactly the directories, each by its index.ts, each in PLUGINS.
+  // The registry: exactly the directories, each by its index.ts, each in PLUGINS; held to the plugin rules itself.
   const registryPath = join(base, "registry.ts");
   const registry = existsSync(registryPath) ? readFileSync(registryPath, "utf8") : "";
   if (!registry) fail("plugins/registry.ts", "no registry: the server imports every plugin from plugins/registry.ts");
+  for (const h of pluginTsProblems(registry, core, { registry: true })) fail(`plugins/registry.ts:${h.line}`, `${h.what} (check 28, SMD-2310)`);
   const registryCode = blanked(registry, false);
   const imported = new Map<string, string>();
   for (const m of registryCode.matchAll(/\bimport\s+(?!type\b)([A-Za-z_$][\w$]*)\s+from\s*["']\.\/([^/"']+)\/index\.ts["']/g)) imported.set(m[2], m[1]);
-  for (const m of registryCode.matchAll(/\bimport\b[^;]*?\bfrom\s*["']([^"']+)["']/g)) {
-    if (m[1] !== "../server-portable/plugin-sdk.ts" && !/^\.\/[^/]+\/index\.ts$/.test(m[1])) fail("plugins/registry.ts", `imports ${m[1]}: the registry imports each plugin's index.ts and the SDK's types alone`);
-  }
   const listed = new Set([...(registryCode.match(/\bPLUGINS\b[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]));
   for (const d of dirs) {
     const where = `plugins/${d}`;
@@ -6028,18 +6174,20 @@ async function checkPlugins() {
     else if (!listed.has(binding)) fail("plugins/registry.ts", `imports ./${d}/index.ts as ${binding} but PLUGINS does not list it`);
     const name = blanked(readFileSync(index, "utf8"), false).match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
     if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
-    const migrations = join(base, d, "migrations");
-    if (existsSync(migrations)) {
-      const files = readdirSync(migrations);
-      const problem = migrationNameProblem(files.filter((f) => f.endsWith(".sql")));
-      if (problem) fail(`${where}/migrations`, problem);
-      for (const f of files.filter((n) => n.endsWith(".sql"))) {
-        for (const h of pluginSqlProblems(readFileSync(join(migrations, f), "utf8"), core)) fail(`${where}/migrations/${f}:${h.line}`, `${h.what} (check 28, SMD-2310)`);
-      }
+    // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
+    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    const migrationFiles: string[] = [];
+    for (const f of files) {
+      const rel = relative(join(base, d), f).split(sep).join("/");
+      if (/^migrations\/[^/]+\.sql$/.test(rel)) { migrationFiles.push(rel.slice("migrations/".length)); continue; }
+      if (rel === "README.md" || rel === "metadata.json") continue;
+      if (!rel.endsWith(".ts") || rel.endsWith(".d.ts")) { fail(`${where}/${rel}`, "a plugin holds TypeScript, its migrations/*.sql, a README.md and a metadata.json, nothing else: a file of another kind is code or data this check does not read (check 28, SMD-2310)"); continue; }
+      for (const h of pluginTsProblems(readFileSync(f, "utf8"), core, { testFile: PLUGIN_TEST_FILE.test(rel) })) fail(`${where}/${rel}:${h.line}`, `${h.what} (check 28, SMD-2310)`);
     }
-    for (const f of walk(join(base, d), [], /\.ts$/)) {
-      if (/(^|\/)(test-[^/]+|[^/]+\.test)\.ts$/.test(f)) continue;
-      for (const h of pluginTsProblems(readFileSync(f, "utf8"), core)) fail(`${relative(ROOT, f)}:${h.line}`, `${h.what} (check 28, SMD-2310)`);
+    const problem = migrationNameProblem(migrationFiles);
+    if (problem) fail(`${where}/migrations`, problem);
+    for (const f of migrationFiles) {
+      for (const h of pluginSqlProblems(readFileSync(join(base, d, "migrations", f), "utf8"), core)) fail(`${where}/migrations/${f}:${h.line}`, `${h.what} (check 28, SMD-2310)`);
     }
   }
   for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
