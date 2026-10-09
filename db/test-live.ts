@@ -45,7 +45,7 @@ import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
-import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION } from "../server-portable/entities.ts";
+import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -53,6 +53,7 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
+import { run as runSleep } from "./sleep.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -4178,17 +4179,26 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // stop — every worker's leases returned while the thought is still in hand,
   // which the worker then abandons: no write, no release of a row no longer
   // its own (review pass 1: it recorded the thought, then failed to release).
+  // The model call in hand is aborted with it (SMD-1794): a 5 s answer does
+  // not hold run(), and no call follows the stop.
   let hardStop: PassStop | undefined;
   const hardFrom = calls;
+  slowMs = 5000;
   const hardRun = extractInProcess({ workers: 1, onPass: (s) => { hardStop = s; } });
   await inHand(hardFrom);
   const firstStop = hardStop?.();
+  const hardAt = Date.now();
+  const callsAtHard = calls;
   const release = hardStop?.();
   await release;
   const heldAfterRelease = (await noteClaims()).claimed ?? 0;
   const hard = await hardRun;
+  const hardMs = Date.now() - hardAt;
+  slowMs = 600;
   assert(firstStop === null && release instanceof Promise && heldAfterRelease === 0 && hard.code === 130 && hard.stderr.includes(`second signal — exiting now; leases not returned in time expire within 900 s`),
          `a second call of the stop onPass hands returns the release of the workers' leases, made before the thought in hand finished (${heldAfterRelease} held after it, exit ${hard.code})`);
+  assert(hardMs < 1500 && calls === callsAtHard,
+         `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
   // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
@@ -5247,7 +5257,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
-      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
       if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       // A follower's one-token probe, answered apart: no judge call counted.
@@ -5267,13 +5277,31 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       if (onJudge) await onJudge();
       await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
+      // SMD-1873, review pass 2: an answer in p3's words, from a model keeping to the old prompt.
+      if (/relic/.test(a) && /relic/.test(b)) return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "conflict", supersedes: "B", confidence: 0.9, reason: "p3's word" }) } }] });
       let answer: Record<string, unknown>;
-      if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.92, reason: "monthly billing against annual" };
-      else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "conflict", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
-      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.3, reason: "guessing" };
-      else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "agree", supersedes: "unknown", confidence: 0.8, reason: "both describe the deploy" };
+      if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
+      else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
+      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: "guessing" };
+      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: "duplicate", supersedes: "unknown", confidence: 0.85, reason: "the same rota" };
+      else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
-      return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+      const content = JSON.stringify(answer);
+      // SMD-1873: two answers come with token probabilities when the pass asks —
+      // the verdict's first token among three alternatives. The billing pair's
+      // put 0.90 on outdates, so it records 0.90, not the 0.92 it states — and
+      // not the 0.97 outdates and duplicate hold together (review pass 4); the lowconf pair's put 0.30 there though it states 0.9, so the
+      // floor sets it aside on the token score (review pass 1). The others come
+      // without, as from an endpoint that returns none, and record what they state.
+      const tokenTop: [string, number][] | null = /monthly/.test(a) && /annually/.test(b) ? [["out", 0.9], ["dup", 0.07], ["rel", 0.03]]
+        : /lowconf/.test(a) && /lowconf/.test(b) ? [["out", 0.3], ["rel", 0.6], ["ev", 0.1]] : null;
+      if (body.logprobs && tokenTop) {
+        const at = content.indexOf('"verdict":"') + '"verdict":"'.length;
+        const tok = (token: string, top: [string, number][] = [[token, 1]]) => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
+        const tokens = [tok(content.slice(0, at)), tok(content.slice(at, at + 3), tokenTop), tok(content.slice(at + 3))];
+        return Response.json({ choices: [{ message: { content }, logprobs: { content: tokens } }], model: body.model });
+      }
+      return Response.json({ choices: [{ message: { content } }], model: body.model });
     },
   });
 
@@ -5397,10 +5425,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
   assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
-  assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
+  assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 0 unrelated, 0 related, 1 evolves, 0 duplicate, 3 outdates/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
-  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
-         `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; of 3 proposing verdict\(s\), confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
+         `…two proposals recorded, one undirected, one too weak to record on its token score though it states 0.9, and the floor cut two on token probabilities and one on the written number (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
@@ -5421,16 +5449,28 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     `each proposal has its lineage row: both thoughts at the fingerprints the row took, the agent, the judge's model, prompt version and hash, the candidate parameters (${JSON.stringify(plin.map((l) => l.recipe))})`);
   const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
   const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
-  assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.92, "the billing pair is proposed newer-supersedes-older at the judge's confidence");
+  assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.9,
+         `the billing pair is proposed newer-supersedes-older at the token probability of outdates, 0.90 — not the 0.92 the answer states, nor 0.97 with duplicate's mass beside it (SMD-1873; ${directed?.confidence})`);
+  assert(Number(undirected?.confidence) === 0.7, "…and the colour pair, whose answer came without token probabilities, at the confidence it states");
+  const judgedOf = (id: string) => (plin.find((l) => l.o === p1.find((p) => p.id === id)?.older_id)?.recipe.judged ?? {}) as Record<string, unknown>;
+  assert(judgedOf(directed.id).verdict === "outdates" && judgedOf(directed.id).confidence_source === "token" && judgedOf(directed.id).stated_confidence === 0.92 && judgedOf(directed.id).evidence_found === true
+         && "probabilities" in judgedOf(directed.id)
+         && judgedOf(undirected.id).confidence_source === "stated" && !("evidence_found" in judgedOf(undirected.id)) && !("probabilities" in judgedOf(undirected.id)),
+         `each proposal's recipe says what the judge said: its verdict word, where the confidence came from, what it stated, and whether its quote was found (${JSON.stringify([judgedOf(directed.id), judgedOf(undirected.id)])})`);
   assert(undirected?.older_id === blue && undirected.newer_id === green, "the colour pair is proposed without a direction");
   const c1 = await claimCounts();
   assert(c1.succeeded === 10 && c1.failed === 1, `claims: 10 succeeded, 1 failed (${JSON.stringify(c1)})`);
   const [{ err }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${hemlockNewer}::uuid`;
   assert(/1 of 1 pair\(s\) not judged/.test(err) && /not JSON/.test(err), `the failed row says which pair and why (${err})`);
-  const lines = readFileSync(dump, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { verdict: string; recorded: string | null; proposal: string | null; key: string });
+  const lines = readFileSync(dump, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { verdict: string; recorded: string | null; proposal: string | null; key: string; supersedes: string; evidence: string; evidence_found: boolean | null });
   assert(lines.length === 4 && lines.every((l) => l.key === KEY), `the dump holds every parseable verdict, four, under the key — the malformed answer is not a verdict (${lines.length})`);
-  assert(lines.filter((l) => l.recorded === "proposed").length === 2 && lines.filter((l) => l.recorded === "under-confidence").length === 1 && lines.filter((l) => l.verdict === "agree").length === 1,
-         "…two proposed, one under confidence, one agree");
+  assert(lines.filter((l) => l.recorded === "proposed").length === 2 && lines.filter((l) => l.recorded === "under-confidence").length === 1 && lines.filter((l) => l.verdict === "evolves").length === 1,
+         "…two proposed, one under confidence, one evolves");
+  // SMD-1873: a directed conflict's quote is checked against the side it names; an undirected one carries none.
+  const billing = lines.find((l) => l.verdict === "outdates" && l.supersedes === "newer" && l.recorded === "proposed");
+  const brand = lines.find((l) => l.verdict === "outdates" && l.supersedes === "unknown");
+  assert(billing?.evidence !== "" && billing?.evidence_found === true && brand?.evidence === "" && brand?.evidence_found === null,
+         `the dump carries the directed conflict's evidence, found in the newer text, and none on the undirected one (${JSON.stringify([billing?.evidence, billing?.evidence_found, brand?.evidence, brand?.evidence_found])})`);
   assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c === 0, "the pass wrote nothing to thoughts.supersedes — it proposes");
 
   // --status, then a second run over an unchanged corpus.
@@ -5449,7 +5489,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 
   // --list prints both thoughts, the IDs, and the decision each row takes.
   const list = await consolidate("--list");
-  assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /conflict, direction not stated/.test(list.out),
+  assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /one is out of date, which not stated/.test(list.out),
          "--list names both verdicts");
   assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction <newer|older>`),
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
@@ -5632,7 +5672,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const rb1 = await rebuild(atlasNew);
     assert(rb1.ok === true && rb1.stale_proposals === 1 && (await proposalRow(atlas!.id)).status === "stale", "a raw text move under the verdict: the rebuild sets the proposal stale and requeues the pair under the judge's key");
     const staleStatus = await consolidate("--status");
-    assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it finds in conflict again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
+    assert(/1 stale \(a text moved under the verdict: 1 in this pass's pool; the pass replaces one it proposes again and settles one it does not\)/.test(staleStatus.out), `--status places the stale row in this pass's pool — its claim is pending (${staleStatus.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 240)})`);
     const staleList = await consolidate("--list", "stale");
     assert(staleList.code === 0 && /1 stale proposal\(s\)/.test(staleList.out) && /\(stale — in this pass's pool\)/.test(staleList.out) && staleList.out.includes(`--accept ${atlas!.id} --force    --reject ${atlas!.id}`), `--list stale tags the row's standing and still offers the reviewer's decision (${staleList.out.split("\n").find((l) => /stale —/.test(l))?.trim().slice(0, 200)})`);
     // 070 (SMD-2313): the same stale row standing on a lineage pair — the
@@ -5669,7 +5709,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const settled = await consolidate();
     const atlasAfter = await proposalRow(atlas!.id);
     const settledNote = passSettledNote("judged again after a text moved — unrelated", KEY);
-    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(settled.out),
+    assert(settled.code === 0 && /pool: 1 thought\(s\) added\s*$/m.test(settled.out) && seen.some((p) => /monthly/.test(p.a) && /deploy calendar/.test(p.b)) && /stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\)/.test(settled.out),
            `the pass judges the stale pair again and reports settling it (exit ${settled.code}: ${staleLine(settled.out)})`);
     assert(atlasAfter.status === "rejected" && atlasAfter.reviewed_at !== null && atlasAfter.review_note === settledNote,
            `…the row is rejected with the pass's marker note and reviewed_at set (${JSON.stringify(atlasAfter)})`);
@@ -5693,7 +5733,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     await rebuild(beaconNew);
     const replaced = await consolidate();
     const beaconAfter = await proposalRow(beacon.id);
-    assert(replaced.code === 0 && /stale proposals: 1 replaced in place — the conflict found again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
+    assert(replaced.code === 0 && /stale proposals: 1 replaced in place — proposed again/.test(replaced.out) && beaconAfter.status === "pending" && beaconAfter.review_note === null && (await lineageOf(beacon.id)).length === 1 && (await lineageOf(beacon.id))[0].fps[1] === beaconFp2,
            `a stale pair the pass finds in conflict again is replaced in place: pending, one lineage row at the moved text (exit ${replaced.code}: ${staleLine(replaced.out)}; ${JSON.stringify(beaconAfter)})`);
     // A later move under the pass-settled atlas row reopens it (067's arm), and the pass settles it again.
     await moveRaw(atlasNew, "Invoices for the atlas account: see the deploy calendar, second edit.");
@@ -5766,7 +5806,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const notRepooled = await consolidate();
     assert(notRepooled.code === 1 && !/re-pooled/.test(notRepooled.out) && !seen.some((p) => /cedar/.test(p.a + p.b)) && (await proposalRow(cedar.id)).status === "stale", "a run meanwhile leaves the failed thought to --retry-failed: no re-pool, no judge call on the pair");
     const retried = await consolidate("--retry-failed");
-    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
+    assert(retried.code === 0 && /stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\)/.test(retried.out) && (await proposalRow(cedar.id)).status === "rejected", `--retry-failed judges the pair again and the pass settles it (${staleLine(retried.out)})`);
     // The OLDER side without a vector waits too, and is not re-pooled every
     // run (first review pass, run-it: it was, with a judge call on the
     // thought's other pairs each time).
@@ -5822,7 +5862,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
            `a consolidate follower whose database is cut keeps running, says so, and resumes when it is back (alive ${aliveCut}; ${followOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     assert(followSettled && followCode === 0 && /\(1 more re-pooled for stale proposals\)/.test(followOut) && seen.length === 1,
            `the poll after the vector lands re-pools the thought and settles the row, one judge call in all (exit ${followCode}; ${followOut.split("\n").filter((l) => /pool:|stale proposals:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
-    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no conflict at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
+    assert(/^\s*stale proposals: 1 settled by the pass \(1 judged again with no proposal at the floor\) — distinct rows across the polls\s*$/m.test(followOut),
            `…and the summary counts the row once, settled, with no wait clause (${staleLine(followOut)})`);
     const cb = await consolidateBeats();
     const cv = cb.length === 1 ? JSON.parse(cb[0].value) : null;
@@ -6283,6 +6323,33 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       restorePauses();
     }
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+  }
+
+  // SMD-1873, review passes 2–4: a duplicate is judged and proposes nothing —
+  // here an agent's copy of the operator's thought, the case three passes
+  // found a way to turn into a takeover — and an answer in p3's words fails
+  // its thought, naming the word.
+  {
+    await sql`SELECT set_agent_kind('op-1873', 'operator')`;
+    await sql`SELECT set_agent_kind('bot-1873', 'agent')`;
+    const seedAs = async (key: string, content: string, axis: number, daysAgo: number, names: string[]) => {
+      const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor: { name: key, via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+      await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+      await sql`SELECT record_thought_entities(${id}::uuid, ${EXTRACT}, ${names.map((n) => ({ name: n, type: "topic", confidence: 0.9 }))}::jsonb, '[]'::jsonb, NULL, NULL)`;
+      return id;
+    };
+    const rotaOld = await seedAs("op-1873", "The on-call rota is weekly.", 11, 4, ["rota"]);
+    const rotaNew = await seedAs("bot-1873", "The rota for on-call runs weekly.", 11, 0, ["rota"]);
+    await seed("The relic note, the first.", 12, 4, ["relic"]);
+    const relicNew = await seed("The relic note, the second.", 12, 0, ["relic"]);
+    const kinds = (await sql`SELECT metadata->>'actor_kind' AS k FROM thoughts WHERE id IN (${rotaOld}::uuid, ${rotaNew}::uuid) ORDER BY created_at`).map((r: { k: string }) => r.k);
+    const run = await consolidate();
+    const rota = await sql`SELECT verdict FROM supersession_proposals WHERE older_id = ${rotaOld}::uuid AND newer_id = ${rotaNew}::uuid`;
+    assert(kinds.join() === "operator,agent" && rota.length === 0 && seen.some((p) => /on-call rota is weekly/.test(p.a) && /rota for on-call/.test(p.b)) && / 1 duplicate,/.test(run.out),
+           `a duplicate — an agent's copy of the operator's thought — is judged, counted, and proposes nothing (${kinds.join()}: ${JSON.stringify(rota)})`);
+    const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
+    assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
+           `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);
   }
 
   judge.stop(true);
@@ -10108,6 +10175,16 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await Bun.sleep(1500);
     const quiet = await row(fast.key);
     assert(quiet?.running === false && (quiet?.age ?? 0) >= 1, `the timer stops with the pass: nothing re-stamps after it (${JSON.stringify(quiet)})`);
+    // alive() re-stamps the row as it stands: idle outside a pass, running
+    // inside one, the outcome kept unless given (the sleep scheduler, SMD-1794).
+    await fast.alive();
+    const idle = await row(fast.key);
+    let inPass: { running?: boolean; outcome?: string } | null = null;
+    // The pass function runs as it is made, before during() marks the row inside a pass: it waits first.
+    await fast.during((async () => { await Bun.sleep(100); await fast.alive("failed"); inPass = await row(fast.key); })());
+    assert(idle?.running === false && (idle?.age ?? 9) < 1 && idle.outcome === "ok"
+           && (inPass as { running?: boolean } | null)?.running === true && (inPass as { outcome?: string } | null)?.outcome === "failed",
+      `alive() re-stamps the row, running only inside a pass, its outcome kept unless given (${JSON.stringify(idle)} → ${JSON.stringify(inPass)})`);
 
     // A role that cannot write: said once, the work goes on, said again only after a write succeeded.
     let failNow = true;
@@ -10182,6 +10259,358 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
+  }
+}
+
+console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
+{
+  // The suite's client closed at [24]; each section since opens its own.
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_entities`;
+  await sql`DELETE FROM query_log`;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+  const MODEL = "stub-sleep";
+  const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
+  await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+  /** Each model call, in order: an extraction or a judgement, and when it arrived. */
+  const modelCalls: { kind: "extract" | "judge"; at: number }[] = [];
+  let slow = 0;
+  /** Extraction calls only: a judge started beside extraction would judge before it ends. */
+  let slowExtract = 0;
+  /** Judge calls only: a wake with a judgement in hand. */
+  let slowJudge = 0;
+  /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
+  let missing = false;
+  /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
+  let unavailable = false;
+  /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
+  let badRequest = false;
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      const judging = /<thought_a>/.test(prompt);
+      if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
+      modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
+      if (slow) await Bun.sleep(slow);
+      if (!judging && slowExtract) await Bun.sleep(slowExtract);
+      if (judging && slowJudge) await Bun.sleep(slowJudge);
+      if (judging) {
+        const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
+        const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
+        const answer = /monthly/.test(a) && /annually/.test(b)
+          ? { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" }
+          : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
+        return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL };
+  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL"]) delete env[k];
+  await sql`SELECT set_agent_kind('sync-sleep', 'ingested')`;
+  await sql`SELECT set_agent_kind('op-sleep', 'operator')`;
+  const capture = async (content: string, key: string | null, daysAgo = 0, axis = 0) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, ...(key ? { actor: { name: key, via: "test-live" } } : {}) }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    if (daysAgo) await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const claims = async (job: string) =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${job} GROUP BY status`).map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+  const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const beat = async () => {
+    const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number } : null;
+  };
+  const lines: string[] = [];
+  const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
+    runSleep({ url: URL_!, env, quiet: 1, poll: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
+  try {
+    const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
+    const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
+    await capture("The deploy runs from main.", "op-sleep", 2, 1);
+    // The newer side already has entities (an earlier model's pass), the older
+    // none: judged before extraction reaches the older, the newer would find
+    // no candidate and its claim would end, the pair never judged.
+    await sql`SELECT record_thought_entities(${newer}::uuid, 'extract:earlier@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+
+    // --dry-run: the reading and the pools, nothing written.
+    lines.length = 0;
+    const dry = await sleepRun({ quiet: 300, dryRun: true });
+    const dryText = lines.join("\n");
+    assert(dry === 0 && /awake: a sleep would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
+      `--dry-run reads the brain awake, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /awake|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    // An empty query log is said: with OB1_QUERY_LOG off a search never wakes it.
+    // --poll past a minute is refused: the awake wait is at most a minute.
+    lines.length = 0;
+    const longPoll = await sleepRun({ poll: 61, dryRun: true });
+    assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
+      `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+
+    // One sleep: extraction alone, drained, then consolidation, then done.
+    lines.length = 0;
+    const auditBefore = await auditRows();
+    // Client sessions only: an autovacuum worker on the database is not a
+    // follower's; and a closed pool's connections take a moment to go.
+    const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
+    const sessionsBefore = await sessions();
+    slowExtract = 1500;
+    // Bounded: a sleep that never finds both pools drained would wait for ever.
+    const acOnce = new AbortController();
+    const onceRun = sleepRun({ signal: acOnce.signal });
+    const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
+    if (onceRace === "hung") { acOnce.abort(); await onceRun; }
+    const once = onceRace === "hung" ? -1 : onceRace;
+    slowExtract = 0;
+    await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
+    const sessionsAfter = await sessions();
+    const onceText = lines.join("\n");
+    const lastExtract = Math.max(...modelCalls.filter((c) => c.kind === "extract").map((c) => c.at));
+    const firstJudge = Math.min(...modelCalls.filter((c) => c.kind === "judge").map((c) => c.at));
+    const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
+    assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
+      `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s))`);
+    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /both pools drained — the sleep ends/.test(onceText),
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
+    const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
+    assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
+      `…writing nothing to thoughts.supersedes and no audit row — its own work cannot wake it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
+    assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
+
+    // --follow: a live read wakes it mid-call; the passes stop at once.
+    lines.length = 0;
+    for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
+    slow = 5000;
+    const ac = new AbortController();
+    const callsBefore = modelCalls.length;
+    const following = sleepRun({ follow: true, quiet: 3, signal: ac.signal, minStampEveryS: 1 });
+    await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
+    const asleepBeat = await beat();
+    const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    const wokenAt = Date.now();
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
+    await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
+    const wakeMs = Date.now() - wokenAt;
+    const awakeBeat = await beat();
+    assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
+      `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
+    // The thought the wake left goes to the back of the queue: claims are taken
+    // oldest first and the release keeps its place, so a thought longer than
+    // the sleeps would be every sleep's first (review pass 1).
+    const queueOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
+    const wakeLines = lines.join("\n");
+    assert(inHand?.id !== undefined && queueOrder.at(-1) === inHand.id && !/second signal|stopping after the current thought/.test(wakeLines),
+      `…the thought it held goes to the back of the queue, and no pass's line speaks of a signal (${queueOrder.indexOf(inHand?.id)} of ${queueOrder.length})`);
+    // Asleep again after the quiet, it extracts the backlog; a sync write
+    // (a key classified 'ingested') does not wake it, a live write does.
+    slow = 0;
+    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => /extraction drained/.test(l)), 30_000);
+    const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
+    const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
+    const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    await Bun.sleep(2500);
+    const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
+    await capture("A note typed by the operator.", "op-sleep", 0, 3);
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
+    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
+      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+    ac.abort();
+    const followCode = await following;
+    const endBeat = await beat();
+    const ownRows = Number((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key LIKE 'heartbeat:extract%' OR key LIKE 'heartbeat:consolidate%'`)[0].c);
+    assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
+      `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
+
+    // A capture whose transaction began before the sleep and commits after it
+    // is dated before the sleep: it still wakes it.
+    lines.length = 0;
+    const ac2 = new AbortController();
+    const late = sleepRun({ follow: true, quiet: 10, signal: ac2.signal });
+    const tx = await sql.reserve();
+    try {
+      await tx`BEGIN`;
+      await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
+      await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
+      await tx`COMMIT`;
+    } finally {
+      tx.release();
+    }
+    const lateWoke = await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 8_000);
+    ac2.abort();
+    await late;
+    assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+
+    // A pass refusing at its first start is the configuration's: the
+    // scheduler ends with its code, the row ended failed.
+    lines.length = 0;
+    missing = true;
+    // Bounded: a scheduler that misses the pass's end would wait for ever.
+    const acFirst = new AbortController();
+    const firstRun = sleepRun({ follow: true, signal: acFirst.signal, minStampEveryS: 1 });
+    const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
+    missing = false;
+    const firstBeat = await beat();
+    assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract ended by itself \(exit 2\)/.test(l)),
+      `a model not served at the first sleep's start ends --follow with 2, the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    // The provider refusing the request itself on the first pass — past the
+    // start's probe, before any pass finished — is the configuration's too:
+    // it ends the run, not a retry for ever (review pass 2).
+    lines.length = 0;
+    await capture("A note the model refuses to be asked about.", "sync-sleep", 0, 8);
+    badRequest = true;
+    const acBad = new AbortController();
+    const badRun = sleepRun({ follow: true, signal: acBad.signal, minStampEveryS: 1 });
+    const refusedMidPass = await Promise.race([badRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedMidPass === "hung") { acBad.abort(); await badRun; }
+    badRequest = false;
+    assert(refusedMidPass === 2 && lines.some((l) => /refuses the request itself/.test(l)) && !lines.some((l) => /tries it again/.test(l)),
+      `a 400 on the first pass ends --follow with 2, not retried (exit ${refusedMidPass})`);
+    // Woken while extraction waits at its start (the provider down, no pass
+    // begun), then refused at the next start: it never got past its start in
+    // this process, so the refusal is the configuration's (review pass 3).
+    lines.length = 0;
+    unavailable = true;
+    const acProbe = new AbortController();
+    const probeRun = sleepRun({ follow: true, signal: acProbe.signal, minStampEveryS: 1 });
+    await pollUntil(async () => lines.some((l) => /provider is not answering at start/.test(l)), 20_000);
+    await capture("A note that wakes it while it waits at the start.", "op-sleep", 0, 9);
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
+    unavailable = false;
+    missing = true;
+    const refusedNeverStarted = await Promise.race([probeRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+    if (refusedNeverStarted === "hung") { acProbe.abort(); await probeRun; }
+    missing = false;
+    assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)),
+      `woken while waiting at its start, then refused at the next: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted})`);
+    // A pass that throws (here its Writer, at its first line) rejects the
+    // scheduler with its error once the other pass stops, and leaves no
+    // unhandled rejection for the host (review pass 4).
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled++; };
+    process.on("unhandledRejection", onUnhandled);
+    const throwing = { out: (l: string) => { if (/\[extract\]\s+job:/.test(l)) throw new Error("the writer's stream is closed"); lines.push(l); }, err: (l: string) => { lines.push(l); } };
+    let thrownBy: unknown = null;
+    try {
+      const thrownRun = sleepRun({ follow: true, writer: throwing }).then(() => "returned" as const, (e: Error) => { thrownBy = e; return "rejected" as const; });
+      const thrownOutcome = await Promise.race([thrownRun, Bun.sleep(30_000).then(() => "hung" as const)]);
+      await Bun.sleep(500);
+      assert(thrownOutcome === "rejected" && /the writer's stream is closed/.test((thrownBy as Error | null)?.message ?? "") && unhandled === 0,
+        `a pass that throws rejects the scheduler with its error, and leaves no unhandled rejection (${thrownOutcome}; ${unhandled} unhandled)`);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    // The same refusal after the pass has run in this process — a model
+    // re-pulled, a credit top-up — is retried on the outage schedule, the row
+    // failed meanwhile, and the next sleep that runs puts it back to ok.
+    lines.length = 0;
+    // Two synced notes beside the March billing note: consolidation has pairs
+    // to judge once extraction drains, and a slow judge holds one in hand.
+    for (let i = 0; i < 2; i++) await capture(`A synced billing note, number ${i}.`, "sync-sleep", 0, 0);
+    slowJudge = 5000;
+    const ac3 = new AbortController();
+    let retryDone = false;
+    const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
+    await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+    await pollUntil(async () => (await claims(CO)).claimed === 1, 40_000);
+    const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
+    missing = true;
+    await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
+    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
+    slowJudge = 0;
+    const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
+    assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
+      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id)} of ${coOrder.length})`);
+    const laterBeat = await beat();
+    // Still refused at the next try: the wait doubles (5 s, then 10 s).
+    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
+    // Four seconds into the 10 s wait the row is fresh — re-stamped through
+    // the wait — not three of its 1 s intervals old (review pass 2).
+    await Bun.sleep(4000);
+    const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
+    const stillRunning = !retryDone;
+    missing = false;
+    const at = lines.length;
+    const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
+    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
+      `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
+    // A sleep that ran resets the schedule: the next refusal waits 5 s again.
+    missing = true;
+    const at2 = lines.length;
+    await capture("A note that wakes it before the model goes again.", "op-sleep", 0, 5);
+    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
+    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
+    missing = false;
+    const at3 = lines.length;
+    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
+    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain})`);
+
+    // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
+    // row reads failed while it does and ok once a pass runs again — the
+    // passes' words reach heartbeat:sleep.
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await capture(`A note an outage holds, number ${i}.`, "sync-sleep", 0, 6);
+    slow = 1500;
+    const restorePauses = shortenPauses();
+    try {
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 40_000);
+      unavailable = true;
+      const failedBeat = await pollUntil(async () => (await beat())?.outcome === "failed", 20_000);
+      unavailable = false;
+      slow = 0;
+      const okBeat = await pollUntil(async () => (await beat())?.outcome === "ok" && !(await claims(EX)).pending, 30_000);
+      assert(failedBeat && okBeat && !retryDone, `an outage mid-sleep reads failed on heartbeat:sleep while the follower waits, and ok once it passes (failed ${failedBeat}, ok ${okBeat})`);
+    } finally {
+      unavailable = false;
+      slow = 0;
+      restorePauses();
+    }
+    // A refusal mid-pass — the provider refusing the request itself — by a
+    // pass that has passed its start many times is still the configuration's:
+    // it ends --follow with 2, as it ends a follower, rather than a retry
+    // (review pass 3: "has run" counted a pass with its first claim in hand).
+    const atBad = lines.length;
+    badRequest = true;
+    await capture("A synced note the model refuses to be asked about.", "sync-sleep", 0, 10);
+    const midPassCode = await Promise.race([retrying, Bun.sleep(40_000).then(() => "hung" as const)]);
+    if (midPassCode === "hung") { ac3.abort(); await retrying; }
+    badRequest = false;
+    assert(midPassCode === 2 && !lines.slice(atBad).some((l) => /tries it again/.test(l)),
+      `a refusal mid-pass by a pass that has run ends --follow with 2, not a retry (exit ${midPassCode})`);
+
+    // The CLI, signalled twice while asleep with a call in hand: it exits 130
+    // at once, and the row reads ended, not running until it goes stale — the
+    // second stop ends it before stopOnSignals exits (review pass 2).
+    await capture("A note the CLI is asleep over.", "sync-sleep", 0, 7);
+    slow = 8000;
+    const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
+    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
+    try {
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 30_000);
+      cli.kill("SIGINT");
+      await Bun.sleep(300);
+      cli.kill("SIGINT");
+      const cliCode = await Promise.race([cli.exited, Bun.sleep(15_000).then(() => "hung" as const)]);
+      const cliBeat = await beat();
+      assert(cliCode === 130 && cliBeat?.ended === true && cliBeat.outcome === "stopped" && !(await claims(EX)).claimed,
+        `the CLI signalled twice while asleep exits 130 with its lease returned and heartbeat:sleep ended (exit ${cliCode}; ${JSON.stringify(cliBeat)})`);
+    } finally {
+      slow = 0;
+      cli.kill("SIGKILL");
+      await cli.exited;
+    }
+  } finally {
+    stub.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await sql`DELETE FROM query_log`;
+    await sql.close();
   }
 }
 

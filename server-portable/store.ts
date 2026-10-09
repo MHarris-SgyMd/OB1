@@ -649,13 +649,13 @@ export type CaptureResult = {
 
 /**
  * One row of migration 029's review queue, with both thoughts (SMD-1294): a
- * pair the consolidation pass judged to conflict, the judge's verdict on which
+ * pair the consolidation pass judged one to outdate or duplicate the other, the judge's verdict on which
  * is current, and where the review stands. `list_supersession_proposals`'s
  * shape, in one place for both stores.
  */
 export type SupersessionProposal = {
   id: string;
-  /** `stale` since migration 063: rebuild_derived found a text moved under a pending verdict; the next consolidation pass replaces the row when it finds the conflict again, a reviewer settles one it does not (SMD-1732). */
+  /** `stale` since migration 063: rebuild_derived found a text moved under a pending verdict; the next consolidation pass replaces the row when it proposes the pair again, and settles one it does not (SMD-1732). */
   status: "pending" | "accepted" | "rejected" | "stale";
   verdict: "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected";
   confidence: number;

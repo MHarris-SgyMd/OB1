@@ -950,7 +950,7 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   const [{ id: pid }] = await sql`
     SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.7, ${"A then B \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
   const listed = await call("list_supersession_proposals", {});
-  assert(/1 pending supersession proposal/.test(listed) && /conflict, direction not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
+  assert(/1 pending supersession proposal/.test(listed) && /one is out of date, which not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
   assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`) && !listed.includes("--force"),
          "…both ids, and the accept command with the direction placeholder the shell cannot parse, and no --force on a row neither edited nor on a lineage pair");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");

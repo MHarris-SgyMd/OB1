@@ -39,8 +39,8 @@ function ok(cond: boolean, msg: string): void {
 
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
-/** The engines, one more per SMD-2304 PR. */
-const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts"] as const;
+/** The engines, one more per SMD-2304 PR, and the sleep scheduler that drives two of them (SMD-1794). */
+const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts", "sleep.ts"] as const;
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};

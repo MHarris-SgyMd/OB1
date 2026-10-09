@@ -381,6 +381,70 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   assert(extract.model === META_MODEL, `…while the entity extractor's, on the same configuration, names OB1_METADATA_MODEL (${extract.model})`);
   assert(consolidateKey(split.judgeModel) !== consolidateKey(shared.judgeModel), "a judge-model change is a new pass key, so an earlier model's judgements are not reused as this one's");
   providerC.stop();
+
+  // SMD-1873: an endpoint that refuses `logprobs` with a 400 is asked again
+  // without it, once, and not asked with it again in this process.
+  const asked: boolean[] = [];
+  const strict = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      asked.push(body.logprobs === true);
+      if (body.logprobs) return Response.json({ error: { message: "Unrecognized request argument supplied: logprobs" } }, { status: 400 });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "related", supersedes: "unknown", confidence: 0.8, reason: "r" }) } }] });
+    },
+  });
+  const strictCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${strict.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const first = await judgePair(older, newer, strictCfg, undefined, undefined, { logprobs: 10 });
+  const second = await judgePair(older, newer, strictCfg, undefined, undefined, { logprobs: 10 });
+  assert(first.verdict === "related" && !first.malformed && !first.probabilities && second.verdict === "related",
+         "a judge call asking for logprobs from an endpoint that refuses them with a 400 still returns the judgement, without probabilities");
+  assert(JSON.stringify(asked) === JSON.stringify([true, false, false]), `…asked once with logprobs, then without, and without for the rest of the process (${JSON.stringify(asked)})`);
+  strict.stop();
+
+  // Review pass 1: a 400 the request gets with or without logprobs (a
+  // context-length overflow) is about the request, so the endpoint is still
+  // asked with logprobs next time; and any other status is no retry at all.
+  const seen: { logprobs: boolean; status: number }[] = [];
+  let status = 400;
+  const fussy = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      seen.push({ logprobs: body.logprobs === true, status });
+      return Response.json({ error: { message: "maximum context length exceeded" } }, { status });
+    },
+  });
+  const fussyCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${fussy.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const statusOf = (p: Promise<unknown>) => p.then(() => 0, (e) => (e as { status?: number }).status ?? -1);
+  assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400 && await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 400,
+         "a 400 the retry without logprobs gets too is the caller's error, twice");
+  assert(JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true, false, true, false]), `…and the second call still asks with logprobs: one overflowing pair does not move the rest of the pass onto the written number (${JSON.stringify(seen)})`);
+  // Review pass 3: a 422 is retried as a 400 — text-generation-inference's
+  // answer to a top_logprobs past its limit — and remembered once the retry answers.
+  const tgi: boolean[] = [];
+  const tgiServer = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { logprobs?: boolean };
+      tgi.push(body.logprobs === true);
+      if (body.logprobs) return Response.json({ error: "Input validation error: top_n_tokens must be <= 5" }, { status: 422 });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "related", supersedes: "unknown", confidence: 0.8, reason: "r" }) } }] });
+    },
+  });
+  const tgiCfg = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${tgiServer.port}/v1`, OB1_METADATA_MODEL: META_MODEL });
+  const viaTgi = await judgePair(older, newer, tgiCfg, undefined, undefined, { logprobs: 10 });
+  await judgePair(older, newer, tgiCfg, undefined, undefined, { logprobs: 10 });
+  const otherModel = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${tgiServer.port}/v1`, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "another-judge" });
+  await judgePair(older, newer, otherModel, undefined, undefined, { logprobs: 10 });
+  assert(viaTgi.verdict === "related" && JSON.stringify(tgi) === JSON.stringify([true, false, false, true, false]),
+         `a 422 refusing logprobs is retried without them and remembered — for that model, not for another judge on the same endpoint (${JSON.stringify(tgi)})`);
+  tgiServer.stop();
+  seen.length = 0;
+  status = 503;
+  assert(await statusOf(judgePair(older, newer, fussyCfg, undefined, undefined, { logprobs: 10 })) === 503 && JSON.stringify(seen.map((x) => x.logprobs)) === JSON.stringify([true]),
+         "a 503 is not retried without logprobs: only a 400 can be the field refused");
+  fussy.stop();
 }
 
 console.log("\n[10] A long thought is extracted in windows of the metadata model's size, each call budgeted, and the windows' answers merged (SMD-1879)");
@@ -400,6 +464,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let prose = false;
   /** Set, a window whose text it matches is answered in prose, and the others as usual (SMD-2260). */
   let proseIf: RegExp | null = null;
+  /** Set, every answer is held this long after the request is counted (the hard stop, SMD-1794). */
+  let holdMs = 0;
   const providerD = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -409,6 +475,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       const part = /^\[Part [^\]]*\]/.exec(inner)?.[0];
       const text = part ? inner.slice(part.length).trimStart() : inner;
       reqs.push({ text, maxTokens: body.max_tokens, part });
+      if (holdMs) await Bun.sleep(holdMs);
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
       if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
       // The subject "Open Brain" is in every window; each window also names one
@@ -687,11 +754,18 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const { RUNAWAY_PENALTY, RUNAWAY_REPEATS, TOKEN_REPEATS, REPEAT_UNIT_MAX, repeatedTail, callsMadeBy } = await import("./entities.ts");
   let runawayOnce = false;
   const penalties: (number | undefined)[] = [];
+  /** Set, the penalised retry is held this long, and `onRetry` told as it arrives (the hard stop, SMD-1794). */
+  let holdRetryMs = 0;
+  let onRetry: (() => void) | null = null;
   const providerE = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
       penalties.push(body.frequency_penalty);
+      if (body.frequency_penalty !== undefined && holdRetryMs) {
+        onRetry?.();
+        await Bun.sleep(holdRetryMs);
+      }
       if (runawayOnce && body.frequency_penalty === undefined) {
         runawayOnce = false;
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -718,6 +792,21 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   penalties.length = 0;
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+  // The hard stop reaches the retry too (SMD-1794): a stop while the penalised
+  // retry is in hand aborts it, not after its 3 s answer.
+  penalties.length = 0;
+  runawayOnce = true;
+  holdRetryMs = 3000;
+  const retryStop = new AbortController();
+  onRetry = () => { setTimeout(() => retryStop.abort(), 200); };
+  const retryAt = Date.now();
+  let retryErr: unknown = null;
+  try { await extractEntities(short, cfgE, undefined, { kind: "extraction" }, undefined, retryStop.signal); } catch (e) { retryErr = e; }
+  const retryMs = Date.now() - retryAt;
+  holdRetryMs = 0;
+  onRetry = null;
+  assert(retryErr !== null && retryMs < 1500 && penalties.length === 2 && callsMadeBy(retryErr) === 2,
+    `a stop during the runaway's retry aborts it, not after its answer (${retryMs} ms, ${penalties.length} call(s) sent, ${callsMadeBy(retryErr)} counted)`);
 
   // SMD-2000: with OB1_EXTRACT_ESCALATE_MODEL set, a runaway is remade on the
   // LARGER model with no penalty — not once more on the same model under one —
@@ -1250,6 +1339,28 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let refused = "";
   try { await extractEntities(long, cfgWide, undefined, { kind: "extraction" }); } catch (e) { refused = (e as Error).message; }
   assert(/input too long/.test(refused), "under a 1200-token window the 1,320-token thought is two calls or refused — the stub refused one over 700, so the windowing is what [10] measures, not the stub's leniency");
+
+  // The claim worker's hard stop (SMD-1794): a stop aborts the window in hand
+  // and sends no other; one already aborted sends nothing, and counts no call.
+  const { callsMadeBy: madeBy } = await import("./entities.ts");
+  const stopped = new AbortController();
+  stopped.abort();
+  reqs.length = 0;
+  let early: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stopped.signal); } catch (e) { early = e; }
+  assert(early !== null && reqs.length === 0 && madeBy(early) === 0,
+         `a stop already aborted sends no window and counts no call (${reqs.length} sent, ${madeBy(early)} counted)`);
+  holdMs = 3000;
+  reqs.length = 0;
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 200);
+  const stopAt = Date.now();
+  let midStop: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stop.signal); } catch (e) { midStop = e; }
+  const stopMs = Date.now() - stopAt;
+  holdMs = 0;
+  assert(midStop !== null && stopMs < 1500 && reqs.length === 1 && madeBy(midStop) === 1,
+         `a stop during the first of a long thought's windows aborts that call, not after its 3 s answer, and sends no other window (${stopMs} ms, ${reqs.length} sent, ${madeBy(midStop)} counted)`);
   providerD.stop();
 }
 
