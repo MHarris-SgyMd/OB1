@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -152,6 +152,13 @@ jobs:
       - name: The REST core's routes and authorization
         working-directory: server-portable
         run: bun test-rest.ts
+
+      # Plugins in the contract (SMD-2310) over a stub core: the manifests,
+      # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
+      # whoami and MCP tools/list behind the scope gate, and ctx.call's gate.
+      - name: Plugins in the contract
+        working-directory: server-portable
+        run: bun test-plugins.ts
 
       # Pure logic — the alias table, title truncation, citation URLs. No database
       # and no provider, so it runs in the fast job rather than the Postgres one.
