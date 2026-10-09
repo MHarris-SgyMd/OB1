@@ -2390,7 +2390,7 @@ jobs:
             if [ "$status" = absent ]; then why="compose finds no container for it"; else
               back "$s" || why="not running and healthy within 2 minutes"
               [ "$policy" = unless-stopped ] || why="${why:+$why; }its restart policy is $policy, not unless-stopped"
-              [ "$at" -ge "$t0" ] || why="${why:+$why; }it started before the restart, so the daemon kept it running"
+              if [ "$status" = running ] && [ "$at" -lt "$t0" ]; then why="${why:+$why; }it started before the restart, so the daemon kept it running"; fi
             fi
             if [ -n "$why" ]; then
               docker compose -f compose.yaml ps -a || true
