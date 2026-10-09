@@ -68,7 +68,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
 import { abandonedRequestLine, mcpReply, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
-import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1296,11 +1296,11 @@ for (const t of TEXT_ONLY) {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
   // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
   // demanded of the image or the core server.
-  const stack = Object.entries(pkg).filter(([name]) => PACKAGES.test(name));
+  const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
   const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
     const drift = stack.filter(([name, version]) => deps[name] !== version);
-    const extra = exact ? Object.keys(deps).filter((name) => !PACKAGES.test(name)) : [];
+    const extra = exact ? Object.keys(deps).filter((name) => !STACK.includes(name)) : [];
     assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}the MCP stack extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not one of the stack`)].join(", ")})` : ""}`);
   };
   hold("integrations/kubernetes-deployment/package.json", JSON.parse(readFileSync(join(ROOT, "integrations/kubernetes-deployment/package.json"), "utf8")).dependencies as Record<string, string>, true);

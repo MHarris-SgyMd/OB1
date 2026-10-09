@@ -599,8 +599,6 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
  * added here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
-/** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
-export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
 
 /**
  * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
