@@ -1540,6 +1540,8 @@ export type StoreEnv = {
   DATABASE_URL?: string;
   /** "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
   OB1_STORE?: string;
+  /** The password of the login role plugins' SQL runs on (db/config.mjs's PLUGIN_LOGIN_ROLE, SMD-2310); unset, a plugin's tables are refused. */
+  OB1_PLUGIN_DB_PASSWORD?: string;
 };
 
 /** What an unset OB1_STORE selects. */
@@ -1654,7 +1656,8 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
       throw new Error(`${problem}. ${fix}`);
     }
     const { SqlStore } = await import("./store-sql.ts");
-    return new SqlStore(conn.url);
+    // Plugins' SQL logs in as the plugin login role (SMD-2310), never as this connection's role.
+    return new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD });
   }
 
   if (kind === "postgrest") {
