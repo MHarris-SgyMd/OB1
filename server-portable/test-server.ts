@@ -1040,6 +1040,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
   const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
   assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  // The sleep scheduler's row (SMD-1794): read as board-sync's is, with no job.
+  const slept = parseHeartbeats([
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true }), at, age_s: 30 },
+    { key: "heartbeat:sleep:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, job: "x" }), at, age_s: 1 },
+  ]);
+  assert(slept.heartbeats.length === 1 && slept.ignored === 2 && slept.heartbeats[0].worker === "sleep" && slept.heartbeats[0].job === null && slept.heartbeats[0].running === true,
+    `heartbeat:sleep is read with no job, and one carrying a job, in its key or its value, is not (${slept.heartbeats.length}, ${slept.ignored})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
