@@ -524,7 +524,15 @@ async function selfCheck(): Promise<number> {
       `build ${JSON.stringify(auth.build)}, networks ${JSON.stringify(doc.networks)}, joined ${JSON.stringify(auth.networks)}, volume ${JSON.stringify(doc.volumes?.["auth-data"])}`,
     );
     expect("compose: its one mount is the auth-data volume at /data", JSON.stringify(auth.volumes) === '["auth-data:/data"]' && JSON.stringify(auth.tmpfs) === '["/tmp"]' && "auth-data" in (doc.volumes ?? {}));
-    const keys = ["build", "cap_drop", "environment", "healthcheck", "init", "networks", "profiles", "read_only", "restart", "security_opt", "tmpfs", "volumes"];
+    // Its log, bounded as every service's is (SMD-1849): compose.yaml's
+    // x-logging, the json-file driver with a max-size and a max-file — a
+    // driver option, not a mount or a privilege.
+    expect(
+      "compose: its log is the stack's x-logging bound",
+      auth.logging !== undefined && JSON.stringify(auth.logging) === JSON.stringify(doc["x-logging"]) && doc["x-logging"]?.driver === "json-file",
+      JSON.stringify(auth.logging),
+    );
+    const keys = ["build", "cap_drop", "environment", "healthcheck", "init", "logging", "networks", "profiles", "read_only", "restart", "security_opt", "tmpfs", "volumes"];
     const extra = Object.keys(auth).filter((k) => !keys.includes(k));
     const missing = keys.filter((k) => !Object.hasOwn(auth, k));
     expect("compose: the service sets these keys and no other (no user, mount, pid, privilege or host entry beside them)", !extra.length && !missing.length, `added ${extra.join(", ") || "none"}; missing ${missing.join(", ") || "none"} — a new key is a decision: add it to this list with the reason`);
