@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -152,6 +152,13 @@ jobs:
       - name: The REST core's routes and authorization
         working-directory: server-portable
         run: bun test-rest.ts
+
+      # Plugins in the contract (SMD-2310) over a stub core: the manifests,
+      # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
+      # whoami and MCP tools/list behind the scope gate, and ctx.call's gate.
+      - name: Plugins in the contract
+        working-directory: server-portable
+        run: bun test-plugins.ts
 
       # Pure logic — the alias table, title truncation, citation URLs. No database
       # and no provider, so it runs in the fast job rather than the Postgres one.
@@ -654,6 +661,15 @@ jobs:
       - name: The REST core agrees with MCP
         working-directory: server-portable
         run: bun test-rest-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # A plugin's tables (SMD-2310): the migrator's plugin ledger, the plugin
+      # role's boundary (its own schema, none of the core's tables), the
+      # example plugin's operations through both servers, preflight's row.
+      - name: Plugin tables, their ledger and their role
+        working-directory: server-portable
+        run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
@@ -1231,35 +1247,44 @@ jobs:
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
 
-      # SMD-2658. check-fork-consistency's checks 27 and 28 hold each route
-      # table as Bun.YAML reads its file, and what each file may set on the
-      # proxy; this holds what compose makes of the files together, which no
-      # Bun.YAML read can (a `!override`, a merge). compose.yaml's own proxy
-      # reads its routes from one file provider directory, with no command (a
-      # command makes Traefik drop every TRAEFIK_* setting, measured on the
-      # pin), volume or other provider; the rest of it is its reviewers'. Then
-      # for each overlay named with -f (compose.canary.yaml under the canary's
-      # project name), and the three-brain stack, the proxy as compose renders
-      # it is compose.yaml's, key for key — image, environment, user, hooks,
-      # secrets, hosts — but for its mounts, its labels and its depends_on,
-      # and it mounts exactly the held tables, each copied into its label and
-      # equal, by cmp, to its file's as Bun.YAML reads it; and the overlays
-      # leave the project's name and the networks the proxy joins as the first
-      # file alone defines them, under the same -p — compose's reading, not
-      # Bun.YAML's, so a key Bun.YAML reads otherwise (`!!binary`, review pass
-      # 5) cannot hide a renamed mesh. Each holds with variables substituted
-      # and again with none (--no-interpolate), so a value that matches under
-      # CI's settings and moves under an operator's fails (pass 6), the
-      # tables' text included (pass 7). No config is defined but the held
-      # tables, each its content and name alone, so an overlay cannot leave a
-      # table for a file order CI does not render to pick up (pass 7) — an
-      # unmounted one shows only in the --no-interpolate render, since compose
-      # drops it from a substituted one. The release's generated overlay is a
-      # combination too, in a rehearsal's form and a tag's; release.yml holds
-      # the overlay a release ships. Review pass 1 mounted a second route
-      # file from an overlay, and pass 2 got keys past the list of forbidden
-      # keys pass 1 added. A compose file here that no combination renders
-      # fails the step, so a new overlay gets one.
+      # SMD-2658, SMD-2685. check-fork-consistency's checks 27 and 28 hold
+      # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
+      # proxy, what each overlay declares it sets, the keys compose.yaml's
+      # services set, and who joins which network under which names. This
+      # holds that compose reads each file so, and what compose makes of the
+      # files together, which no Bun.YAML read can (a `!override`, a merge).
+      # compose.yaml's own proxy reads its routes from one file provider
+      # directory, with no command (a command makes Traefik drop every
+      # TRAEFIK_* setting, measured on the pin), volume or other provider.
+      # Then for each -f combination (compose.canary.yaml under the canary's
+      # project name, the three-brain stack, the release's overlay):
+      # - compose renders it exactly as it renders Bun.YAML's reading of each
+      #   file, so a character, a tag or a number the two read apart
+      #   (`!!binary`, !reset, U+2028, 012) fails here whichever file carries
+      #   it (SMD-2685; the release's overlay, which the checker does not
+      #   read, aside);
+      # - it defines no profile compose.yaml lacks, since every profile is on
+      #   in each render and a service under a new one would be in none;
+      # - the render is compose.yaml's alone, under the same profiles and -p,
+      #   but for what its overlays declare (`declared`, check 28's OVERLAYS),
+      #   the proxy and the configs — so an alias, a service, a network by a
+      #   second key, a `pid:` any overlay adds fails here (SMD-2685), no two
+      #   networks share a name, and no two mappings publish on one host
+      #   address and port, where the first to bind takes the other's clients;
+      # - the proxy is compose.yaml's, key for key, but for its mounts, labels
+      #   and depends_on, and mounts exactly the held tables, each copied into
+      #   its label and equal, by cmp, to its file's as Bun.YAML reads it;
+      # - no config is defined but the held tables, each its content and name
+      #   alone, so no overlay leaves a table for a file order CI does not
+      #   render to pick up (SMD-2658's pass 7) — an unmounted one shows only
+      #   in the --no-interpolate render, since compose drops it from a
+      #   substituted one.
+      # Each holds with variables substituted and again with none
+      # (--no-interpolate), so a value that matches under CI's settings and
+      # moves under an operator's fails (pass 6), the tables' text included
+      # (pass 7). release.yml holds the overlay a release actually ships. A
+      # compose file here that no combination renders fails the step, so a
+      # new overlay gets one.
       - name: The proxy loads only the held route tables
         working-directory: deploy
         run: |
@@ -1271,38 +1296,75 @@ jobs:
           jq -e '([.command, .entrypoint, .volumes, .volumes_from, .env_file] | all(. == null))
             and ([.environment | keys[] | select(startswith("TRAEFIK_PROVIDERS"))] == ["TRAEFIK_PROVIDERS_FILE_DIRECTORY"])
             and .environment.TRAEFIK_PROVIDERS_FILE_DIRECTORY == "/etc/traefik/dynamic"' <<<"$base" >/dev/null
+          # What each overlay may change in a render, as jq paths, beside the
+          # proxy and the configs (held below): check 28's OVERLAYS. The
+          # canary's network and aliases are held by value in "Every published
+          # port binds loopback"; the ports by it and by check 13.
+          declared() {
+            case "$1" in
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml) ;;
+              compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' ;;
+              compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
+              # The release's: an image and its pull policy, on any service but the proxy.
+              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
+              *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
+            esac
+          }
           # proxy_loads WANT ARGS...: WANT is [{source, target, label, file}].
           # Each file named with -f is kept in `rendered`, held to the
           # directory's compose files at the end.
           rendered=()
+          trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold. Labels are held on the substituted
           # render alone: --no-interpolate leaves two files' labels a list.
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           held='. as $r | .services.proxy as $p
-            | ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
+            | def rest: del(.services.proxy, .configs) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
+            ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
             and (($r.configs // {}) | keys) == ([$want[].source] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
-            and $r.name == $alone.name
-            and all($p.networks | keys[]; $r.networks[.] == $alone.networks[.])'
+            and ($r | rest) == ($alone | rest)
+            and ([$r.networks[].name] | length == (unique | length))
+            and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
           proxy_loads() {
-            local want="$1" render raw alone row r prev="" first="" project=()
+            local want="$1" render raw alone row r paths prev="" first="" project=() only=() twins=()
             shift
+            paths=""
             for a in "$@"; do
-              if [ "$prev" = -f ]; then rendered+=("$a"); if [ -z "$first" ]; then first="$a"; fi; fi
+              if [ "$prev" = -f ]; then
+                rendered+=("$a")
+                paths+="$(declared "$a")"$'\n'
+                if [ -z "$first" ]; then first="$a"; fi
+                # Bun.YAML's reading of the file, which checks 27 and 28 hold; the release's overlay is read by none.
+                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else
+                  bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
+                  twins+=(".bun-view.$a.json")
+                fi
+              else twins+=("$a"); fi
               if [ "$prev" = -p ]; then project=(-p "$a"); fi
+              case "$a" in --profile=*) only+=("$a") ;; esac
               prev="$a"
             done
+            paths="$(jq -sc . <<<"$paths")"
+            # Every profile is on in each render, so a service under a profile
+            # the first file lacks would be in none of them (SMD-2685 review pass 1).
+            [ "$(docker compose "$@" config --profiles)" = "$(docker compose "${project[@]}" -f "$first" config --profiles)" ] \
+              || { echo "$*: a profile $first alone does not define, under which a service would go unrendered here" >&2; return 1; }
             render="$(docker compose "$@" config --format json)"
-            alone="$(docker compose "${project[@]}" -f "$first" config --format json)"
-            jq -e --argjson want "$want" --argjson base "$base" --argjson alone "$alone" "$labelled" <<<"$render" >/dev/null
+            [ "$(docker compose "${twins[@]}" config --format json)" = "$render" ] || { echo "compose reads $* otherwise than Bun.YAML does" >&2; return 1; }
+            alone="$(docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json)"
+            jq -e --argjson want "$want" --argjson base "$base" --argjson alone "$alone" --argjson declared "$paths" "$labelled" <<<"$render" >/dev/null \
+              || { echo "$*: the render is not compose.yaml's alone but for what its overlays declare, or its proxy and tables are not the held ones" >&2; return 1; }
             # The same, with no variable substituted: a value that matched under
             # CI's settings and moved under an operator's (pass 6) differs here.
             raw="$(docker compose "$@" config --no-interpolate --format json)"
-            alone="$(docker compose "${project[@]}" -f "$first" config --no-interpolate --format json)"
-            jq -e --argjson want "$want" --argjson base "$base_raw" --argjson alone "$alone" "$held" <<<"$raw" >/dev/null
+            [ "$(docker compose "${twins[@]}" config --no-interpolate --format json)" = "$raw" ] || { echo "compose reads $* otherwise than Bun.YAML does, with no variable substituted" >&2; return 1; }
+            alone="$(docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json)"
+            jq -e --argjson want "$want" --argjson base "$base_raw" --argjson alone "$alone" --argjson declared "$paths" "$held" <<<"$raw" >/dev/null \
+              || { echo "$*: the same, with no variable substituted" >&2; return 1; }
             while read -r row; do
               for r in "$render" "$raw"; do
                 cmp <(jq -j --arg s "$(jq -r .source <<<"$row")" '.configs[$s].content' <<<"$r") \
@@ -1318,12 +1380,11 @@ jobs:
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
           CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
-          proxy_loads "[$tiers]" -f compose.tiers.yaml --profile local-models
+          proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
           # cut). release.yml holds the overlay a release actually ships.
-          trap 'rm -f compose.release.yaml' EXIT
           for mode in rehearsal tag; do
             if [ "$mode" = rehearsal ]; then
               bun ../scripts/release-artifacts.ts compose --rehearsal --owner "$GITHUB_REPOSITORY_OWNER" --ollama-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 > compose.release.yaml
@@ -1333,7 +1394,7 @@ jobs:
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
           done
-          files="$(printf '%s\n' * | grep -iE '^(docker-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
+          files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
 
@@ -1772,7 +1833,7 @@ jobs:
           [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
           [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
 
-      # SMD-2038, SMD-2294. The canary's life beside this stack, in three `up`s.
+      # SMD-2038, SMD-2294. The canary's life beside this stack, in four `up`s.
       # canary.sh runs compose.yaml again as the project open-brain-canary:
       # its Postgres, a refresh from this stack's through tier.sh on both
       # networks, its server and REST core built from this checkout, then the
@@ -1789,7 +1850,10 @@ jobs:
       #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
       #   serves another model: the thought put on stable just before it
       #   reaches the canary, and the smoke fails on the 50% floor.
-      # - A third `up`, back on stable's origin: the canary's proxy is removed,
+      # - A third `up`, on the same port with a connector at its root: named
+      #   as on the deprecated root, not as one the canary no longer answers,
+      #   and the root answers 200 with a Deprecation header (SMD-2661).
+      # - A fourth `up`, back on stable's origin: the canary's proxy is removed,
       #   8011 is free, and a connector left at the old URL is named.
       # - Then teardown:
       #   - `down --volumes` is refused on a canary stamped working;
@@ -1852,6 +1916,16 @@ jobs:
           [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          # A connector at the root of the canary's own port is not lost: the
+          # proxy's legacy route still hands a POST there to the canary,
+          # deprecated, until v2.0.0 (SMD-2532), and `up` says so (SMD-2661).
+          FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --port 8011 --no-smoke | tee /tmp/canary-root.out
+          grep -F 'connector open-brain-canary points at http://127.0.0.1:8011/?…, the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --port 8011 --connect' /tmp/canary-root.out
+          if grep -F 'no longer answers' /tmp/canary-root.out; then echo "up called the canary's root URL one it no longer answers" >&2; exit 1; fi
+          root_h=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            http://127.0.0.1:8011/ | tr -d '\r')
+          { grep -q '^HTTP/[0-9.]* 200' <<<"$root_h" && grep -qi '^deprecation: ' <<<"$root_h"; } || { echo "the canary's root did not answer 200 with a Deprecation header: $(head -n 1 <<<"$root_h")" >&2; exit 1; }
           # Back on stable's origin, the way a canary stood up before SMD-2294
           # moves over: its own proxy goes, its port is free, and a connector
           # left at the old URL is named.
@@ -1977,6 +2051,11 @@ jobs:
           grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" || { echo "the server did not name the capture key for its POST /?key= at the root:" >&2; grep 'old root URL' <<<"$SLOG" >&2; exit 1; }
           if grep -qF 'key "ci-read" reached' <<<"$SLOG"; then echo "a marker the client set on /mcp or /health reached the server and was logged" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
+          # The server's JSON lines for a thought_stats call so far (SMD-1849),
+          # so the absolute-form probe's own line is counted below, not an
+          # earlier call's.
+          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+\}$'
+          stats_before=$(docker compose -f compose.yaml logs --no-color --no-log-prefix server | grep -cE "$STATS_LINE" || true)
           # Answered by the server, so Traefik took the absolute form and logged it:
           # a refusal before the log would leave the userinfo half untested.
           code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
@@ -1986,6 +2065,14 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
           if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
           grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
+          # The server's own line per request (SMD-1849): the absolute-form
+          # probe's tool call above, by its tool, its key's name, how it ended
+          # and its time — and the key it carried in ?key= nowhere in the log.
+          SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$SLOG"; then echo "the server's log holds the smoke key" >&2; exit 1; fi
+          stats_after=$(grep -cE "$STATS_LINE" <<<"$SLOG" || true)
+          [ "$stats_after" -eq $((stats_before + 1)) ] \
+            || { echo "the absolute-form probe's thought_stats call left $((stats_after - stats_before)) JSON lines, not one, so the absence of the key proves nothing:" >&2; grep '^{"ts"' <<<"$SLOG" | tail -5 >&2; exit 1; }
           touch /tmp/provider-stub-slow-embed
           trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
           python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'
@@ -2040,7 +2127,7 @@ jobs:
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
-          grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes

@@ -3,14 +3,20 @@
 # Built from the REPO ROOT, not server-portable/ — see deploy/compose.yaml. The
 # server needs db/config.mjs, which a narrower context cannot reach.
 FROM oven/bun:1.4.0-alpine AS deps
-WORKDIR /app
+WORKDIR /app/server-portable
 COPY server-portable/package.json server-portable/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
+# The image keeps the checkout's layout under /app — server-portable/, db/,
+# plugins/ and releases.json side by side — so every relative import resolves
+# as it does in a checkout: the server's ../db/config.mjs, and a plugin's
+# ../../server-portable/plugin-sdk.ts, through which it reaches zod in
+# server-portable's node_modules (SMD-2310; before, the server sat at /app and
+# db/ at /db, which a plugin's import could not mirror).
 FROM oven/bun:1.4.0-alpine
-WORKDIR /app
+WORKDIR /app/server-portable
 ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/server-portable/node_modules ./node_modules
 # Copy every source file rather than naming them. An explicit list silently broke
 # the image when auth.ts was added — the container crashlooped on a missing module.
 # .dockerignore keeps tests and tooling out.
@@ -18,15 +24,17 @@ COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/shims ./shims
 COPY server-portable/core ./core
 COPY server-portable/rest ./rest
-# The embedding contract and the version helpers, both imported by preflight.ts.
-# Kept at ../db/ inside the image so the import path is identical in the container
-# and in a checkout; releases.json at their parent's parent, where version.mjs
-# resolves it, so preflight's "migrations applied beyond the version the brain
-# names" warning reads the release ranges as they stood at this build's commit
-# (SMD-1860 — before, the image carried none, and in a container that warning
-# could never fire).
-COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
-COPY releases.json /releases.json
+# Every plugin in the tree (SMD-2310): the registry imports each by name, and
+# OB1_PLUGINS picks which run. Tests stay out (.dockerignore).
+COPY plugins /app/plugins
+# The embedding contract and the version helpers, both imported by preflight.ts,
+# at ../db/ as in a checkout; releases.json at their parent's parent, where
+# version.mjs resolves it, so preflight's "migrations applied beyond the
+# version the brain names" warning reads the release ranges as they stood at
+# this build's commit (SMD-1860 — before, the image carried none, and in a
+# container that warning could never fire).
+COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /app/db/
+COPY releases.json /app/releases.json
 
 # The commit this image was built from, reported by brain_info and the keyed
 # /health body (SMD-2041). A build arg baked into the environment: compose
@@ -82,12 +90,12 @@ USER bun
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
 CMD ["index.ts"]
 
-# Liveness only — the MCP server's. The MCP endpoint requires auth, so a probe
-# cannot exercise a real tool; an unauthenticated POST returns HTTP 200 with a
-# JSON-RPC -32001 envelope, which proves the process is serving and leaks
-# nothing. The REST core answers that POST 405; its service names its own
-# check, a GET of its /health (deploy/compose.yaml). Readiness — is the
-# database actually reachable — is the entrypoint's job, above.
+# Liveness only: a keyless GET of /health, which both servers answer 200 with
+# no key, no store and nothing about the brain. Not a POST to the MCP
+# endpoint, as before: that was an unauthenticated request every 30 s, which
+# the server's request log (SMD-1849, telemetry.ts) would write as a refusal —
+# half the log, as the REST core's liveness was before it was left out there;
+# the REST core answered it 404 besides. Readiness — is the database actually
+# reachable — is the entrypoint's job, above.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- --post-data='{}' --header='Content-Type: application/json' \
-      http://127.0.0.1:${PORT:-8000}/ >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:${PORT:-8000}/health >/dev/null || exit 1

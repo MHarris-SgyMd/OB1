@@ -12,7 +12,7 @@
 # Never ship dependency trees — the image installs its own from bun.lock.
 **/node_modules
 
-# Everything outside the two directories the image actually needs.
+# Everything outside the directories the images actually need (db/, server-portable/, plugins/).
 recipes
 dashboards
 integrations
