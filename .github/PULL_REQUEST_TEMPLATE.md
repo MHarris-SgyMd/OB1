@@ -24,5 +24,6 @@
 - [ ] My `metadata.json` has all required fields
 - [ ] If my contribution depends on a skill or primitive, I declared it in metadata.json and linked it in the README
 - [ ] I tested this on my own Open Brain instance
-- [ ] If this ships a server, it runs under `bun <file>` and is reached by URL, and its tests import it (no stdio server, no `claude_desktop_config.json`)
+- [ ] If this adds operations to the brain, it is a plugin (`plugins/<name>/`), with no server or keys of its own and no database connection but the one the brain gives it, and check 31 passes
+- [ ] If this changes a vendored server still to port, it runs under `bun <file>` and is reached by URL, and its tests import it (no stdio server, no `claude_desktop_config.json`)
 - [ ] No credentials, API keys, or secrets are included
