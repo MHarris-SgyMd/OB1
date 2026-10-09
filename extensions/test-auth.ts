@@ -230,11 +230,17 @@ for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.
 // configured — the clean "past the gate" signal this test wants; the shell's
 // keys must not reach them. The servers read their access keys per request, so
 // they can be set and unset from here; the rest is read once, at import.
-for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
+for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "EMBEDDING_API_BASE", "CHAT_API_BASE", "OB1_LLM_TIMEOUT"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own; the last three, kubernetes-deployment's provider (below)
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.DB_PASSWORD = "stub";
+// kubernetes-deployment's provider and database, read at import (SMD-2692 review pass 3): the
+// provider at its defaults (unset above), which the cases below name, its deadline left to the
+// cases; and its database on a port nothing listens on, so no case writes to a Postgres the
+// shell happens to have on 5432.
+process.env.DB_HOST = "127.0.0.1";
+process.env.DB_PORT = "1";
 process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
@@ -568,7 +574,7 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
     } finally {
       upload.stop(true);
     }
-    // At the ceiling a vendored stream says so in its own line: no OB1_LLM_TIMEOUT bounds its provider calls (review pass 3).
+    // At the ceiling a vendored stream says so in its own line, which names no OB1_LLM_TIMEOUT: only kubernetes-deployment reads it (SMD-2692; review pass 3).
     warned.length = 0;
     const silent = new Response(new ReadableStream({ async start(ctl) { await Bun.sleep(300); ctl.close(); } }), { headers: { "content-type": "text/event-stream" } });
     await withSseKeepalive(silent, { intervalMs: 20, maxMs: 100, label: "tools/call slow_one", stalledLine: vendoredStalledLine }).text();
@@ -576,6 +582,177 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
       `a stall is logged in the line given, which names no core-only bound (${warned[0]?.slice(0, 120)})`);
   } finally {
     console.warn = realWarn;
+  }
+}
+
+// ── A provider that fails or never answers ───────────────────────────────────
+//
+// SMD-2692: kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, as
+// the core server's do. The provider is a real server, and the server's fetch
+// reaches it with its init as given, so the deadline under test is the real
+// fetch's signal. search_thoughts' embedding stalls or fails each way, and the
+// tool fails naming the knob or the fault. capture_thought's chat call fails
+// each way the core's extractMetadata names: each is logged, and the capture
+// goes on to its write without tags. Here the write is refused, the database
+// being on a closed port (set above), and a control capture whose tags arrive
+// shows which answer the refusal gives. Until then Bun's 300 s fetch cut was
+// the only bound, and SMD-2001's keepalive let a client sit through it.
+console.log(`\n[${K8S.file}: provider calls end at OB1_LLM_TIMEOUT, and each failure is named or falls back (SMD-2692)]`);
+{
+  const handler = handlers[SERVERS.indexOf(K8S)];
+  assert(handler !== undefined, "the module imported above");
+  const k8sSource = readFileSync(join(ROOT, K8S.file), "utf8");
+  const embedSource = readFileSync(join(ROOT, "server-portable/embed.ts"), "utf8");
+  for (const name of ["DEFAULT_LLM_TIMEOUT_S", "PROVIDER_ERROR_CHARS"]) {
+    const own = new RegExp(`\\nconst ${name} = (\\d+);`).exec(k8sSource)?.[1];
+    const core = new RegExp(`\\nexport const ${name} = (\\d+);`).exec(embedSource)?.[1];
+    assert(own !== undefined && own === core, `its ${name} is the core server's (${own}, embed.ts ${core})`);
+  }
+  // The startup warning (review pass 6), on a second import made under each value: one the
+  // deadline cannot use is said, one it can is not.
+  for (const [value, warns] of [["300s", true], ["Infinity", true], ["2.5", false]] as const) {
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    process.env.OB1_LLM_TIMEOUT = value;
+    try {
+      await import(`${join(ROOT, K8S.file)}?timeout=${encodeURIComponent(value)}`);
+    } finally {
+      delete process.env.OB1_LLM_TIMEOUT;
+      console.warn = realWarn;
+    }
+    const said = warned.filter((l) => l.startsWith(`OB1_LLM_TIMEOUT="${value}" is not a positive number of seconds`));
+    assert(said.length === (warns ? 1 : 0), `OB1_LLM_TIMEOUT=${value} at start is ${warns ? "said once" : "taken without a word"} (${said.length} lines)`);
+  }
+  if (handler) {
+    env(K8S, KEYS);
+    const realFetch = globalThis.fetch;
+    const enc = new TextEncoder();
+    const choice = (content: unknown) => Response.json({ choices: [{ message: { content } }] });
+    /** The chat endpoint's answers, by case, each a capture's; `tags` is the control. */
+    const CHAT: Record<string, () => Response | Promise<Response>> = {
+      tags: () => choice(JSON.stringify({ topics: ["x"], type: "idea", metadata_extraction_failed: "provider_timeout" })),
+      stall: () => new Promise<Response>(() => {}),
+      "502": () => new Response("model not found", { status: 502 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      reset: () => new Response("served by `cut` below"),
+      empty: () => Response.json({ error: { message: "rate limited" } }),
+      prose: () => choice("here are your tags: none"),
+      array: () => choice("[1, 2]"),
+    };
+    const stalled = (status: number, start: string) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(enc.encode(start)); } }), { status, headers: { "content-type": "application/json" } });
+    /** The embedding endpoint's answers, by case: each but `ok` is a search's; every capture's embedding is `ok`. */
+    const EMBED: Record<string, () => Response> = {
+      stall: () => stalled(200, '{"data":'),
+      "503 stalled": () => stalled(503, '{"error":'),
+      "503": () => new Response("x".repeat(2_000), { status: 503 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      empty: () => Response.json({ data: [] }),
+      "a vector of nothing": () => Response.json({ data: [{ embedding: [] }] }),
+      "a vector of strings": () => Response.json({ data: [{ embedding: ["0.1"] }] }),
+      ok: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+    };
+    let embed = "stall";
+    let chat = "stall";
+    const provider = Bun.serve({
+      port: 0,
+      fetch(req) {
+        return new URL(req.url).pathname === "/embeddings" ? EMBED[embed]() : CHAT[chat]();
+      },
+    });
+    // A body cut off: 200 and a length of 100, six bytes, and the socket closed, so the body read rejects (review pass 2).
+    const cut = Bun.listen<{ answered: boolean }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(s) { s.data = { answered: false }; },
+        data(s) {
+          if (s.data.answered) return;
+          s.data.answered = true;
+          s.write('HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"choi');
+          s.end();
+        },
+      },
+    });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const to = /\/(embeddings|chat\/completions)$/.exec(url);
+      const port = to?.[1] === "chat/completions" && chat === "reset" ? cut.port : provider.port;
+      return realFetch(to ? `http://127.0.0.1:${port}/${to[1]}` : input, init);
+    }) as typeof fetch;
+    type Outcome = { ms: number; lines: string[]; error: string };
+    /** One tool call: its error text, the extractor's log lines, and how long it took; given up on at 8 s, so a call with no deadline fails here rather than hanging the suite. */
+    const tool = async (key: string, id: number, name: string, args: Record<string, string>): Promise<Outcome> => {
+      const t0 = performance.now();
+      const req = new Request("http://extension.test/mcp", { method: "POST", headers: { ...RPC, "x-access-key": key },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) });
+      const logged: string[] = [];
+      const realError = console.error;
+      console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), new Promise<null>((res) => { timer = setTimeout(() => res(null), 8_000); })]);
+        return { ms: performance.now() - t0, lines: logged.filter((l) => l.startsWith("extractMetadata: ")),
+          error: reply?.json?.result?.isError === true ? String(reply.json.result.content?.[0]?.text) : `no error reply (${reply ? reply.text.slice(0, 80) : "none in 8 s"})` };
+      } finally {
+        clearTimeout(timer);
+        console.error = realError;
+      }
+    };
+    process.env.OB1_LLM_TIMEOUT = "2";
+    const searches: Record<string, Outcome> = {};
+    const captures: Record<string, Outcome> = {};
+    try {
+      let id = 60;
+      for (const name of Object.keys(EMBED).filter((n) => n !== "ok")) {
+        embed = name;
+        searches[name] = await tool(READ_KEY, id++, "search_thoughts", { query: `a query whose embedding is ${name}` });
+      }
+      embed = "ok";
+      for (const name of Object.keys(CHAT)) {
+        chat = name;
+        captures[name] = await tool(WRITE_KEY, id++, "capture_thought", { content: `a thought whose chat answer is ${name}` });
+      }
+    } finally {
+      delete process.env.OB1_LLM_TIMEOUT;
+      globalThis.fetch = realFetch;
+      provider.stop(true);
+      cut.stop(true);
+    }
+    const BASE = "https://openrouter.ai/api/v1";
+    const embedWhy: Record<string, string> = {
+      stall: `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "503 stalled": `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "503": `Error: Embeddings request to ${BASE} failed: 503 ${"x".repeat(500)}`,
+      html: `Error: Embeddings request to ${BASE} answered a body that is not JSON`,
+      empty: `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of nothing": `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of strings": `Error: Embeddings request to ${BASE} answered no embedding`,
+    };
+    for (const [name, error] of Object.entries(embedWhy)) {
+      assert(searches[name].error === error, `an embedding answered ${name} fails search_thoughts saying so (${searches[name].error.slice(0, 100)})`);
+    }
+    const stalls = [searches.stall.ms, searches["503 stalled"].ms];
+    assert(stalls.every((ms) => ms >= 1_900 && ms < 6_000), `…the two whose bodies stall at the deadline (${stalls.map(Math.round).join(", ")} ms)`);
+    const control = captures.tags;
+    // Its answer is the database's refusal, not a provider's, so a capture that matches it reached the write (review pass 4).
+    assert(control.lines.length === 0 && /Failed to connect|ECONNREFUSED|connection refused/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),
+      `the control: a capture whose tags arrive logs nothing from the extractor, and its write is refused by the closed database port ("${control.error.slice(0, 60)}")`);
+    const why: Record<string, string> = {
+      stall: `Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "502": `Chat completion request to ${BASE} failed: 502 model not found`,
+      html: `Chat completion request to ${BASE} answered a body that is not JSON`,
+      reset: `Chat completion request to ${BASE} answered a body that is not JSON`, // empty, the read having failed
+      empty: "provider response had no message content",
+      prose: "model content was not valid JSON",
+      array: "model returned JSON that is not an object",
+    };
+    for (const [name, line] of Object.entries(why)) {
+      const c = captures[name];
+      assert(c.lines.join() === `extractMetadata: ${line}` && c.error === control.error,
+        `a chat answer that is ${name} is logged ("${c.lines.join(" / ")}"), and the capture goes on to the control's write (${c.error === control.error ? "the same answer" : c.error.slice(0, 80)})`);
+    }
+    assert(captures.stall.ms >= 1_900 && captures.stall.ms < 6_000, `…the stalled one at the deadline (${Math.round(captures.stall.ms)} ms)`);
   }
 }
 
