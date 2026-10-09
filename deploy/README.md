@@ -437,9 +437,11 @@ docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
 - **What a hook may do.** It runs as `hook:<plugin>`, a caller of capture
   scope alone: it may add a thought, and the audit row names it as the writer,
   but nothing it is sent can read, change or delete one.
-- **The request.** Its body is read whole up to 1 MiB (past that, 413) and
-  handed to the handler raw, since a signature is over the bytes. It takes
-  POST alone.
+- **The request.** Its body is counted as it arrives and cut at 1 MiB (413),
+  chunked or not, and handed to the handler as the bytes sent, since a
+  signature is over the bytes. It takes POST alone. A plugin with no secret
+  set is answered 503 before its handler runs, and a handler's fault is
+  `FAILED` to the sender, its message in the REST core's log alone.
 - **The proxy.** It deletes `x-brain-forwarder` on the way in, as `/api`'s
   route does.
 - **No rate limit.** Nothing limits the rate of deliveries: a sender that

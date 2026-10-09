@@ -301,7 +301,7 @@ export function hookPrincipal(plugin: string): Principal {
  * sender reads and a JSON object body. A handler that answers otherwise is
  * the plugin's fault, thrown.
  */
-export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string | undefined; track?: CallOptions["track"] }, request: HookRequest): Promise<HookAnswer> {
+export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"] }, request: HookRequest): Promise<HookAnswer> {
   const ctx = contextFor(hook.plugin, { core: deps.core, principal: hookPrincipal(hook.plugin), track: deps.track });
   const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret }, request);
   if (!answer || !HOOK_STATUSES.has(answer.status)) throw new Error(`${hook.path} answered status ${answer?.status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);

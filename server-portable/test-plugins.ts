@@ -506,8 +506,9 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(r.status === 401, "an unsigned delivery: 401");
   r = await deliver(on, "{not json", { "x-example-signature": hmacSha256Hex(SECRET, "{not json") });
   assert(r.status === 400, "a signed body that is not JSON: 400");
+  calls.length = 0;
   r = await deliver(hookApp("example", undefined), body, signed);
-  assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED", "no secret for the plugin: the handler refuses, 503");
+  assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED" && calls.length === 0, "no secret for the plugin: the REST core refuses, 503, and the handler never runs");
   r = await deliver(hookApp(undefined, `example=${SECRET}`), body, signed);
   assert(r.status === 404 && calls.length === 0, "OB1_HOOKS unset: the webhook is no route, whatever is sent");
   r = await deliver(on, body, signed, "/hooks/example/nothing");
@@ -520,15 +521,30 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
   r = await deliver(on, body, signed);
   assert(r.status === 422 && ((await r.json()) as { refused?: string }).refused === "REFUSED", "the core refusing the capture: the plugin's 422, naming the core's code");
-  answer = async () => { throw new Error("store down"); };
+  answer = async () => { throw new Error("store down at secret-host:5432"); };
+  lines.length = 0;
   r = await deliver(on, body, signed);
-  assert(r.status === 500 && ((await r.json()) as { code?: string }).code === "FAILED", "a fault: 500 FAILED");
+  const fault = (await r.json()) as Record<string, unknown>;
+  assert(r.status === 500 && fault.code === "FAILED" && !JSON.stringify(fault).includes("secret-host"), `a fault: 500 FAILED, and nothing of why to the anonymous sender (${JSON.stringify(fault)})`);
+  assert(lines.some((l) => l.includes("api hook /hooks/example/capture fault: store down at secret-host:5432")), "the message goes to the REST core's log");
+  // A chunked body with no length, past the limit: cut as it arrives, never read whole.
+  let pulled = 0;
+  const chunk = new Uint8Array(64 * 1024).fill(32);
+  const stream = new ReadableStream<Uint8Array>({ pull(controller) { pulled++; if (pulled > 64) controller.close(); else controller.enqueue(chunk); } });
+  calls.length = 0;
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: stream, headers: { "x-example-signature": "x" }, duplex: "half" } as RequestInit));
+  assert(r.status === 413 && pulled <= 20 && calls.length === 0, `a chunked body past 1 MiB: 413, cut after ${pulled} of 64 chunks, and the handler never ran`);
+  // The bytes as sent: a BOM-prefixed body the sender signed verifies.
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(body)]);
+  answer = async () => coreOk({ id: "t-bom" });
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", "x-example-signature": hmacSha256Hex(SECRET, bom) } }));
+  assert(r.status === 202, `a body signed over its bytes, BOM and all, verifies (${r.status})`);
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
     hooks: { teapot: { description: "Answers a status no sender reads.", handler: async () => ({ status: 418 as never }) }, list: { description: "Answers an array.", handler: async () => ({ status: 200, body: [] as never }) } } });
   const oddApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, track: (run) => run(), log: () => {},
-    plugins: () => loadPlugins("probe-kit", [odd]), hooks: () => ({ hooks: enabledHooks(loadPlugins("probe-kit", [odd]), "probe-kit"), secrets: new Map() }) });
+    plugins: () => loadPlugins("probe-kit", [odd]), hooks: () => ({ hooks: enabledHooks(loadPlugins("probe-kit", [odd]), "probe-kit"), secrets: new Map([["probe-kit", "s"]]) }) });
   r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/teapot", { method: "POST", body: "{}" }));
   assert(r.status === 500, "a hook answering a status no sender reads is the plugin's fault: 500");
   r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/list", { method: "POST", body: "{}" }));

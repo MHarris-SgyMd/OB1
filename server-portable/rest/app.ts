@@ -45,6 +45,28 @@ export interface RestDeps {
 /** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
 export const HOOK_BODY_LIMIT = 1024 * 1024;
 
+/** A request's body as bytes, read until `limit` and no further: null, the stream cancelled, past it. */
+async function boundedBody(req: Request, limit: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
+}
+
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
 const RETRY_AFTER_SECONDS = 2;
 const RETRY_AFTER = { "Retry-After": String(RETRY_AFTER_SECONDS) };
@@ -404,19 +426,28 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     c.set("template", hook.path);
     if (c.req.method !== "POST") return refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
-    const declared = Number(c.req.header("content-length") ?? "0");
-    if (declared > HOOK_BODY_LIMIT) return c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
-    const body = await c.req.text();
-    if (Buffer.byteLength(body) > HOOK_BODY_LIMIT) return c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    // No secret, nothing to verify a delivery against: refused here, whatever the handler would do (PR 4 review pass 1).
+    const secret = served.secrets.get(hook.plugin);
+    if (!secret) return c.json({ code: "HOOK_NOT_CONFIGURED", retryable: false }, 503);
+    const tooLarge = () => c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    if (Number(c.req.header("content-length") ?? "0") > HOOK_BODY_LIMIT) return tooLarge();
+    // Read with a running count and cut at the limit: a chunked body declares
+    // no length, and reading it whole first let an anonymous sender fill the
+    // server's memory (PR 4 review pass 1). Kept as bytes — a signature is
+    // over what was sent, which decoding would change (a BOM, invalid UTF-8).
+    const body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
+    if (body === null) return tooLarge();
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((value, name) => { headers[name.toLowerCase()] = value; });
     const query: Record<string, string> = {};
     for (const [k, v] of queryOf(c.req.url)) query[k] = v;
     let answer;
     try {
-      answer = await runHook(hook, { core: deps.core, secret: served.secrets.get(hook.plugin), track: deps.track }, { headers, query, body });
+      answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
-      return c.json(failure(err), 500);
+      // The sender is anonymous: it is told FAILED and nothing of why; the operator's log has the message.
+      log(`api hook ${hook.path} fault: ${failure(err).message}`);
+      return c.json({ code: "FAILED", retryable: false }, 500);
     }
     if (answer.status === 204) return c.body(null, 204);
     return c.json(answer.body ?? {}, answer.status);

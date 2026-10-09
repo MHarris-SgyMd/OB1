@@ -110,8 +110,12 @@ export interface PluginManifest {
   hooks?: Record<string, PluginHook>;
 }
 
-/** An inbound webhook's request: its headers (names lower-cased), its query and its raw body, at most 1 MiB. */
-export type HookRequest = { headers: Readonly<Record<string, string>>; query: Readonly<Record<string, string>>; body: string };
+/**
+ * An inbound webhook's request: its headers (names lower-cased), its query,
+ * its body as the bytes the sender sent (at most 1 MiB) — what a signature is
+ * over — and the same bytes read as UTF-8 text, for parsing.
+ */
+export type HookRequest = { headers: Readonly<Record<string, string>>; query: Readonly<Record<string, string>>; body: Uint8Array; text: string };
 
 /** A webhook's answer to its sender: a status, and a JSON body if it has one. */
 export type HookAnswer = { status: 200 | 202 | 204 | 400 | 401 | 403 | 404 | 409 | 413 | 422 | 503; body?: Record<string, unknown> };
@@ -125,8 +129,8 @@ export interface HookContext {
    */
   call: PluginContext["call"];
   readonly db: PluginContext["db"];
-  /** The secret OB1_HOOK_SECRETS gives this plugin, or undefined: a handler with none to verify against refuses (503). */
-  readonly secret: string | undefined;
+  /** The secret OB1_HOOK_SECRETS gives this plugin: always set — with none, the REST core answers 503 and never calls the handler. */
+  readonly secret: string;
 }
 
 export interface PluginHook {
@@ -134,8 +138,8 @@ export interface PluginHook {
   handler(ctx: HookContext, request: HookRequest): Promise<HookAnswer>;
 }
 
-/** HMAC-SHA256 of `data` under `key`, as lower-case hex — the signature most webhook senders send. */
-export function hmacSha256Hex(key: string, data: string): string {
+/** HMAC-SHA256 of `data` (the body's bytes, or text) under `key`, as lower-case hex — the signature most webhook senders send. */
+export function hmacSha256Hex(key: string, data: Uint8Array | string): string {
   return createHmac("sha256", key).update(data).digest("hex");
 }
 

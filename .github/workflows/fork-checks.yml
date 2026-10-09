@@ -1966,7 +1966,9 @@ jobs:
       # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
       # plugin is turned on for this step alone — the migrator, recreated with
       # the REST core, applies its table as ob1_plugins, and the REST core's
-      # preflight finds it in place — then off again, so every other step sees
+      # preflight finds it in place; the proxy is recreated with --no-deps, so
+      # the MCP server, whose environment the knobs change too, is left as it
+      # was — then off again, so every other step sees
       # the plugin-free stack it expects (smoke.sh holds tools/list to the
       # manifest). With the overlay off /hooks is the proxy's 404; on, a
       # delivery signed with another secret is the plugin's 401 and a signed
@@ -1987,11 +1989,11 @@ jobs:
           post() { code -X POST -H 'content-type: application/json' "$@"; }
           c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
           [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(post -H "x-example-signature: $(printf %s "$BODY" | openssl dgst -sha256 -hmac other -hex | sed 's/^.* //')" -d "$BODY" "$B/hooks/example/capture")
           [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
           c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
-          id=$(jq -r '.id // empty' /tmp/hook-body)
+          id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
           { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
           fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
           grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
@@ -2000,7 +2002,8 @@ jobs:
           c=$(code "$B/hooks/example/capture")
           [ "$c" = 405 ] || { echo "a GET of the webhook answered $c, not 405" >&2; exit 1; }
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
-          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api proxy
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
           [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
 

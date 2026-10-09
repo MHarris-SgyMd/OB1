@@ -23,12 +23,12 @@ export default definePlugin({
     capture: {
       description: "Captures the delivery's text as a thought of trust ingested, when its signature matches the secret OB1_HOOK_SECRETS gives the example.",
       async handler(ctx, request) {
-        if (!ctx.secret) return { status: 503, body: { code: "HOOK_NOT_CONFIGURED", retryable: false } };
+        // The signature is over the bytes sent; the REST core has refused already if no secret is set.
         const signature = request.headers["x-example-signature"] ?? "";
         if (!safeEqual(signature, hmacSha256Hex(ctx.secret, request.body))) return { status: 401, body: { code: "BAD_SIGNATURE", retryable: false } };
         let text: unknown;
         try {
-          text = (JSON.parse(request.body) as { text?: unknown }).text;
+          text = (JSON.parse(request.text) as { text?: unknown }).text;
         } catch {
           return { status: 400, body: { code: "NOT_JSON", retryable: false } };
         }

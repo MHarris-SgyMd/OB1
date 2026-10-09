@@ -39,9 +39,9 @@ A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned b
 A capture source (Slack, Telegram, Readwise) needs an endpoint its service can POST to, and that service holds no brain key. A plugin declares each such endpoint as a hook:
 
 - **Where.** The REST core serves it at `/hooks/<plugin>/<name>`, but only for a plugin the operator names in `OB1_HOOKS` (also enabled in `OB1_PLUGINS`). The proxy reaches it only with `deploy/compose.hooks-public.yaml`, so a webhook is off unless the operator turns on both.
-- **The handler** is given the request's headers, query and raw body (at most 1 MiB, POST alone) and the secret `OB1_HOOK_SECRETS` gives its plugin. It verifies the delivery itself: `hmacSha256Hex` and `safeEqual` from the SDK cover the common HMAC signature, and a handler with no secret to check against refuses (503).
+- **The handler** is given the request's headers, query, its body as the bytes sent (at most 1 MiB, counted as they arrive; POST alone) and as UTF-8 text, and the secret `OB1_HOOK_SECRETS` gives its plugin. It verifies the delivery itself, over the bytes: `hmacSha256Hex` and `safeEqual` from the SDK cover the common HMAC signature. With no secret set for the plugin, the REST core answers 503 and never calls the handler.
 - **What it may do.** It runs as `hook:<plugin>`, a caller of capture scope alone. Through `ctx.call` it can add a thought, written as the hook on its audit row, but nothing a sender posts can read, change or delete one. It reaches its plugin's own tables through `ctx.db` as an operation does.
-- **Its answer** is a status a sender reads (200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503) and an optional JSON object body.
+- **Its answer** is a status a sender reads (200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503) and an optional JSON object body. A handler that throws is answered `FAILED` with nothing of why — the sender is anonymous — and the message goes to the REST core's log.
 
 The example's `capture` hook is the template ([example/README.md](example/README.md)).
 
