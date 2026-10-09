@@ -2055,6 +2055,69 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(scopeOf(merged.s) === "capture" && scopeOf(ws) === null, `…the capture key's capture row says its scope, the write key's says none (${JSON.stringify(marks)})`);
   }
 
+  // [13f] SMD-2664's repro: the capture key, classified agent, labels a text
+  // outside text; the operator's key captures the same text after it. The
+  // row's stamp moves to the operator (migration 083): it is found under
+  // min_trust agent and carries no outside-text notice.
+  {
+    await sql`SELECT set_agent_kind('session-hook', 'agent')`;
+    await sql`SELECT set_agent_kind('op-key', 'operator')`;
+    const K = captureAs(CAPTURE_KEY);
+    const T = "[13f] smd2664probe a page the hook labels outside text and the operator sends too";
+    const kept = await K({ content: T, trust: "ingested" });
+    assert(kept.result?.isError !== true, `[13f] setup: the capture key captures the text as outside text (${textOf(kept).split("\n")[0].slice(0, 80)})`);
+    const control = idIn(await call("capture_thought", { content: "[13f] smd2664probe the operator's own note" }, "op-raw"));
+    const stampOf = async () => (await sql`SELECT id::text AS id, metadata->>'actor_kind' AS kind, metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE content = ${T}`)[0] as { id: string; kind: string; name: string; trust: string };
+    const before = await stampOf();
+    const hidden = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    assert(`${before.kind}/${before.name}/${before.trust}` === "agent/session-hook/ingested" && !hidden.includes(before.id) && hidden.includes(control!),
+      `before the writer's capture the row is the capture key's outside text, and min_trust agent leaves it out (${before.kind}/${before.name}/${before.trust})`);
+    const landed = idIn(await call("capture_thought", { content: T, metadata: { project: "smd-2664" } }, "op-raw"));
+    const after = await stampOf();
+    assert(landed === before.id && `${after.kind}/${after.name}/${after.trust}` === "operator/op-key/operator",
+      `the operator's capture of the same text lands on the row and moves its stamp to the operator (${after.kind}/${after.name}/${after.trust})`);
+    const [ev] = await sql`SELECT actor_name, trust FROM thought_audit WHERE thought_id = ${before.id}::uuid AND diff ? 'restamped'`;
+    assert(ev?.actor_name === "op-key" && ev?.trust === "operator", `…recorded as a restamp event in the operator's name (${JSON.stringify(ev)})`);
+    const shown = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    const block = shown.split("--- Result ").find((b) => b.includes(T)) ?? "";
+    assert(shown.includes(before.id) && shown.includes(control!) && block.includes("By: op-key (operator) · trust operator\n") && !block.includes(INGESTED_NOTICE),
+      `…so min_trust agent finds it beside the control, labelled the operator's and without the outside-text notice (${block.replace(/\n/g, " ⏎ ").slice(0, 200)})`);
+    // The capture key sending it again keeps the row (080): the stamp stays the operator's.
+    await K({ content: T, trust: "ingested" });
+    const again = await stampOf();
+    assert(`${again.kind}/${again.name}/${again.trust}` === "operator/op-key/operator", `the capture key's re-capture after it moves nothing — 080's keep: the store never calls the restamp for it (${again.kind}/${again.name}/${again.trust})`);
+    // Only a capture-only key's stamp yields: the operator's own outside-text
+    // label stands when an agent key sends the same text (review pass 1).
+    await sql`SELECT set_agent_kind('bot-key', 'agent')`;
+    const OWN = "[13f] smd2664probe a page the operator labels outside text itself";
+    const own = idIn(await call("capture_thought", { content: OWN, trust: "ingested" }, "op-raw"));
+    const resent = idIn(await call("capture_thought", { content: OWN }, "bot-raw"));
+    const [ownStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${own}::uuid`;
+    const stillHidden = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    assert(resent === own && ownStamp?.name === "op-key" && ownStamp?.trust === "ingested" && !stillHidden.includes(own!),
+      `…the operator's own ingested label stands when an agent key re-sends the text, and min_trust agent still leaves it out (${JSON.stringify(ownStamp)})`);
+    // The first key that can read settles the capture key's row: the
+    // operator's equal re-capture of the hook's outside text leaves it, and an
+    // agent key re-sending it after moves nothing (review pass 2).
+    const SETTLED = "[13f] smd2664probe a page the hook and then the operator label outside text";
+    await K({ content: SETTLED, trust: "ingested" });
+    const settled = idIn(await call("capture_thought", { content: SETTLED, trust: "ingested" }, "op-raw"));
+    const botLanded = idIn(await call("capture_thought", { content: SETTLED }, "bot-raw"));
+    const [settledStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${settled}::uuid`;
+    assert(botLanded === settled && settledStamp?.name === "session-hook" && settledStamp?.trust === "ingested",
+      `…and once the operator's equal re-capture settled the hook's row, an agent key's re-send after it lands there and moves nothing (${JSON.stringify(settledStamp)})`);
+    // A key nobody classified can never move the stamp, so its landing first
+    // settles nothing — 082 notes it, which is not what settles (review pass 3).
+    const UNCLASSIFIED = "[13f] smd2664probe a page the hook labels and an unclassified key re-sends first";
+    await K({ content: UNCLASSIFIED, trust: "ingested" });
+    const uncLanded = idIn(await call("capture_thought", { content: UNCLASSIFIED }));  // the legacy key, which no one classifies
+    const opLanded = idIn(await call("capture_thought", { content: UNCLASSIFIED }, "op-raw"));
+    const [uncStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust,
+        (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${uncLanded}::uuid AND diff ? 'recaptured') AS notes FROM thoughts WHERE id = ${uncLanded}::uuid`;
+    assert(opLanded === uncLanded && uncStamp?.notes === 1 && uncStamp?.name === "op-key" && uncStamp?.trust === "operator",
+      `…an unclassified key landing first (noted by 082) settles nothing: the operator after it moves the stamp (${JSON.stringify(uncStamp)})`);
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).

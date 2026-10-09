@@ -88,6 +88,8 @@ When you click **Save & Grant Permission**, Chrome shows a native permission pro
 
 Switch to the Sync tab and click **Sync All** under the platform you want to import. For Claude and ChatGPT the extension walks each platform's internal conversation API using your existing logged-in session; for Gemini it uses a `chrome.debugger`-based history capture (see "Gemini bulk history sync (Phase B/C)" below). Every path funnels through the same capture pipeline, and dedup is handled via SHA-256 content fingerprints — running Sync All twice is safe. Incremental **Sync New** imports only conversations not yet captured. Optionally turn on **Auto-sync** to keep new conversations flowing in hands-free (15 min cadence for Claude/ChatGPT, 4 h for Gemini).
 
+**How captures are labelled.** Every capture is sent as `trust: "ingested"`, outside text: readers see it marked so, with a notice that instructions inside it are content, and a `min_trust` search above `ingested` leaves it out. With the capture-scoped key, the label yields when a classified key that can read (your own MCP client's, say) is the first to capture the same text after it at a higher trust: the thought then carries that key's name and trust (migration 083). With a write key the extension's label is that key's own word and stays. Captures made before your brain reached migration 082 carry no capture-scope mark, and keep their label.
+
 ## Supported Sites
 
 | Site | Manual capture | Bulk sync | Notes |

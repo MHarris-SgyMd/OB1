@@ -632,7 +632,7 @@ export class SqlStore implements ThoughtStore {
             ${opts.embedding ? toVector(opts.embedding) : null}::vector
           ) AS r`;
 
-    const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;
+    const r = rows[0]?.r as { id?: string; fingerprint?: unknown; existed?: unknown; supersedes?: unknown } | undefined;
     const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
     // 082: a key that can read landed on a row that already held the text —
@@ -645,6 +645,17 @@ export class SqlStore implements ThoughtStore {
     if (r?.existed === true && opts.recapture !== "keep") {
       try {
         await this.sql`SELECT ob1_note_recapture(${id}::uuid, ${actorPayload(opts.actor)}::jsonb)`;
+      } catch (e) {
+        if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
+      }
+    }
+    // 083: and when the row's stamp is still a capture-only key's, at a trust
+    // above it, the stamp moves to this key (SMD-2664) — the trust this write
+    // declares, checked against the text it captured. Made the way the note
+    // is made, and after it, so a restamp that fails never holds up the note.
+    if (r?.existed === true && opts.recapture !== "keep") {
+      try {
+        await this.sql`SELECT ob1_restamp_recapture(${id}::uuid, ${typeof r.fingerprint === "string" ? r.fingerprint : null}::text, ${actorPayload(opts.actor)}::jsonb, ${opts.event?.trust ?? null}::text)`;
       } catch (e) {
         if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
       }

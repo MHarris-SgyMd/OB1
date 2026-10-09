@@ -696,7 +696,11 @@ function renderChange(c: AuditChange, n: number): string {
   // only change is the marks — 050's two, 073's trust — is "marked", the
   // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
-  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
+  // 083's two events (SMD-2664): a key that can read re-captured a capture-only
+  // key's text and was weighed against its label — moved to it, or kept.
+  const restamped = c.action === "update" && c.changed.includes("restamped");
+  const declined = c.action === "update" && c.changed.includes("restamp_declined");
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (restamped || declined ? "re-captured" : marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
   const text = c.head === null ? null : snipText(c.head, 200);
@@ -706,7 +710,12 @@ function renderChange(c: AuditChange, n: number): string {
   // is in its delete row, not gone (both caught: cold-read, pass 1).
   if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
   if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
-  if (c.action === "update") {
+  if (restamped) {
+    const keys = c.metadataKeys.filter((k) => ACTOR_MARKS.has(k));
+    lines.push(`   the capture-only key's label moved to this key${keys.length ? ` (metadata: ${keys.join(", ")})` : ""}`);
+  } else if (declined) {
+    lines.push("   the capture-only key's label kept: this key's trust is not higher, and no other key's re-capture will move it");
+  } else if (c.action === "update") {
     const parts: string[] = [];
     if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
     // 050 stamps the two marks into metadata whenever the content moves under
