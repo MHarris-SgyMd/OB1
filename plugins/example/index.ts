@@ -31,7 +31,9 @@ export default definePlugin({
   // the time and the body — x-example-timestamp, Unix seconds, and
   // x-example-signature, the hex HMAC-SHA256 of "<timestamp>.<body>" — so a
   // recorded delivery verifies for five minutes, not forever, and inside them
-  // its id runs it once (SMD-2755).
+  // its id runs it once (SMD-2755). Its 4xx answers suit a sender that reads
+  // them; one that retries anything but a 2xx is answered a 2xx for what is
+  // not captured (plugins/README.md).
   hooks: {
     capture: {
       description: "Captures the delivery's text as a thought of trust ingested, when it is signed with the secret OB1_HOOK_SECRETS gives the example within five minutes; a delivery whose id it has seen is answered with that thought and runs nothing.",

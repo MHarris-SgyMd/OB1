@@ -14,7 +14,7 @@ import type { Scope } from "./auth.ts";
 import type { ToolName } from "./tools.ts";
 import type { CoreAnswer } from "./core/calls.ts";
 import type { SPECS } from "./core/schemas.ts";
-import type { PluginSql } from "./store.ts";
+import { UUID_RE, type PluginSql } from "./store.ts";
 
 export { z };
 export type { PluginSql };
@@ -326,7 +326,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   }
   // Anything else would fail the record unseen. Not given back: a resend is
   // 409 until the lease, where a release would run it again on every one.
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(thoughtId)) {
+  if (!UUID_RE.test(thoughtId)) {
     throw new Error("onceById: a run's thoughtId is the core's thought id, a uuid, or null");
   }
   await ctx.db
