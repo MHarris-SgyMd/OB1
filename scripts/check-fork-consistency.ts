@@ -308,6 +308,12 @@
  *      no name outside printable ASCII; each rule is the only
  *      catch of one of its probes (what the files make together, CI's "The
  *      proxy loads only the held route tables")
+ *  30. no Go template in the tree names a port binding's address field —
+ *      `.HostIp` is docker's struct field and `.HostIP` podman's, so an
+ *      `inspect -f` template naming either fails under the other CLI
+ *      (SMD-2677); the address is read from the binding's JSON, whose key
+ *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
+ *      or would track, a `{{ … }}` action at a time; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27 and 28 parse YAML with Bun.YAML)
@@ -6093,6 +6099,51 @@ function checkRouteTables() {
   if (clean) for (const rule of ROUTE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 28's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
 }
 checkRouteTables();
+
+// ── 30: no inspect template names a port binding's address field (SMD-2677) ──
+//
+// A Go template's field is the runtime's Go struct field, not the JSON key:
+// a port binding's address is `HostIp` in docker's struct and `HostIP` in
+// podman's, while both runtimes' JSON spell the key `HostIp`. deploy/canary.sh
+// read it as `{{.HostIp}}`, which the docker CLI evaluates (against podman
+// machine too) and podman's refuses: path-mode `up` ended on exit 125 under
+// --runtime podman, and a connector check lost stable's LAN address from the
+// hosts it matches. CI runs docker alone, so no job sees a template that only
+// one CLI evaluates; this does. The address comes from `{{json .}}` of the
+// binding.
+/** A `{{ … }}` action naming `.HostIp` or `.HostIP` as a field: the action may span lines, not cross its closing `}}`. */
+const HOST_IP_FIELD = /\{\{(?:[^}]|\}(?!\}))*?\.HostI[pP]/g;
+/** [text, hit] — what check 30 must catch, and what it must not. */
+const HOST_IP_PROBES: [string, boolean][] = [
+  [`inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\\n"}}{{end}}{{end}}' "$1"`, true],
+  ["podman inspect -f '{{ .HostIP }}' c", true],
+  [`{{- (index (index .HostConfig.PortBindings "80/tcp") 0).HostIp -}}`, true],
+  ["{{range $b}}{{\n  .HostIp\n}}{{end}}", true],
+  [`inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{json .}}{{"\\n"}}{{end}}{{end}}' "$1"`, false],
+  [`sed -n 's/.*"HostIp":"\\([^"]*\\)".*/\\1/p'`, false],
+  ["(b ?? []).map((x) => `${service(c)}@${x.HostIp}`)", false],
+  ["{{.HostPort}} — the field .HostIp, outside any action", false],
+];
+/** The 1-based lines of `text` where an action names the field, ascending: the line of the field itself, not of the action's `{{`. */
+function hostIpFieldsIn(text: string): number[] {
+  const lineOf = lineIndexer(text);
+  return [...new Set([...text.matchAll(HOST_IP_FIELD)].map((m) => lineOf(m.index! + m[0].length - 1)))];
+}
+function checkHostIpTemplates() {
+  for (const [probe, hit] of HOST_IP_PROBES) {
+    const n = hostIpFieldsIn(probe).length;
+    if (hit && n === 0) fail(SELF, `check 30 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 30 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const files = citationFiles();
+  if (!files.includes("deploy/canary.sh")) fail(SELF, "check 30's listing does not reach deploy/canary.sh — the listing is broken, not the tree clean");
+  for (const rel of files) {
+    for (const line of hostIpFieldsIn(readFileSync(join(ROOT, rel), "utf8"))) {
+      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/canary.sh's bound_ip does");
+    }
+  }
+}
+checkHostIpTemplates();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
