@@ -114,15 +114,15 @@ export const CGROUP_MEMORY_SQL = `SELECT pg_read_file('/sys/fs/cgroup/memory.cur
 
 /** memory.current and memory.stat's text into numbers, or null when either is not the cgroup v2 shape. */
 export function parseCgroupMemory(current: string, stat: string): CgroupMemory | null {
-  const total = Number(current.trim());
-  if (!/^\d+$/.test(current.trim()) || !Number.isFinite(total)) return null;
+  const total = current.trim();
+  if (!/^\d+$/.test(total)) return null;
   const field = (name: string) => {
     const m = stat.match(new RegExp(`^${name} (\\d+)$`, "m"));
     return m ? Number(m[1]) : NaN;
   };
   const [anon, file, shmem] = [field("anon"), field("file"), field("shmem")];
   if ([anon, file, shmem].some((x) => Number.isNaN(x))) return null;
-  return { current: total, anon, file, shmem };
+  return { current: Number(total), anon, file, shmem };
 }
 
 /** One reading of the container's memory, or the reason there is none (not Linux, not cgroup v2, not a role that may read server files). */
@@ -217,7 +217,7 @@ export type LoadRun = {
  * on `pairAt(c, N, k)`. No call starts after the deadline. A call in flight at
  * the deadline is awaited and counted, so the wall time runs to the last
  * return. The first error stops every connection from starting another call,
- * and is thrown once the calls in flight have returned. Through `memory`, a
+ * and is thrown once the calls in flight have returned. Through `monitor`, a
  * connection outside the pool, the CPU clocks and the container's memory are
  * read before the first call, the memory every `sampleMs` until the last
  * return, and the CPU clocks again at it.
@@ -228,20 +228,20 @@ export async function closedLoop(opts: {
   slots: number;
   queries: number;
   call: (sql: SQL, slot: number, query: number) => Promise<string[]>;
-  memory?: SQL;
+  monitor?: SQL;
   sampleMs?: number;
 }): Promise<LoadRun> {
   const { pool, slots, queries, call } = opts;
   const unread = "no connection to read the server through";
-  const cpuBefore = opts.memory ? await readCpu(opts.memory) : unread;
-  const idle = opts.memory ? await readMemory(opts.memory) : unread;
+  const cpuBefore = opts.monitor ? await readCpu(opts.monitor) : unread;
+  const idle = opts.monitor ? await readMemory(opts.monitor) : unread;
   let peak: CgroupMemory | null = typeof idle === "string" ? null : { ...idle };
   let samples = 0;
   let running = true;
   const sampler = (async () => {
-    if (!opts.memory || peak === null) return;
+    if (!opts.monitor || peak === null) return;
     while (running) {
-      const m = await readMemory(opts.memory);
+      const m = await readMemory(opts.monitor);
       if (typeof m !== "string") {
         samples++;
         peak = { current: Math.max(peak!.current, m.current), anon: Math.max(peak!.anon, m.anon), file: Math.max(peak!.file, m.file), shmem: Math.max(peak!.shmem, m.shmem) };
@@ -271,7 +271,7 @@ export async function closedLoop(opts: {
   running = false;
   // At the last return, not after the sampler's last sleep: the window is the
   // run's, give or take one memory read queued ahead on the same connection.
-  const cpuAfter = opts.memory && failed === null ? await readCpu(opts.memory) : unread;
+  const cpuAfter = opts.monitor && failed === null ? await readCpu(opts.monitor) : unread;
   await sampler;
   if (failed !== null) throw failed;
   const cpu = typeof cpuBefore === "string" ? cpuBefore : typeof cpuAfter === "string" ? cpuAfter : { ...cpuShare(cpuBefore, cpuAfter), cpus: cpuAfter.cpus };

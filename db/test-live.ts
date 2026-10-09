@@ -10641,7 +10641,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
       return [`${slot}/${query}`];
     };
     const one = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1, slots: 2, queries: 3, call }));
-    const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, memory }));
+    const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, monitor: memory }));
     assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
     const lastStart = Math.max(...four.records.map((r) => r.at));
     assert(lastStart > 500 && lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
@@ -10674,7 +10674,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     };
     // Three seconds: the spike (connect, sort, 0.4 s held) is over well before
     // the end, so samples land after it on a slow runner too (review pass 2).
-    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, memory }));
+    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, monitor: memory }));
     const pm = peaked.memory;
     if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
     else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.02, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.02 or more)`);

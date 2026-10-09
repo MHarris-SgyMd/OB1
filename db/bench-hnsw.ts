@@ -1391,6 +1391,8 @@ const EXACT_CEILING = 110_000;
 /** Section F's tiers by key: the broad filter (the HNSW walk), the band (1%, whose plan flipped between GIN and the walk from pass to pass at a million and ten million rows), the thin one (900 rows: the exact branch at its widest). Those are their roles at a million rows and up; at the default scales 1% is the exact branch too. */
 const LOAD_BROAD = "t50";
 const LOAD_TIERS = [LOAD_BROAD, "t1", "r900"] as const;
+/** The same three by the labels the tables use, for the note when one is not planted. */
+const LOAD_TIER_LABELS: Record<(typeof LOAD_TIERS)[number], string> = { t50: "50%", t1: "1%", r900: "900 rows" };
 /** Section F's row: one mix at one connection count, each slot's line beside its single-call median from sections A and B, and what 014's header prices that many broad calls' walks at. */
 type UnderLoadRow = { scale: number; mix: string; connections: number; calls: number; elapsedMs: number; slots: (SlotLoad & { singleMs: number })[]; memory: LoadRun["memory"]; cpu: LoadRun["cpu"]; pricedBytes: number | null };
 const underLoad: UnderLoadRow[] = [];
@@ -1420,8 +1422,7 @@ async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[]
     ...(picked.length ? [{ name: "filtered", slots: picked.map(slotOf) }] : []),
   ];
   const missing = LOAD_TIERS.filter((k) => !picked.some((t) => t.key === k));
-  const named: Record<(typeof LOAD_TIERS)[number], string> = { t50: "50%", t1: "1%", r900: "900 rows" };
-  if (missing.length) console.log(`\n  (section F: ${missing.map((k) => named[k]).join(", ")} is not a tier of its own at this scale — dropped, or merged with a share tier, as the notes above say; the mixes leave it out)`);
+  if (missing.length) console.log(`\n  (section F: ${missing.map((k) => LOAD_TIER_LABELS[k]).join(", ")} is not a tier of its own at this scale — dropped, or merged with a share tier, as the notes above say; the mixes leave it out)`);
   const lits = queries.map(lit);
   const statement = (s: Slot, q: number) => `SELECT id FROM match_thoughts('${lits[q]}'::vector, -1.0, ${K}, '${s.key === null ? "{}" : tierFilter(s.key)}'::jsonb)`;
   const answerKey = (s: Slot) => s.key ?? WHOLE_TABLE;
@@ -1449,7 +1450,7 @@ async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[]
     const [{ wm, mult }] = await pool[0].unsafe(`SELECT (SELECT setting::bigint * 1024 FROM pg_settings WHERE name = 'work_mem') AS wm, current_setting('hnsw.scan_mem_multiplier') AS mult`);
     for (const mix of mixes) {
       for (const c of LOAD_CONNECTIONS) {
-        const run = await closedLoop({ pool: pool.slice(0, c), seconds: LOAD_S, slots: mix.slots.length, queries: Q, call: (db, slot, q) => ids(db, mix.slots[slot], q), memory: sql });
+        const run = await closedLoop({ pool: pool.slice(0, c), seconds: LOAD_S, slots: mix.slots.length, queries: Q, call: (db, slot, q) => ids(db, mix.slots[slot], q), monitor: sql });
         const lines = summarise(run.records, mix.slots, (slot, q) => answers[answerKey(mix.slots[slot])][q].ids, (slot, q) => alone.get(answerKey(mix.slots[slot]))![q]);
         underLoad.push({
           scale: n,
