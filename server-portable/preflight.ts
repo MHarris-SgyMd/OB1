@@ -280,7 +280,7 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
@@ -3417,6 +3417,70 @@ if (configFailed) {
         } catch (e) {
           add("filtered search", "warn", `could not verify: ${(e as Error).message}`,
               "The catalog reads behind this check need SELECT on pg_proc, pg_extension and pg_available_extensions.");
+        }
+
+        /**
+         * SMD-1499: the server sized for the table. Two comparisons, each a
+         * warning since a managed platform may not let the operator change
+         * either setting: the HNSW indexes over thoughts and thought_chunks
+         * (found by access method, so 039's halfvec swap and any later rename
+         * are read alike) against shared_buffers, and the bitmap a filter
+         * spanning the thoughts heap needs against work_mem. db/config.mjs's
+         * memorySizing holds the arithmetic and why.
+         */
+        try {
+          const { memorySizing, bytesText } = await import("../db/config.mjs");
+          const [m] = await sql`
+            SELECT
+              (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
+                WHERE a.amname = 'hnsw' AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+              COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
+              current_setting('block_size')::int AS block,
+              pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
+              pg_size_bytes(current_setting('work_mem'))::bigint AS work,
+              COALESCE(current_setting('hnsw.scan_mem_multiplier', true), '1')::int AS multiplier,
+              to_regclass('thoughts') IS NOT NULL AS found`;
+          if (!m.found) {
+            // Sizes of nothing would read as fitting; say what was not found instead.
+            const why = "thoughts is not on this connection's search_path, so there is nothing to size";
+            add("vector index memory", "skip", why);
+            add("filter bitmap memory", "skip", why);
+          } else {
+            const s = memorySizing({
+              hnswBytes: Number(m.hnsw),
+              sharedBuffersBytes: Number(m.shared),
+              heapBytes: Number(m.heap),
+              blockSize: Number(m.block),
+              workMemBytes: Number(m.work),
+              scanMemMultiplier: Number(m.multiplier),
+            });
+            const r = s.resident;
+            if (r.fits) {
+              add("vector index memory", "ok", `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})`);
+            } else {
+              add("vector index memory", "warn",
+                  `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold, and what the OS page cache does not hold either is read from disk on the walk`,
+                  `Set shared_buffers to at least ${r.recommend} (more for the hot heap) and restart Postgres — POSTGRES_SHARED_BUFFERS=${r.recommend} in deploy/.env on the compose stack, -c shared_buffers=${r.recommend} elsewhere, or the platform's parameter group. A host whose free memory keeps the indexes in the OS page cache serves the walk from there too; this check reads shared_buffers alone.`);
+            }
+            const b = s.bitmap;
+            const capNote = b.capRises
+              ? `it rises from ${bytesText(b.capBytes)} to ${b.recommend} even at hnsw.scan_mem_multiplier = 1;`
+              : `keep it at ${bytesText(b.capBytes)} with ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = ${b.keepMultiplier};`;
+            if (b.fits) {
+              add("filter bitmap memory", "ok", `a bitmap over the whole thoughts heap (${b.heapPages.toLocaleString()} pages) needs ${bytesText(b.needBytes)}, within work_mem (${bytesText(b.haveBytes)})`);
+            } else {
+              add("filter bitmap memory", "warn",
+                  `a filter whose matches lie across the thoughts heap (${b.heapPages.toLocaleString()} pages) needs a ${bytesText(b.needBytes)} bitmap to stay exact and work_mem is ${bytesText(b.haveBytes)}: past it the bitmap goes lossy, and every lossy page is rechecked row by row (SMD-1018: 11.6 s for a broad filter at ten million rows)`,
+                  `Set work_mem to at least ${b.recommend} — ALTER DATABASE <db> SET work_mem = '${b.recommend}' and restart the servers so their pools reconnect, or POSTGRES_WORK_MEM=${b.recommend} in deploy/.env on the compose stack. Raising work_mem raises the HNSW walk's memory cap (work_mem × hnsw.scan_mem_multiplier, 014's header): ${capNote} then restart the servers.`);
+            }
+          }
+        } catch (e) {
+          // Both rows, so each direct check still prints exactly one.
+          const why = `could not verify: ${(e as Error).message}`;
+          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class and pg_am, and the shared_buffers and work_mem settings.";
+          add("vector index memory", "warn", why, reads);
+          add("filter bitmap memory", "warn", why, reads);
         }
 
         /**

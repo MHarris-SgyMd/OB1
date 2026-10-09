@@ -313,6 +313,15 @@ export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Prom
 >;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
 export const BOUNDS_IN_FORCE_SQL: string;
+/** Bytes one exact heap page costs a TID bitmap (PostgreSQL 16 tidbitmap.c); past work_mem / this, a bitmap goes lossy. */
+export const BITMAP_BYTES_PER_PAGE: number;
+/** SMD-1499's two comparisons: the HNSW indexes against shared_buffers, and a whole-heap filter's bitmap against work_mem (with the multiplier that keeps the walk's memory cap under the recommended work_mem). Sizes in bytes. */
+export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number; scanMemMultiplier: number }): {
+  resident: { fits: boolean; needBytes: number; haveBytes: number; recommend: string };
+  bitmap: { fits: boolean; heapPages: number; needBytes: number; haveBytes: number; recommend: string; capBytes: number; keepMultiplier: number; capRises: boolean };
+};
+/** A byte count for a preflight line: kB, MB, or GB to one decimal. */
+export function bytesText(bytes: number): string;
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */

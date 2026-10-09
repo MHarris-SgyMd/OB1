@@ -186,6 +186,8 @@ x-migrate-env: &migrate-env
 # own volume so the three brains are genuinely separate corpora.
 x-tier-postgres: &tier-postgres
   image: pgvector/pgvector:0.8.6-pg16
+  # compose.yaml's memory knobs (SMD-1499), the same for every tier.
+  command: ["postgres", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}"]
   shm_size: ${POSTGRES_SHM_SIZE:-1g}
   environment:
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}

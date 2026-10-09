@@ -1699,6 +1699,68 @@ export const BOUNDS_IN_FORCE_SQL =
   `SELECT n AS name, current_setting(n, true) AS value FROM unnest(ARRAY[${HNSW_BOUNDS.map((n) => `'${n}'`).join(", ")}]) AS n`;
 
 /**
+ * Bytes one exact page costs a TID bitmap: PostgreSQL 16's tidbitmap.c sizes
+ * a PagetableEntry at 48 bytes (block number, flags and five 64-bit words for
+ * up to 291 tuples) and adds two pointers of hash overhead per entry, and it
+ * caps the exact entries at work_mem divided by that. A bitmap over more heap
+ * pages than work_mem / 64 goes lossy: the overflow is kept per page, not per
+ * row, and every lossy page is rechecked row by row (SMD-1018's generic plan
+ * at ten million rows rechecked 460,687 of them, 11.6 s).
+ */
+export const BITMAP_BYTES_PER_PAGE = 64;
+
+/**
+ * Sizing the server for the table (SMD-1499): what the brain's relations need
+ * against what the server is set to, as two comparisons.
+ *
+ * - Resident: the HNSW indexes over thoughts and thought_chunks are read on
+ *   every vector search, and a walk that misses the cache reads from disk.
+ *   The lever an operator sets is shared_buffers, so that is what the indexes
+ *   are compared with. Pages the OS page cache holds serve a walk too (change
+ *   80), so a pool smaller than the indexes is a warning, not a failure, and
+ *   the advice says so.
+ * - Bitmap: a filter's matches are collected one entry per heap page (above),
+ *   so a filter whose matches lie on every page of the thoughts heap needs
+ *   heap pages × BITMAP_BYTES_PER_PAGE of work_mem to stay exact. Raising
+ *   work_mem raises the HNSW walk's memory cap with it (work_mem ×
+ *   hnsw.scan_mem_multiplier, 014's header); `keepMultiplier` is the
+ *   multiplier that keeps the cap where it is under the recommended work_mem.
+ *
+ * Pure: preflight reads the numbers and prints what this returns, and the
+ * schema suite holds the arithmetic. Sizes in bytes; recommendations are
+ * PostgreSQL size strings, rounded up to whole MB (shared_buffers to 64 MB).
+ */
+export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes, scanMemMultiplier }) {
+  const MB = 1048576;
+  const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
+  const heapPages = Math.ceil(heapBytes / blockSize);
+  const bitmapBytes = heapPages * BITMAP_BYTES_PER_PAGE;
+  const workMemMB = upTo(bitmapBytes, 1);
+  const capBytes = workMemBytes * scanMemMultiplier;
+  return {
+    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
+    bitmap: {
+      fits: bitmapBytes <= workMemBytes,
+      heapPages,
+      needBytes: bitmapBytes,
+      haveBytes: workMemBytes,
+      recommend: `${workMemMB}MB`,
+      capBytes,
+      keepMultiplier: Math.max(1, Math.floor(capBytes / (workMemMB * MB))),
+      /** The recommended work_mem alone exceeds today's cap, so no multiplier keeps it. */
+      capRises: workMemMB * MB > capBytes,
+    },
+  };
+}
+
+/** A byte count as a reader wants it in a preflight line: kB under a megabyte, MB under a gigabyte, then GB to one decimal. */
+export function bytesText(bytes) {
+  if (bytes < 1048576) return `${Math.ceil(bytes / 1024)} kB`;
+  if (bytes < 1073741824) return `${Math.round(bytes / 1048576)} MB`;
+  return `${(bytes / 1073741824).toFixed(1)} GB`;
+}
+
+/**
  * match_thoughts clamps match_count to this INSIDE the function (migration
  * 014, templated as {{MATCH_COUNT_CEILING}}). 500 was set to cover every
  * caller the repo had: enhanced-mcp asked for up to 500 under a date filter

@@ -2068,7 +2068,12 @@ so the profile builds from a checkout.
   `POSTGRES_SHM_SIZE` at least that, before the stack runs it; the migrator
   prints the vector count and the setting in force just before 039. On a brain
   past a million rows build the two staging indexes `CONCURRENTLY` first, as
-  the migration's header says, and let it adopt them.
+  the migration's header says, and let it adopt them. Memory for the brain's
+  size is a knob, not a limit (SMD-1499): `POSTGRES_SHARED_BUFFERS` and
+  `POSTGRES_WORK_MEM` default to the image's 128MB and 4MB. Preflight's
+  `vector index memory` and `filter bitmap memory` rows warn when the HNSW
+  indexes outgrow the pool or a broad filter's bitmap outgrows `work_mem`, and
+  print the setting to use; `deploy/.env.example` has the rule.
 - **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open

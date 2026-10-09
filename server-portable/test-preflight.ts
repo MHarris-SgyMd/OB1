@@ -166,7 +166,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 22, "…twenty-two of them as the catalog-only skip (061's lineage, the workers' heartbeats and the plugin tables among them), the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 24, "…twenty-four of them as the catalog-only skip (061's lineage, the workers' heartbeats, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -735,6 +735,37 @@ else {
   await tamper.close();
   assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
          "…and dropped, the claim functions are the shipped four, said as such");
+
+  /**
+   * SMD-1499: the server sized for the table. On this small fixture both rows
+   * are ok. A thoughts heap past what a lowered work_mem's bitmap covers is a
+   * warning that names the work_mem the heap needs and the multiplier that
+   * keeps the HNSW walk's memory cap. shared_buffers cannot be lowered for one
+   * database (it is the postmaster's), so the index row's warning is held by
+   * test-schema's arithmetic on memorySizing, and here only as ok.
+   */
+  assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out) && /filter bitmap memory\s+a bitmap over the whole thoughts heap \([\d,]+ pages\) needs [^,]+, within work_mem \([^)]+\)/.test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and a whole-heap bitmap fits work_mem");
+  {
+    // Rows of ~1.9 KB stay inline (under the TOAST threshold), so 4,500 of them
+    // fill more heap pages than 64 kB of work_mem covers (1,024 at 64 bytes each).
+    const sizing = new SQL({ url: LIVE, max: 1 });
+    try {
+      await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 4500) i`);
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '64kB'); END $s$`);
+      const lowered = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      const pages = Number(/thoughts heap \(([\d,]+) pages\) needs a/.exec(lowered.out)?.[1]?.replace(/,/g, "") ?? NaN);
+      assert(lowered.code === 0 && pages > 1024
+             && /filter bitmap memory\s+a filter whose matches lie across the thoughts heap \([\d,]+ pages\) needs a \d+ kB bitmap to stay exact and work_mem is 64 kB: past it the bitmap goes lossy/.test(lowered.out)
+             && /Set work_mem to at least \d+MB — ALTER DATABASE <db> SET work_mem = '\d+MB'/.test(lowered.out)
+             && /hnsw\.scan_mem_multiplier/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs and the walk's memory cap (${pages} pages; exit ${lowered.code})`);
+    } finally {
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
+      await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);
+      await sizing.close();
+    }
+  }
 
   /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
