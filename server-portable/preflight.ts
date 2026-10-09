@@ -3422,27 +3422,31 @@ if (configFailed) {
         /**
          * SMD-1499: the server sized for the table. Two comparisons, each a
          * warning since a managed platform may not let the operator change
-         * either setting: the HNSW indexes over thoughts and thought_chunks
-         * (found by access method, so 039's halfvec swap and any later rename
-         * are read alike) against shared_buffers, and the bitmap a filter
-         * spanning the thoughts heap needs against work_mem. db/config.mjs's
-         * memorySizing holds the arithmetic and why.
+         * either setting: the valid HNSW indexes over thoughts and
+         * thought_chunks (found by access method, so 039's halfvec swap and
+         * any later rename read alike; an INVALID or staging index the planner
+         * ignores is not counted) against shared_buffers, and the bitmap the
+         * broadest filter the router leaves on the GIN route needs against
+         * work_mem. db/config.mjs's memorySizing holds the arithmetic and why.
          */
         try {
-          const { memorySizing, bytesText } = await import("../db/config.mjs");
+          const { memorySizing, bytesText, ROUTE_ESTIMATE_MIN_PAGES } = await import("../db/config.mjs");
+          // Read before any row is added, so a failure here prints each row once.
+          const { poolSizeFrom } = await import("./store-sql.ts");
+          const pool = poolSizeFrom(process.env.OB1_PG_POOL);
           const [m] = await sql`
             SELECT
               (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
                  FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
-                WHERE a.amname = 'hnsw' AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+                WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
               COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
               current_setting('block_size')::int AS block,
               pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
               pg_size_bytes(current_setting('work_mem'))::bigint AS work,
               to_regclass('thoughts') IS NOT NULL AS found`;
           if (!m.found) {
-            // Sizes of nothing would read as fitting; say what was not found instead.
-            const why = "thoughts is not on this connection's search_path, so there is nothing to size";
+            // Sizes of nothing would read as fitting; say so instead.
+            const why = "thoughts does not resolve on this connection (the schema row says why), so there is nothing to size";
             add("vector index memory", "skip", why);
             add("filter bitmap memory", "skip", why);
           } else {
@@ -3458,21 +3462,20 @@ if (configFailed) {
               add("vector index memory", "ok", `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})`);
             } else {
               add("vector index memory", "warn",
-                  `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold, and what the OS page cache does not hold either is read from disk on the walk`,
-                  `Set shared_buffers to at least ${r.recommend} (more for the hot heap) and restart Postgres — POSTGRES_SHARED_BUFFERS=${r.recommend} in deploy/.env on the compose stack, -c shared_buffers=${r.recommend} elsewhere, or the platform's parameter group. A host whose free memory keeps the indexes in the OS page cache serves the walk from there too; this check reads shared_buffers alone.`);
+                  `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
+                  `As a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`: the setting is kept in the data directory), or set it in the platform's parameter group. More for the hot heap where the host has it. On compose.tiers.yaml each tier's postgres is set on its own.`);
             }
             const b = s.bitmap;
-            // What the recommendation costs: about one work_mem per busy pooled
-            // connection (measured, memorySizing's note), so the remedy prices it
-            // at this server's pool.
-            const { poolSizeFrom } = await import("./store-sql.ts");
-            const pool = poolSizeFrom(process.env.OB1_PG_POOL);
+            const pages = `${b.bitmapPages.toLocaleString("en-US")} of the thoughts heap's ${b.heapPages.toLocaleString("en-US")} pages`;
+            const route = b.gated
+              ? "the broadest filter 037's gate leaves on the GIN route (about one match a page, placed at random)"
+              : `every filter, since on a heap under ${ROUTE_ESTIMATE_MIN_PAGES.toLocaleString("en-US")} pages none is gated to the walk,`;
             if (b.fits) {
-              add("filter bitmap memory", "ok", `a bitmap over the whole thoughts heap (${b.heapPages.toLocaleString()} pages) needs ${bytesText(b.needBytes)}, within work_mem (${bytesText(b.haveBytes)})`);
+              add("filter bitmap memory", "ok", `${route} touches about ${pages}: a ${bytesText(b.needBytes)} bitmap, within work_mem (${bytesText(b.haveBytes)})`);
             } else {
               add("filter bitmap memory", "warn",
-                  `a filter whose matches lie across the thoughts heap (${b.heapPages.toLocaleString()} pages) needs a ${bytesText(b.needBytes)} bitmap to stay exact and work_mem is ${bytesText(b.haveBytes)}: past it the bitmap goes lossy, and every lossy page is rechecked row by row (SMD-1018: 11.6 s for a broad filter at ten million rows)`,
-                  `Set work_mem to at least ${b.recommend} — ALTER DATABASE <db> SET work_mem = '${b.recommend}' and restart the servers so their pools reconnect, or POSTGRES_WORK_MEM=${b.recommend} in deploy/.env on the compose stack. Each busy connection may then spend about that much more: budget ${b.recommend} × this server's pool of ${pool} (OB1_PG_POOL), up to ${bytesText(b.recommendBytes * pool)}, beside shared_buffers (SMD-1499 measured ten concurrent broad filters growing by 260 MiB at 31MB).`);
+                  `${route} touches about ${pages}, a ${bytesText(b.needBytes)} bitmap, and work_mem is ${bytesText(b.haveBytes)}: past it the bitmap goes lossy, and every lossy page is rechecked row by row`,
+                  `Set work_mem to at least ${b.recommend}: ALTER DATABASE <db> SET work_mem = '${b.recommend}', then restart the servers so their pools reconnect. Each busy connection may spend about that much more, so budget ${b.recommend} for every pooled connection on this database — the MCP server and the REST core each hold OB1_PG_POOL (${pool} here) — beside shared_buffers. Raise it on a server you can watch: match_thoughts' default walk is static SQL that plpgsql can move to a cached generic plan after five calls, and at ten million rows a larger work_mem changed the generic plans (one from 27 ms to 17.4 s); SMD-1464 settles the plan mode.`);
             }
           }
         } catch (e) {

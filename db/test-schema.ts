@@ -71,6 +71,7 @@ import {
   SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
   stripSqlComments,
   BITMAP_BYTES_PER_PAGE,
+  BITMAP_PAGE_SHARE_GATED,
   bytesText,
   memorySizing,
   supabaseIsmsIn,
@@ -12510,24 +12511,36 @@ console.log("\n[73] bench-hnsw's section F under load: the schedule, the percent
   assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
 }
 
-console.log("\n[74] memorySizing: the HNSW indexes against shared_buffers, and a whole-heap filter's bitmap against work_mem (SMD-1499, db/config.mjs)");
+console.log("\n[74] memorySizing: the valid HNSW indexes against shared_buffers, and the broadest GIN-routed filter's bitmap against work_mem (SMD-1499, db/config.mjs)");
 {
   // Pure arithmetic: preflight reads the numbers and prints what this returns.
   const MB = 1048576;
-  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 65536 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
-  assert(BITMAP_BYTES_PER_PAGE === 64, "an exact bitmap page costs 64 bytes (PagetableEntry 48 + two hash pointers, PostgreSQL 16)");
-  const fits = memorySizing(base);
-  assert(fits.resident.fits && fits.bitmap.fits && fits.bitmap.heapPages === 65536 && fits.bitmap.needBytes === 4 * MB,
-    `at the image's defaults 100 MB of index fits 128 MB of shared_buffers, and 4 MB of work_mem holds a bitmap over exactly 65,536 heap pages (${JSON.stringify(fits.bitmap)})`);
-  const over = memorySizing({ ...base, hnswBytes: 129 * MB, heapBytes: 65537 * 8192 });
-  assert(!over.resident.fits && over.resident.recommend === "192MB", `an index 1 MB past the pool does not fit, and the pool it needs is rounded up to 64 MB (${over.resident.recommend})`);
-  assert(!over.bitmap.fits && over.bitmap.recommend === "5MB" && over.bitmap.recommendBytes === 5 * MB, `one heap page more than work_mem covers goes lossy, and the work_mem it needs is rounded up to a whole MB (${over.bitmap.recommend})`);
-  const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 6536 * MB });
-  assert(tenMillion.bitmap.recommend === "31MB" && tenMillion.resident.recommend === "6592MB",
-    `change 28's ten-million-row corpus (3,907 MiB heap, 6,536 MiB of HNSW): work_mem ${tenMillion.bitmap.recommend}, shared_buffers ${tenMillion.resident.recommend} — the settings SMD-1499's sized run used`);
-  const tiny = memorySizing({ ...base, hnswBytes: 1024, heapBytes: 8192 });
-  assert(tiny.resident.recommend === "64MB" && tiny.bitmap.recommend === "1MB" && tiny.bitmap.heapPages === 1, `a recommendation never rounds below its step (${tiny.resident.recommend}, ${tiny.bitmap.recommend})`);
-  assert(bytesText(512) === "1 kB" && bytesText(6488 * 1024) === "6 MB" && bytesText(128 * MB) === "128 MB" && bytesText(6.4 * 1024 * MB) === "6.4 GB", "sizes read as kB, MB, or GB to one decimal");
+  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 8000 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
+  assert(BITMAP_BYTES_PER_PAGE === 64 && Math.abs(BITMAP_PAGE_SHARE_GATED - (1 - 1 / Math.E)) < 1e-12 && ROUTE_ESTIMATE_MIN_PAGES === 8192,
+    "an exact bitmap page costs 64 bytes, and on a heap 037's gate samples (8,192 pages up) the broadest GIN-routed filter touches 1 - 1/e of its pages");
+  const atPool = memorySizing({ ...base, hnswBytes: 128 * MB });
+  const overPool = memorySizing({ ...base, hnswBytes: 128 * MB + 1 });
+  assert(atPool.resident.fits && !overPool.resident.fits && overPool.resident.recommend === "192MB",
+    `indexes the size of the pool fit; one byte more does not, and the pool it needs is rounded up to 64 MB (${overPool.resident.recommend})`);
+  // Under the gate every filter takes the GIN route, so the bitmap is the whole heap.
+  const ungated = memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 });
+  assert(!ungated.bitmap.gated && ungated.bitmap.bitmapPages === 8000 && ungated.bitmap.fits && !memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 - 1 }).bitmap.fits,
+    `under 8,192 pages the bitmap is every page (${ungated.bitmap.bitmapPages}), and work_mem one byte short of it is short`);
+  const gated = memorySizing({ ...base, heapBytes: 100000 * 8192 });
+  assert(gated.bitmap.gated && gated.bitmap.bitmapPages === 63213 && gated.bitmap.needBytes === 63213 * 64 && gated.bitmap.fits,
+    `at 100,000 pages the gate leaves about 1 - 1/e of them to the broadest GIN-routed filter: ${gated.bitmap.bitmapPages} pages, ${gated.bitmap.needBytes} bytes, within 4 MB`);
+  const partial = memorySizing({ ...base, heapBytes: 8191 * 8192 + 1, workMemBytes: 64 * MB });
+  assert(partial.bitmap.heapPages === 8192 && partial.bitmap.gated, `a heap a byte past a page boundary counts the page it reaches into (${partial.bitmap.heapPages})`);
+  const bigBlocks = memorySizing({ ...base, heapBytes: 100000 * 8192, blockSize: 32768 });
+  assert(bigBlocks.bitmap.heapPages === 25000 && bigBlocks.bitmap.gated, `pages are counted in the server's block size (${bigBlocks.bitmap.heapPages} at 32 kB)`);
+  const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: (4143 + 837) * MB });
+  assert(tenMillion.bitmap.recommend === "20MB" && tenMillion.resident.recommend === "4992MB",
+    `SMD-1499's ten-million-row corpus (3,907 MiB heap; 4,143 + 837 MiB of HNSW): work_mem ${tenMillion.bitmap.recommend}, shared_buffers ${tenMillion.resident.recommend}`);
+  const empty = memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 });
+  assert(empty.resident.recommend === "64MB" && empty.bitmap.recommend === "1MB" && empty.resident.fits && empty.bitmap.fits,
+    `an empty brain fits, and its recommendations never round below their step (${empty.resident.recommend}, ${empty.bitmap.recommend})`);
+  assert(bytesText(512) === "1 kB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
+    "sizes read as kB, MB, or GB to one decimal, rounded up: a size a byte past a setting never reads as equal to it");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

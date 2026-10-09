@@ -354,12 +354,6 @@ services:
   # function instead, where it travels with the schema; its header has the numbers.
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
-    # The two settings preflight's "vector index memory" and "filter bitmap
-    # memory" rows size against the brain (SMD-1499): shared_buffers for the
-    # HNSW indexes every vector search walks, work_mem for the bitmap a broad
-    # filter collects. The defaults are the image's own, so an unset deploy/.env
-    # runs the server exactly as before; deploy/.env.example has the rule.
-    command: ["postgres", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}"]
     # /dev/shm: a container gets 64 MB, and a parallel HNSW build keeps its
     # whole graph in dynamic shared memory there, sized by maintenance_work_mem
     # — so rebuilding the vector index after a bulk load of a real corpus fails

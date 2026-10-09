@@ -10699,15 +10699,16 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
 
 console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row sizes work_mem by (SMD-1499)");
 {
-  // ~2,000 pages with a matching row on every one, a forced bitmap heap scan,
-  // and work_mem 16 kB either side of the rule. Measured on PostgreSQL 16.15
+  // ~4,000 pages with a matching row on every one, a forced bitmap heap scan,
+  // and work_mem 8 kB either side of the rule. Measured on PostgreSQL 16.15
   // at 4,243 pages: lossy at 256 kB, exact from 272 kB, the rule's 265 kB
-  // between. A server whose bitmap entry is another size fails here rather
+  // between. At ~4,000 pages and 8 kB, a server whose entry is outside about
+  // 62-66 bytes (a 32-bit build's 56, a 32 kB block's ~176) fails here rather
   // than leaving preflight's arithmetic quietly wrong.
   const sql = new SQL({ url: URL_, max: 1 });
   try {
     await sql.unsafe(`CREATE TEMP TABLE bitmap_rule (k int, pad text)`);
-    await sql.unsafe(`INSERT INTO bitmap_rule SELECT g % 7, repeat('x', 200) FROM generate_series(1, 66000) g`);
+    await sql.unsafe(`INSERT INTO bitmap_rule SELECT g % 7, repeat('x', 200) FROM generate_series(1, 140000) g`);
     await sql.unsafe(`CREATE INDEX ON bitmap_rule (k)`);
     await sql.unsafe(`ANALYZE bitmap_rule`);
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size('bitmap_rule') / current_setting('block_size')::int)::int AS pages`);
@@ -10721,10 +10722,10 @@ console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over
       });
       return plan.find((l) => /Heap Blocks/.test(l))?.trim() ?? "(no bitmap heap scan)";
     };
-    const under = await heapBlocks(Math.floor(ruleKb) - 16);
-    const over = await heapBlocks(Math.ceil(ruleKb) + 16);
-    assert(Number(pages) > 1500 && /lossy=\d+/.test(under) && /^Heap Blocks: exact=\d+$/.test(over),
-      `${pages} heap pages need ${ruleKb.toFixed(0)} kB by the rule: 16 kB under it the bitmap is lossy (${under}), 16 kB over it exact (${over})`);
+    const under = await heapBlocks(Math.floor(ruleKb) - 8);
+    const over = await heapBlocks(Math.ceil(ruleKb) + 8);
+    assert(Number(pages) > 3500 && /lossy=\d+/.test(under) && /^Heap Blocks: exact=\d+$/.test(over),
+      `${pages} heap pages need ${ruleKb.toFixed(0)} kB by the rule: 8 kB under it the bitmap is lossy (${under}), 8 kB over it exact (${over})`);
   } finally {
     await sql.close();
   }

@@ -739,27 +739,34 @@ else {
   /**
    * SMD-1499: the server sized for the table. On this small fixture both rows
    * are ok. A thoughts heap past what a lowered work_mem's bitmap covers is a
-   * warning that names the work_mem the heap needs and what it costs across
-   * the server's pool. shared_buffers cannot be lowered for one
-   * database (it is the postmaster's), so the index row's warning is held by
-   * test-schema's arithmetic on memorySizing, and here only as ok.
+   * warning that names the work_mem it needs, prices it per pooled connection
+   * and says why to raise it watchfully. The heap here is under 037's gate
+   * (8,192 pages), so the bitmap is every page. shared_buffers cannot be
+   * lowered for one database (it is the postmaster's), so the index row's
+   * warning is held by test-schema's arithmetic on memorySizing, and here
+   * only as ok.
    */
-  assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out) && /filter bitmap memory\s+a bitmap over the whole thoughts heap \([\d,]+ pages\) needs [^,]+, within work_mem \([^)]+\)/.test(withKw.out),
-         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and a whole-heap bitmap fits work_mem");
+  const ungatedRow = /filter bitmap memory\s+every filter, since on a heap under 8,192 pages none is gated to the walk, touches about ([\d,]+) of the thoughts heap's ([\d,]+) pages/;
+  assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
+         && new RegExp(`${ungatedRow.source}: a [^,]+ bitmap, within work_mem \\(4 MB\\)`).test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and the bitmap of every page fits work_mem");
   {
-    // Rows of ~1.9 KB stay inline (under the TOAST threshold), so 4,500 of them
-    // fill more heap pages than 64 kB of work_mem covers (1,024 at 64 bytes each).
+    // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
+    // 6,000 of them fill ~1,500 heap pages: past the 1,024 that 64 kB of
+    // work_mem covers at 64 bytes each, with room if a column shifts the fit.
     const sizing = new SQL({ url: LIVE, max: 1 });
     try {
-      await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 4500) i`);
+      await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 6000) i`);
       await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '64kB'); END $s$`);
       const lowered = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      const pages = Number(/thoughts heap \(([\d,]+) pages\) needs a/.exec(lowered.out)?.[1]?.replace(/,/g, "") ?? NaN);
-      assert(lowered.code === 0 && pages > 1024
-             && /filter bitmap memory\s+a filter whose matches lie across the thoughts heap \([\d,]+ pages\) needs a \d+ kB bitmap to stay exact and work_mem is 64 kB: past it the bitmap goes lossy/.test(lowered.out)
-             && /Set work_mem to at least \d+MB — ALTER DATABASE <db> SET work_mem = '\d+MB'/.test(lowered.out)
-             && /budget \d+MB × this server.s pool of \d+ \(OB1_PG_POOL\)/.test(lowered.out),
-             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs and its cost across the pool (${pages} pages; exit ${lowered.code})`);
+      const seen = ungatedRow.exec(lowered.out);
+      const pages = Number(seen?.[1]?.replace(/,/g, "") ?? NaN);
+      assert(lowered.code === 0 && pages > 1024 && seen?.[1] === seen?.[2]
+             && new RegExp(`${ungatedRow.source}, a \\d+ kB bitmap, and work_mem is 64 kB: past it the bitmap goes lossy`).test(lowered.out)
+             && /Set work_mem to at least 1MB: ALTER DATABASE <db> SET work_mem = '1MB', then restart the servers/.test(lowered.out)
+             && /the MCP server and the REST core each hold OB1_PG_POOL \(10 here\)/.test(lowered.out)
+             && /cached generic plan after five calls.*SMD-1464 settles the plan mode/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs, its cost per pooled connection and the plan-mode caveat (${pages} pages; exit ${lowered.code})`);
     } finally {
       await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
       await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);

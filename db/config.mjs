@@ -1699,35 +1699,47 @@ export const BOUNDS_IN_FORCE_SQL =
   `SELECT n AS name, current_setting(n, true) AS value FROM unnest(ARRAY[${HNSW_BOUNDS.map((n) => `'${n}'`).join(", ")}]) AS n`;
 
 /**
- * Bytes one exact page costs a TID bitmap: PostgreSQL 16's tidbitmap.c sizes
- * a PagetableEntry at 48 bytes (block number, flags and five 64-bit words for
- * up to 291 tuples) and adds two pointers of hash overhead per entry, and it
- * caps the exact entries at work_mem divided by that. A bitmap over more heap
- * pages than work_mem / 64 goes lossy: the overflow is kept per page, not per
- * row, and every lossy page is rechecked row by row (SMD-1018's generic plan
- * at ten million rows rechecked 460,687 of them, 11.6 s).
+ * Bytes one exact page costs a TID bitmap, on a 64-bit server with 8 kB
+ * blocks: PostgreSQL 16's tidbitmap.c sizes a PagetableEntry at 48 bytes
+ * (block number, flags and five 64-bit words for up to 291 tuples) and
+ * tbm_calculate_entries divides work_mem by that plus two pointers. A bitmap
+ * over more heap pages than work_mem / 64 goes lossy: the overflow is kept per
+ * page, not per row, and every lossy page is rechecked row by row. Another
+ * block size or a 32-bit build costs another figure; test-live [40] measures
+ * it on the server it runs against.
  */
 export const BITMAP_BYTES_PER_PAGE = 64;
+
+/**
+ * The share of heap pages the broadest filter that still reaches a GIN bitmap
+ * touches, on a heap large enough for 037's gate. The gate (074) sends a
+ * filter to the HNSW walk, which builds no bitmap, only when its
+ * ROUTE_SAMPLE_PAGES-page sample holds at least 8 hits on at least 3 pages
+ * and puts the filter at ten times v_exact; every filter averaging under about
+ * one match a heap page fails the first test and takes the GIN route, where
+ * the routing count's bitmap holds every page with a match. A filter at one
+ * match a page, placed at random, touches 1 - 1/e of the pages. Below the
+ * gate's ROUTE_ESTIMATE_MIN_PAGES every filter takes the GIN route, so there
+ * the share is the whole heap.
+ */
+export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
 
 /**
  * Sizing the server for the table (SMD-1499): what the brain's relations need
  * against what the server is set to, as two comparisons.
  *
- * - Resident: the HNSW indexes over thoughts and thought_chunks are read on
- *   every vector search, and a walk that misses the cache reads from disk.
- *   The lever an operator sets is shared_buffers, so that is what the indexes
- *   are compared with. Pages the OS page cache holds serve a walk too (change
- *   80), so a pool smaller than the indexes is a warning, not a failure, and
- *   the advice says so.
+ * - Resident: the HNSW indexes over thoughts and thought_chunks are walked on
+ *   every vector search. The lever an operator sets is shared_buffers, so that
+ *   is what the indexes are compared with. The OS page cache serves a walk
+ *   too, but not as well: on the ten-million-row bench corpus, with the
+ *   indexes read into the page cache before every run, ten connections got
+ *   about a third of the throughput they got with the indexes in
+ *   shared_buffers (SMD-1499's record).
  * - Bitmap: a filter's matches are collected one entry per heap page (above),
- *   so a filter whose matches lie on every page of the thoughts heap needs
- *   heap pages × BITMAP_BYTES_PER_PAGE of work_mem to stay exact. work_mem is
- *   also what each busy connection may spend: on the ten-million-row bench
- *   corpus, ten concurrent broad filters grew the backends' memory by 260 MiB
- *   at 31MB of work_mem against 51 MiB at 4MB, and lowering
- *   hnsw.scan_mem_multiplier to 1 changed neither that nor the walk's latency
- *   (SMD-1499's measurement) — so the cost of the recommendation is about one
- *   work_mem per pooled connection, and that is what the remedy says.
+ *   for the filters the router sends down the GIN route (the share above), so
+ *   the broadest of them needs that many pages × BITMAP_BYTES_PER_PAGE of
+ *   work_mem to stay exact. Raising work_mem raises what each busy connection
+ *   may spend, so the remedy prices it against the pools.
  *
  * Pure: preflight reads the numbers and prints what this returns, and the
  * schema suite holds the arithmetic. Sizes in bytes; recommendations are
@@ -1737,19 +1749,21 @@ export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSi
   const MB = 1048576;
   const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
   const heapPages = Math.ceil(heapBytes / blockSize);
-  const bitmapBytes = heapPages * BITMAP_BYTES_PER_PAGE;
+  const gated = heapPages >= ROUTE_ESTIMATE_MIN_PAGES;
+  const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
+  const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
   const workMemMB = upTo(bitmapBytes, 1);
   return {
     resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
-    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, needBytes: bitmapBytes, haveBytes: workMemBytes, recommend: `${workMemMB}MB`, recommendBytes: workMemMB * MB },
+    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, haveBytes: workMemBytes, recommend: `${workMemMB}MB`, recommendBytes: workMemMB * MB },
   };
 }
 
-/** A byte count as a reader wants it in a preflight line: kB under a megabyte, MB under a gigabyte, then GB to one decimal. */
+/** A byte count as a reader wants it in a preflight line: kB under a megabyte, MB under a gigabyte, then GB to one decimal — rounded up, so a size just past a setting never reads as equal to it. */
 export function bytesText(bytes) {
   if (bytes < 1048576) return `${Math.ceil(bytes / 1024)} kB`;
-  if (bytes < 1073741824) return `${Math.round(bytes / 1048576)} MB`;
-  return `${(bytes / 1073741824).toFixed(1)} GB`;
+  if (bytes < 1073741824) return `${Math.ceil(bytes / 1048576)} MB`;
+  return `${(Math.ceil((bytes * 10) / 1073741824) / 10).toFixed(1)} GB`;
 }
 
 /**

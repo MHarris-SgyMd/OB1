@@ -151,10 +151,14 @@ SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 # so a bench can measure the server sized for the table beside the image's
 # defaults (SMD-1499). Only `-c name=value` pairs, each checked: a name of
 # letters, digits, '_' and '.', a value of letters, digits, '_', '.' and '-'.
-# Under OB1_PG_KEEP they apply to the fresh container, as the image does.
+# Under OB1_PG_KEEP the container is a fresh one on the kept volume, so a run
+# takes the settings named now, whatever an earlier run was given.
 PG_ARGS=()
+PG_WORDS=()
 if [ -n "${OB1_PG_ARGS:-}" ]; then
   read -r -a PG_WORDS <<< "$OB1_PG_ARGS"
+fi
+if [ ${#PG_WORDS[@]} -gt 0 ]; then
   if [ $(( ${#PG_WORDS[@]} % 2 )) -ne 0 ]; then
     echo "OB1_PG_ARGS must be '-c name=value' pairs, got: $OB1_PG_ARGS" >&2
     exit 2
