@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2524 assertions: 2524 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2531 assertions: 2531 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-three (83) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -2785,17 +2785,23 @@ its scale, so the sections above are measured as before. N connections, each its
 own backend, call `match_thoughts` closed-loop for `OB1_BENCH_LOAD_S` seconds
 (60) a run. There are three mixes:
 - the unfiltered default path alone;
-- a broad, a band and a thin filter in turn (50%, 1% and 900 rows);
-- the broad filter alone.
+- the broad filter alone;
+- a broad, a band and a thin filter in turn, one call each (50%, 1% and 900
+  rows; at a million rows and up, the HNSW walk, the tier whose plan flips
+  between GIN and the walk, and the exact branch).
 
-Per slot it prints QPS, p50 and p99 beside sections A and B's single-call
-medians, and recall@10 against the exact oracle. It also counts the answers
-that differed from the answer one call alone gave to the same query. That count
-should be zero. The database container's anonymous memory is sampled from its
-cgroup through `pg_read_file` (a superuser on Linux; otherwise the table says
-why not), against what 014's header prices the walks at. `bench-load.ts` holds
-the loop; test-schema [73] holds its pure parts, test-live [39] the loop. Six
-runs at 60 s add about seven minutes a scale.
+It prints QPS per run, and per slot its calls, p50 and p99 beside sections A
+and B's single-call medians, and recall@10 against the exact oracle. It also
+counts the answers that differed from the answer one call alone gave to the
+same query; the one-connection run is that count's control. The database
+container's anonymous memory is sampled from its cgroup through `pg_read_file`
+(a superuser on Linux; otherwise the table says why not), against what 014's
+header prices the walks at. Its CPU time and the rest of the machine's are
+read across each run, so a table says how much other containers on the same
+VM used meanwhile. A failure under load is reported without discarding the
+sections above. `bench-load.ts` holds the loop; test-schema [73] holds its pure
+parts, test-live [39] the loop. Six runs at 60 s add about seven minutes a
+scale.
 
 The before arm runs only up to 100,000 rows: its defect is established there,
 and above that every question is about the shipped function. The rows are
@@ -3629,8 +3635,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2524 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1165 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2531 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1166 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

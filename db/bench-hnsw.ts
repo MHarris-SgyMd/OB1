@@ -138,15 +138,18 @@
  *      Every section above is one call at a time on one connection. This one
  *      runs N connections closed-loop for `OB1_BENCH_LOAD_S` seconds (60)
  *      over three mixes: the unfiltered default path alone (the first-party
- *      path); a broad, a band and a thin filter in turn (50%, 1% and 900
- *      rows: the HNSW walk, the tier whose plan flips between GIN and the
- *      walk, the exact branch); and the broad filter alone, where 014's
- *      header prices the walk's memory per backend. Per slot: calls, QPS,
- *      p50 and p99, beside sections A and B's medians; the recall@10 of every
- *      answer against the oracle; and how many answers differed from the one
- *      a call alone gave. Peak container memory is sampled through the run.
+ *      path); the broad filter alone, the call 014's header prices the walk's
+ *      memory for; and a broad, a band and a thin filter in turn, one call
+ *      each (50%, 1% and 900 rows: at a million rows and up the HNSW walk,
+ *      the tier whose plan flips between GIN and the walk, and the exact
+ *      branch). Per run, QPS; per slot, its calls, its share of the QPS, p50
+ *      and p99 beside sections A and B's medians, the recall@10 of every
+ *      answer against the oracle, and how many answers differed from the one
+ *      a call alone gave. The container's peak memory is sampled through the
+ *      run, and its CPU and the rest of the machine's are read across it.
  *      It runs last for its scale, after D, so it cannot perturb the
- *      sections above. bench-load.ts has the method.
+ *      sections above, and a failure in it is reported without discarding
+ *      them. bench-load.ts has the method.
  *
  * ── Running ──────────────────────────────────────────────────────────────────
  *
@@ -1382,20 +1385,26 @@ const EF_SEARCH_RAISED = 400;
  */
 const EXACT_CEILING = 110_000;
 
-/** Section F's tiers by key: the broad filter (the HNSW walk), the band (1%, whose plan flipped between GIN and the walk from pass to pass at a million and ten million rows), the thin one (900 rows: the exact branch at its widest). */
+/** Section F's tiers by key: the broad filter (the HNSW walk), the band (1%, whose plan flipped between GIN and the walk from pass to pass at a million and ten million rows), the thin one (900 rows: the exact branch at its widest). Those are their roles at a million rows and up; at the default scales 1% is the exact branch too. */
 const LOAD_BROAD = "t50";
 const LOAD_TIERS = [LOAD_BROAD, "t1", "r900"] as const;
 /** Section F's row: one mix at one connection count, each slot's line beside its single-call median from sections A and B, and what 014's header prices that many broad calls' walks at. */
-type UnderLoadRow = { scale: number; mix: string; connections: number; calls: number; qps: number; slots: (SlotLoad & { aloneMs: number })[]; memory: LoadRun["memory"]; loadBefore: number | null; pricedBytes: number };
+type UnderLoadRow = { scale: number; mix: string; connections: number; calls: number; elapsedMs: number; slots: (SlotLoad & { aloneMs: number })[]; memory: LoadRun["memory"]; cpu: LoadRun["cpu"]; pricedBytes: number };
 const underLoad: UnderLoadRow[] = [];
+/** Section F runs that failed, by scale, with the reason: printed with the report, so a failure under load does not discard the sections already measured (review pass 1). */
+const underLoadFailures: string[] = [];
 
 /**
  * Section F at one scale (SMD-1500). A pool of its own, one backend per
- * connection, asserted. Each backend first makes one untimed call per slot,
- * so plpgsql's compile and the first plan are not in any timing. Then every
- * pair is asked once alone, on the first connection, for the answers the
- * loaded calls are compared with. Then every mix runs at every connection
- * count. The bench's own connection reads the container's memory meanwhile.
+ * connection, asserted, each under a statement timeout so one hung call cannot
+ * hang the bench. Each backend first makes one untimed call per slot, so
+ * plpgsql's compile and the first plan are not in any timing. Then every pair
+ * is asked once alone, on the first connection, for the answers the loaded
+ * calls are compared with. Then every mix runs at every connection count:
+ * unfiltered, broad, filtered. The broad mix runs before the filtered one, so
+ * its memory reading starts from backends the band's walks have not grown
+ * (review pass 1). The bench's own connection reads the container's memory
+ * and CPU meanwhile.
  */
 async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[], queries: number[][], answers: Record<string, OracleAnswer[]>): Promise<void> {
   const slotOf = (t: Tier): Slot => ({ key: t.key, label: t.label });
@@ -1403,11 +1412,11 @@ async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[]
   const broad = picked.find((t) => t.key === LOAD_BROAD);
   const mixes: Mix[] = [
     { name: "unfiltered", slots: [{ key: null, label: "unfiltered" }] },
-    ...(picked.length ? [{ name: "filtered", slots: picked.map(slotOf) }] : []),
     ...(broad ? [{ name: "broad", slots: [slotOf(broad)] }] : []),
+    ...(picked.length ? [{ name: "filtered", slots: picked.map(slotOf) }] : []),
   ];
   const missing = LOAD_TIERS.filter((k) => !picked.some((t) => t.key === k));
-  if (missing.length) console.log(`\n  (section F: ${missing.join(", ")} not planted at this scale; the mixes leave it out)`);
+  if (missing.length) console.log(`\n  (section F: ${missing.join(", ")} is not a tier of its own at this scale — dropped, or merged with a share tier, as the notes above say; the mixes leave it out)`);
   const lits = queries.map(lit);
   const statement = (s: Slot, q: number) => `SELECT id FROM match_thoughts('${lits[q]}'::vector, -1.0, ${K}, '${s.key === null ? "{}" : tierFilter(s.key)}'::jsonb)`;
   const answerKey = (s: Slot) => s.key ?? WHOLE_TABLE;
@@ -1416,6 +1425,9 @@ async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[]
   const pool = Array.from({ length: Math.max(...LOAD_CONNECTIONS) }, () => openSql(URL_));
   try {
     await assertDistinctBackends(pool);
+    // Five runs' worth: generous for any one call (the slowest measured, a
+    // generic plan at ten million rows, is 11.6 s), and a bound on the wait.
+    await Promise.all(pool.map((db) => db.unsafe(`SET statement_timeout = '${Math.max(60, LOAD_S * 5)}s'`)));
     await Promise.all(pool.map(async (db) => { for (const s of distinct) await ids(db, s, 0); }));
     const alone = new Map<string, string[][]>();
     for (const s of distinct) {
@@ -1439,10 +1451,10 @@ async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[]
           mix: mix.name,
           connections: c,
           calls: run.records.length,
-          qps: run.records.length / (run.elapsedMs / 1000),
+          elapsedMs: run.elapsedMs,
           slots: lines.map((l, i) => ({ ...l, aloneMs: aloneMs(mix.slots[i]) })),
           memory: run.memory,
-          loadBefore: run.loadBefore,
+          cpu: run.cpu,
           pricedBytes: c * 2 * Number(wm) * Number(mult),
         });
         process.stdout.write(".");
@@ -1867,8 +1879,14 @@ for (const n of SCALES) {
   // single-call sections above, and the next scale resets the schema.
   if (LOAD_CONNECTIONS.length > 0) {
     process.stdout.write(`  under load        ${LOAD_CONNECTIONS.join(" and ")} connections, ${LOAD_S} s a run `);
-    await measureUnderLoad(n, withCounts, queries, answers);
-    console.log(" done");
+    try {
+      await measureUnderLoad(n, withCounts, queries, answers);
+      console.log(" done");
+    } catch (err) {
+      const reason = (err as Error).message.split("\n")[0];
+      underLoadFailures.push(`${n.toLocaleString()} rows: ${reason}`);
+      console.log(` failed (${reason}); the runs before it are kept, and the sections above are reported`);
+    }
   }
 }
 
@@ -1955,26 +1973,30 @@ for (const b of bounds) {
 }
 console.log();
 
-if (underLoad.length > 0) {
+if (underLoad.length > 0 || underLoadFailures.length > 0) {
+  /** A reason string in a table cell: a `|` in a server's message would split the row. */
+  const cellText = (t: string) => t.replace(/\|/g, "/");
   console.log(`### F. Under load: ${LOAD_CONNECTIONS.join(" and ")} connections closed-loop, ${LOAD_S} s a run (SMD-1500)\n`);
-  console.log(`Each connection is a backend of its own and makes its next call the moment its last returns, rotating through the mix's slots with every query (${Q}); the connections' cycles start spread apart. "QPS" is the run's calls over its wall time, counting the calls in flight at the deadline. p50 and p99 are nearest-rank over the slot's calls. "median ms alone" is section A's or B's median for the same call, one at a time. "in exact top-${K}" is averaged per query, then over the queries the run reached; "alone" beside it is one call's recall over the same queries. "changed" counts the calls whose rows, as a set, were not the rows one call alone returned for the same query. Concurrency should change no answer: a non-zero count is a finding.\n`);
-  console.log(`| rows | mix | connections | calls | QPS | slot | slot calls | p50 ms | p99 ms | median ms alone | in exact top-${K} | alone | changed |`);
-  console.log("| ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+  for (const f of underLoadFailures) console.log(`Section F failed at ${f}; the runs before the failure are below.\n`);
+  console.log(`Each connection is a backend of its own and makes its next call the moment its last returns. It takes the mix's slots in turn, one call each, so the slots are weighted equally by calls, not by time: a slow slot holds the connections longest. Every slot is asked with every query (${Q}), and the connections start on different slots and queries. "QPS" is the run's calls over its wall time, counting the calls in flight at the deadline; "slot QPS" is the slot's calls over the same time. p50 and p99 are nearest-rank over the slot's calls. "median ms alone" is section A's or B's median for the same call, one at a time, taken earlier in the run on a heap and cache in another state: the one-connection rows are the same-state baseline. "in exact top-${K}" is averaged per query, then over the queries the run reached; "alone" beside it is one call's recall over the same queries. "changed" counts the calls whose rows, as a set, were not the rows one call alone returned for the same query; the one-connection rows are its control, the same call repeated with nothing beside it. A count under ten connections above the one-connection row's is a finding.\n`);
+  console.log(`| rows | mix | connections | calls | QPS | slot | slot calls | slot QPS | p50 ms | p99 ms | median ms alone | in exact top-${K} | alone | changed |`);
+  console.log("| ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const u of underLoad) {
+    const seconds = u.elapsedMs / 1000;
     for (const [i, s] of u.slots.entries()) {
-      const run = i === 0 ? `${u.calls.toLocaleString()} | ${u.qps.toFixed(1)}` : " | ";
-      console.log(`| ${u.scale.toLocaleString()} | ${u.mix} | ${u.connections} | ${run} | ${s.label} | ${s.calls.toLocaleString()} | ${s.p50.toFixed(1)} | ${s.p99.toFixed(1)} | ${s.aloneMs.toFixed(1)} | ${s.recall.toFixed(1)} | ${s.recallAlone.toFixed(1)} | ${s.changed} |`);
+      const run = i === 0 ? `${u.calls.toLocaleString()} | ${(u.calls / seconds).toFixed(1)}` : " | ";
+      console.log(`| ${u.scale.toLocaleString()} | ${u.mix} | ${u.connections} | ${run} | ${s.label} | ${s.calls.toLocaleString()} | ${(s.calls / seconds).toFixed(1)} | ${s.p50.toFixed(1)} | ${s.p99.toFixed(1)} | ${s.aloneMs.toFixed(1)} | ${s.recall.toFixed(1)} | ${s.recallAlone.toFixed(1)} | ${s.changed} |`);
     }
   }
-  console.log(`\nThe database container's memory through each run, from its cgroup. "anon" is memory.stat's anonymous memory: the backends' private allocations, which are what 014's header prices. "total" is memory.current, which includes the page cache and shared memory. "014 prices" is connections × 2 scan nodes × work_mem × hnsw.scan_mem_multiplier: the most the walks of that many concurrent broad filters may take. Only the broad mix asks for one at every call. "VM load" is the machine's one-minute load average just before the run, from the server's /proc/loadavg; other containers sharing the CPUs count in it.\n`);
-  console.log("| rows | mix | connections | anon MiB idle | anon MiB peak | anon growth MiB | 014 prices MiB | total MiB peak | samples | VM load |");
-  console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+  console.log(`\nThe database container's memory and CPU through each run, from its cgroup. "anon" is memory.stat's anonymous memory: the backends' private allocations, which are what 014's header prices. "total" is memory.current, which includes the page cache and shared memory. "014 prices" is connections × 2 scan nodes × work_mem × hnsw.scan_mem_multiplier, the top of the header's range: the most the walks of that many concurrent broad filters may take. "db CPUs" is the container's CPU time over the run's wall time; "other CPUs" is the rest of the machine's busy time over the same span, from the server's /proc/stat: every other container on the same VM. The bench's client runs outside the VM and is in neither.\n`);
+  console.log("| rows | mix | connections | anon MiB idle | anon MiB peak | anon growth MiB | 014 prices MiB | total MiB peak | samples | db CPUs | other CPUs |");
+  console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const u of underLoad) {
     const m = u.memory;
     const lead = `| ${u.scale.toLocaleString()} | ${u.mix} | ${u.connections}`;
-    const load = u.loadBefore === null ? "—" : u.loadBefore.toFixed(2);
-    if (typeof m === "string") console.log(`${lead} | — | — | — | ${mb(u.pricedBytes)} | — | ${m} | ${load} |`);
-    else console.log(`${lead} | ${mb(m.idle.anon)} | ${mb(m.peak.anon)} | ${mb(m.peak.anon - m.idle.anon)} | ${mb(u.pricedBytes)} | ${mb(m.peak.current)} | ${m.samples} | ${load} |`);
+    const cpu = typeof u.cpu === "string" ? `— | ${cellText(u.cpu)}` : `${u.cpu.db.toFixed(2)} of ${u.cpu.cpus} | ${u.cpu.others.toFixed(2)}`;
+    if (typeof m === "string") console.log(`${lead} | — | — | — | ${mb(u.pricedBytes)} | — | ${cellText(m)} | ${cpu} |`);
+    else console.log(`${lead} | ${mb(m.idle.anon)} | ${mb(m.peak.anon)} | ${mb(m.peak.anon - m.idle.anon)} | ${mb(u.pricedBytes)} | ${mb(m.peak.current)} | ${m.samples} | ${cpu} |`);
   }
   console.log();
 }

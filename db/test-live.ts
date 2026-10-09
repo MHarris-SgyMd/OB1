@@ -10641,11 +10641,39 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     const one = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1, slots: 2, queries: 3, call }));
     const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, memory }));
     assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
-    assert(one.records.length <= Math.ceil(1 / nap) + 1 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline: one connection made at most ${Math.ceil(1 / nap) + 1} calls (${one.records.length}), and the run ended within a call of it (${four.elapsedMs.toFixed(0)} ms)`);
+    const lastStart = Math.max(...four.records.map((r) => r.at));
+    assert(lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
     assert(new Set(four.records.map((r) => `${r.slot}/${r.query}`)).size === 6 && four.records.every((r) => r.ids[0] === `${r.slot}/${r.query}` && r.ms >= nap * 1000 * 0.9), "every (slot, query) pair is reached, and each record is its own call's pair and time");
     const m = four.memory;
     if (typeof m === "string") assert(m.length > 0, `the container's memory is not readable here, and the run says why (${m})`);
-    else assert(m.samples >= 3 && m.peak.anon >= m.idle.anon && m.peak.current >= m.peak.anon && typeof four.loadBefore === "number" && one.loadBefore === null, `the container's memory was sampled through the run (${m.samples} samples, anon ${(m.idle.anon / 1048576).toFixed(0)} → ${(m.peak.anon / 1048576).toFixed(0)} MiB) and the load average read before it (${four.loadBefore}); a run given no connection to read through reads neither`);
+    else assert(m.samples >= 3 && m.peak.anon >= m.idle.anon && m.peak.current >= m.peak.anon && typeof four.cpu !== "string" && four.cpu.cpus >= 1 && typeof one.memory === "string" && typeof one.cpu === "string", `the container's memory was sampled through the run (${m.samples} samples, anon ${(m.idle.anon / 1048576).toFixed(0)} → ${(m.peak.anon / 1048576).toFixed(0)} MiB) and its CPU read across it (${JSON.stringify(four.cpu)}); a run given no connection to read through reads neither`);
+
+    // The peak, not the last reading: the first call sorts two million rows
+    // under a large work_mem in a backend of its own, held 400 ms by the same
+    // statement, and closes it, so the memory rises and falls inside the run
+    // (~150 MiB measured on with-postgres.sh's container).
+    let spiked = false;
+    const spike = async (db: SQL) => {
+      if (spiked) {
+        await db`SELECT pg_sleep(${nap})`;
+        return [];
+      }
+      spiked = true;
+      const own = new SQL({ url: URL_, max: 1 });
+      try {
+        await own.begin(async (tx: SQL) => {
+          await tx`SET LOCAL work_mem = '256MB'`;
+          await tx`SELECT count(*), pg_sleep(0.4) FROM (SELECT g FROM generate_series(1, 2000000) g ORDER BY g DESC OFFSET 0) s`;
+        });
+      } finally {
+        await own.close();
+      }
+      return [];
+    };
+    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1.5, slots: 1, queries: 1, call: spike, memory }));
+    const pm = peaked.memory;
+    if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
+    else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.05, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.05 or more)`);
 
     let calls = 0;
     const failing = async (db: SQL) => {
@@ -10657,6 +10685,9 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     const thrown = await bounded(closedLoop({ pool, seconds: 5, slots: 1, queries: 1, call: failing })).then(() => "not thrown", (err) => (err as Error).message);
     const ms = performance.now() - t0;
     assert(thrown === "a call refused" && ms < 1000 && calls <= 3 + pool.length, `the first error stops every connection and is thrown (${thrown}, after ${ms.toFixed(0)} ms of a 5 s run, ${calls} calls)`);
+  } catch (err) {
+    // A run that outran its bound, or a refusal, is this section's failure, not the suite's crash.
+    assert(false, `[39] stopped: ${(err as Error).message}`);
   } finally {
     await Promise.all([...pool, memory].map((db) => db.close()));
   }
