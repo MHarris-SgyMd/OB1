@@ -303,6 +303,15 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   const takenBody = (await taken.json()) as { id?: string };
   const recorded = await one<{ thought_id: string | null }>(sql`SELECT thought_id::text FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-orphan`}`);
   assert(taken.status === 202 && (await captures(orphanText)) === 1 && recorded?.thought_id === takenBody.id, `past it, the retry takes the claim and captures (${taken.status}, recorded ${recorded?.thought_id})`);
+  const fresh = await one<{ fresh: boolean }>(sql`SELECT claimed_at > now() - interval '1 minute' AS fresh FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-orphan`}`);
+  assert(fresh?.fresh === true, "the claim taken is dated afresh: its lease and its window start again");
+  // A capture that fails on the live stack — text Postgres will not store —
+  // gives its claim back: the release matches its own claim's time, kept to
+  // the microsecond, so the sender's retry is not refused.
+  const nul = JSON.stringify({ id: `evt-${RUN}-nul`, text: "a NUL \u0000 Postgres refuses" });
+  const failed = await deliver(nul);
+  const nulLeft = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-nul`}`);
+  assert(failed.status >= 400 && nulLeft.n === 0, `a capture that fails gives its claim back (${failed.status}, ${nulLeft.n} left)`);
 }
 
 console.log("\n[7] The plugin's handle: its own table, named bare; a core table refused by Postgres");

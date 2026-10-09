@@ -18,7 +18,14 @@ const TOLERANCE_S = 300;
  * retry, signed afresh with the same id, is told apart only inside it.
  */
 const KEEP_S = 2 * TOLERANCE_S + 60;
-/** How long a claim whose capture never finished — the server stopped mid-capture — holds its id, in seconds, before a retry may take it: longer than a capture whose model calls each run to OB1_LLM_TIMEOUT's default 120 s. A capture longer still may run twice, which costs model calls and changes no row (a re-capture keeps the thought). */
+/**
+ * How long a claim whose capture never finished — the server stopped
+ * mid-capture — holds its id, in seconds, before a retry may take it: longer
+ * than one round of model calls at OB1_LLM_TIMEOUT's default 120 s. Contextual
+ * chunking (OB1_CHUNK_CONTEXT) makes two rounds, and a raised timeout longer
+ * ones; a capture past the lease may run twice, which costs model calls and
+ * changes no row (a re-capture keeps the thought).
+ */
 const LEASE_S = 180;
 
 export default definePlugin({
@@ -68,12 +75,13 @@ export default definePlugin({
         // taken again, so the sender's retry is not refused until the prune.
         const claim = await ctx.db.tx(async (sql) => {
           await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${KEEP_S} * interval '1 second'`;
-          const [mine] = await sql<{ id: string }>`
+          // claimed_at as text: a Date would round its microseconds away, and the release matches on it.
+          const [mine] = await sql<{ claimed: string }>`
             INSERT INTO deliveries (id) VALUES (${id})
             ON CONFLICT (id) DO UPDATE SET claimed_at = now()
              WHERE deliveries.thought_id IS NULL AND deliveries.claimed_at < now() - ${LEASE_S} * interval '1 second'
-            RETURNING id`;
-          if (mine) return { claimed: true as const };
+            RETURNING claimed_at::text AS claimed`;
+          if (mine) return { claimed: true as const, at: mine.claimed };
           const [held] = await sql<{ thought_id: string | null }>`SELECT thought_id FROM deliveries WHERE id = ${id}`;
           return { claimed: false as const, thoughtId: held?.thought_id ?? null };
         });
@@ -83,8 +91,11 @@ export default definePlugin({
             : { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
         }
         // A capture that fails gives the claim back, so the sender's retry
-        // runs; one that cannot be given back lapses with the lease.
-        const release = () => ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${id} AND thought_id IS NULL`).catch(() => undefined);
+        // runs; one that cannot be given back lapses with the lease. Its own
+        // claim alone: one a retry took past the lease is the retry's.
+        const claimedAt = claim.at;
+        const release = () =>
+          ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${id} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).catch(() => undefined);
         let captured;
         try {
           captured = await capture();

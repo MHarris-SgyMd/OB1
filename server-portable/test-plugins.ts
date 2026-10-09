@@ -589,17 +589,23 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const claims = new Map<string, string | null>();
   /** Unfinished claims past their lease, which the next claim of the id takes. */
   const lapsed = new Set<string>();
+  /** Each claim's claimed_at, as the claim returns it and the release matches it. */
+  const claimedAt = new Map<string, string>();
+  let tick = 0;
   let recordFails = false;
   const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ").trim();
     const id = values[0] as string;
     if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve([]);
     if (q.startsWith("INSERT INTO deliveries (id) VALUES (?) ON CONFLICT (id) DO UPDATE SET claimed_at = now() WHERE deliveries.thought_id IS NULL AND")) {
-      if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) return Promise.resolve((claims.set(id, null), [{ id }]));
+      if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) {
+        const at = `t${++tick}`;
+        return Promise.resolve((claims.set(id, null), claimedAt.set(id, at), [{ claimed: at }]));
+      }
       return Promise.resolve([]);
     }
     if (q.startsWith("SELECT thought_id FROM deliveries WHERE id =")) return Promise.resolve(claims.has(id) ? [{ thought_id: claims.get(id) }] : []);
-    if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL")) return Promise.resolve((claims.get(id) === null && claims.delete(id), []));
+    if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz")) return Promise.resolve((claims.get(id) === null && claimedAt.get(id) === values[1] && claims.delete(id), []));
     if (q.startsWith("INSERT INTO deliveries (id, thought_id) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET thought_id =")) {
       if (recordFails) return Promise.reject(new Error("connection reset"));
       return Promise.resolve((claims.set(id, values[1] as string), []));
@@ -641,11 +647,26 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await send("evt-5");
   recordFails = false;
   assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-retry", `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
+  // A first attempt that outlives its lease and then fails gives back its own claim, not the retry's that took it.
+  let failFirst: (e: Error) => void = () => {};
+  answer = () => new Promise((_ok, fail) => { failFirst = fail; });
+  const slow = send("evt-7");
+  while (claims.get("evt-7") !== null) await Bun.sleep(1);
+  lapsed.add("evt-7");
+  let finishRetry: (v: unknown) => void = () => {};
+  answer = () => new Promise((ok) => { finishRetry = ok; });
+  const retry = send("evt-7");
+  while (lapsed.has("evt-7")) await Bun.sleep(1);
+  failFirst(new Error("embedder timed out"));
+  r = await slow;
+  assert(r.status === 500 && claims.has("evt-7") && claims.get("evt-7") === null, `the first attempt's late failure leaves the retry's claim standing (${r.status})`);
+  finishRetry(coreOk({ id: "t-seven" }));
+  r = await retry;
+  assert(r.status === 202 && claims.get("evt-7") === "t-seven", `and the retry records its thought (${r.status})`);
   answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
   r = await send("evt-6");
   const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
   assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
-  answer = async () => coreOk({ thoughts: [] });
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
