@@ -139,7 +139,7 @@ export interface PluginHook {
   handler(ctx: HookContext, request: HookRequest): Promise<HookAnswer>;
 }
 
-/** HMAC-SHA256 of `data` (the body's bytes, or text) under `key`, as lower-case hex — the signature most webhook senders send. */
+/** HMAC-SHA256 of `data` (the body's bytes, or text) under `key`, as lower-case hex — the signature most webhook senders send. Over the body alone it verifies a resend forever: a sender that signs the time too is verifyTimestamped's. */
 export function hmacSha256Hex(key: string, data: Uint8Array | string): string {
   return createHmac("sha256", key).update(data).digest("hex");
 }
@@ -149,6 +149,60 @@ export function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/**
+ * How a sender signs a delivery with the time it sent it (SMD-2755): the
+ * HMAC-SHA256, under the plugin's secret, of `<prefix><timestamp><separator>`
+ * followed by the body's bytes, as hex in one header (after
+ * `signaturePrefix`), the timestamp — Unix seconds — in another. A signature
+ * over the body alone verifies forever, so a recorded delivery could be resent
+ * at will; one over the time too verifies for the tolerance alone. Slack's is
+ * `{ signatureHeader: "x-slack-signature", signaturePrefix: "v0=",
+ * timestampHeader: "x-slack-request-timestamp", prefix: "v0:", separator: ":" }`.
+ */
+export type TimestampedScheme = {
+  signatureHeader: string;
+  timestampHeader: string;
+  /** Before the timestamp in what is signed: none by default. */
+  prefix?: string;
+  /** Between the timestamp and the body in what is signed: "." by default. */
+  separator?: string;
+  /** Before the hex in the signature header (Slack's "v0="): none by default. */
+  signaturePrefix?: string;
+  /** How far the timestamp may be from the server's clock, either way, in seconds: 300 by default. */
+  toleranceSeconds?: number;
+};
+
+/**
+ * A timestamped delivery's verdict: verified, with its timestamp, or the code
+ * a handler answers 401 with — a timestamp missing or not Unix seconds, a
+ * signature that does not match, or a signed one outside the tolerance.
+ */
+export type TimestampVerdict = { ok: true; timestamp: number } | { ok: false; code: "NO_TIMESTAMP" | "BAD_SIGNATURE" | "STALE_DELIVERY" };
+
+/**
+ * Whether a delivery is signed by the secret's holder within the tolerance of
+ * now (`now` in milliseconds, the clock's by default). The signature is
+ * checked before the time, so only a delivery the secret's holder signed is
+ * told it is stale — a clock-skew fault its operator can read.
+ */
+export function verifyTimestamped(request: HookRequest, secret: string, scheme: TimestampedScheme, now = Date.now()): TimestampVerdict {
+  const tolerance = scheme.toleranceSeconds ?? 300;
+  if (!Number.isFinite(tolerance) || tolerance <= 0) throw new Error(`verifyTimestamped: toleranceSeconds ${tolerance} is not a positive number of seconds`);
+  const stamp = request.headers[scheme.timestampHeader.toLowerCase()] ?? "";
+  if (!/^\d{1,12}$/.test(stamp)) return { ok: false, code: "NO_TIMESTAMP" };
+  const sent = request.headers[scheme.signatureHeader.toLowerCase()] ?? "";
+  const signaturePrefix = scheme.signaturePrefix ?? "";
+  if (!sent.startsWith(signaturePrefix)) return { ok: false, code: "BAD_SIGNATURE" };
+  const expected = createHmac("sha256", secret)
+    .update(`${scheme.prefix ?? ""}${stamp}${scheme.separator ?? "."}`)
+    .update(request.body)
+    .digest("hex");
+  if (!safeEqual(sent.slice(signaturePrefix.length).toLowerCase(), expected)) return { ok: false, code: "BAD_SIGNATURE" };
+  const timestamp = Number(stamp);
+  if (Math.abs(now / 1000 - timestamp) > tolerance) return { ok: false, code: "STALE_DELIVERY" };
+  return { ok: true, timestamp };
 }
 
 /** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */

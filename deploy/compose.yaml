@@ -972,7 +972,8 @@ services:
     restart: on-failure:3
     logging: *logging
 
-  # Proposals only: consolidation never applies one. Each waits for review
+  # Consolidation never applies a proposal; since 084 it stores related,
+  # evolves and duplicate verdicts as relation facets. Each proposal waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
   # a stale one the next pass settles (067). Beside extraction: the pool holds
   # only thoughts with entities and a vector, and a candidate shares an

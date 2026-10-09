@@ -2152,7 +2152,10 @@ jobs:
       # manifest). With the overlay off /hooks is the proxy's 404; on, a
       # delivery signed with another secret is the plugin's 401 and a signed
       # one captures through the core as the hook's own caller, read back on
-      # the mesh; a plugin it does not serve is the REST core's 404.
+      # the mesh; a plugin it does not serve is the REST core's 404. SMD-2755:
+      # each delivery signs its time with its body — one signed ten minutes
+      # ago, as a recorded one resent would be, is 401 STALE_DELIVERY, and the
+      # captured one resent with its id is 200, the same thought, run once.
       - name: A plugin's webhook reaches the REST core only by the overlay, and captures as its hook
         working-directory: deploy
         run: |
@@ -2163,17 +2166,26 @@ jobs:
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }
-          BODY='{"text":"ci: a capture through the example webhook"}'
-          SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+          BODY="{\"id\":\"ci-$(openssl rand -hex 8)\",\"text\":\"ci: a capture through the example webhook\"}"
           post() { code -X POST -H 'content-type: application/json' "$@"; }
-          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          # deliver BODY [TIMESTAMP [SECRET]]: signed as the example's sender signs, the HMAC of "<timestamp>.<body>".
+          deliver() {
+            local ts
+            ts="${2:-$(date +%s)}"
+            post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
+          }
+          c=$(deliver "$BODY")
           [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
           docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          c=$(post -H "x-example-signature: $(printf %s "$BODY" | openssl dgst -sha256 -hmac other -hex | sed 's/^.* //')" -d "$BODY" "$B/hooks/example/capture")
+          c=$(deliver "$BODY" "" other)
           [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
-          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          c=$(deliver "$BODY" "$(( $(date +%s) - 600 ))")
+          { [ "$c" = 401 ] && [ "$(jq -r '.code // empty' /tmp/hook-body 2>/dev/null)" = STALE_DELIVERY ]; } || { echo "a delivery signed ten minutes ago answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
           id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
           { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
+          { [ "$c" = 200 ] && [ "$(jq -c '[.id, .duplicate]' /tmp/hook-body 2>/dev/null)" = "[\"$id\",true]" ]; } || { echo "the same delivery resent answered $c, not 200 and the same thought: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
           fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
           grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
           c=$(post -d '{}' "$B/hooks/nothing/here")
@@ -2183,7 +2195,7 @@ jobs:
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          c=$(deliver "$BODY")
           [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
