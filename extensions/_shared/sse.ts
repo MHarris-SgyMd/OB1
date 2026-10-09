@@ -11,7 +11,9 @@
 // imports nothing, and everything here runs as it is on Bun, Node, Deno and Workers.
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
-// result to it when the tool returns; until then the stream carries nothing.
+// result to it when the tool returns; until then the stream carries nothing
+// (the core's SDK v2 transport adds its own keepalive comment every 15 s,
+// longer than the silence Bun allows; the vendored servers' none).
 // Bun closes a connection that has been silent for `idleTimeout` seconds — 10
 // by default — a streaming response included, at the next of its 4-second
 // sweeps, so between 8 and 12 s of silence by phase; it never reaches into a
@@ -59,12 +61,15 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  * the runtime's reap that follows on Bun is not logged as a client leaving; on
  * Node or Workers nothing reaps a silent stream, and it stays open until the
  * client or a proxy gives up). A response that is not an event stream is
- * returned as it is, `onEnd` run at once: it is complete.
+ * returned as it is, `onEnd` run at once: it is complete. `onEnd` is told the
+ * bytes the body carried, this function's own keepalive frames apart — the
+ * MCP SDK's transport writes its own every 15 s, part of the body it hands
+ * here, and those are counted (none for a response returned as it is).
  */
 export function withSseKeepalive(
   response: Response,
   opts: {
-    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string;
+    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; label?: string;
     stalledLine?: (label: string, elapsedMs: number) => string;
   } = {},
 ): Response {
@@ -77,6 +82,7 @@ export function withSseKeepalive(
   const maxMs = opts.maxMs ?? SSE_KEEPALIVE_MAX_MS;
   const started = opts.startedAt ?? performance.now();
   let timer: ReturnType<typeof setInterval> | null = null;
+  let bytes = 0;
   const stop = () => {
     if (timer === null) return;
     clearInterval(timer);
@@ -100,9 +106,13 @@ export function withSseKeepalive(
         }
       }, intervalMs);
     },
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
     flush() {
       stop(); // the transport closed the stream: the response is complete
-      opts.onEnd?.();
+      opts.onEnd?.(bytes);
     },
   });
   opts.signal?.addEventListener("abort", stop, { once: true });

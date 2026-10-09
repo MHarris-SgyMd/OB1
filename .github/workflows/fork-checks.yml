@@ -1997,6 +1997,11 @@ jobs:
           grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" || { echo "the server did not name the capture key for its POST /?key= at the root:" >&2; grep 'old root URL' <<<"$SLOG" >&2; exit 1; }
           if grep -qF 'key "ci-read" reached' <<<"$SLOG"; then echo "a marker the client set on /mcp or /health reached the server and was logged" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
+          # The server's JSON lines for a thought_stats call so far (SMD-1849),
+          # so the absolute-form probe's own line is counted below, not an
+          # earlier call's.
+          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+\}$'
+          stats_before=$(docker compose -f compose.yaml logs --no-color --no-log-prefix server | grep -cE "$STATS_LINE" || true)
           # Answered by the server, so Traefik took the absolute form and logged it:
           # a refusal before the log would leave the userinfo half untested.
           code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
@@ -2006,6 +2011,14 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
           if grep -qF "$OB1_SMOKE_KEY" <<<"$LOG"; then echo "the proxy's access log holds the smoke key from a query string or userinfo" >&2; exit 1; fi
           grep -qF '"RequestPath":"/auth/callback"' <<<"$LOG" || { echo "no access-log line for the callback with its bare path, so the absence of the key proves nothing:" >&2; tail -5 <<<"$LOG" >&2; exit 1; }
+          # The server's own line per request (SMD-1849): the absolute-form
+          # probe's tool call above, by its tool, its key's name, how it ended
+          # and its time — and the key it carried in ?key= nowhere in the log.
+          SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
+          if grep -qF "$OB1_SMOKE_KEY" <<<"$SLOG"; then echo "the server's log holds the smoke key" >&2; exit 1; fi
+          stats_after=$(grep -cE "$STATS_LINE" <<<"$SLOG" || true)
+          [ "$stats_after" -eq $((stats_before + 1)) ] \
+            || { echo "the absolute-form probe's thought_stats call left $((stats_after - stats_before)) JSON lines, not one, so the absence of the key proves nothing:" >&2; grep '^{"ts"' <<<"$SLOG" | tail -5 >&2; exit 1; }
           touch /tmp/provider-stub-slow-embed
           trap 'rm -f /tmp/provider-stub-slow-embed' EXIT
           python3 - "$B/mcp" "$OB1_SMOKE_KEY" <<'PY'
@@ -2060,7 +2073,7 @@ jobs:
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
-          grep -qE '^.*api GET /v1/whoami 200 [0-9]+ms$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
