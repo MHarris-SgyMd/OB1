@@ -8,6 +8,8 @@ import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from 
 import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { setJobSink } from "./jobs.ts";
+import { enabledHooks, hookSecrets, loadPlugins, type LoadedHook, type LoadedPlugin } from "./core/plugins.ts";
+import { knowTools } from "./telemetry.ts";
 
 /**
  * Runtime-portable env access.
@@ -195,6 +197,26 @@ export type Env = {
    * list itself, as it does to the authorization server.
    */
   COMPOSE_PROFILES?: string;
+  /**
+   * The plugins this brain runs (SMD-2310): comma-separated names from
+   * plugins/registry.ts. Unset, none. A name that is no plugin refuses to
+   * start — preflight first, then the entry (plugins.ts).
+   */
+  OB1_PLUGINS?: string;
+  /**
+   * The password of the login role plugins' SQL runs on, `ob1_plugins`
+   * (SMD-2310): the migrator makes the role with it, and the servers' plugin
+   * pools log in with it. Required while an enabled plugin keeps tables.
+   */
+  OB1_PLUGIN_DB_PASSWORD?: string;
+  /**
+   * The plugins whose webhooks the REST core serves at /hooks/<plugin>/<name>
+   * (SMD-2310), comma-separated, each enabled in OB1_PLUGINS. Unset, none —
+   * and the proxy reaches /hooks only with deploy/compose.hooks-public.yaml.
+   */
+  OB1_HOOKS?: string;
+  /** Each webhook plugin's secret, `plugin=secret` pairs separated by spaces: what its handler verifies a delivery against. */
+  OB1_HOOK_SECRETS?: string;
 };
 
 let ENV: Env | null = null;
@@ -245,6 +267,10 @@ export function serveHere(door: string): void {
   // review pass 1). A store that fails to build here fails again, and says
   // so, at the first request.
   initEnv();
+  // A name in OB1_PLUGINS or OB1_HOOKS that is no plugin, or a malformed
+  // OB1_HOOK_SECRETS, stops the server here, not at its first request (SMD-2310).
+  plugins();
+  hooks();
   void db().catch(() => {});
 }
 
@@ -307,4 +333,30 @@ export function agents(): AgentResolver {
   // PostgREST store) a fetch belongs to the request that started it.
   if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
   return _agents;
+}
+
+// The enabled plugins (SMD-2310), read once from the seeded environment: both
+// entries serve the same set, and a serving entry asks at its start so a name
+// that is no plugin stops it there rather than at its first request. Their
+// tool names join the core's in the request line (telemetry.ts).
+let _plugins: LoadedPlugin[] | null = null;
+export function plugins(): LoadedPlugin[] {
+  if (!_plugins) {
+    _plugins = loadPlugins(env().OB1_PLUGINS);
+    knowTools(_plugins.flatMap((p) => p.operations.map((op) => op.tool)));
+  }
+  return _plugins;
+}
+
+// The webhooks the REST core serves and their secrets (SMD-2310), read once
+// like the plugins: a name in OB1_HOOKS that is no enabled plugin with a
+// webhook, or a malformed OB1_HOOK_SECRETS, stops the server at its start.
+let _hooks: { hooks: LoadedHook[]; secrets: Map<string, string> } | null = null;
+export function hooks(): { hooks: LoadedHook[]; secrets: Map<string, string> } {
+  if (!_hooks) {
+    const { secrets, problem } = hookSecrets(env().OB1_HOOK_SECRETS);
+    if (problem) throw new Error(problem);
+    _hooks = { hooks: enabledHooks(plugins(), env().OB1_HOOKS), secrets };
+  }
+  return _hooks;
 }

@@ -133,7 +133,7 @@ It goes on the server's run command as `DEFAULT_USER_ID`.
 
 ### 4.3 Run the Server
 
-Run the Work Operating Model server as [its README's Step 4](../work-operating-model-activation/README.md#4-run-the-mcp-server) shows — `PORT=8787 … bun recipes/work-operating-model-activation/index.ts` with `DEFAULT_USER_ID` and `MCP_ACCESS_KEYS` in its environment ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the steps). Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form.
+Run the Work Operating Model server as [its README's Step 4](../work-operating-model-activation/README.md#4-run-the-mcp-server) shows — `PORT=8787 … bun --no-install recipes/work-operating-model-activation/index.ts` with `DEFAULT_USER_ID` and `MCP_ACCESS_KEYS` in its environment ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks the steps). Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form.
 
 ### 4.4 Connect It to Your AI Client
 
