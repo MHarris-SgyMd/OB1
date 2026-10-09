@@ -722,12 +722,12 @@ those its own way.
 bun test-server.ts        # 859 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
 bun test-auth.ts          # 187 — scoped, hashed, named keys
 bun test-rest.ts          # 315 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 153 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks
+bun test-plugins.ts       # 199 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped and the example's replay refusals
 bun run test:local        # 202 — fully local provider, no credential
-bun run test:sql          # 237 — store conformance, real Postgres in a container
-bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:sql          # 244 — store conformance, real Postgres in a container
+bun run test:e2e          # 540 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
-../db/with-postgres.sh bun test-plugins-sql.ts  # 83 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, preflight's row
+../db/with-postgres.sh bun test-plugins-sql.ts  # 95 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

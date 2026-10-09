@@ -591,6 +591,42 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
   return "conflict_undirected";
 }
 
+/** The verdicts that relate two thoughts that both stand — a `relation` facet each (migration 084), never a proposal. */
+export const RELATION_VERDICTS = ["related", "evolves", "duplicate"] as const;
+export type RelationVerdict = (typeof RELATION_VERDICTS)[number];
+
+/**
+ * The relation a judgement records (SMD-1873 PR 2), or null when it records
+ * none — an unrelated pair, an outdates (a proposal's), a malformed answer.
+ * The pass writes it with record_thought_relation (084) on the newer thought,
+ * and for a well-formed judgement a null closes the pair's edge, so a
+ * re-judge that no longer sees the relation retracts it; a malformed,
+ * timed-out or refused pair never reaches the write, and its edge stands.
+ */
+export function relationVerdict(j: Judgement): RelationVerdict | null {
+  return !j.malformed && (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;
+}
+
+/**
+ * What a relation records, and where it came from, by proposalConfidence's
+ * rule (the written number without a distribution, or under MIN_COVERED):
+ * `confidence`, the token probability of the word it chose, which the
+ * relation stores; and `mass`, the probability that SOME relation holds —
+ * related, evolves and duplicate together — which the floor cuts on. The
+ * three words share the model's mass, so a confident "related" can read 0.45
+ * with 0.98 on the three: floored on its own word, about 3.6% of the dogfood
+ * brain's relation verdicts would have been dropped while the model was sure a
+ * relation held (SMD-1873 PR 2 review pass 1). Without a distribution the
+ * two are the written number.
+ */
+export function relationConfidence(j: Judgement): { confidence: number; mass: number; source: "token" | "stated" } {
+  const d = j.probabilities?.verdict;
+  if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, mass: j.confidence, source: "stated" };
+  const p = d.p as Record<string, number>;
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  return { confidence: r2(p[j.verdict] ?? 0), mass: Math.min(1, r2(RELATION_VERDICTS.reduce((m, w) => m + (p[w] ?? 0), 0))), source: "token" };
+}
+
 /** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */
 export const MIN_COVERED = 0.5;
 

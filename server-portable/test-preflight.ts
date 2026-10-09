@@ -1239,6 +1239,21 @@ else {
   // identical regeneration recorded nothing, and the remedy was false).
   await ctx.unsafe(`SELECT write_page_section('${pg064.page_id}'::uuid, 'body', 'A generated body.', 'generated', NULL, '{"model": "stub"}'::jsonb, ARRAY['${tid}']::uuid[]) AS r`);
   assert(/✓  lineage\s+every derived row has its lineage row — 2 lineage row\(s\)/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — regenerating the section unchanged — records the row: ok again on two rows");
+  // 084's kind (SMD-1873): an active judged relation without its lineage row
+  // is refused the same way, the relation named, and the remedy is the
+  // relation's own: close it, and the pass judges the pair again. The two
+  // thoughts are removed after, so the counts below are as they were.
+  const relA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-084 older', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const relB = ((await ctx.unsafe(`SELECT upsert_thought('preflight-084 newer', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const rel084 = (await ctx.unsafe(`SELECT record_thought_relation('${relB}'::uuid, '${relA}'::uuid, 'related', 0.7, 'consolidate:t@p4', NULL, 'a', 'b', NULL) AS r`))[0].r as { id: string };
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = '${rel084.id}'::uuid`);
+  const noRelation = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noRelation.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 judged relation\\(s\\) \\(${rel084.id}\\)`).test(noRelation.out) && /A judged relation's row is written by 084's record_thought_relation: close the edge/.test(noRelation.out),
+         `a judged relation without its lineage row does not start, the relation named, and the remedy is the relation's own (exit ${noRelation.code}: ${noRelation.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${rel084.id}'::uuid`);
+  assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — the edge closed — the check is ok again: a closed relation is history");
+  await ctx.unsafe(`SELECT delete_thought('${relB}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${relA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger

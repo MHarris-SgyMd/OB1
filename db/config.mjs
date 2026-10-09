@@ -2210,7 +2210,10 @@ export const ROLE_GRANTS = Object.freeze({
   // releases work, upserts its job key into `ob1_config` (reembed's
   // --switch-model, extract's key), and, for consolidate.ts, records and
   // resolves proposals in `supersession_proposals` (029's SECURITY INVOKER
-  // record/accept functions run as the caller).
+  // record/accept functions run as the caller). Its judged relations (084)
+  // are written with the structure group's INSERT on `thought_facets` and the
+  // capture group's UPDATE and derivations writes; a role without the
+  // structure group stores none, and the pass says so.
   worker: Object.freeze([
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
     // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).

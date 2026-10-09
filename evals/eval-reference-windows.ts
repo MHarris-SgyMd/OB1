@@ -32,8 +32,9 @@
  *      false-positive rate on content windows + a prose control (candidate 2,
  *      Work item 2/3).
  *
- * Run (read-only) from a one-off container on the brain's network:
- *   podman run --rm --network open-brain_default --env-file deploy/.env \
+ * Run (read-only) from a one-off container on the brain's networks (Postgres on
+ * `data`, the model on `egress`):
+ *   podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
  *     -e OB1_LLM_LOCAL=1 -e OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1 \
  *     -e OB1_METADATA_MODEL=qwen2.5:7b -e OB1_EMBEDDING_MODEL=qwen3-embedding:4b \
  *     -v <worktree>:/repo -w /repo oven/bun:1.4.0-alpine \

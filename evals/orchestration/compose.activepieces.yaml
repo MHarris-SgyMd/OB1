@@ -20,6 +20,9 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD}
       ORCH_DB_PASSWORD: ${ORCH_DB_PASSWORD}
+    # The brain's Postgres is on compose.yaml's internal `data` network alone
+    # (SMD-2583).
+    networks: [data]
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -70,6 +73,9 @@ services:
       AP_PIECES_SYNC_MODE: ${ORCH_AP_PIECES_SYNC_MODE:-OFFICIAL_AUTO}
     volumes:
       - activepieces-cache:/usr/src/app/cache
+    # Its database on the brain's Postgres, on `data`; the brain's server
+    # (`server:8000`) and its own port on `egress`, as n8n's (SMD-2583).
+    networks: [data, egress]
 
 volumes:
   activepieces-cache:

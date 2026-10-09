@@ -281,6 +281,63 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   await sql.close();
 }
 
+console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key that can read at a higher trust: the store calls migration 085's restamp after the note, with the text's fingerprint and the trust the write declared (SMD-2664)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const resolved = async (label: string, scope: string, seed: string) => {
+    const r = await store.resolveAgent({ keyHash: seed.repeat(32), label, scope });
+    return r.ok ? r.agentId : "";
+  };
+  const hook = { name: "hook-8d", agentId: await resolved("hook-8d", "capture", "8e"), via: "store-test", scope: "capture" as const };
+  const writer = { name: "writer-8d", agentId: await resolved("writer-8d", "write", "e8"), via: "store-test" };
+  await sql`SELECT set_agent_kind('hook-8d', 'agent')`;
+  await sql`SELECT set_agent_kind('writer-8d', 'operator')`;
+  const made: string[] = [];
+  const capture = async (content: string, actor: typeof hook | typeof writer, trust?: string) => {
+    const r = await store.captureThought({ content, payload: { metadata: { source: "mcp" } }, embedding: vec(7), actor, ...(trust ? { event: { trust } } : {}), ...(actor === hook ? { recapture: "keep" as const } : {}) });
+    made.push(r.id);
+    return r;
+  };
+  const stamp = async (id: string) => {
+    const [m] = await sql`SELECT metadata->>'actor_kind' AS k, metadata->>'actor_name' AS n, metadata->>'trust' AS t FROM thoughts WHERE id = ${id}::uuid`;
+    return `${m?.k ?? "-"}/${m?.n ?? "-"}/${m?.t ?? "-"}`;
+  };
+  const restamps = async (id: string) => (await sql`SELECT canonical_agent_id::text AS agent, trust FROM thought_audit WHERE thought_id = ${id}::uuid AND diff ? 'restamped'`) as { agent: string | null; trust: string | null }[];
+
+  const lowered = await capture("[8d] the hook's outside text the writer sends too", hook, "ingested");
+  assert((await stamp(lowered.id)) === "agent/hook-8d/ingested", `setup: the hook's capture carries its declared lowering (${await stamp(lowered.id)})`);
+  const landed = await capture("[8d] the hook's outside text the writer sends too", writer);
+  const moved = await restamps(lowered.id);
+  assert(landed.existed === true && (await stamp(lowered.id)) === "operator/writer-8d/operator" && moved.length === 1 && moved[0].agent === writer.agentId && moved[0].trust === "operator",
+    `the writer's re-capture moves the stamp to it — one restamp event under its agent id (${await stamp(lowered.id)}; ${JSON.stringify(moved)})`);
+  await capture("[8d] the hook's outside text the writer sends too", hook, "ingested");
+  assert((await stamp(lowered.id)) === "operator/writer-8d/operator" && (await restamps(lowered.id)).length === 1, "the hook's re-capture after it ('keep') moves nothing back");
+  const declared = await capture("[8d] the hook's text the writer re-sends as outside text", hook);
+  await capture("[8d] the hook's text the writer re-sends as outside text", writer, "ingested");
+  assert((await stamp(declared.id)) === "agent/hook-8d/agent" && (await restamps(declared.id)).length === 0, `the writer declaring a trust below the row's moves nothing: the store passes the write's declaration (${await stamp(declared.id)})`);
+  const between = await capture("[8d] the hook's outside text the writer re-sends as agent", hook, "ingested");
+  await capture("[8d] the hook's outside text the writer re-sends as agent", writer, "agent");
+  assert((await stamp(between.id)) === "operator/writer-8d/agent", `…and one between the two moves the stamp at the declared trust (${await stamp(between.id)})`);
+
+  // A database before 085: the capture stands. A restamp that fails throws, so the caller's retry makes it.
+  await sql`ALTER FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture_away`;
+  let missing = "";
+  try { await capture("[8d] the hook's text the writer re-captures before 085", hook, "ingested"); await capture("[8d] the hook's text the writer re-captures before 085", writer); } catch (e) { missing = (e as Error).message; }
+  await sql`ALTER FUNCTION ob1_restamp_recapture_away(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture`;
+  assert(missing === "", `a database without the restamp: the capture stands (${missing.slice(0, 80)})`);
+  await sql`ALTER FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture_real`;
+  await sql.unsafe(`CREATE FUNCTION ob1_restamp_recapture(p_id uuid, p_fingerprint text, p_actor jsonb DEFAULT NULL, p_declared text DEFAULT NULL) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the restamp failed for [8d]'; END $$`);
+  let failed = "";
+  try { await capture("[8d] the hook's text the writer re-captures while the restamp fails", hook, "ingested"); await capture("[8d] the hook's text the writer re-captures while the restamp fails", writer); } catch (e) { failed = (e as Error).message; }
+  await sql`DROP FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text)`;
+  await sql`ALTER FUNCTION ob1_restamp_recapture_real(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture`;
+  const [noted] = await sql`SELECT count(*)::int AS n FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+     WHERE t.content = '[8d] the hook''s text the writer re-captures while the restamp fails' AND a.action = 'update' AND a.diff ? 'recaptured'`;
+  assert(/the restamp failed/.test(failed) && noted?.n === 1, `a restamp that fails throws, so the caller's retry makes it — and the note before it is made (${failed.slice(0, 80)}; ${noted?.n})`);
+  await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+  await sql.close();
+}
+
 console.log("\n[2] captureThought WITH chunks — the 4-arg RPC arrives intact");
 {
   // This is the argument shape that shipped unverified: p_chunks as a jsonb array

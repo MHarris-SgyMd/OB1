@@ -468,6 +468,11 @@ first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
 [`deploy/README.md`](deploy/README.md), "Pinning a release".
 
+After a reboot, Docker brings the stack back by itself once its daemon starts
+at boot. Podman does so only once its `podman-restart.service` is enabled,
+which it was not on a podman machine measured here: see
+[`deploy/README.md`](deploy/README.md), "After a reboot" (SMD-2760).
+
 ### 3. Verify
 
 ```bash
