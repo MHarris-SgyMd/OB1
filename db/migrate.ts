@@ -1304,34 +1304,38 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     let pluginRan = 0;
     let pluginSkipped = 0;
     let pluginDrifted = 0;
-    /** The session's path as the run set it, restored after each plugin file. */
-    const [{ sessionPath }] = (await sql`SELECT current_setting('search_path') AS "sessionPath"`) as { sessionPath: string }[];
     for (const p of plugins as PluginMigrations[]) {
       out(`  plugin ${p.name}  (schema ${p.schema}, role ${p.role})`);
       if (p.files.length === 0) {
         out("  ·  no migrations");
         continue;
       }
-      if (!dryRun) {
-        // The role and its schema, on every run that names the plugin — not
-        // only before a pending file: a brain restored into a new cluster
-        // (roles are not in a dump) records every file and has no role, and
-        // the run that names the plugin makes it again (review pass 1). The
-        // role to own what the plugin makes, the schema to hold it; neither
-        // is ever dropped. A migrator that is no superuser takes membership
-        // in what it made, so it may SET ROLE to it: on PG 16 a CREATEROLE
-        // role's own grant has ADMIN alone (createrole_self_grant unset), and
-        // CREATE SCHEMA … AUTHORIZATION and SET ROLE both need SET.
+      // The role and its schema, made by any run that names the plugin and
+      // finds either missing — not only before a pending file: a brain
+      // restored into a new cluster (roles are not in a dump) records every
+      // file and has no role (review pass 1). Read first, so a run with both
+      // in place and nothing pending asks no privilege of the migrator
+      // (review pass 2: CREATE SCHEMA IF NOT EXISTS checks the database's
+      // CREATE before it looks). The role owns what the plugin makes, the
+      // schema holds it; neither is ever dropped. A migrator that is no
+      // superuser takes membership in the role, so it may SET ROLE to it: on
+      // PG 16 a CREATEROLE role's own grant on a role it makes has ADMIN alone
+      // (createrole_self_grant unset), and CREATE SCHEMA … AUTHORIZATION and
+      // SET ROLE both need SET.
+      const [state] = (await sql`
+        SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
+               EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema,
+               (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
+               current_setting('server_version_num')::int AS version`) as { role: boolean; schema: boolean; superuser: boolean; version: number }[];
+      const canSet = async (q: SQL): Promise<boolean> =>
+        state.superuser || ((await q.unsafe(`SELECT pg_has_role(current_user, $1, '${state.version >= 160000 ? "SET" : "MEMBER"}') AS can`, [p.role])) as { can: boolean }[])[0].can;
+      const pending = p.files.some((m) => !recorded.has(`${p.name}/${m.name}`));
+      if (!dryRun && (!state.role || !state.schema || (pending && !(await canSet(sql))))) {
         try {
           await begin(async (tx: SQL) => {
-            const [{ present }] = (await tx`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS present`) as { present: boolean }[];
-            if (!present) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
-            const [me] = (await tx`SELECT rolsuper AS superuser, current_setting('server_version_num')::int AS version FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean; version: number }[];
-            if (!me.superuser) {
-              const [{ can }] = (await tx.unsafe(`SELECT pg_has_role(current_user, $1, '${me.version >= 160000 ? "SET" : "MEMBER"}') AS can`, [p.role])) as { can: boolean }[];
-              if (!can) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${me.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
-            }
-            await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
+            if (!state.role) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
+            if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
+            if (!state.schema) await tx.unsafe(`CREATE SCHEMA ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
           });
         } catch (caught) {
           err(`  ✗  plugin ${p.name}: its role and schema could not be made: ${(caught as Error).message}`);
@@ -1371,12 +1375,12 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
           if (/permission denied/.test(message)) err(`  A plugin's migration runs as ${p.role}, which holds its own schema alone: a core table, or a schema not its own, is refused.`);
           return 1;
         } finally {
-          // What the file may have left on the session past its transaction —
-          // a temp table, which Postgres searches before any schema, or a
-          // session search_path — goes, so the next plugin's file meets the
-          // session the run set (review pass 1).
+          // A temp table the file left past its transaction goes: Postgres
+          // searches temp before any schema, so it would stand in for the
+          // next plugin's table of that name (review pass 1). A session
+          // search_path it set is moot: the next file sets its own, LOCAL,
+          // and the ledger is named by its schema.
           await sql.unsafe("DISCARD TEMP");
-          await sql`SELECT set_config('search_path', ${sessionPath}, false)`;
         }
         out(`  ✓  ${m.name}  applied`);
         pluginRan++;
