@@ -122,12 +122,14 @@ let carrierIdentity: AgentOutcome = { status: "ok", agentId: "agent-f" };
 /** Every key the registry was asked about, by name — a refused forwarder must reach it with neither key. */
 const resolvedNames: string[] = [];
 let resolveThrows = false;
+/** Set to hold every registry answer until it resolves (a request in flight at the registry, for a stop to cut). */
+let resolveGate: Promise<void> | null = null;
 const lines: string[] = [];
 const app = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
-  resolve: async (p) => { resolvedNames.push(p.name); if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
+  resolve: async (p) => { resolvedNames.push(p.name); if (resolveGate) await resolveGate; if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
   track: (run) => run(),
   log: (l) => lines.push(l),
 });
@@ -454,6 +456,130 @@ console.log("\n[8] One JSON line per request (telemetry.ts, SMD-1849): method, r
   const hungUp = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
   assert(hungUp.outcome === "abandoned" && !("code" in hungUp) && hungUp.tool === "search_thoughts" && hungUp.agent === "w",
     `a client that hangs up mid-body: \`abandoned\`, no code, not a fault (${lines[0]})`);
+
+  // A job's stream is timed to its end, not its opening (SMD-1849 PR 2a): its
+  // line waits for the stream to close, and carries the bytes it sent.
+  lines.length = 0;
+  const { startJob } = await import("./jobs.ts");
+  const handle = startJob({ keyHash: hashKey("read-raw"), name: "r", scope: "read" } as Principal, "scan_thoughts", async () => { await Bun.sleep(120); return { done: true }; });
+  const streamed = await app.fetch(new Request(`http://api/v1/jobs/${handle.jobId}/stream`, { headers: { "x-brain-key": "read-raw" } }));
+  const linesWhileOpen = lines.length;
+  const streamText = await streamed.text();
+  await Bun.sleep(20);
+  const jobLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(linesWhileOpen === 0 && lines.length === 1 && jobLine.route === "/v1/jobs/:job_id/stream" && jobLine.tool === "job_status" && jobLine.agent === "r" && jobLine.outcome === "ok"
+    && (jobLine.ms as number) >= 60 && jobLine.bytes === new TextEncoder().encode(streamText).byteLength,
+    `a job stream's one line is written at its end, with its time and bytes, not as it opens (${linesWhileOpen} while open; ${lines[0]})`);
+
+  // A job stream whose client is gone — before the route listens, mid-stream,
+  // or by letting go of the body with no abort (a runtime whose signal never aborts) — is one
+  // `abandoned` line, and leaves no record open (review pass 1: two of these
+  // stayed open until a stop wrote them `cut`, or forever).
+  const { openRequestCount, cutOpenRequests } = await import("./telemetry.ts");
+  const openBefore = openRequestCount();
+  const slowJob = () => startJob({ keyHash: hashKey("read-raw"), name: "r", scope: "read" } as Principal, "scan_thoughts", async () => { await Bun.sleep(400); return { done: true }; });
+  const streamOf = (id: string, signal?: AbortSignal) => Promise.resolve(app.fetch(new Request(`http://api/v1/jobs/${id}/stream`, { headers: { "x-brain-key": "read-raw" }, signal })));
+  // Each way alone: the line is read right after its own trigger, before the
+  // body's cancel (which would end the record too) comes, outside the count.
+  const lineAfter = async (trigger: () => Promise<unknown>) => {
+    lines.length = 0;
+    await trigger();
+    await Bun.sleep(20);
+    return lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  };
+  const preGone = new AbortController();
+  preGone.abort();
+  let preBody: ReadableStream | null = null;
+  const pre = await lineAfter(async () => { preBody = (await streamOf(slowJob().jobId, preGone.signal)).body; });
+  const midGone = new AbortController();
+  let midReader: ReadableStreamDefaultReader | null = null;
+  const mid = await lineAfter(async () => {
+    midReader = (await streamOf(slowJob().jobId, midGone.signal)).body!.getReader();
+    await midReader.read();
+    midGone.abort();
+  });
+  const letGo = await lineAfter(async () => {
+    const reader = (await streamOf(slowJob().jobId)).body!.getReader();
+    await reader.read();
+    await reader.cancel();
+  });
+  const late = await lineAfter(async () => {
+    await (preBody as ReadableStream | null)?.cancel().catch(() => {});
+    await (midReader as ReadableStreamDefaultReader | null)?.cancel().catch(() => {});
+    await Bun.sleep(600); // past every job's end
+  });
+  const each = [pre, mid, letGo];
+  assert(each.every((g) => g.length === 1 && g[0]?.outcome === "abandoned" && g[0].route === "/v1/jobs/:job_id/stream" && g[0].tool === "job_status") && late.length === 0 && openRequestCount() === openBefore,
+    `a job stream left before it listens, by its abort mid-stream, or by its body alone: one \`abandoned\` line each, written then, none later, none left open (${openRequestCount() - openBefore} open; ${JSON.stringify(each.map((g) => g.map((l) => l.outcome)))}; ${late.length} late)`);
+
+  // A request held at the registry when the stop cuts it carries the route its
+  // handler named as it started — whoami's, and the job stream's with its
+  // operation (the middleware's own naming comes only after the answer, so a
+  // refusal's line could not show this: review pass 5).
+  lines.length = 0;
+  let release = () => {};
+  resolveGate = new Promise<void>((r) => { release = r; });
+  try {
+    const held = [
+      app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" } })),
+      app.fetch(new Request(`http://api/v1/jobs/${crypto.randomUUID()}/stream`, { headers: { "x-brain-key": "read-raw" } })),
+    ];
+    await Bun.sleep(20);
+    cutOpenRequests();
+    release();
+    await Promise.all(held.map((h) => Promise.resolve(h).then((r) => r.text())));
+  } finally {
+    release();
+    resolveGate = null;
+  }
+  const heldCut = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.outcome === "cut");
+  const cutWhoami = heldCut.find((l) => l.route === "/v1/whoami");
+  const cutStream = heldCut.find((l) => l.route === "/v1/jobs/:job_id/stream");
+  assert(heldCut.length === 2 && cutWhoami !== undefined && cutStream?.tool === "job_status" && lines.length === 2,
+    `whoami and a job stream cut at the registry: one \`cut\` line each with the route its handler named (the stream's operation too), and none when they later answer (${lines.join(" / ")})`);
+  // A client that left while its request waited is `abandoned` at the cut, as
+  // the MCP endpoint says of its own (review pass 7: it read `cut`, status 0).
+  lines.length = 0;
+  resolveGate = new Promise<void>((r) => { release = r; });
+  try {
+    const leaving = new AbortController();
+    const left = app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" }, signal: leaving.signal }));
+    await Bun.sleep(20);
+    leaving.abort();
+    cutOpenRequests();
+    release();
+    await Promise.resolve(left).then((r) => r.text()).catch(() => {});
+  } finally {
+    release();
+    resolveGate = null;
+  }
+  const leftCut = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(lines.length === 1 && leftCut.outcome === "abandoned" && leftCut.status === 0 && leftCut.route === "/v1/whoami",
+    `a client gone while its request waited at the registry, then the stop's cut: one \`abandoned\` line, status 0 (${lines.join(" / ")})`);
+
+  // An environment that will not seed is a 500 with its line, not a silent one.
+  const initFails: string[] = [];
+  const brokenInit = createRestApp({ core, init: () => { throw new Error("OB1_TIER is not a tier"); }, keys: () => ({}), resolve: async () => identity, track: (run) => run(), log: (l) => initFails.push(l) });
+  const initAnswer = await brokenInit.fetch(new Request("http://api/openapi.json"));
+  const initLine = JSON.parse(initFails[0] ?? "{}") as Record<string, unknown>;
+  assert(initAnswer.status === 500 && initFails.length === 1 && initLine.status === 500 && initLine.outcome === "error" && initLine.code === "FAILED", `an init that throws: the 500 has its line, FAILED as its answer says (${initFails[0]})`);
+
+  // A path the `*` middleware never matches (an encoded line break) still has its line, from notFound (review pass 3).
+  lines.length = 0;
+  const unmatched = await app.fetch(new Request("http://api/health%0A"));
+  const unmatchedLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(unmatched.status === 404 && lines.length === 1 && unmatchedLine.status === 404 && unmatchedLine.outcome === "refused" && unmatchedLine.code === "NO_ROUTE",
+    `a path with an encoded line break: one 404 NO_ROUTE line (${lines.join(" / ")})`);
+  // The liveness probe has no record at all, keyed or not.
+  lines.length = 0;
+  const probesBefore = openRequestCount();
+  await app.fetch(new Request("http://api/health", { headers: { "x-brain-key": "read-raw" } }));
+  await app.fetch(new Request("http://api/health", { method: "HEAD" }));
+  assert(lines.length === 0 && openRequestCount() === probesBefore, `GET and HEAD /health: no line, no record (${lines.length} lines)`);
+  // Any other method there is no probe: its 405 is logged (review pass 4).
+  await app.fetch(new Request("http://api/health", { method: "POST" }));
+  const postHealth = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(lines.length === 1 && postHealth.status === 405 && postHealth.code === "METHOD_NOT_ALLOWED", `a POST to /health: its 405 logged (${lines.join(" / ")})`);
 }
 
 console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
@@ -625,6 +751,47 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   const inputTold = await told(() => client.apiFetch("/v1/thoughts", { apiKey: "cap-raw", ...at, method: "POST", body: {} }));
   assert(/HTTP 400: REFUSED_INPUT — content: /.test(inputTold), `an input refusal names its field (${inputTold})`);
   answer = async () => ok({});
+}
+
+console.log("\n[11] `bun api.ts` stopped with a search in flight: the stop's bound cuts it, and its line is written as `cut` before the exit (SMD-1849 PR 2a)");
+{
+  // A provider that answers no embedding for 5 s, so the search is in flight
+  // when the stop's bound (OB1_STOP_GRACE=3: 1 s) cuts it.
+  const slow = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(5_000); return Response.json({ data: [{ embedding: [0] }] }); } });
+  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = free.port;
+  free.stop(true);
+  const child = Bun.spawn([process.execPath, "--no-env-file", "api.ts"], {
+    cwd: import.meta.dir,
+    env: {
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STOP_GRACE: "3",
+      MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub",
+      OB1_LLM_BASE_URL: `http://127.0.0.1:${slow.port}/v1`, OB1_LLM_LOCAL: "1",
+    },
+    stdout: "pipe", stderr: "pipe",
+  });
+  let out = "";
+  let up = false;
+  try {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !(up = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false))) await Bun.sleep(100);
+    const inFlight = fetch(`http://127.0.0.1:${port}/v1/search`, { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "a search the stop cuts" }) })
+      .then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(400);
+    child.kill("SIGTERM");
+    const killer = setTimeout(() => child.kill("SIGKILL"), 8_000);
+    await child.exited;
+    clearTimeout(killer);
+    await inFlight;
+    out = await new Response(child.stdout).text() + await new Response(child.stderr).text();
+  } finally {
+    child.kill("SIGKILL");
+    slow.stop(true);
+  }
+  assert(up, `bun api.ts came up (${out.slice(-400)})`);
+  const cut = out.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.outcome === "cut");
+  assert(cut.length === 1 && cut[0]?.route === "/v1/search" && cut[0]?.tool === "search_thoughts" && cut[0]?.agent === "w" && cut[0]?.door === "api",
+    `the search the stop cut has one line, \`cut\`, by its route, operation and key (${JSON.stringify(cut)}; ${out.slice(-400)})`);
 }
 
 report();

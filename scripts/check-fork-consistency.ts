@@ -347,9 +347,15 @@
  *      plugins/registry.ts imports and lists exactly the plugin directories,
  *      a manifest's name is its directory's, and its migration files are
  *      named by the core's rule; each held by in-memory probes
+ *  32. every service deploy/compose.yaml defines has the restart policy
+ *      RESTART_POLICIES holds for it, value for value — what serves
+ *      `unless-stopped`, so it comes back after a reboot with what it reads;
+ *      what runs once "no" — and no service but those held (SMD-2760: Postgres
+ *      had none, so on Docker a reboot would bring the servers back without
+ *      their database; the tiers file is check 27's)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28 and 29 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29 and 32 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -5328,6 +5334,8 @@ const API_ROLE: TransportRole = {
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
+    // The stop's lines for what it cuts (SMD-1849): request records, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -6379,7 +6387,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
   // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
   ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
-  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    logging: *logging\n\n  # Replaces: pasting SQL", "    networks: [data, mesh]\n    logging: *logging\n\n  # Replaces: pasting SQL"],
+  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
   ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
   ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.0-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
   ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
@@ -6863,6 +6871,72 @@ async function checkPlugins() {
   for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
 }
 await checkPlugins();
+
+// ── 32. Every service's restart policy is held (SMD-2760) ────────────────────
+//
+// What comes back after a reboot is each container's restart policy: Docker
+// starts its `unless-stopped` containers when the daemon starts, and podman's
+// podman-restart.service, where enabled, starts those not stopped by hand.
+// deploy/compose.yaml's postgres had none, so on Docker the servers would come
+// back without their database; on podman, its unit disabled too, nothing came
+// back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
+// RESTART_POLICIES holds each service's policy by value: what serves is
+// `unless-stopped`, what runs once is "no", and a service that exits on
+// configuration a restart does not fix is `on-failure:3` (board-sync's
+// comment). A service added, or a policy changed, is a change there on
+// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// through check 27, and the overlays name no restart (check 28's OVERLAYS),
+// so this file is the one to read.
+/** Each compose.yaml service's `restart`, exactly. */
+const RESTART_POLICIES: Record<string, string> = {
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
+};
+/** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
+function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const restart = isMapping(def) ? def.restart : undefined;
+    const shown = restart === undefined ? "unset, which is \"no\"" : JSON.stringify(restart);
+    if (!(service in held)) gaps.push([service, `not in check 32's RESTART_POLICIES (its restart is ${shown})`]);
+    else if (restart !== held[service]) gaps.push([service, `restart ${shown} where check 32's RESTART_POLICIES holds ${JSON.stringify(held[service])}`]);
+  }
+  for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
+  return gaps;
+}
+const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
+const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
+/** [what, text, the services (null = the file) the rule reports]. */
+const RESTART_PROBES: [string, string, (string | null)[]][] = [
+  ["every policy as held", RESTART_GOOD, []],
+  ["postgres with none, as before SMD-2760", RESTART_GOOD.replace("    restart: unless-stopped\n", ""), ["postgres"]],
+  ["postgres told not to restart", RESTART_GOOD.replace("restart: unless-stopped", "restart: \"no\""), ["postgres"]],
+  ["postgres on always, which restarts a container stopped by hand", RESTART_GOOD.replace("restart: unless-stopped", "restart: always"), ["postgres"]],
+  ["the one-shot migrator restarting", RESTART_GOOD.replace("restart: \"no\"", "restart: unless-stopped"), ["migrate"]],
+  ["a service the map does not hold", `${RESTART_GOOD}  extra:\n    image: z\n    restart: unless-stopped\n`, ["extra"]],
+  ["a service the map does not hold, with no policy", `${RESTART_GOOD}  extra:\n    image: z\n`, ["extra"]],
+  ["a held service gone from the file", RESTART_GOOD.replace(/  migrate:[\s\S]*$/, ""), ["migrate"]],
+  ["no services at all", "name: x\n", [null]],
+];
+function checkRestartPolicies() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 32 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2760)`);
+    return;
+  }
+  for (const [what, text, expected] of RESTART_PROBES) {
+    const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
+  }
+}
+checkRestartPolicies();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

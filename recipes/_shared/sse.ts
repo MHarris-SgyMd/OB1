@@ -65,11 +65,21 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  * bytes the body carried, this function's own keepalive frames apart — the
  * MCP SDK's transport writes its own every 15 s, part of the body it hands
  * here, and those are counted (none for a response returned as it is).
+ * `onCancel` runs if the body is cancelled before it ends — the reader let go
+ * of it, as a runtime does when the client leaves — so a caller waiting on
+ * its end hears that it will not come, even where `signal` never aborts.
+ * Measured on Bun 1.4.0: a reader's cancel and a client leaving a socket both
+ * reach it; so does a source stream that errors, which none of this file's
+ * callers' streams do. Other runtimes are unmeasured: where one does not call
+ * a transformer's `cancel`, the next keepalive frame finds the stream closed
+ * and runs it then. Should a runtime close the stream before calling
+ * `cancel`, it could run twice (that frame, then the cancel), so a caller
+ * makes it idempotent.
  */
 export function withSseKeepalive(
   response: Response,
   opts: {
-    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; label?: string;
+    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
     stalledLine?: (label: string, elapsedMs: number) => string;
   } = {},
 ): Response {
@@ -103,6 +113,7 @@ export function withSseKeepalive(
           controller.enqueue(SSE_KEEPALIVE_FRAME);
         } catch {
           stop(); // the readable side closed under the timer: the client left
+          opts.onCancel?.(); // said here too, for a runtime that never calls the transformer's cancel
         }
       }, intervalMs);
     },
@@ -114,7 +125,13 @@ export function withSseKeepalive(
       stop(); // the transport closed the stream: the response is complete
       opts.onEnd?.(bytes);
     },
-  });
+    cancel() {
+      stop(); // the reader let go: no end will come
+      opts.onCancel?.();
+    },
+    // Cast: the WHATWG Transformer has `cancel`, and Bun runs it, but neither
+    // bun-types nor lib.dom declares it yet.
+  } as Transformer<Uint8Array, Uint8Array>);
   opts.signal?.addEventListener("abort", stop, { once: true });
   if (opts.signal?.aborted) stop(); // gone before the stream was built: nothing to keep alive
   return new Response(body.pipeThrough(keepalive), { status: response.status, statusText: response.statusText, headers: response.headers });

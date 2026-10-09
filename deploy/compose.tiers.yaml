@@ -167,6 +167,7 @@ x-server-env: &server-env
   OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
   OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
   OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+  OB1_PROPOSALS_WARN_DAYS: ${OB1_PROPOSALS_WARN_DAYS:-}
   OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
   OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
   OB1_PG_POOL: ${OB1_PG_POOL:-}
@@ -199,6 +200,8 @@ x-tier-postgres: &tier-postgres
     retries: 12
   # The internal `data` network alone, as compose.yaml's (SMD-2583).
   networks: [data]
+  # Back after a reboot with the tier's servers (SMD-2760).
+  restart: unless-stopped
 
 # The migrator image compose.yaml builds (db/Dockerfile — the ob1-migrate image
 # the release job publishes, SMD-1860), one build shared by the three tiers.
@@ -785,6 +788,7 @@ services:
       timeout: 5s
       retries: 20
     networks: [egress]
+    restart: unless-stopped
     logging: *logging
 
   ollama-pull:

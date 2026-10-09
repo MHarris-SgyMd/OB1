@@ -1699,6 +1699,125 @@ export const BOUNDS_IN_FORCE_SQL =
   `SELECT n AS name, current_setting(n, true) AS value FROM unnest(ARRAY[${HNSW_BOUNDS.map((n) => `'${n}'`).join(", ")}]) AS n`;
 
 /**
+ * Bytes one exact page costs a TID bitmap, on a 64-bit server with 8 kB
+ * blocks: PostgreSQL 16's tidbitmap.c sizes a PagetableEntry at 48 bytes
+ * (block number, flags and five 64-bit words for up to 291 tuples) and
+ * tbm_calculate_entries divides work_mem by that plus two pointers. A bitmap
+ * over more heap pages than work_mem / 64 goes lossy: the overflow is kept per
+ * page, not per row, and every lossy page is rechecked row by row. Another
+ * block size or a 32-bit build costs another figure; test-live [40] measures
+ * it on the server it runs against.
+ */
+export const BITMAP_BYTES_PER_PAGE = 64;
+
+/**
+ * The least share of heap pages a GIN-routed filter at 037's gate boundary
+ * touches, on a heap large enough for the gate. The gate (074) sends a filter
+ * to the HNSW walk only when its ROUTE_SAMPLE_PAGES-page sample, drawn again
+ * on every call, holds at least 8 hits on at least 3 pages AND puts the filter
+ * at ten times v_exact (max(16 x match_count, 1000)). On a heap of 10 x
+ * v_exact pages or more the first test binds, and a filter averaging about one
+ * match a page takes the GIN route on about half its calls; on a smaller gated
+ * heap the third test binds, and the boundary rises to 10 x v_exact / pages
+ * matches a page (about 1.2 at the default count on 8,192 pages, more at
+ * larger counts). A filter at one match a page, placed at random, touches
+ * 1 - 1/e of the pages, so this is a floor. Below the gate's
+ * ROUTE_ESTIMATE_MIN_PAGES every filter takes the GIN route, so there it is
+ * the whole heap.
+ */
+export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
+
+/**
+ * Sizing the server for the table (SMD-1499).
+ *
+ * - Resident, the warning: the HNSW indexes over thoughts and thought_chunks
+ *   are walked on every vector search, and the lever an operator sets is
+ *   shared_buffers. The OS page cache serves a walk too, but not as well: on
+ *   the ten-million-row bench corpus, with the indexes read into the page
+ *   cache before every run, ten connections got about a third of the
+ *   throughput they got with the indexes in shared_buffers (SMD-1499's
+ *   record). The recommendation is the indexes' size rounded up to 64 MB.
+ * - Bitmap, information only: a filter's matches are collected one entry per
+ *   heap page (BITMAP_BYTES_PER_PAGE). On the custom plans match_thoughts
+ *   runs, the bitmap a GIN-routed filter builds is the routing count's, under
+ *   `LIMIT v_exact + 1`, so a lossy one rechecks pages only until it has its
+ *   rows — little. The bitmap that costs when lossy is a generic-plan GIN
+ *   walk's, over every page with a match (up to the whole heap), and whether
+ *   match_thoughts takes a generic plan is SMD-1464's to settle; a larger
+ *   work_mem moved those plans both ways at ten million rows. So preflight
+ *   reports both sizes against work_mem and recommends nothing.
+ *
+ * Pure: preflight reads the numbers and prints what this returns, and the
+ * schema suite holds the arithmetic. Sizes in bytes.
+ */
+export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
+  const MB = 1048576;
+  const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
+  const heapPages = Math.ceil(heapBytes / blockSize);
+  const gated = heapPages >= ROUTE_ESTIMATE_MIN_PAGES;
+  const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
+  const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
+  return {
+    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
+    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, wholeHeapBytes: heapPages * BITMAP_BYTES_PER_PAGE, haveBytes: workMemBytes },
+  };
+}
+
+/** A byte count as a reader wants it in a preflight line: kB under a megabyte, MB under a gigabyte, then GB to one decimal — rounded up, so a size just past a setting never reads as equal to it. */
+export function bytesText(bytes) {
+  if (bytes < 1048576) return `${Math.ceil(bytes / 1024)} kB`;
+  if (bytes < 1073741824) return `${Math.ceil(bytes / 1048576)} MB`;
+  return `${(Math.ceil((bytes * 10) / 1073741824) / 10).toFixed(1)} GB`;
+}
+
+/**
+ * Preflight's two SMD-1499 rows from memorySizing's result: their status,
+ * detail and remedy, as text, so test-schema holds every branch's wording —
+ * the resident warning's included, which no live test can reach (a pool
+ * cannot be lowered for one database). `vector index memory` is a warning
+ * (a managed platform may not let the operator change the setting), with the
+ * size to set and the way back if postgres then will not start; `filter
+ * bitmap memory` is information only, always ok, and recommends nothing.
+ */
+export function memoryRows(s) {
+  const r = s.resident;
+  const b = s.bitmap;
+  const n = (x) => x.toLocaleString("en-US");
+  const resident = r.needBytes === 0
+    ? { name: "vector index memory", status: "ok", detail: "no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold (the walk index check says whether one is missing)" }
+    : r.fits
+    ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})` }
+    : {
+        name: "vector index memory",
+        status: "warn",
+        detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
+        fix: `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
+      };
+  let detail;
+  if (b.heapPages === 0) {
+    detail = "the thoughts heap is empty, so no filter builds a bitmap";
+  } else {
+    const route = b.gated
+      ? `a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least ${n(b.bitmapPages)} of the thoughts heap's ${n(b.heapPages)} pages`
+      : `on a heap under ${n(ROUTE_ESTIMATE_MIN_PAGES)} pages every filter takes the GIN route, the broadest touching ${b.heapPages === 1 ? "its one page" : `up to all ${n(b.heapPages)} of its pages`}`;
+    const routeBitmap = b.fits
+      ? `its routing count's bitmap (${bytesText(b.needBytes)}) fits work_mem (${bytesText(b.haveBytes)})`
+      : `its routing count's bitmap (${bytesText(b.needBytes)}) passes work_mem (${bytesText(b.haveBytes)}) and goes lossy, which costs little: under LIMIT v_exact + 1 it rechecks pages only until it has its rows`;
+    const wholeFits = b.wholeHeapBytes <= b.haveBytes;
+    const generic = b.gated
+      ? `; a generic-plan GIN walk's bitmap can cover the whole heap (${bytesText(b.wholeHeapBytes)}, ${wholeFits ? "within" : "past"} work_mem)`
+      : "";
+    detail = `${route}: ${routeBitmap}${generic}`;
+  }
+  const bitmap = {
+    name: "filter bitmap memory",
+    status: "ok",
+    detail: `${detail}. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle, and at ten million rows a larger work_mem moved those plans both ways, so nothing here recommends raising it`,
+  };
+  return [resident, bitmap];
+}
+
+/**
  * match_thoughts clamps match_count to this INSIDE the function (migration
  * 014, templated as {{MATCH_COUNT_CEILING}}). 500 was set to cover every
  * caller the repo had: enhanced-mcp asked for up to 500 under a date filter
@@ -2086,6 +2205,13 @@ export const ROLE_GRANTS = Object.freeze({
     // Soft as the rest of this group — without it that search is refused with
     // this grant named, and every other search runs.
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT"]),                   since: "053" }),
+    // brain_info (and so keyed /health and GET /v1/brain) counts the proposal
+    // queue, list_supersession_proposals lists it, and preflight's proposals
+    // row reads it, all as the server's role (SMD-2680).
+    // Soft as the rest of this group — without it brain_info reports the queue
+    // unread, preflight's proposals row names this grant and the listing tool
+    // is refused; a capture and every other read go on. The writes stay the worker group's.
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),          since: "029" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's

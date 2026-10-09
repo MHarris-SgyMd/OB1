@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
+import type { PluginSql } from "./plugin-sdk.ts";
 import { migrationSha } from "../db/version.mjs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
 
@@ -314,9 +315,9 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   const store = new SqlStore(URL_, { max: 1, pluginPassword: PLUGIN_PW });
   const [hook] = enabledHooks(loadPlugins("example"), "example");
   const rowOf = async (id: string) => one<{ thought_id: string | null; claimed_at: string } | undefined>(sql`SELECT thought_id::text, claimed_at::text FROM plugin_example.deliveries WHERE id = ${id}`);
-  /** One signed delivery of `id` through the hook, its capture `capture`: the answer, or the message it threw. */
-  const viaHook = async (id: string, capture: () => Promise<unknown>) => {
-    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : capture) }) as never;
+  /** One signed delivery of `id` through the hook, its capture `capture`, under a core whose captures may run `captureSeconds`: the answer, or the message it threw. */
+  const viaHook = async (id: string, capture: () => Promise<unknown>, captureSeconds = 120) => {
+    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => captureSeconds : capture) }) as never;
     const text = JSON.stringify({ id, text: `smd2755: ${id}` });
     const ts = Math.floor(Date.now() / 1000);
     try {
@@ -352,6 +353,62 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     });
     const recorded = await rowOf(prunedId);
     assert(typeof answered === "object" && answered.status === 202 && recorded?.thought_id === thought, `a capture whose claim was pruned meanwhile is recorded, and answered 202 (${JSON.stringify(answered)}, ${JSON.stringify(recorded)})`);
+    // The lease follows the core's deadline (SMD-2768): at OB1_LLM_TIMEOUT=600
+    // a claim four minutes old is a capture that may still be running.
+    const slowId = `evt-${RUN}-slow`;
+    const never = async () => { throw new Error("the capture ran"); };
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${slowId}, now() - interval '4 minutes')`;
+    const slowHeld = await viaHook(slowId, never, 600);
+    assert(typeof slowHeld === "object" && slowHeld.status === 409, `a core whose captures may run 600 s: a claim four minutes old is 409, not taken (${JSON.stringify(slowHeld)})`);
+    await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '661 seconds' WHERE id = ${slowId}`;
+    const slowTaken = await viaHook(slowId, async () => coreOk({ id: thought }), 600);
+    assert(typeof slowTaken === "object" && slowTaken.status === 202 && (await rowOf(slowId))?.thought_id === thought, `past its 660 s lease, taken (${JSON.stringify(slowTaken)})`);
+    // A lease longer than the window: the prune keeps an unfinished claim
+    // until its lease ends, and still drops a captured id at the window.
+    const longId = `evt-${RUN}-long`;
+    const doneId = `evt-${RUN}-done`;
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${longId}, now() - interval '12 minutes')`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${doneId}, ${thought}, now() - interval '12 minutes')`;
+    const longHeld = await viaHook(longId, never, 1200);
+    const kept = await rowOf(longId);
+    assert(typeof longHeld === "object" && longHeld.status === 409 && kept !== undefined && kept.thought_id === null && (await rowOf(doneId)) === undefined,
+      `a core whose captures may run 1200 s: a claim twelve minutes old outlives the eleven-minute window, 409, while a captured id that old is pruned (${JSON.stringify(longHeld)}, ${JSON.stringify(kept)})`);
+    // Scopes: two hooks' ids in the one table, each pruned by its own window.
+    const { onceById } = await import("./plugin-sdk.ts");
+    const handle = { db: { tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", fn) }, captureSeconds: 120 };
+    const forGood = `rw-${RUN}`;
+    const shortLived = `ev-${RUN}`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${`readwise ${forGood}`}, ${thought}, now() - interval '12 minutes'), (${`events ${shortLived}`}, ${thought}, now() - interval '12 minutes')`;
+    const once = (scope: string, id: string, keepSeconds: number) => onceById(handle, id, async () => ({ value: "ran", thoughtId: thought }), { keepSeconds, scope });
+    const fresh = await once("events", `ev-${RUN}-new`, 660);
+    const survivors = (await sql`SELECT id FROM plugin_example.deliveries WHERE id IN (${`readwise ${forGood}`}, ${`events ${shortLived}`})`).map((r: { id: string }) => r.id);
+    assert("ran" in fresh && JSON.stringify(survivors) === JSON.stringify([`readwise ${forGood}`]), `a scope's claim prunes its own scope's old ids, not another's (${JSON.stringify(survivors)})`);
+    const again = await once("readwise", forGood, Infinity);
+    const elsewhere = await once("events", forGood, 660);
+    assert("duplicate" in again && again.duplicate === thought && "ran" in elsewhere, `so a hook kept for good still knows its id twelve minutes on, and the same id under another scope is another delivery (${JSON.stringify(again)}, ${JSON.stringify(elsewhere)})`);
+    // The index onceById's doc comment gives a plugin keeping one scope for
+    // good beside one that prunes: the prune, as onceById sends it, reads it
+    // past a kept scope's old rows rather than scanning them.
+    const docIndex = /`(CREATE INDEX IF NOT EXISTS deliveries_by_scope ON deliveries [^`]+)`/.exec(readFileSync(new URL("./plugin-sdk.ts", import.meta.url), "utf8"))?.[1] ?? "";
+    await sql.unsafe(docIndex.replace(" ON deliveries ", " ON plugin_example.deliveries "));
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) SELECT 'kept ' || ${RUN} || '-' || n, ${thought}, now() - interval '1 day' FROM generate_series(1, 5000) n`;
+    await sql`ANALYZE plugin_example.deliveries`;
+    let plan = "";
+    const explaining = {
+      db: {
+        tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", (q) => fn(((strings: TemplateStringsArray, ...values: unknown[]) => {
+          if (!strings[0].startsWith("DELETE FROM deliveries WHERE claimed_at")) return q(strings, ...values);
+          // Frozen, as a template's are: pluginTx takes nothing else.
+          const explain = Object.freeze(Object.assign(["EXPLAIN " + strings[0], ...strings.slice(1)], { raw: Object.freeze(["EXPLAIN " + strings.raw[0], ...strings.raw.slice(1)]) }));
+          return q(explain as unknown as TemplateStringsArray, ...values).then((rows) => { plan = rows.map((r) => String(Object.values(r)[0])).join("\n"); return []; });
+        }) as PluginSql)),
+      },
+      captureSeconds: 120,
+    };
+    await onceById(explaining, `ev-${RUN}-plan`, async () => ({ value: 0, thoughtId: thought }), { keepSeconds: 660, scope: "events" });
+    assert(/deliveries_by_scope/.test(plan) && /Index Cond: .*CASE/.test(plan), `the doc comment's index is the one the scoped prune reads (${plan.replace(/\s+/g, " ").slice(0, 160)})`);
+    await sql`DELETE FROM plugin_example.deliveries WHERE id LIKE ${`kept ${RUN}-%`}`;
+    await sql.unsafe("DROP INDEX plugin_example.deliveries_by_scope");
   } finally {
     await store.close();
   }
