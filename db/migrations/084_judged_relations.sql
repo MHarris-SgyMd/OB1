@@ -40,11 +40,14 @@
 --     or the score fell under the floor). Both thoughts are locked FOR KEY
 --     SHARE before the facet, so a delete of either waits rather than
 --     deadlocks. Returns {ok, action, id}.
+--   * A facet keeps its kind: an UPDATE changing it is refused for every
+--     kind, which closes a capture-group role's forging of a citation from a
+--     link (review pass 2).
 --   * Grants: none new. The caller needs INSERT on thought_facets — the
---     structure group's, held since 053 — and the capture group's UPDATE on
---     it and on thoughts and its derivations writes; the worker group gains
---     nothing (a grant of INSERT there would let it write citations and links
---     too — SMD-1873 PR 2 review pass 1).
+--     structure group's, held since 053, which also writes source rows,
+--     links and citations: Postgres grants INSERT per table, so a role that
+--     writes relations can write any facet kind — and the capture group's
+--     UPDATE on it and on thoughts and its derivations writes.
 --   * The other thought deleted: an AFTER DELETE trigger on thoughts closes
 --     the active relations naming it. The facet's own thought deleted: the
 --     foreign key cascades, and an AFTER DELETE trigger on thought_facets
@@ -106,30 +109,41 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.payload must be a JSON object, got %s', COALESCE(jsonb_typeof(NEW.payload), 'null'));
   END IF;
+  -- 084: a facet keeps its kind. An UPDATE turning a link into a citation
+  -- was admitted by the citation branch, so a role holding the capture
+  -- group's UPDATE could forge a citation of any thought and have its delete
+  -- refused (CITED); the same for a link or a relation made from another
+  -- kind. No writer changes a kind (SMD-1873 PR 2 review pass 2).
+  IF TG_OP = 'UPDATE' AND NEW.kind IS DISTINCT FROM OLD.kind THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('a facet keeps its kind: a %s is not turned into a %s; write a new facet', OLD.kind, NEW.kind);
+  END IF;
   IF NEW.kind IS DISTINCT FROM 'citation' AND NEW.kind IS DISTINCT FROM 'link' AND NEW.kind IS DISTINCT FROM 'relation' THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.kind %L is not a registered facet kind', NEW.kind),
       HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
-  IF NEW.kind = 'relation' OR (TG_OP = 'UPDATE' AND OLD.kind = 'relation') THEN
+  IF NEW.kind = 'relation' THEN
     -- ob1:relation-facet (084)
     -- A relation is written once and only ever closed. The one UPDATE is the
     -- close — record_thought_relation, or the target's delete, setting
     -- valid_until with every other column as it was — and it is not re-judged:
     -- the target may be gone by then. Any other UPDATE of a relation, or one
     -- turning another kind into a relation, is refused: a rewrite would leave
-    -- its lineage naming what it no longer says, a re-open could stand an edge
-    -- on a deleted thought, and `origin: judged` is to mean the pass wrote it
-    -- (SMD-1873 PR 2 review pass 1).
+    -- its lineage naming what it no longer says, and a re-open could stand an
+    -- edge on a deleted thought (SMD-1873 PR 2 review pass 1).
     IF TG_OP = 'UPDATE' THEN
-      IF OLD.kind = 'relation' AND NEW.kind = 'relation' AND NEW.thought_id = OLD.thought_id AND NEW.payload = OLD.payload
+      -- The close sets valid_until to a time not in the future: a future one
+      -- would leave the row off the one-standing index while
+      -- thought_facet_active still counted it active (review pass 2).
+      IF NEW.id = OLD.id AND NEW.thought_id = OLD.thought_id AND NEW.payload = OLD.payload
          AND NEW.superseded_by IS NOT DISTINCT FROM OLD.superseded_by AND NEW.created_at = OLD.created_at
-         AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL THEN
+         AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL AND NEW.valid_until <= now() THEN
         RETURN NEW;
       END IF;
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
-        MESSAGE = 'a relation is written once and only closed: the one update it takes sets valid_until on a standing relation, every other column as it was',
+        MESSAGE = 'a relation is written once and only closed: the one update it takes sets valid_until, not in the future, on a standing relation, every other column as it was',
         HINT = 'record_thought_relation replaces a relation (the old one closed, a new one written); write a new row rather than edit one.';
     END IF;
     IF NEW.valid_until IS NOT NULL OR NEW.superseded_by IS NOT NULL THEN
@@ -303,7 +317,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, every other column as it was) is admitted — no rewrite, re-open or move, and no other kind turned into a relation. A pure close of a link passes unjudged. Migrations 042, 053, 084.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate, target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. Migrations 042, 053, 084.';
 
 -- One active relation per pair (the newer thought, the older target): the
 -- set is the index's, not a writer's discipline. Closed rows are history.
@@ -439,8 +453,10 @@ BEGIN
       MESSAGE = format('record_thought_relation: relation must be related, evolves, duplicate or NULL (close), got %L', p_relation),
       ERRCODE = 'invalid_parameter_value';
   END IF;
-  IF p_judge_key IS NULL OR btrim(p_judge_key) = '' THEN
-    RAISE EXCEPTION USING MESSAGE = 'record_thought_relation: judge_key must name the pass', ERRCODE = 'invalid_parameter_value';
+  IF p_judge_key IS NULL OR btrim(p_judge_key) = '' OR length(p_judge_key) > 200 THEN
+    -- The validator's bound, refused here as a parameter error: a check
+    -- violation would read to the pass as a side deleted mid-write (review pass 2).
+    RAISE EXCEPTION USING MESSAGE = 'record_thought_relation: judge_key must name the pass, in at most 200 characters', ERRCODE = 'invalid_parameter_value';
   END IF;
 
   -- One writer per pair at a time: two passes judging the pair at once would
@@ -543,7 +559,7 @@ CREATE TRIGGER thought_facets_drop_relation_derivation
 
 -- 042's comments named one kind; the catalog's copy follows the three.
 COMMENT ON TABLE thought_facets IS
-  'Typed rows on a thought, three kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), written once by record_thought_relation and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084 / SMD-1712, SMD-1867, SMD-1873.';
+  'Typed rows on a thought, three kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084 / SMD-1712, SMD-1867, SMD-1873.';
 COMMENT ON COLUMN thought_facets.kind IS
   'The registered kind: citation (042), link (053) or relation (084). A later migration registers another by extending thought_facets_validate, not by a registry table.';
 

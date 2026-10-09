@@ -599,8 +599,9 @@ export type RelationVerdict = (typeof RELATION_VERDICTS)[number];
  * The relation a judgement records (SMD-1873 PR 2), or null when it records
  * none — an unrelated pair, an outdates (a proposal's), a malformed answer.
  * The pass writes it with record_thought_relation (084) on the newer thought,
- * and a null closes the pair's edge, so a re-judge that no longer sees the
- * relation retracts it.
+ * and for a well-formed judgement a null closes the pair's edge, so a
+ * re-judge that no longer sees the relation retracts it; a malformed,
+ * timed-out or refused pair never reaches the write, and its edge stands.
  */
 export function relationVerdict(j: Judgement): RelationVerdict | null {
   return !j.malformed && (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;

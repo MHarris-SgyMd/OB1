@@ -7233,7 +7233,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const onC = (await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[{"relation":"references","target":"c"}]'::jsonb) AS r`, [tC])).r;
   const cLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link'`, [tC])).id;
   assert(onC.added === 1 && /does not link to itself/.test(await refused(`UPDATE thought_facets SET thought_id = $1::uuid WHERE id = $2::uuid`, [tB, cLink])), "moving a link row onto the thought whose identity it names is judged and refused");
-  assert(/needs a non-empty text|not a registered facet kind|stance/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is judged as the new kind, and a link payload is no citation");
+  assert(/a facet keeps its kind: a link is not turned into a citation/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is refused — since 084 no facet changes its kind ([73])");
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
@@ -12509,9 +12509,31 @@ console.log("\n[73] Migration 084: the consolidation judge's relations — a `re
     "a relation is written standing: a valid_until set at insert, even a future one past the index, is refused");
   await db.query(`SELECT record_citation($1::uuid, $2::uuid, 'the newer note rests on the older', 'stated')`, [newer, older]);
   const cit = (await q<{ id: string }>(`SELECT id FROM thought_facets WHERE kind = 'citation' AND thought_id = $1::uuid`, [newer]))[0];
-  if (cit) assert(ONCE.test(await refused(`UPDATE thought_facets SET kind = 'relation', payload = $2::jsonb WHERE id = $1::uuid`, [cit.id, JSON.stringify({ relation: "duplicate", target: older, judge_key: "consolidate:x" })])), "a citation is not turned into a relation — origin judged means the pass wrote it");
+  const KIND = /a facet keeps its kind/;
+  if (cit) assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'relation', payload = $2::jsonb WHERE id = $1::uuid`, [cit.id, JSON.stringify({ relation: "duplicate", target: older, judge_key: "consolidate:x" })])), "a citation is not turned into a relation");
   else assert(false, "a citation to test the kind change with (record_citation)");
   if (cit) await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [cit.id]);  // a citation of the older would refuse its delete below (042's guard)
+  // Review pass 2: no facet changes its kind — a link turned into a citation
+  // was admitted, so the capture group's UPDATE could forge a citation of any
+  // thought and have its delete refused.
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::jsonb)`, [newer, JSON.stringify([{ relation: "relates_to", target: "SMD-9" }])]);
+  const link = (await q<{ id: string }>(`SELECT id FROM thought_facets WHERE kind = 'link' AND thought_id = $1::uuid`, [newer]))[0];
+  assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'citation', payload = $2::jsonb WHERE id = $1::uuid`, [link.id, JSON.stringify({ text: "forged", stance: "stated", source_id: older })])),
+    "a link is not turned into a citation — the capture group's UPDATE cannot forge a citation that refuses the source's delete");
+  const rel = (await one<{ r: { id: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.6, 'consolidate:t@p4', NULL, 'a', 'b', NULL) AS r`, [newer, older])).r;
+  assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'citation', payload = $2::jsonb WHERE id = $1::uuid`, [rel.id, JSON.stringify({ text: "forged", stance: "stated", source_id: older })])), "…nor a relation into a citation");
+  for (const [what, sql, params] of [
+    ["a rewrite riding a close", `UPDATE thought_facets SET valid_until = now(), payload = payload || '{"relation": "evolves"}'::jsonb WHERE id = $1::uuid`, [rel.id]],
+    ["a move riding a close", `UPDATE thought_facets SET valid_until = now(), thought_id = $2::uuid WHERE id = $1::uuid`, [rel.id, older]],
+    ["a close that sets superseded_by", `UPDATE thought_facets SET valid_until = now(), superseded_by = $2::uuid WHERE id = $1::uuid`, [rel.id, link.id]],
+    ["a close into the future", `UPDATE thought_facets SET valid_until = now() + interval '10 years' WHERE id = $1::uuid`, [rel.id]],
+    ["a close that changes the id", `UPDATE thought_facets SET valid_until = now(), id = gen_random_uuid() WHERE id = $1::uuid`, [rel.id]],
+  ] as [string, string, unknown[]][]) assert(ONCE.test(await refused(sql, params)), `${what} is refused`);
+  assert((await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [rel.id])) === "" && ONCE.test(await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [rel.id])),
+    "a closed relation is not closed again");
+  assert(/a relation is written standing/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload, superseded_by) VALUES ($1::uuid, 'relation', $2::jsonb, $3::uuid)`, [newer, JSON.stringify({ relation: "related", target: older, judge_key: "k" }), link.id])),
+    "a relation inserted with superseded_by set is refused");
+  await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [link.id]);
   await db.exec(`DELETE FROM thought_facets WHERE kind = 'relation'`);
 
   // record_thought_relation: the set per pair.
@@ -12550,6 +12572,7 @@ console.log("\n[73] Migration 084: the consolidation judge's relations — a `re
     ["one thought on both sides", `SELECT record_thought_relation($1::uuid, $1::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer], /two different thoughts/],
     ["a word outside the three", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate or NULL/],
     ["no pass", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, ' ', NULL, 'a', 'b', NULL)`, [newer, older], /judge_key must name the pass/],
+    ["a pass key past 200 characters, as a parameter error the pass does not mistake for a deleted side", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, repeat('k', 201), NULL, 'a', 'b', NULL)`, [newer, older], /in at most 200 characters/],
   ] as [string, string, unknown[], RegExp][]) {
     const m = await refused(sql, params);
     assert(re.test(m), `record_thought_relation refuses ${what} (${m.slice(0, 80)})`);

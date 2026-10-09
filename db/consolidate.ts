@@ -958,7 +958,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           SELECT has_table_privilege('thought_facets', 'INSERT') AS fi, has_table_privilege('thought_facets', 'UPDATE') AS fu,
                  has_table_privilege('thoughts', 'UPDATE') AS tu, has_table_privilege('derivations', 'INSERT') AS di`) as { fi: boolean; fu: boolean; tu: boolean; di: boolean }[];
         const missing = [!g.fi && "INSERT on thought_facets (the structure group)", !(g.fu && g.tu && g.di) && "UPDATE on thought_facets and thoughts and INSERT on derivations (the capture group)"].filter(Boolean);
-        return missing.length ? `this role lacks ${missing.join(" and ")} — cd db && bun migrate.ts --url <url> --grant <role> --groups capture,worker,structure` : null;
+        return missing.length ? `this role lacks ${missing.join(" and ")} — cd db && bun migrate.ts --url <url> --grant <role> --groups structure (which also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)` : null;
       })();
   const HAS_084 = RELATIONS_OFF === null;
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
@@ -1068,7 +1068,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
@@ -1307,10 +1307,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // check, or the foreign key) is that pair's, not the thought's: the
           // write answers nothing and the rest of the thought's pairs go on
           // (review pass 1: a racing delete failed the newer thought).
+          // Only a side gone — the target check's message, or the foreign key;
+          // any other refusal is a defect to see, not a pair to skip (review pass 2).
           const code = (e as { code?: string; errno?: string }).errno ?? (e as { code?: string }).code;
-          if (code !== "23514" && code !== "23503") throw e;
-          r = { action: "none" };
+          if (!(code === "23503" || (code === "23514" && /is not a thought/.test((e as Error).message)))) throw e;
+          r = { action: "none", gone: true } as { action: string; gone?: boolean };
         }
+        if ((r as { gone?: boolean }).gone) totals.relationsGone++;
         relation = r.action;
         if (r.action === "added") totals.relationsAdded++;
         else if (r.action === "kept") totals.relationsKept++;
@@ -1824,7 +1827,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   );
   // 084 (SMD-1873 PR 2): what the pass did to the relations it judged.
   out(HAS_084
-    ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed`
+    ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed${totals.relationsGone ? `, ${totals.relationsGone} skipped — a side deleted mid-pass` : ""}`
     : `  relations: not stored — ${RELATIONS_OFF} — ${totals.related + totals.evolves + totals.duplicate} related, evolves or duplicate verdict(s) counted only`);
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).

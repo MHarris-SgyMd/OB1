@@ -171,7 +171,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2549 assertions: 2549 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2559 assertions: 2559 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-four (84) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1250,7 +1250,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
-| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them, as the orchestration runner does; without it the pass stores no relations and says so, SMD-1873); capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them, as the orchestration runner does; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
@@ -2327,12 +2327,16 @@ reviewer to direct. Only `outdates` becomes a row; `related`, `evolves` and
 hand one writer's near-copy the standing of another's thought, which three
 review passes each found a way to do. Since 084 each is a **relation**: a
 `relation` facet on the newer thought naming the older (`thought_facets`, kind
-`relation`, origin `judged`), at the token probability of its word (else the
-written number) and only at or above the floor, its lineage row (`derivations`,
-kind `relation`) at the fingerprints judged, one standing per pair.
+`relation`, origin `judged` — the kind's mark, not proof of the writer), stored
+at the token probability of its word (else the written number) and written
+only when the mass of related, evolves and duplicate together reaches the
+floor (else the written number does), its lineage row (`derivations`, kind
+`relation`) at the fingerprints judged, one standing per pair. A relation is
+written once and only closed, and since 084 no facet changes its kind.
 `record_thought_relation` keeps it when the pair is judged the same again,
-replaces it when judged another word, and closes it (`valid_until`) when a
-judgement sees none — unrelated, outdates, or under the floor; the other
+replaces it when judged another word, key or score, and closes it
+(`valid_until`) when a well-formed judgement sees none — unrelated, outdates,
+or under the floor (a malformed or timed-out pair leaves it standing); the other
 thought's delete closes it too, and the newer thought's takes it and its
 lineage. `--status` counts the relations standing and `--list relations`
 lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
@@ -3540,7 +3544,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2549 assertions, PGlite, no container
+bun test-schema.ts                          # 2559 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1146 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
