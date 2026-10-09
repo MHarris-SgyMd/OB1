@@ -1199,7 +1199,9 @@ proxy is bound to, or a canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
 `--connect` leaves the connector where it was, and says how to move it.
-Moving off `--port`, pass `--connect` in that same `up`, which moves the
+One at the root of `--port`'s port, the URL from before `/mcp`, still
+answers through the deprecated root until v2.0.0 (SMD-2532), and `up` says
+so; `--port N --connect` moves it to `/mcp`. Moving off `--port`, pass `--connect` in that same `up`, which moves the
 connector before the canary's proxy goes; afterwards its old port is no
 longer the canary's, and the connector must be removed by hand first
 (`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
@@ -1228,7 +1230,7 @@ On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
 started, stamped or registered: an old stable by its proxy's route label, a
 stable proxy off its mesh, an empty `--port` and a `--stable-project` no
-project could be named among them. The second is the canary's life, in three
+project could be named among them. The second is the canary's life, in four
 `up`s:
 - `up --connect` over a stable carrying the protective mark `stable`. The
   canary must answer at `/canary/mcp` with tier `canary` and OAuth not
@@ -1240,7 +1242,10 @@ project could be named among them. The second is the canary's life, in three
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
-- a third `up`, back on stable's origin: the canary's proxy removed, its port
+- a third `up` on the same port, with a connector at its root: named as on
+  the deprecated root, not as one the canary no longer answers, and the root
+  answering 200 with a `Deprecation` header;
+- a fourth `up`, back on stable's origin: the canary's proxy removed, its port
   free, and a connector left at that port named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
