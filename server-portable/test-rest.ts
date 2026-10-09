@@ -400,7 +400,7 @@ console.log("\n[7e] The door hands the core why a key has no agent id, which a c
   identity = { status: "ok", agentId: "agent-1" };
 }
 
-console.log("\n[8] One log line per request: method, route, status, time — no query, key, id or content");
+console.log("\n[8] One JSON line per request (telemetry.ts, SMD-1849): method, route, operation, key name, status, time — no query, key, id or content");
 {
   lines.length = 0;
   await hit("/v1/thoughts/9f0c1e2a-0000-4000-8000-00000000abcd?x=1", { key: "read-raw" });
@@ -408,11 +408,52 @@ console.log("\n[8] One log line per request: method, route, status, time — no 
   await hit("/v1/search", { key: "write-raw", method: "POST", body: JSON.stringify({ query: "the private query" }) });
   await hit("/nope");
   await hit("/health");
-  assert(lines.length === 4, `four requests, four lines — the liveness probe's 200 is not one (${lines.length})`);
-  assert(/^api GET \/v1\/thoughts\/:id \d{3} \d+ms$/.test(lines[0] ?? ""), `the route's template, not its id (${lines[0]})`);
+  await hit("/v1/thoughts", { key: "not-a-key" });
+  assert(lines.length === 5, `five requests, five lines — the liveness probe's 200 is not one (${lines.length})`);
+  const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const [fetched, , searched, unrouted, unkeyed] = parsed;
+  assert(fetched?.door === "api" && fetched.method === "GET" && fetched.route === "/v1/thoughts/:id" && fetched.tool === "fetch" && fetched.agent === "r"
+    && typeof fetched.status === "number" && typeof fetched.ms === "number" && typeof fetched.ts === "string",
+    `the route's template, not its id, with its operation and the key's name (${lines[0]})`);
+  assert(same(Object.keys(fetched ?? {}), ["ts", "door", "method", "route", "tool", "agent", "status", "outcome", "code", "ms"]) && fetched?.status === 400 && fetched.outcome === "refused" && fetched.code === "REFUSED_INPUT",
+    `those keys and no other, in order, a 4xx \`refused\` with its answer's code (${lines[0]})`);
+  assert(!("code" in (parsed[1] ?? {})) && parsed[1]?.status === 200 && parsed[1].outcome === "ok", `a success is \`ok\` and carries no code (${lines[1]})`);
+  assert(searched?.tool === "search_thoughts" && searched.agent === "w", `the search is its operation and its key's name (${lines[2]})`);
   const all = lines.join("\n");
-  for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);
-  assert(/^api GET - 404 /.test(lines[3] ?? ""), `an unrouted request is logged without its path (${lines[3]})`);
+  for (const s of ["9f0c1e2a", "someone-secret", "private query", "read-raw", "write-raw", "not-a-key", "x=1"]) assert(!all.includes(s), `no ${s} in the log`);
+  assert(unrouted?.status === 404 && unrouted.code === "NO_ROUTE" && !("route" in unrouted) && !("tool" in unrouted) && !("agent" in unrouted), `an unrouted request is logged without its path (${lines[3]})`);
+  assert(unkeyed?.status === 401 && unkeyed.code === "UNAUTHORIZED" && unkeyed.tool === "list_thoughts" && !("agent" in unkeyed), `a key that does not authenticate names no one, and says why (${lines[4]})`);
+  // A revoked key is a 401 too: the code tells the two apart, and the key's name is said.
+  lines.length = 0;
+  identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-08T00:00:00.000Z", reason: null };
+  await hit("/v1/thoughts", { key: "read-raw" });
+  identity = { status: "ok", agentId: "agent-1" };
+  const revoked = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(revoked.status === 401 && revoked.code === "REVOKED" && revoked.agent === "r", `a revoked key: 401 REVOKED, by its name (${lines[0]})`);
+  // A 503 that refuses for now is `refused`, as the MCP server says it — not a fault.
+  lines.length = 0;
+  identity = { status: "busy" };
+  await hit("/v1/thoughts", { key: "read-raw" });
+  identity = { status: "ok", agentId: "agent-1" };
+  const busy = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(busy.status === 503 && busy.code === "BUSY" && busy.outcome === "refused", `a busy registry: 503 BUSY \`refused\`, not \`error\` (${lines[0]})`);
+
+  // A fault is `error`; a client that hangs up mid-body is `abandoned`, not the
+  // 500 its cut-off read becomes — no one received it, and it is no fault.
+  lines.length = 0;
+  const realAnswer = answer;
+  answer = async () => { throw new Error("the store fell over"); };
+  await hit("/v1/stats", { key: "read-raw" });
+  answer = realAnswer;
+  const faulted = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(faulted.status === 500 && faulted.outcome === "error" && faulted.code === "FAILED", `a fault: 500 \`error\` FAILED (${lines[0]})`);
+  lines.length = 0;
+  const hangUp = new AbortController();
+  const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("{\"query\":\"cut")); setTimeout(() => { hangUp.abort(); c.error(new Error("the client hung up")); }, 20); } });
+  await app.fetch(new Request("http://api/v1/search", { method: "POST", body, signal: hangUp.signal, headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, duplex: "half" } as RequestInit));
+  const hungUp = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(hungUp.outcome === "abandoned" && !("code" in hungUp) && hungUp.tool === "search_thoughts" && hungUp.agent === "w",
+    `a client that hangs up mid-body: \`abandoned\`, no code, not a fault (${lines[0]})`);
 }
 
 console.log("\n[9] A request URL that will not parse — Bun builds it from the Host header unchecked — still has its query read: a refusal, not a 500 (SMD-2535)");
