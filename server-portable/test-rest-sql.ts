@@ -456,7 +456,7 @@ console.log("\n[8] The log: one line per request, with no query, key, id or cont
   } finally {
     Object.assign(console, real);
   }
-  const api = lines.filter((l) => l.startsWith("api "));
+  const api = lines.filter((l) => l.startsWith('{"ts":') && (JSON.parse(l) as { door?: string }).door === "api");
   assert(api.length === 4, `four requests, four lines (${api.length}: ${api.join(" / ")})`);
   const all = lines.join("\n");
   for (const s of ["private words", ids[2], "trace=1", "someone-named", "must not be logged", KEYS.writer]) assert(!all.includes(s), `no ${s.slice(0, 20)} in the log`);

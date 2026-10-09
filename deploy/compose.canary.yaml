@@ -10,7 +10,12 @@
 # api.ob1.internal, auth.ob1.internal), and on stable's network they would take
 # a share of stable's /mcp, /api and /auth. Compose still adds each container's
 # service name (`server`, `api`) there, which is why stable's proxy dials its
-# backends by their mesh names alone (SMD-2294 PR 1).
+# backends by their mesh names alone (SMD-2294 PR 1). Check 28
+# (scripts/check-fork-consistency.ts) holds this file's network and names
+# exactly (FILE_NETWORKS, SERVICE_NETWORKS), and CI's "The proxy loads only the
+# held route tables" that it changes nothing else: a second key under stable's
+# network name, with a shadow on it answering as mcp.ob1.internal, would take
+# stable's /mcp (SMD-2685).
 #
 # The canary keeps its own default network, where its Postgres and the refresh
 # reach it, and its own `mesh`, which nothing else joins. It runs with

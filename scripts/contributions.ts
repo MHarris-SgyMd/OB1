@@ -17,6 +17,7 @@ export const CATEGORIES = [
   "skills",
   "primitives",
   "extensions",
+  "plugins",
 ];
 
 /**
