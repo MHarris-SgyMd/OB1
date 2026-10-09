@@ -1310,7 +1310,7 @@ jobs:
           # port binds loopback"; the ports by it and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy.
