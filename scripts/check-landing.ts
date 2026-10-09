@@ -14,7 +14,7 @@
  * as a PR).
  *
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
- * db/migrations/, server-portable/, evals/ or jev/ ships a changes/smd-NNNN.md
+ * db/migrations/, server-portable/, plugins/, evals/ or jev/ ships a changes/smd-NNNN.md
  * fragment — added, or extended when a ticket lands in slices (SMD-1806 did);
  * a deleted one is not shipped. The one exception is a release cut (SMD-1860):
  * it adds the migration that writes the version and deletes the fragments it
@@ -43,7 +43,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export type Change = [status: string, path: string];
 
 /** The directories whose change is a change to the fork itself, as CONTRIBUTING.md names them. */
-export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "evals/", "jev/"];
+export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "plugins/", "evals/", "jev/"];
 /** Inside those directories, what asks no fragment: a test file in the tree's spelling (`test-x.ts`, `x.test.ts`) or a Markdown file. */
 export const FRAGMENT_EXEMPT = /(?:^|\/)(?:test-[^/]+|[^/]+\.test)\.(?:ts|mjs|js|py|sh)$|\.md$/i;
 /** A fragment, as changes/README.md names one — a numbered `changes/NNN-slug.md` is the release step's, and ships with no PR. */
@@ -87,6 +87,7 @@ export const LANDING_PROBES: [why: string, changes: Change[], says: string | nul
   ["a migration with no fragment", [["A", "db/migrations/048_x.sql"], ["M", "db/README.md"]], "touches db/migrations/048_x.sql and ships no"],
   ["a server file with no fragment", [["M", "server-portable/store.ts"]], "touches server-portable/store.ts"],
   ["an eval with no fragment", [["M", "evals/eval-replay.ts"]], "touches evals/eval-replay.ts"],
+  ["a plugin with no fragment — it runs in the brain's servers", [["M", "plugins/example/index.ts"]], "touches plugins/example/index.ts"],
   ["two asking files, both named", [["M", "server-portable/store.ts"], ["M", "evals/lib.ts"]], "server-portable/store.ts, evals/lib.ts"],
   ["a deleted migration", [["D", "db/migrations/047_x.sql"]], "touches db/migrations/047_x.sql"],
   ["a migration with a fragment", [["A", "db/migrations/048_x.sql"], ["A", "changes/smd-1857.md"]], null],

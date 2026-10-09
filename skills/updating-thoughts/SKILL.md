@@ -8,7 +8,7 @@ description: |
   creating a new thought (that is capture) or removing one (see
   deleting-thoughts).
 author: Ezana Azene
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Updating Thoughts
@@ -27,7 +27,9 @@ it will not look up for you.
 - Annotating it without touching the wording
 
 Not for: creating a thought (use capture), or removing one — if the thought is
-outdated or wrong, prefer updating or tagging it `superseded` over deleting
+outdated or wrong, prefer updating it — or recording the newer thought that
+replaces it with `update_thought`'s `supersedes` field, which search labels —
+over deleting
 (see the **deleting-thoughts** skill).
 
 ## Process

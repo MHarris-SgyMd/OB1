@@ -41,6 +41,21 @@ name: open-brain
 # release's compose overlay (SMD-1860; deploy/README.md, "Pinning a release").
 x-ollama-image: &ollama-image ollama/ollama:0.34.3
 
+# Every service's log, bounded (SMD-1849): the json-file driver, rotated at
+# 10 MB with three files kept — at most 30 MB per container, where Docker's
+# default is one file that grows until the disk is full. Podman reads the same
+# keys as its k8s-file driver, and keeps one file: at max-size it truncates
+# rather than rotates, so the bound holds and the older lines go (measured on
+# podman 6.0.2; max-file is accepted and has no effect there). Every service
+# below names it, and check 29 of scripts/check-fork-consistency.ts holds
+# that, so a service added without it fails CI; compose.tiers.yaml carries the
+# same, as check 27 holds it to this file.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 # The proxy's route table (SMD-1846), which Traefik's file provider reads. It
 # lives here rather than in a file of its own because compose.yaml is the file
 # a release ships (scripts/release-artifacts.ts, ASSETS): a pinned stack on a
@@ -50,7 +65,12 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # first proposed: the socket is root on the host, and the proxy is the one
 # process a client on the network reaches — docs/orchestration-tool.md declined
 # the same socket for n8n. So adding a service is two edits in this file, the
-# service and its router here.
+# service and its router here, and in check 28 of
+# scripts/check-fork-consistency.ts its router in PROXY_ROUTE_TABLE, which
+# holds this table byte for byte, its mesh name in SERVICE_NETWORKS, which
+# holds who answers to each name, and its keys, mounts, build, confinement and
+# named volumes in SERVICE_KEYS, SERVICE_MOUNTS, SERVICE_BUILDS, CONFINEMENT
+# and COMPOSE_VOLUMES; the proxy itself is PROXY_SERVICE there (SMD-2685).
 #
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
@@ -78,17 +98,22 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           (the proxy's dns_search);
 #   resource the MCP server's protected-resource document,
 #           /.well-known/oauth-protected-resource/mcp (RFC 9728), to the
-#           server, which serves it only while the stack is configured and the
-#           authorization server answers it on the mesh, and answers 404
-#           otherwise (SMD-2382; server-portable/oauth-edge.ts). A server that
-#           is down is `auth-absent`'s 404 too, never a 502 a connector could
-#           read as "OAuth here";
+#           server, which serves it only while the stack is configured, the
+#           request's Host is the origin's and the authorization server
+#           answers it on the mesh, and answers 404 otherwise (SMD-2382;
+#           server-portable/oauth-edge.ts). A server that is down is
+#           `auth-absent`'s 404 too, never a 502 a connector could read as
+#           "OAuth here";
 #   oauth-fallback-off  /register, /authorize and /token at the origin root:
 #           a bare 404 (`not-served`). An MCP client that finds the document
 #           but no authorization-server metadata registers and signs in at the
 #           issuer's root, and the legacy route would hand that POST to the
 #           MCP server, whose 200 envelope the client cannot read (SMD-2382
 #           review). The authorization server's own are under /auth;
+#   api-off /api and everything under it. Unless the operator names
+#           deploy/compose.api-public.yaml, whose router (priority 36) wins
+#           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
+#           legacy route, where the MCP server takes a POST at every path;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -102,8 +127,12 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #   tier-off every other path that starts with /canary or /working, in
 #           any case and whatever follows: a bare 404 (`not-served`), so a
 #           client handed a tier's URL changed in any way after the prefix
-#           never reaches this stack's server by the legacy route (a typo of
-#           the prefix itself, `/canry/mcp`, still does until SMD-2532);
+#           (its case, an escaped slash, a pasted invisible space) never
+#           reaches this stack's server by the legacy route, to write with
+#           the same key (a typo of the prefix itself, `/canry/mcp`, still
+#           does until SMD-2532). No boundary after the prefix: each one
+#           tried left some character through (SMD-2294 review passes 2-4),
+#           and nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -129,6 +158,30 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # none of the server's CORS headers; the SDK's discovery reads a CORS failure
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
+# The middlewares:
+#   legacy-window  marks the request for the server, which logs each key
+#           name still on the root once (X-OB1-Legacy-Route, set, so a
+#           client's own value is replaced), and adds to every answer a
+#           Deprecation header (RFC 9745) dated 2026-10-02 and a Link to the
+#           upgrade guide;
+#   not-legacy  deletes that marker (an empty value deletes the header), so a
+#           client cannot send it on /mcp and be logged as a straggler;
+#   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
+#           listening, or a request the server dropped mid-flight, as its
+#           registration stall does at 30 s; the server never answers 502
+#           itself — is answered by noop@internal and becomes a 404 with no
+#           body. The server's 500, 503 and 504 are its answers and are left
+#           alone (measured);
+#   api-off, not-served  noop@internal's 418 becomes the 404 a path nothing
+#           serves gets (measured on this pin).
+# Every backend is dialled by its mesh name, written rooted. Not `server`:
+# compose gives each container its service name as an alias on every network
+# it joins, so a tier of another project on this mesh (SMD-2294) would answer
+# to `server` beside this stack's.
+# The table holds no comment of its own: Traefik renders it as a Go template
+# first, so a comment line there is not inert, and check 28
+# (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
+# byte (SMD-2658).
 x-proxy-routes: &proxy-routes |
   http:
     routers:
@@ -138,28 +191,18 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [auth-absent]
         service: auth
-      # The MCP server's protected-resource document (SMD-2382): the server
-      # answers it, 404 unless OAuth is advertised (configured, the origin's
-      # Host, the authorization server answering); a server that is down is a
-      # 404 too (auth-absent), not a 502.
       resource:
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
         middlewares: [not-legacy, auth-absent]
         service: server
-      # An MCP client's fallback sign-in at the issuer's root (SMD-2382): a
-      # bare 404, so the legacy route never hands it to the MCP server.
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
         priority: 35
         entryPoints: [web]
         middlewares: [not-served]
         service: noop@internal
-      # The REST core's public path (SMD-2284), off unless the operator names
-      # deploy/compose.api-public.yaml, whose router (priority 36) wins over
-      # this one. Off, /api answers a bodyless 404 rather than falling to
-      # legacy, where the MCP server takes a POST at every path.
       api-off:
         rule: "Path(`/api`) || PathPrefix(`/api/`)"
         priority: 35
@@ -172,7 +215,6 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      # The other tiers' MCP servers (SMD-2294), each a 404 while absent.
       canary:
         rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
         priority: 30
@@ -185,32 +227,18 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy, tier-absent]
         service: working
-      # Under a tier's prefix, only its /mcp is served: every other path that
-      # starts with /canary or /working, in any case, is a bare 404 rather
-      # than the legacy route's way into this stack's server, where a client
-      # handed a tier's URL with anything changed after the prefix (its
-      # case, an escaped slash, a pasted invisible space) would write with
-      # the same key. No boundary after the prefix: each one tried left some
-      # character through (review passes 2-4), and nothing this stack serves
-      # starts with either word.
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
         entryPoints: [web]
         middlewares: [not-served]
         service: noop@internal
-      # OPTIONS too: a browser's CORS preflight for a keyed GET /health is
-      # the server's to answer, not the legacy route's.
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      # The root URL clients were given before SMD-1846, kept for a
-      # compatibility window that closes with v2.0.0 (SMD-2306; SMD-2532
-      # deletes this router). Every answer says so in its headers, and the
-      # server logs each key name that comes this way once.
       legacy:
         rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
         priority: 1
@@ -218,9 +246,6 @@ x-proxy-routes: &proxy-routes |
         middlewares: [legacy-window]
         service: server
     middlewares:
-      # Deprecation (RFC 9745) since 2026-10-02, and a Link to the upgrade
-      # guide. The request is marked for the server, which logs the key
-      # names still on the root; set, so a client's own value is replaced.
       legacy-window:
         headers:
           customRequestHeaders:
@@ -228,50 +253,34 @@ x-proxy-routes: &proxy-routes |
           customResponseHeaders:
             Deprecation: "@1790899200"
             Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"'
-      # An empty value deletes the header: a client cannot send the marker
-      # on /mcp and be logged as a straggler.
       not-legacy:
         headers:
           customRequestHeaders:
             X-OB1-Legacy-Route: ""
-      # Any 502: Traefik's own (no such name, nothing listening, or a request
-      # the server dropped mid-flight, as its registration stall does at
-      # 30 s), since the server never answers 502 itself. noop@internal
-      # answers, and the status becomes 404 with no body. The server's 500,
-      # 503 and 504 are its answers and are left alone (measured).
       auth-absent:
         errors:
           status: ["502"]
           service: noop@internal
           statusRewrites:
             "502": 404
-      # The same, for a tier's MCP server (SMD-2294): no tier by that name
-      # on the mesh, or one stopped, is the 404 of a path nothing serves.
       tier-absent:
         errors:
           status: ["502"]
           service: noop@internal
           statusRewrites:
             "502": 404
-      # noop@internal answers 418; the same errors middleware turns it into
-      # the 404 a path nothing serves gets (measured on this pin).
       api-off:
         errors:
           status: ["418"]
           service: noop@internal
           statusRewrites:
             "418": 404
-      # The same, for the fallback sign-in paths (SMD-2382).
       not-served:
         errors:
           status: ["418"]
           service: noop@internal
           statusRewrites:
             "418": 404
-    # Every backend by its mesh name, written rooted. Not `server`: compose
-    # gives each container its service name as an alias on every network it
-    # joins, so a tier of another project on this mesh (SMD-2294) would
-    # answer to `server` beside this stack's.
     services:
       server:
         loadBalancer:
@@ -344,6 +353,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    logging: *logging
 
   # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
   # Runs to completion, then exits. The server waits for it.
@@ -394,6 +404,7 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    logging: *logging
 
   # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
   server:
@@ -545,6 +556,11 @@ services:
       # same `public origin` row, naming the MCP server.
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # The plugins the brain runs (SMD-2310): names from plugins/registry.ts,
+      # comma-separated; unset, none. The REST core below takes this block, so
+      # both servers serve the same set; preflight refuses a name that is no
+      # plugin. The three-tier stack leaves it out (check 27's TIER_OMITTED_ENV).
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at
@@ -599,6 +615,7 @@ services:
       default: {}
       mesh:
         aliases: [mcp.ob1.internal]
+    logging: *logging
 
   # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
   # over the same core — the server's image run as `bun api.ts`, with the
@@ -633,14 +650,16 @@ services:
       default: {}
       mesh:
         aliases: [api.ob1.internal]
-    # The image's check POSTs to the MCP endpoint at /, which the REST core
-    # answers 405; its own liveness is a keyless GET of /health.
+    # The image's own check, the same keyless GET of /health (SMD-1849), named
+    # here too: a server image from before it POSTs to the MCP endpoint at /,
+    # which the REST core answers 404 (NO_ROUTE).
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 3s
       start_period: 10s
       retries: 3
+    logging: *logging
 
   # The stack's one origin (SMD-1846): a reverse proxy, and the only service
   # without a profile that publishes a port. Each service is a path on it —
@@ -771,6 +790,7 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
+    logging: *logging
 
   # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
   # `--profile board-sync`; a brain that is not the fork's own never runs it.
@@ -833,6 +853,7 @@ services:
     # filling the log (fifth review pass). Three tries cover a database not yet
     # answering; then the service stops and `ps` says so.
     restart: on-failure:3
+    logging: *logging
 
   # Entity extraction and consolidation, unattended (SMD-2424). Optional —
   # `--profile workers`, since each is a model call per thought: GPU time on a
@@ -907,6 +928,7 @@ services:
     # follower stopped by a signal exits 0 (137 if killed past the grace
     # period) and stays stopped.
     restart: on-failure:3
+    logging: *logging
 
   # Proposals only: consolidation never applies one. Each waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
@@ -948,6 +970,7 @@ services:
     stop_grace_period: 60s
     depends_on: *claim-worker-depends
     restart: on-failure:3
+    logging: *logging
 
   # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
   #
@@ -970,6 +993,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    logging: *logging
 
   # Pulls the two models — more when OB1_JUDGE_MODEL or
   # OB1_EXTRACT_ESCALATE_MODEL names one — then exits.
@@ -994,6 +1018,7 @@ services:
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
         [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
+    logging: *logging
 
   # The typed-decision tier (SMD-2050). Optional — `--profile jev`; a brain
   # that runs none of the Jev spikes never builds it.
@@ -1045,6 +1070,7 @@ services:
     # named; three tries cover a network that was not up yet, then the service
     # stops and `ps` says so rather than looping (the board-sync rule above).
     restart: on-failure:3
+    logging: *logging
 
   # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's
   # decision). Optional — `--profile orchestration`; a brain plus an AI client
@@ -1156,6 +1182,7 @@ services:
       server:
         condition: service_started
     restart: unless-stopped
+    logging: *logging
 
   # The import runner (SMD-2212; docs/orchestration-tool.md, "Running a
   # pipeline from a workflow"). It is part of the `orchestration` profile: the
@@ -1212,6 +1239,7 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
+    logging: *logging
 
   orchestration-runner:
     build:
@@ -1223,8 +1251,15 @@ services:
       # which git and every build context ignore (deploy/imports/README.md).
       # `z` relabels both mounts for a container on an SELinux host, where the
       # runner otherwise meets EACCES and restarts (review pass 4); elsewhere
-      # it is a no-op.
-      - ${IMPORTS_DIR:-./imports}:/imports:ro,z
+      # it is a no-op. In long form: compose 2.38–2.40.0, the CI runner's,
+      # reads the short `${IMPORTS_DIR…}:/imports:ro,z` as too many colons when
+      # it renders without substituting, as CI's proxy check does (SMD-2658).
+      - type: bind
+        source: ${IMPORTS_DIR:-./imports}
+        target: /imports
+        read_only: true
+        bind:
+          selinux: z
       # The allowlist provisioning reads, so the two cannot disagree: a line
       # the runner does not hold would load an import that fails every run
       # (review pass 1). The runner reads it at start, so recreate it after an
@@ -1309,6 +1344,7 @@ services:
     # A stop waits for a running step to hand back what it holds: the runner
     # gives it two SIGTERMs and up to 5 s (review pass 4).
     stop_grace_period: 15s
+    logging: *logging
 
   # The authorization server (SMD-2285; docs/operator-surface-tiers.md,
   # decisions 13-16): oidc-provider in a small Bun service of ours
@@ -1391,6 +1427,7 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    logging: *logging
 
 networks:
   # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"):

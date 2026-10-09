@@ -6634,7 +6634,7 @@ console.log("\n[46] Migration 050: the actor on the row — who wrote the curren
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /050/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
   assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
-    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 083's restamp window orders by seq alone, against rows written after 050), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 084's restamp window orders by seq alone, against rows written after 050), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
   assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.action = 'update'\) OVER \(\)\)\) AS vouched/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text — not from sorting first (fourth review pass)");
   assert(/CROSS JOIN LATERAL \([\s\S]*?THEN content_fingerprint_of\(t\.content\) END AS fp\s+OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
@@ -7633,7 +7633,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("083") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("084") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -11448,8 +11448,8 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   // The shape: the three writers stamp with the event's declaration after
   // folding the payload's into it; the raw path reads the handoff; the 1-arg
   // stamp is the 2-arg with none.
-  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("083"),
-    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 083 of the backfill (073's body, a restamp a writer)");
+  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("084"),
+    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 084 of the backfill (073's body, a restamp a writer)");
   const bodies = await Promise.all(["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"].map(src));
   assert(bodies.every((b) => /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', NULL\);\s+v_new_meta := ob1_actor_stamp\(COALESCE\(p_payload->'metadata', '\{\}'::jsonb\), v_decl->>'trust'\)/.test(b)
                        && /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', v_old_meta\);\s+v_new_meta := ob1_actor_stamp_kept/.test(b)
@@ -12441,7 +12441,7 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[73] Migration 083: a capture-only key's stamp yields to the first classified key that can read to re-capture it, at a higher trust — the whole stamp, once; an equal or lower trust, an unclassified writer, a capture-only actor, a moved text, a key that can read's own stamp (its lowering included), a row settled by an earlier reader, a restamped or rewritten row and a row from before the scope mark move nothing; the backfill reads the restamp as the stamp's writer (SMD-2664)");
+console.log("\n[73] Migration 084: a capture-only key's stamp yields to the first classified key that can read to re-capture it, at a higher trust — the whole stamp, once; an equal or lower trust, an unclassified writer, a capture-only actor, a moved text, a key that can read's own stamp (its lowering included), a row settled by an earlier reader, a restamped or rewritten row and a row from before the scope mark move nothing; the backfill reads the restamp as the stamp's writer (SMD-2664)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12458,8 +12458,8 @@ console.log("\n[73] Migration 083: a capture-only key's stamp yields to the firs
   const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`);
   const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
-  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /083/.test(c) && /SMD-2664/.test(c) && /083 \/ SMD-2664/.test(bc),
-    "083's one function, its sentinel in its body; it and the backfill's comment name 083 and the ticket");
+  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /084/.test(c) && /SMD-2664/.test(c) && /084 \/ SMD-2664/.test(bc),
+    "084's one function, its sentinel in its body; it and the backfill's comment name 084 and the ticket");
   const bfSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'backfill_thought_actors(integer)'::regprocedure`)).s);
   assert(/\(a\.action = 'update' AND a\.diff \? 'restamped'\) AS restamped/.test(bfSrc) && /\(\(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\)\s+OR/.test(bfSrc)
       && /ORDER BY \(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\) DESC,/.test(bfSrc),
@@ -12665,9 +12665,9 @@ console.log("\n[73] Migration 083: a capture-only key's stamp yields to the firs
 
   // A re-apply moves nothing.
   const rows = JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`));
-  await reapply("083");
+  await reapply("084");
   assert(JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`)).n === 1,
-    "083 re-applied: one function, and no row moved");
+    "084 re-applied: one function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
 }

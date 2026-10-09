@@ -107,6 +107,10 @@ import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Post
 // identical by extensions/test-auth.ts. Never
 // compare a key with `!==` yourself (the fork's consistency check refuses it).
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+// The reply kept alive while a tool runs, and a client that leaves logged: Bun
+// closes a stream silent for 8–12 s (SMD-1864, SMD-2001). _shared/sse.ts is
+// server-portable/sse.ts, held identical by extensions/test-auth.ts.
+import { mcpReply } from "../_shared/sse.ts";
 
 // --- Environment Variables ---
 const SUPABASE_URL = process.env.SUPABASE_URL!; // a postgres:// connection string
@@ -145,7 +149,7 @@ app.all("*", async (c) => {
 
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);
-  return transport.handleRequest(c);
+  return mcpReply(c, () => transport.handleRequest(c));
 });
 
 // Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
@@ -263,7 +267,7 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 
 Before submitting, verify:
 
-- [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim and `../_shared/auth.ts` — no supabase-js, no `deno.json`
+- [ ] `index.ts` imports only `hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk` (from `extensions/package.json`), the SQL shim, `../_shared/auth.ts` and `../_shared/sse.ts`, and the route returns `mcpReply(c, () => transport.handleRequest(c))` — no supabase-js, no `deno.json`
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
 - [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its tables are in `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`
 - [ ] `schema.sql` does NOT modify the `thoughts` table

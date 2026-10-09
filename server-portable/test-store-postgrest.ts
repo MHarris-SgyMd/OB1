@@ -281,7 +281,7 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   await sql.close();
 }
 
-console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key that can read at a higher trust: the store calls migration 083's restamp after the note, with the text's fingerprint and the trust the write declared (SMD-2664)");
+console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key that can read at a higher trust: the store calls migration 084's restamp after the note, with the text's fingerprint and the trust the write declared (SMD-2664)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const resolved = async (label: string, scope: string, seed: string) => {
@@ -319,10 +319,10 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
   await capture("[8d] the hook's outside text the writer re-sends as agent", writer, "agent");
   assert((await stamp(between.id)) === "operator/writer-8d/agent", `…and one between the two moves the stamp at the declared trust (${await stamp(between.id)})`);
 
-  // A database before 083: the capture stands. A restamp that fails throws, so the caller's retry makes it.
+  // A database before 084: the capture stands. A restamp that fails throws, so the caller's retry makes it.
   await sql`ALTER FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture_away`;
   let missing = "";
-  try { await capture("[8d] the hook's text the writer re-captures before 083", hook, "ingested"); await capture("[8d] the hook's text the writer re-captures before 083", writer); } catch (e) { missing = (e as Error).message; }
+  try { await capture("[8d] the hook's text the writer re-captures before 084", hook, "ingested"); await capture("[8d] the hook's text the writer re-captures before 084", writer); } catch (e) { missing = (e as Error).message; }
   await sql`ALTER FUNCTION ob1_restamp_recapture_away(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture`;
   assert(missing === "", `a database without the restamp: the capture stands (${missing.slice(0, 80)})`);
   await sql`ALTER FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text) RENAME TO ob1_restamp_recapture_real`;

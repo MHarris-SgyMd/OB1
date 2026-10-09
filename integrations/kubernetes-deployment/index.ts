@@ -13,6 +13,7 @@
  *   CHAT_API_BASE - Base URL for OpenAI-compatible chat API (defaults to EMBEDDING_API_BASE)
  *   CHAT_API_KEY - API key for chat service (defaults to EMBEDDING_API_KEY)
  *   CHAT_MODEL - Model name for metadata extraction (default: gpt-4o-mini)
+ *   OB1_LLM_TIMEOUT - seconds each embedding or chat call may take (default 120, the core server's)
  *   MCP_ACCESS_KEYS - name:scope:sha256 access keys (the older single MCP_ACCESS_KEY still works);
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
@@ -32,6 +33,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { SQL } from "bun";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { mcpReply } from "../_shared/sse.ts";
 
 // ob1-fork (SMD-1524): capture_thought writes `thoughts` with a raw INSERT, by design —
 // this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
@@ -107,57 +109,139 @@ function thoughtUrl(id: string): string {
 
 // --- Embedding & Metadata Extraction ---
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${EMBEDDING_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: EMBEDDING_MODEL,
-      input: text,
-    }),
-  });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`Embedding API failed: ${r.status} ${msg}`);
+/** server-portable/embed.ts's, held equal by extensions/test-auth.ts. */
+const DEFAULT_LLM_TIMEOUT_S = 120;
+/** How much of a provider's error body a message carries: embed.ts's, held equal the same way (review pass 6). */
+const PROVIDER_ERROR_CHARS = 500;
+/** OB1_LLM_TIMEOUT's seconds if it is a finite positive number (embed.ts's rule), else undefined. */
+function llmTimeoutOf(text: string | undefined): number | undefined {
+  const n = text ? Number(text) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+// Read per call below; a value it cannot use is said once here, as OB1_STOP_GRACE's is (review passes 4 and 5).
+const llmTimeoutText = process.env.OB1_LLM_TIMEOUT?.trim() ?? "";
+if (llmTimeoutText && llmTimeoutOf(llmTimeoutText) === undefined) console.warn(`OB1_LLM_TIMEOUT="${llmTimeoutText}" is not a positive number of seconds, with no unit; provider calls are given ${DEFAULT_LLM_TIMEOUT_S} s (SMD-2692)`);
+
+/** A provider answer's body: empty if it fails to arrive, unless the deadline passed during it (embed.ts providerCall). */
+function bodyOf(r: Response): Promise<string> {
+  return r.text().catch((e: Error) => { if (e.name === "TimeoutError") throw e; return ""; });
+}
+
+/** A provider call that ran past OB1_LLM_TIMEOUT, its message naming the knob. */
+class ProviderTimeout extends Error {}
+
+/**
+ * A provider call under the core server's deadline (SMD-2692): OB1_LLM_TIMEOUT,
+ * read per call as the keys are, over the answer's headers and body both. Until
+ * then Bun's own 300 s fetch cut was the only bound, and since SMD-2001 keeps
+ * the reply alive a client sat through all of it.
+ */
+async function withDeadline<T>(what: string, base: string, call: (deadline: { signal: AbortSignal; timeout: false }) => Promise<T>): Promise<T> {
+  const seconds = llmTimeoutOf(process.env.OB1_LLM_TIMEOUT) ?? DEFAULT_LLM_TIMEOUT_S;
+  try {
+    // `timeout: false` makes this the one deadline: Bun's fetch would otherwise
+    // cut the call at its 300 s idle timeout, so a longer value never applied (embed.ts).
+    return await call({ signal: AbortSignal.timeout(seconds * 1000), timeout: false });
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw new ProviderTimeout(`${what} request to ${base} timed out after ${seconds} s (OB1_LLM_TIMEOUT)`);
+    throw e;
   }
-  const d = await r.json();
-  return d.data[0].embedding;
+}
+
+async function getEmbedding(text: string): Promise<number[]> {
+  return withDeadline("Embeddings", EMBEDDING_API_BASE, async (deadline) => {
+    const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${EMBEDDING_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input: text,
+      }),
+      ...deadline,
+    });
+    const body = await bodyOf(r);
+    if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, PROVIDER_ERROR_CHARS)}`);
+    let d: { data?: [{ embedding?: unknown }] } | null;
+    try {
+      d = JSON.parse(body);
+    } catch {
+      throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered a body that is not JSON`);
+    }
+    const embedding = d?.data?.[0]?.embedding;
+    // A vector of numbers, or Postgres refuses it later with a cast error that names no provider (review pass 4).
+    if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} answered no embedding`);
+    return embedding as number[];
+  });
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${CHAT_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CHAT_MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
+  // The capture goes on without its tags, the embedding being what it needs,
+  // when the chat call times out, answers a status outside 2xx, or answers a
+  // body or content that is not JSON or not a JSON object: logged, and recorded
+  // on the thought in the core server's reasons (server-portable/metadata.ts).
+  // A deadline that failed the capture instead would lose one that a model
+  // slower than it had always completed (review pass 1). A connection refused,
+  // or a name that does not resolve, still fails the capture, as on the core.
+  const fallback = (reason: string, why: string): Record<string, unknown> => {
+    console.error(`extractMetadata: ${why}`);
+    return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: reason };
+  };
+  let answer: { ok: boolean; status: number; text: string };
+  try {
+    answer = await withDeadline("Chat completion", CHAT_API_BASE, async (deadline) => {
+      const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CHAT_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: CHAT_MODEL,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content: `Extract metadata from the user's captured thought. Return JSON with:
 - "people": array of people mentioned (empty if none)
 - "action_items": array of implied to-dos (empty if none)
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
 Only extract what's explicitly there.`,
-        },
-        { role: "user", content: text },
-      ],
-    }),
-  });
-  const d = await r.json();
-  try {
-    return JSON.parse(d.choices[0].message.content);
-  } catch {
-    return { topics: ["uncategorized"], type: "observation" };
+            },
+            { role: "user", content: text },
+          ],
+        }),
+        ...deadline,
+      });
+      return { ok: r.ok, status: r.status, text: await bodyOf(r) };
+    });
+  } catch (e) {
+    if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);
+    throw e;
   }
+  if (!answer.ok) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, PROVIDER_ERROR_CHARS)}`);
+  let d: { choices?: [{ message?: { content?: unknown } }] } | null;
+  try {
+    d = JSON.parse(answer.text);
+  } catch {
+    return fallback("invalid_response_body", `Chat completion request to ${CHAT_API_BASE} answered a body that is not JSON`);
+  }
+  const content = d?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") return fallback("no_message_content", "provider response had no message content");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return fallback("unparseable_model_output", "model content was not valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return fallback("unexpected_json_shape", "model returned JSON that is not an object");
+  // The marker is the server's to set, never the model's: the confirmation prints it (review pass 2).
+  const { metadata_extraction_failed: _, ...tags } = parsed as Record<string, unknown>;
+  return tags;
 }
 
 // --- MCP Server Setup ---
@@ -544,6 +628,8 @@ function buildServer(principal: Principal): McpServer {
           confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
         if (Array.isArray(meta.action_items) && meta.action_items.length)
           confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+        if (meta.metadata_extraction_failed)
+          confirmation += ` | Tags not extracted: ${meta.metadata_extraction_failed}`;
 
         return {
           content: [{ type: "text" as const, text: confirmation }],
@@ -600,7 +686,8 @@ app.all("*", async (c) => {
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
-  const response = await transport.handleRequest(c);
+  // The reply kept alive while the tool runs, and a client that leaves logged (SMD-2001, _shared/sse.ts).
+  const response = await mcpReply(c, () => transport.handleRequest(c));
   if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);

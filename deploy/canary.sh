@@ -60,7 +60,8 @@
 #      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
 #      the same key, at the canary's URL; without it, names a connector left at
-#      the other mode's URL;
+#      the other mode's URL, and with --port says one at that port's root
+#      still answers, deprecated, until v2.0.0;
 #   7. on stable's origin, removes a canary proxy of its own (from --port, or
 #      from before SMD-2294) — last, so a run that fails before this keeps it,
 #      and a connector at its port stays the canary's to move.
@@ -256,12 +257,21 @@ port_of() {
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
   "$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{"\n"}}{{end}}{{end}}' "$1" | head -n 1
 }
+# The address a container's published port is bound to, running or stopped
+# (0.0.0.0, :: or empty for every interface), or nothing when none is.
+# Read from each binding's JSON, whose key both runtimes spell HostIp: a
+# template field is the runtime's Go struct field, HostIp in docker's and
+# HostIP in podman's, so neither name evaluates under both (SMD-2677).
+bound_ip() {
+  # shellcheck disable=SC2016 # a Go template's variables, not the shell's
+  "$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{json .}}{{"\n"}}{{end}}{{end}}' "$1" | head -n 1 \
+    | sed -n 's/.*"HostIp":"\([^"]*\)".*/\1/p'
+}
 # The address to dial a container's published port at from this host: its
 # bound address, or loopback for one bound to every interface or to none.
 host_of() {
   local ip
-  # shellcheck disable=SC2016 # a Go template's variables, not the shell's
-  ip="$("$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\n"}}{{end}}{{end}}' "$1" | head -n 1)"
+  ip="$(bound_ip "$1")"
   case "$ip" in ""|0.0.0.0|::) printf '127.0.0.1' ;; *:*) printf '[%s]' "$ip" ;; *) printf '%s' "$ip" ;; esac
 }
 # The canary's published container in any state, or nothing: its proxy, the
@@ -444,8 +454,7 @@ else
   [ -n "$STABLE_PORT" ] || { echo "$STABLE_PROXY publishes no port, so /canary/mcp cannot be reached from this host. Pass --port N." >&2; exit 2; }
   STABLE_HOST="$(host_of "$STABLE_PROXY")"
   MODE=path
-  # shellcheck disable=SC2016 # a Go template's variables, not the shell's
-  STABLE_BOUND="$("$RUNTIME" inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\n"}}{{end}}{{end}}' "$STABLE_PROXY" | head -n 1)"
+  STABLE_BOUND="$(bound_ip "$STABLE_PROXY")"
 fi
 
 if [ "$MODE" = port ]; then
@@ -703,12 +712,19 @@ else
   # URL this canary no longer answers on: by port and path, so another
   # spelling of this host (localhost) is no move. Once the old proxy is gone
   # its port is no longer the canary's to replace, hence the remove first.
+  # With --port, that port's root is the exception: the proxy's legacy route
+  # still hands it to the canary, deprecated, until v2.0.0 (SMD-2532).
   read_connector
-  if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$(endpoint_of "$CONN_URL")" != "$(endpoint_of "$BASE")" ]; then
-    if [ "$MODE" = port ]; then advice="re-run with --port $PORT --connect"
-    else advice="move it with claude mcp remove --scope user $NAME, then up --connect"
+  if [ -n "$CONN_URL" ] && ours "$CONN_URL"; then
+    at="$(endpoint_of "$CONN_URL")"
+    if [ "$MODE" = port ] && [ "$at" = "$PORT " ]; then
+      say "connector $NAME points at $(shown "$CONN_URL"), the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --port $PORT --connect"
+    elif [ "$at" != "$(endpoint_of "$BASE")" ]; then
+      if [ "$MODE" = port ]; then advice="re-run with --port $PORT --connect"
+      else advice="move it with claude mcp remove --scope user $NAME, then up --connect"
+      fi
+      say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: $advice"
     fi
-    say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: $advice"
   fi
 fi
 

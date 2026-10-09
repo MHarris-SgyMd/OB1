@@ -1,16 +1,17 @@
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
+import { agents, closeStore, db, env, initEnv, plugins, serveHere, type Env } from "./root.ts";
 import { authenticateRequest, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
-import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
-import { mayCall, type ToolName } from "./tools.ts";
+import { createCore, runOperation, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
+import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
-import { labelPart, withSseKeepalive } from "./sse.ts";
+import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
+import { logRequest, outcomeOf, type RequestOutcome } from "./telemetry.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -18,7 +19,7 @@ import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDoc
 export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
-export { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
+export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
@@ -47,8 +48,51 @@ const core = createCore({ env, store: db, door: SERVER_NAME });
 const toolCalls = createCallCount();
 /** How many tool calls are running now, for test-server [13d]. */
 export const toolCallsRunning = (): number => toolCalls.running;
-/** `endpoint`: the path the request came to, with no trailing slash — the job handle's links go under it. */
-function buildServer(principal: Principal, endpoint = ""): McpServer {
+
+/**
+ * The keepalive's timing on an MCP answer's stream (sse.ts): its frame
+ * interval, at whose ticks the ceiling is checked, and the ceiling — the
+ * defaults, but where test-server [21] stalls a call in a fraction of a second.
+ */
+type KeepaliveTiming = { intervalMs: number; maxMs: number };
+let keepaliveTiming: KeepaliveTiming = { intervalMs: SSE_KEEPALIVE_MS, maxMs: SSE_KEEPALIVE_MAX_MS };
+/** Sets the timing for the calls that follow; returns the one it replaced. */
+export function useKeepaliveTiming(next: KeepaliveTiming): KeepaliveTiming {
+  const previous = keepaliveTiming;
+  keepaliveTiming = next;
+  return previous;
+}
+/**
+ * What a request's tool calls tell its line (telemetry.ts): how many ran to
+ * an end, and the worst of how they ended, with that call's refusal or fault
+ * code — one call, or a JSON-RPC batch's several, which the SDK's transport
+ * still accepts.
+ */
+export type CallRecord = { ended?: number; outcome?: RequestOutcome; code?: string };
+
+/** How a tool call ended, worst first: a batch's line says its worst call's. */
+const OUTCOME_RANK: Partial<Record<RequestOutcome, number>> = { error: 3, refused: 2, unrun: 1, ok: 0 };
+/** The worse of two outcomes (an absent one is better than any). */
+function worseOutcome(a: RequestOutcome | undefined, b: RequestOutcome | undefined): RequestOutcome | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return (OUTCOME_RANK[b] ?? -1) > (OUTCOME_RANK[a] ?? -1) ? b : a;
+}
+
+/** One call's end, on its request's record: counted, and kept with its code when it is worse than what the record holds — the first of equals stays. */
+export function recordCall(record: CallRecord, outcome: RequestOutcome, code: string | undefined): void {
+  record.ended = (record.ended ?? 0) + 1;
+  if (outcome === record.outcome || worseOutcome(outcome, record.outcome) !== outcome) return;
+  record.outcome = outcome;
+  record.code = code;
+}
+
+/**
+ * `endpoint`: the path the request came to, with no trailing slash — the job
+ * handle's links go under it. `record`: where each tool call says how it ended,
+ * for the request's line.
+ */
+function buildServer(principal: Principal, endpoint = "", record: CallRecord = {}): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
     // The fork's version, generated from db/version.mjs (SMD-2041) — a literal
@@ -75,11 +119,30 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
     // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
     // schema is what it validates against, and Input<K> is that schema's output.
     const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
+    // How the call ended goes on the request's record: the reply's isError
+    // is a refusal from `run` (render.ts) and the fault from `fault`; the
+    // code is the one an error reply's structuredContent already carries (an
+    // enum spelling, telemetry.ts holds it to that) — a success's value may
+    // hold a field of that name, which is not one. Calls are counted, and a batch's line
+    // keeps its worst call's (worseOutcome).
+    const ended = (reply: say.Reply, outcome: RequestOutcome): say.Reply => {
+      const code = reply.structuredContent.code;
+      recordCall(record, outcome, reply.isError && typeof code === "string" ? code : undefined);
+      return reply;
+    };
     register(name, SPECS[name], async (input) => {
       try {
-        return await run(input);
+        const reply = await run(input);
+        return ended(reply, reply.isError ? "refused" : "ok");
       } catch (err: unknown) {
-        return fault(err, input);
+        // A fault reply that itself throws is still this call's end: an
+        // error, counted, and the SDK says the throw (not `unrun`).
+        try {
+          return ended(fault(err, input), "error");
+        } catch (faultErr: unknown) {
+          recordCall(record, "error", undefined);
+          throw faultErr;
+        }
       }
     });
   };
@@ -241,6 +304,24 @@ function buildServer(principal: Principal, endpoint = ""): McpServer {
     const o = await core.scanThoughts(principal, input, { track: toolCalls.track });
     return say.renderJobHandle(o.ok ? { ...o, value: atEndpoint(o.value, endpoint) } : o);
   });
+
+  // The enabled plugins' operations (SMD-2310), each a tool named
+  // `<plugin>_<operation>` behind the gate a core tool of its group is
+  // (tools.ts's unlocks) — absent from a key's tools/list where it does not
+  // hold — with the SDK holding the input to the operation's schema and the
+  // answer to its output schema. The REST core serves the same operations
+  // (rest/app.ts), over the same runOperation.
+  const registerPlugin = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: unknown) => Promise<say.Reply>) => unknown;
+  for (const op of plugins().flatMap((p) => p.operations)) {
+    if (!unlocks(principal, op.scope)) continue;
+    registerPlugin(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input) => {
+      try {
+        return say.renderPlugin(await runOperation(op, { core, principal, track: toolCalls.track }, input));
+      } catch (err: unknown) {
+        return say.failed(err);
+      }
+    });
+  }
 
   return server;
 }
@@ -805,33 +886,43 @@ app.get("*", async (c, next) => {
 });
 
 
-/**
- * What a log line may say about a request: the JSON-RPC method and, for a
- * tool call, the tool's name — never the arguments, which are the thought —
- * each as `labelPart` admits it, since both are the caller's strings. A batch
- * is named by its first message; anything unreadable is `?`.
- */
-export function requestLabel(bodyText: string | null): string {
+// requestLabel and abandonedRequestLine live in sse.ts, beside the keepalive,
+// so the vendored MCP servers' copies of it log a client that leaves the same
+// way (SMD-2001).
+
+/** A request body read as JSON, for its line's parts; null when it is not JSON. */
+type ParsedBody = { value: unknown } | null;
+function parsedBody(bodyText: string | null): ParsedBody {
   try {
-    const parsed: unknown = JSON.parse(bodyText ?? "");
-    const first = Array.isArray(parsed) ? parsed[0] : parsed;
-    const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
-    const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
-    return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
+    return { value: JSON.parse(bodyText ?? "") };
   } catch {
-    return "?";
+    return null;
   }
 }
 
+/** What the request's JSON line (telemetry.ts) reads from its body. */
+export type RequestParts = { rpc?: string; tool?: string; toolCalls: number };
+
 /**
- * The line the server logs when a client closes the connection before the
- * response is complete — the trace SMD-1864's captures never left. The tool
- * runs to its end regardless (a capture may still land), which the line says,
- * so an operator reading a duplicate row later knows where it came from.
+ * The JSON-RPC method and, for a tool call, the tool's name, as the caller
+ * sent them, for the request's JSON line, which holds each to its known set
+ * (telemetry.ts) — and how many tool calls the body asks for, so a call that
+ * never ran is told from one that did. A batch of more than one message is
+ * `batch`, naming no tool: its messages may be several calls, each ending its
+ * own way (CallRecord). `tool` is read from a tool call alone, not from any
+ * message whose params carry a name (a `prompts/get`). Unreadable, neither.
  */
-export function abandonedRequestLine(label: string, elapsedMs: number): string {
-  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
+function partsOf(body: ParsedBody): RequestParts {
+  if (!body) return { toolCalls: 0 };
+  const messages: unknown[] = Array.isArray(body.value) ? body.value : [body.value];
+  const isCall = (m: unknown) => (m as { method?: unknown } | null)?.method === "tools/call";
+  const toolCalls = messages.filter(isCall).length;
+  if (messages.length > 1) return { rpc: "batch", toolCalls };
+  const msg = (messages[0] ?? {}) as { method?: unknown; params?: { name?: unknown } };
+  if (typeof msg.method !== "string") return { toolCalls: 0 };
+  return isCall(msg) && typeof msg.params?.name === "string" ? { rpc: msg.method, tool: msg.params.name, toolCalls } : { rpc: msg.method, toolCalls };
 }
+
 
 /**
  * The same close when the server's own stop made it: the request was still
@@ -855,137 +946,194 @@ export function cutByStopLine(label: string, elapsedMs: number): string {
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
-  // The one thing this server logs per request (SMD-1849 has the rest; the
-  // root URL's line, noteLegacyRoute's, is once per key name): a
-  // client that closes the connection before the response is complete, named
-  // by method and tool, never by content. Registered first, so a client that
-  // leaves during the key check, the registry resolve or the body read is
-  // logged too (a listener added to a signal already aborted never fires — so
-  // that case is checked by hand); the label is filled in once the body is
-  // read. The signal aborts when the client goes, not when a complete
-  // response's socket is later reaped (measured), and `settled` keeps the line
-  // to the former anyway.
-  const signal = c.req.raw.signal;
+  // Every request's JSON line (SMD-1849, telemetry.ts), written once, when it
+  // ends: answered, refused at the key, left by its client, cut by the stop,
+  // stalled, or thrown. `status` is the answer's, once there is one (0
+  // before; 408 for a client gone before the route ran); `parts` the
+  // JSON-RPC method and tool, once the body is read;
+  // `agent` the key's name once it authenticates; `call` how the tools ended,
+  // filled in by buildServer's registerOp. A tool call asked for that never
+  // ran to an end — the transport or the SDK refused it, or the key's scope
+  // does not register it — counts as `unrun`, and a batch says its worst.
   const started = performance.now();
+  let status = 0;
+  let parts: RequestParts = { toolCalls: 0 };
+  let agent: string | undefined;
+  const call: CallRecord = {};
+  let logged = false;
+  const finish = (end?: RequestOutcome, code?: string, bytes?: number) => {
+    if (logged) return;
+    logged = true;
+    const ran = (call.ended ?? 0) < parts.toolCalls ? worseOutcome(call.outcome, "unrun") : call.outcome;
+    const outcome = end ?? ran ?? outcomeOf(status);
+    const { toolCalls: _, ...said } = parts;
+    logRequest({
+      door: "mcp", method: c.req.method, ...said, agent, status, outcome,
+      code: code ?? (outcome === call.outcome ? call.code : undefined),
+      ms: performance.now() - started, bytes,
+    });
+  };
+  /** Refused before any tool ran: the key, the registry; the answer's status and why. */
+  const refused = (response: Response, code: string): Response => {
+    status = response.status;
+    finish("refused", code);
+    return response;
+  };
+
+  // Beside it, the human line for a client that closes the connection before
+  // the response is complete, named by method and tool, never by content (the
+  // root URL's line, noteLegacyRoute's, is once per key name). Registered
+  // first, so a client that leaves during the key check, the registry resolve
+  // or the body read is logged too (a listener added to a signal already
+  // aborted never fires — so that case is checked by hand); the label is
+  // filled in once the body is read. The signal aborts when the client goes,
+  // not when a complete response's socket is later reaped (measured), and
+  // `settled` keeps the line to the former anyway.
+  const signal = c.req.raw.signal;
   let label = "?";
   let settled = false;
   const abandoned = () => {
-    if (!settled) console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
+    if (settled) return;
+    console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
+    finish(cutByStop ? "cut" : "abandoned");
   };
   signal.addEventListener("abort", abandoned, { once: true });
   if (signal.aborted) {
     // Gone before the route ran: the line, and nothing else — no key check, no
     // registry resolve, no tool run for a client that will never read it. The
     // status reaches no one; 408 is the nearest name for what happened.
+    status = 408;
     abandoned();
     return c.body(null, 408);
   }
 
-  // Accept the access key via header, bearer token OR URL query parameter — every
-  // form presented is tried, so a gateway's own bearer token beside the client's
-  // `?key=` does not shadow it. The query form stays because Claude Desktop
-  // custom connectors are URL-only; scopes are what limit the damage when such a
-  // URL leaks. See auth.ts.
-  // Every caller's scope: this is the one server that registers a tool group for a
-  // capture-only key. A consumer that does not say admits read and write alone,
-  // and none admits a forwarder's, which grants nothing (SMD-2284).
-  const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
-    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  }, { admit: CLIENT_SCOPES });
+  // A throw from here on — the store, the transport — is Hono's 500; the
+  // line says so before it goes.
+  try {
+    // Accept the access key via header, bearer token OR URL query parameter — every
+    // form presented is tried, so a gateway's own bearer token beside the client's
+    // `?key=` does not shadow it. The query form stays because Claude Desktop
+    // custom connectors are URL-only; scopes are what limit the damage when such a
+    // URL leaks. See auth.ts.
+    // Every caller's scope: this is the one server that registers a tool group for a
+    // capture-only key. A consumer that does not say admits read and write alone,
+    // and none admits a forwarder's, which grants nothing (SMD-2284).
+    const principal = authenticateRequest(c.req.raw, {
+      MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+      MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+    }, { admit: CLIENT_SCOPES });
 
-  if (!principal) {
-    // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
-    // HTTP 401 so strict MCP hosts treat this as an application-level
-    // error rather than a transport fault and keep the connection alive.
-    // Best-effort echo of the inbound request id keeps the response
-    // correlated; malformed/missing bodies fall back to id: null.
-    // At the public resource of a configured stack, a keyless request or an
-    // OAuth token is answered for OAuth (SMD-2382, oauth-edge.ts): the
-    // challenge while the authorization server answers, a 503 for a token while
-    // it does not. Asked before the body is read, so the probe's wait (at most
-    // its timeout, once per window) comes before the read, not inside it.
-    const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
-    const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
-    const target = refusalTarget(bodyText);
-    settled = true;
-    if (answer.kind === "challenge") return challengeResponse(answer.origin, answer.refusedToken, target);
-    if (answer.kind === "unavailable") return unavailableResponse(target);
-    // A notification (no id) gets no JSON-RPC body: 202, since no key never
-    // changes on a retry (SMD-2106). A request keeps the 200 envelope.
-    return target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse();
-  }
-
-  /**
-   * Resolve the stable agent id, and honour a revocation.
-   *
-   * At the request boundary rather than inside the write tools, because a
-   * revoked key must not read either — a leaked read-only connector URL is the
-   * likeliest thing anyone ever revokes.
-   *
-   * Cached, so the steady state adds no query; see agents.ts for what happens
-   * when the registry cannot answer, which is deliberately NOT a refusal —
-   * except when it is locked (`busy`, a refusal for now), or for a key whose
-   * revocation this process has already read.
-   */
-  const identity = await agents().resolve(db(), principal);
-  if (identity.status === "revoked" || identity.status === "busy") {
-    const bodyText = await readBodyText(c.req.raw);
-    const target = refusalTarget(bodyText);
-    settled = true;
-    // Revoked never changes on a retry, so a notification gets a bare 202; busy
-    // can, so it gets 503 + Retry-After (and a busy REQUEST keeps the 200
-    // envelope but gains Retry-After too). A request stays the 200 envelope,
-    // answering its id (SMD-2106).
-    if (identity.status === "revoked") {
-      return target.expectsReply ? unauthorizedResponse(target.id, REVOKED_MESSAGE) : notificationRefusedResponse();
+    if (!principal) {
+      // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
+      // HTTP 401 so strict MCP hosts treat this as an application-level
+      // error rather than a transport fault and keep the connection alive.
+      // Best-effort echo of the inbound request id keeps the response
+      // correlated; malformed/missing bodies fall back to id: null.
+      // At the public resource of a configured stack, a keyless request or an
+      // OAuth token is answered for OAuth (SMD-2382, oauth-edge.ts): the
+      // challenge while the authorization server answers, a 503 for a token while
+      // it does not. Asked before the body is read, so the probe's wait (at most
+      // its timeout, once per window) comes before the read, not inside it.
+      const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
+      const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
+      const target = refusalTarget(bodyText);
+      parts = partsOf(parsedBody(bodyText));
+      settled = true;
+      if (answer.kind === "challenge") return refused(challengeResponse(answer.origin, answer.refusedToken, target), "UNAUTHORIZED");
+      if (answer.kind === "unavailable") return refused(unavailableResponse(target), "AUTH_UNREACHABLE");
+      // A notification (no id) gets no JSON-RPC body: 202, since no key never
+      // changes on a retry (SMD-2106). A request keeps the 200 envelope.
+      return refused(target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse(), "UNAUTHORIZED");
     }
-    return target.expectsReply
-      ? unauthorizedResponse(target.id, BUSY_MESSAGE, JSON_RPC_BUSY_CODE, { retryAfter: RETRY_AFTER_SECONDS })
-      : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS });
-  }
-  principal.agentId = identity.agentId;
-  principal.agentUnresolved = identity.unresolved;
-  noteLegacyRoute(c.req.raw, principal.name);
+    // Named from here on, so a line written during the registry's answer —
+    // the client gone, a throw — says whose key it was.
+    agent = principal.name;
 
-  // The label, read once from the request body. v2's transport reads the raw
-  // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was
-  // harmless), so we cache the text here and hand a reconstructed Request to the
-  // transport below — otherwise its parse sees an empty stream and every call
-  // returns -32700 (SMD-2278). A body that cannot be read (the client gone
-  // mid-upload) is `?` here and the transport's 400 there, as before.
-  const rawBody = await c.req.text().catch(() => null);
-  label = requestLabel(rawBody);
+    /**
+     * Resolve the stable agent id, and honour a revocation.
+     *
+     * At the request boundary rather than inside the write tools, because a
+     * revoked key must not read either — a leaked read-only connector URL is the
+     * likeliest thing anyone ever revokes.
+     *
+     * Cached, so the steady state adds no query; see agents.ts for what happens
+     * when the registry cannot answer, which is deliberately NOT a refusal —
+     * except when it is locked (`busy`, a refusal for now), or for a key whose
+     * revocation this process has already read.
+     */
+    const identity = await agents().resolve(db(), principal);
+    if (identity.status === "revoked" || identity.status === "busy") {
+      const bodyText = await readBodyText(c.req.raw);
+      const target = refusalTarget(bodyText);
+      parts = partsOf(parsedBody(bodyText));
+      settled = true;
+      // Revoked never changes on a retry, so a notification gets a bare 202; busy
+      // can, so it gets 503 + Retry-After (and a busy REQUEST keeps the 200
+      // envelope but gains Retry-After too). A request stays the 200 envelope,
+      // answering its id (SMD-2106).
+      if (identity.status === "revoked") {
+        return refused(target.expectsReply ? unauthorizedResponse(target.id, REVOKED_MESSAGE) : notificationRefusedResponse(), "REVOKED");
+      }
+      return refused(target.expectsReply
+        ? unauthorizedResponse(target.id, BUSY_MESSAGE, JSON_RPC_BUSY_CODE, { retryAfter: RETRY_AFTER_SECONDS })
+        : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS }), "BUSY");
+    }
+    principal.agentId = identity.agentId;
+    principal.agentUnresolved = identity.unresolved;
+    noteLegacyRoute(c.req.raw, principal.name);
 
-  // Repeated slashes collapsed: a path that came as `//mcp` (a proxy that
-  // does not clean paths, or none) made the link `//mcp/jobs/<id>`, which a
-  // client resolves as another host (review pass 2).
-  const server = buildServer(principal, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""));
-  const transport = new WebStandardStreamableHTTPServerTransport();
-  await server.connect(transport);
-  // Hand the transport the body reconstructed from the cached text above. The
-  // client-abort signal is deliberately not carried onto it: this route already
-  // observes a disconnect through `c.req.raw.signal` at entry (the
-  // abandoned-request log, and `withSseKeepalive` below), and the server runs a
-  // started tool to completion (the keepalive comment below), so the transport
-  // is not handed a signal that would cancel it mid-run.
-  const mcpRequest = new Request(c.req.raw.url, {
-    method: c.req.raw.method,
-    headers: c.req.raw.headers,
-    body: rawBody ?? undefined,
-  });
-  const response = await transport.handleRequest(mcpRequest);
-  if (!response) {
+    // The label, read once from the request body. v2's transport reads the raw
+    // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was
+    // harmless), so we cache the text here and hand a reconstructed Request to the
+    // transport below — otherwise its parse sees an empty stream and every call
+    // returns -32700 (SMD-2278). A body that cannot be read (the client gone
+    // mid-upload) is `?` here and the transport's 400 there, as before.
+    const rawBody = await c.req.text().catch(() => null);
+    label = requestLabel(rawBody);
+    parts = partsOf(parsedBody(rawBody));
+
+    // Repeated slashes collapsed: a path that came as `//mcp` (a proxy that
+    // does not clean paths, or none) made the link `//mcp/jobs/<id>`, which a
+    // client resolves as another host (review pass 2).
+    const server = buildServer(principal, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), call);
+    const transport = new WebStandardStreamableHTTPServerTransport();
+    await server.connect(transport);
+    // Hand the transport the body reconstructed from the cached text above. The
+    // client-abort signal is deliberately not carried onto it: this route already
+    // observes a disconnect through `c.req.raw.signal` at entry (the
+    // abandoned-request log, and `withSseKeepalive` below), and the server runs a
+    // started tool to completion (the keepalive comment below), so the transport
+    // is not handed a signal that would cancel it mid-run.
+    const mcpRequest = new Request(c.req.raw.url, {
+      method: c.req.raw.method,
+      headers: c.req.raw.headers,
+      body: rawBody ?? undefined,
+    });
+    const response = await transport.handleRequest(mcpRequest);
+    if (!response) {
+      settled = true;
+      status = 500;
+      finish("error");
+      return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+    }
+    response.headers.delete("mcp-session-id");
+    for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
+    status = response.status;
+    // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
+    // route's entry (SMD-1864, sse.ts); a stall settles the request too, so the
+    // reap that follows it is not a second line blaming the client. The line is
+    // written at the stream's end, with the bytes the transport wrote.
+    return withSseKeepalive(response, {
+      signal, label, startedAt: started, ...keepaliveTiming,
+      onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
+      onStall: () => { settled = true; finish("stalled"); },
+    });
+  } catch (err) {
     settled = true;
-    return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+    status = 500;
+    finish("error");
+    throw err;
   }
-  response.headers.delete("mcp-session-id");
-  for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-  // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
-  // route's entry (SMD-1864, sse.ts); a stall settles the request too, so the
-  // reap that follows it is not a second line blaming the client.
-  const settle = () => { settled = true; };
-  return withSseKeepalive(response, { signal, label, startedAt: started, onEnd: settle, onStall: settle });
 });
 
 // Whatever no route above matched: 405 with `Allow`, before authenticate(), so

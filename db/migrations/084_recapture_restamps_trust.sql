@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 083: a capture-only key's stamp yields to a re-capture by a key
+-- Migration 084: a capture-only key's stamp yields to a re-capture by a key
 --                that can read at a higher trust — the row's marks and trust
 --                move to that key (SMD-2664)
 -- =============================================================================
@@ -124,7 +124,7 @@ BEGIN
      OR to_regprocedure('ob1_actor_stamp(jsonb, text)') IS NULL
      OR to_regprocedure('ob1_trust_rank(text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 083 needs 055, 060, 073 and 074 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_stamp, ob1_trust_rank); this schema lacks it',
+      MESSAGE = 'migration 084 needs 055, 060, 073 and 074 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_stamp, ob1_trust_rank); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -265,7 +265,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_restamp_recapture(uuid, text, jsonb, text) IS
-  'Moves a capture-only key''s stamp to the key whose capture just landed on its row, when that key''s trust is higher: called by the stores after a capture without p_payload.recapture = ''keep'' (a key that can read) landed on an existing row, after ob1_note_recapture. Sets ob1.actor from p_actor (008''s envelope) and locks the row. Moves nothing when the actor in force carries "scope": "capture", the row''s fingerprint is no longer p_fingerprint (the text moved since the capture), its metadata is not an object, or its stamp is not still a capture-only key''s — its capture row carries no "scope": "capture", or an update since changed the text or restamped it — or another agent''s decline is on it (a "restamp_declined" update event this function wrote: the first classified key that can read to land settles the row; a decline naming no agent id — a name-only writer — is no caller''s own, so it settles the row for every caller). Otherwise computes the stamp the write would have put on a new text (ob1_actor_stamp with p_declared, the write event''s trust). An unclassified writer (no actor_kind) moves and records nothing. A classified one whose trust does not rank strictly above the row''s (ob1_trust_rank) records the decline once per agent — an update event, diff {"restamp_declined": true}, only updated_at moving — and moves nothing. One whose trust does appends one update event — the metadata with the writer''s actor_kind, actor_name and trust, and "restamped": true in the diff, the event declaring that trust — and projects it. Returns whether it moved the stamp. backfill_thought_actors reads the event as the stamp''s writer. Migration 083 / SMD-2664.';
+  'Moves a capture-only key''s stamp to the key whose capture just landed on its row, when that key''s trust is higher: called by the stores after a capture without p_payload.recapture = ''keep'' (a key that can read) landed on an existing row, after ob1_note_recapture. Sets ob1.actor from p_actor (008''s envelope) and locks the row. Moves nothing when the actor in force carries "scope": "capture", the row''s fingerprint is no longer p_fingerprint (the text moved since the capture), its metadata is not an object, or its stamp is not still a capture-only key''s — its capture row carries no "scope": "capture", or an update since changed the text or restamped it — or another agent''s decline is on it (a "restamp_declined" update event this function wrote: the first classified key that can read to land settles the row; a decline naming no agent id — a name-only writer — is no caller''s own, so it settles the row for every caller). Otherwise computes the stamp the write would have put on a new text (ob1_actor_stamp with p_declared, the write event''s trust). An unclassified writer (no actor_kind) moves and records nothing. A classified one whose trust does not rank strictly above the row''s (ob1_trust_rank) records the decline once per agent — an update event, diff {"restamp_declined": true}, only updated_at moving — and moves nothing. One whose trust does appends one update event — the metadata with the writer''s actor_kind, actor_name and trust, and "restamped": true in the diff, the event declaring that trust — and projects it. Returns whether it moved the stamp. backfill_thought_actors reads the event as the stamp''s writer. Migration 084 / SMD-2664.';
 
 -- ---------------------------------------------------------------------------
 -- 2. backfill_thought_actors — 073's body; a restamp is a writer.
@@ -308,7 +308,7 @@ BEGIN
    * derives to nothing, and a mark it carries is stripped: nobody vouches
    * for it. A metadata that is not an object has no mark to read or write.
    *
-   * 083: a re-capture that moved the stamp — ob1_restamp_recapture's event,
+   * 084: a re-capture that moved the stamp — ob1_restamp_recapture's event,
    * `restamped` in its diff — writes no text, and is the writer when no
    * text-writing row came after it by seq, the newest such: that re-capture's key
    * wrote the stamp the row carries, at a trust above the one before it, and
@@ -401,7 +401,7 @@ BEGIN
                -- (fourth review pass, planted: a pre-050 seq inverted under a
                -- created_at tie put the capture on top of an unmatched update,
                -- and it was vouched by its place in the order).
-               -- 083: a restamp, when every row after it is another restamp.
+               -- 084: a restamp, when every row after it is another restamp.
                -- The two arms after it need no change: a restamp that does
                -- not vouch has a text-changing update after it, so f.fp is
                -- the row's hash, no capture vouches and no restamp's NULL
@@ -432,7 +432,7 @@ BEGIN
         -- whose text CHANGED by 003's normalised fingerprint — 018's unchanged
         -- edit (case, whitespace) is in the diff and is not a change of writer,
         -- on the row or here (first review pass: the two disagreed, and a pass
-        -- rewrote the trigger's stamp). 083: and a re-capture that moved the
+        -- rewrote the trigger's stamp). 084: and a re-capture that moved the
         -- stamp.
         WHERE a.action = 'capture' OR a.fb IS DISTINCT FROM a.fa OR a.restamped
         -- The rows after this one, newest first: a restamp vouches only when
@@ -447,7 +447,7 @@ BEGIN
         -- The row whose text stands first; then the newest transaction; then
         -- the order inside it. Not seq alone (second review pass — see the
         -- header): a pre-050 seq is heap order, and heap order lies after
-        -- 046's amendments and a VACUUM. 083: a vouched restamp ahead of all.
+        -- 046's amendments and a VACUUM. 084: a vouched restamp ahead of all.
         ORDER BY (a.restamped AND COALESCE(bool_and(a.restamped) OVER newer, true)) DESC,
                  (a.action = 'update' AND a.fa IS NOT DISTINCT FROM f.fp) DESC,
                  a.created_at DESC, a.seq DESC
@@ -521,4 +521,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind, metadata.actor_name and (since 073) metadata.trust on every thought to what thought_audit derives for the write of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches — or, since 083, the newest re-capture that moved the stamp (ob1_restamp_recapture''s event, `restamped` in its diff) when no text-writing row came after it by seq: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, its actor_name, and a trust that is never raised — the lowest of the trust that write recorded (thought_audit.trust; or, recorded none, the claim it filed under actor_context.claimed while its key was unclassified), that kind now, and the row''s own metadata.trust when it is a ladder word, none where the log supports none — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 050 / SMD-1726; trust 073 / SMD-1724; the restamp 083 / SMD-2664.';
+  'Sets metadata.actor_kind, metadata.actor_name and (since 073) metadata.trust on every thought to what thought_audit derives for the write of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches — or, since 084, the newest re-capture that moved the stamp (ob1_restamp_recapture''s event, `restamped` in its diff) when no text-writing row came after it by seq: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, its actor_name, and a trust that is never raised — the lowest of the trust that write recorded (thought_audit.trust; or, recorded none, the claim it filed under actor_context.claimed while its key was unclassified), that kind now, and the row''s own metadata.trust when it is a ladder word, none where the log supports none — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 050 / SMD-1726; trust 073 / SMD-1724; the restamp 084 / SMD-2664.';

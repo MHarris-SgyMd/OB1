@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2665]
-migrations: []
----
-
-## Changelog
-
-One unauthenticated request could stop the authorization server: an authorization request naming a client ID metadata document whose host answered with a status outside 200–599 made the server's fetch throw where nothing caught it. Such an answer is now refused, and so is a 101, which left the request hanging. A throw in a registration's handlers, the purge and re-resolution timers, or the provider's event handlers is now logged, and the process keeps serving; one on the way out still ends it, and one in a function the library itself runs is still that request's error answer (SMD-2665).
-
-## FORK
-
-A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end (SMD-2665)
+# 277. A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end (SMD-2665)
 
 **What changed.**
 - **`deploy/auth/fetch-guard.ts`:**

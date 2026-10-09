@@ -309,7 +309,7 @@ const FUNCTIONS = [
   "ob1_note_recapture(uuid, jsonb)",
   "ob1_lapse_capture_pointers()",
   "ob1_check_capture_pointer()",
-  // 083 (SMD-2664): a re-capture at a higher trust moves the stamp.
+  // 084 (SMD-2664): a re-capture at a higher trust moves the stamp.
   "ob1_restamp_recapture(uuid, text, jsonb, text)",
 ];
 

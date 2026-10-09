@@ -27,6 +27,7 @@ import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refu
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
+import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
@@ -90,6 +91,21 @@ export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint
   const { message, ...own } = failure(err);
   const text = `${lead}${message}${hint ? hint(message) : ""}`;
   return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(verdict ?? own), text } };
+}
+
+/**
+ * A plugin operation's reply (SMD-2310): a tool whose text is its value's JSON,
+ * the value itself beside it — the structured content its output schema
+ * describes, which the SDK holds it to. A refusal is its code and facts, as
+ * the REST core answers them, with its message in the text.
+ */
+export function renderPlugin(o: PluginOutcome<Record<string, unknown>>): Reply {
+  if (!o.ok) {
+    const { status: _status, ...facts } = o.refusal;
+    const text = `Refused: ${o.refusal.code}${o.refusal.message ? ` — ${o.refusal.message}` : ""}`;
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...facts, text } };
+  }
+  return { content: [{ type: "text", text: JSON.stringify(o.value) }], structuredContent: { ...o.value } };
 }
 
 /**
@@ -580,7 +596,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     const phrase = (v: string) =>
       v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
       : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-      : "conflict, direction not stated — accepting needs --direction newer or older";
+      : "one is out of date, which not stated — accepting needs --direction newer or older";
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
@@ -696,7 +712,7 @@ function renderChange(c: AuditChange, n: number): string {
   // only change is the marks — 050's two, 073's trust — is "marked", the
   // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
-  // 083's two events (SMD-2664): a key that can read re-captured a capture-only
+  // 084's two events (SMD-2664): a key that can read re-captured a capture-only
   // key's text and was weighed against its label — moved to it, or kept.
   const restamped = c.action === "update" && c.changed.includes("restamped");
   const declined = c.action === "update" && c.changed.includes("restamp_declined");
