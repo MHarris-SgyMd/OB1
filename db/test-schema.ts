@@ -12497,14 +12497,14 @@ console.log("\n[73] bench-hnsw's section F under load: the schedule, the percent
   const [dup] = summariseLoad([{ slot: 0, query: 0, at: 0, ms: 1, ids: ["a", "a"] }], [{ key: "t1", label: "1%" }], () => ["a", "b"], () => ["a", "b"]);
   assert(dup.changed === 1, "two rows of one id are not the two ids one call alone returned: the comparison is of sets, sizes included");
 
-  const procStat = "cpu  1000 50 400 90000 300 20 30 700 0 0\ncpu0 500 25 200 45000 150 10 15 350 0 0\ncpu1 500 25 200 45000 150 10 15 350 0 0\nintr 1 2\n";
+  const procStat = "cpu  1000 50 400 90000 300 20 30 700 600 40\ncpu0 500 25 200 45000 150 10 15 350 300 20\ncpu1 500 25 200 45000 150 10 15 350 300 20\nintr 1 2\n";
   const vm = parseProcStat(procStat);
-  assert(vm !== null && vm.busyS === 15 && vm.cpus === 2, `/proc/stat: user + nice + system + irq + softirq at USER_HZ 100, not idle, iowait or steal; CPUs counted from the cpuN lines (${JSON.stringify(vm)})`);
+  assert(vm !== null && vm.busyS === 15 && vm.cpus === 2, `/proc/stat: user + nice + system + irq + softirq at USER_HZ 100, not idle, iowait or steal, and not guest, which user already counts; CPUs counted from the cpuN lines (${JSON.stringify(vm)})`);
   assert(parseProcStat("intr 1 2\n") === null && parseProcStat("cpu  1 2 3 4 5 6 7\n") === null, "a /proc/stat without the cpu line, or without a cpuN line, is refused");
   assert(parseCpuStat("usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n") === 2.5 && parseCpuStat("user_usec 1\n") === null, "cpu.stat's usage_usec in seconds; without it, null");
   const share = cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 106, dbS: 14, at: 2000 });
   assert(share.db === 2 && share.others === 1, `over two seconds the container used 4 CPU-seconds of the machine's 6: two CPUs its own, one the others' (${JSON.stringify(share)})`);
-  assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === 0, "the two clocks' skew never reads as negative CPUs for the others");
+  assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

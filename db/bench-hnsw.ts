@@ -1401,10 +1401,11 @@ const underLoadFailures: string[] = [];
  * plpgsql's compile and the first plan are not in any timing. Then every pair
  * is asked once alone, on the first connection, for the answers the loaded
  * calls are compared with. Then every mix runs at every connection count:
- * unfiltered, broad, filtered. The broad mix runs before the filtered one, so
- * its memory reading starts from backends the band's walks have not grown
- * (review pass 1). The bench's own connection reads the container's memory
- * and CPU meanwhile.
+ * unfiltered, broad, filtered. Every backend has made a band call by then
+ * (the warm-up), so the order does not give the broad mix backends no band
+ * walk has touched; it keeps the broad reading clear of the filtered mix's
+ * minute of band walks (review pass 2 corrected pass 1's reason). The bench's
+ * own connection reads the container's memory and CPU meanwhile.
  */
 async function measureUnderLoad(n: number, tiers: (Tier & { matches: number })[], queries: number[][], answers: Record<string, OracleAnswer[]>): Promise<void> {
   const slotOf = (t: Tier): Slot => ({ key: t.key, label: t.label });
@@ -1974,10 +1975,12 @@ for (const b of bounds) {
 console.log();
 
 if (underLoad.length > 0 || underLoadFailures.length > 0) {
+  console.log(`### F. Under load: ${LOAD_CONNECTIONS.join(" and ")} connections closed-loop, ${LOAD_S} s a run (SMD-1500)\n`);
+  for (const f of underLoadFailures) console.log(`Section F failed at ${f}; the rows below are the runs that completed.\n`);
+}
+if (underLoad.length > 0) {
   /** A reason string in a table cell: a `|` in a server's message would split the row. */
   const cellText = (t: string) => t.replace(/\|/g, "/");
-  console.log(`### F. Under load: ${LOAD_CONNECTIONS.join(" and ")} connections closed-loop, ${LOAD_S} s a run (SMD-1500)\n`);
-  for (const f of underLoadFailures) console.log(`Section F failed at ${f}; the runs before the failure are below.\n`);
   console.log(`Each connection is a backend of its own and makes its next call the moment its last returns. It takes the mix's slots in turn, one call each, so the slots are weighted equally by calls, not by time: a slow slot holds the connections longest. Every slot is asked with every query (${Q}), and the connections start on different slots and queries. "QPS" is the run's calls over its wall time, counting the calls in flight at the deadline; "slot QPS" is the slot's calls over the same time. p50 and p99 are nearest-rank over the slot's calls. "median ms alone" is section A's or B's median for the same call, one at a time, taken earlier in the run on a heap and cache in another state: the one-connection rows are the same-state baseline. "in exact top-${K}" is averaged per query, then over the queries the run reached; "alone" beside it is one call's recall over the same queries. "changed" counts the calls whose rows, as a set, were not the rows one call alone returned for the same query; the one-connection rows are its control, the same call repeated with nothing beside it. A count under ten connections above the one-connection row's is a finding.\n`);
   console.log(`| rows | mix | connections | calls | QPS | slot | slot calls | slot QPS | p50 ms | p99 ms | median ms alone | in exact top-${K} | alone | changed |`);
   console.log("| ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
@@ -1988,7 +1991,7 @@ if (underLoad.length > 0 || underLoadFailures.length > 0) {
       console.log(`| ${u.scale.toLocaleString()} | ${u.mix} | ${u.connections} | ${run} | ${s.label} | ${s.calls.toLocaleString()} | ${(s.calls / seconds).toFixed(1)} | ${s.p50.toFixed(1)} | ${s.p99.toFixed(1)} | ${s.aloneMs.toFixed(1)} | ${s.recall.toFixed(1)} | ${s.recallAlone.toFixed(1)} | ${s.changed} |`);
     }
   }
-  console.log(`\nThe database container's memory and CPU through each run, from its cgroup. "anon" is memory.stat's anonymous memory: the backends' private allocations, which are what 014's header prices. "total" is memory.current, which includes the page cache and shared memory. "014 prices" is connections × 2 scan nodes × work_mem × hnsw.scan_mem_multiplier, the top of the header's range: the most the walks of that many concurrent broad filters may take. "db CPUs" is the container's CPU time over the run's wall time; "other CPUs" is the rest of the machine's busy time over the same span, from the server's /proc/stat: every other container on the same VM. The bench's client runs outside the VM and is in neither.\n`);
+  console.log(`\nThe database container's memory and CPU through each run, from its cgroup. "anon" is memory.stat's anonymous memory: the backends' private allocations, which are what 014's header prices. "total" is memory.current, which includes the page cache and shared memory. "014 prices" is connections × 2 scan nodes × work_mem × hnsw.scan_mem_multiplier, the top of the header's range: the most the walks of that many concurrent broad filters may take. "db CPUs" is the container's CPU time between readings at the run's start and at its last return, over that span; "other CPUs" is the rest of the machine's busy time over the same span, from the server's /proc/stat: other containers, the kernel and the network path to the server. Under podman or Docker on a Mac the bench's client runs outside the VM and is in neither; on a Linux host with no VM between, it is in "other CPUs". A small negative value there is the two clocks' skew (/proc/stat counts ticks), printed rather than hidden.\n`);
   console.log("| rows | mix | connections | anon MiB idle | anon MiB peak | anon growth MiB | 014 prices MiB | total MiB peak | samples | db CPUs | other CPUs |");
   console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const u of underLoad) {
@@ -2000,3 +2003,5 @@ if (underLoad.length > 0 || underLoadFailures.length > 0) {
   }
   console.log();
 }
+// A section asked for and not measured is a failed run, once the report has said why (review pass 2).
+if (underLoadFailures.length > 0) process.exitCode = 1;

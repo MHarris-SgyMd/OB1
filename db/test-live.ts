@@ -10402,8 +10402,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // passes stop, their claims move to the tail, then the sleep is stamped
     // ended), so it is polled for, bounded: a sleep that never stamps it still
     // fails below. Read at once, it raced the stamp (SMD-1500 review pass 1).
-    await pollUntil(async () => (await beat())?.running === false, 3_000);
-    const awakeBeat = await beat();
+    // The value the poll saw is the one asserted: a re-read could catch the
+    // next sleep's stamp (review pass 2).
+    let awakeBeat = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (awakeBeat = await beat())?.running === false, 3_000);
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
       `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
     // The thought the wake left goes to the back of the queue: claims are taken
@@ -10642,7 +10644,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, memory }));
     assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
     const lastStart = Math.max(...four.records.map((r) => r.at));
-    assert(lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
+    assert(lastStart > 500 && lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
     assert(new Set(four.records.map((r) => `${r.slot}/${r.query}`)).size === 6 && four.records.every((r) => r.ids[0] === `${r.slot}/${r.query}` && r.ms >= nap * 1000 * 0.9), "every (slot, query) pair is reached, and each record is its own call's pair and time");
     const m = four.memory;
     if (typeof m === "string") assert(m.length > 0, `the container's memory is not readable here, and the run says why (${m})`);
@@ -10670,7 +10672,9 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
       }
       return [];
     };
-    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1.5, slots: 1, queries: 1, call: spike, memory }));
+    // Three seconds: the spike (connect, sort, 0.4 s held) is over well before
+    // the end, so samples land after it on a slow runner too (review pass 2).
+    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, memory }));
     const pm = peaked.memory;
     if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
     else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.05, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.05 or more)`);

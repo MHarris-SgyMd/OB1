@@ -22,9 +22,10 @@
  *   Anonymous memory is what the header's arithmetic prices: backends'
  *   private allocations, with the page cache and shared buffers left out.
  * - The CPU time the container used and the CPU time the whole machine was
- *   busy are read the same way, before the first call and after the last
- *   return. The difference is what the other containers on the same VM used
- *   during that run.
+ *   busy are read the same way, before the first call and at the last
+ *   return. The difference is everything else busy on the machine during
+ *   that run: other containers, the kernel, the network path to the server
+ *   (and, on a Linux host with no VM between, this client too).
  *
  * Lifted out of bench-hnsw.ts as bench-oracle.ts was. The schedule, the
  * percentiles, the summary and the parses are pure functions that
@@ -178,14 +179,17 @@ async function readCpu(sql: SQL): Promise<CpuReading | string> {
 
 /**
  * The CPUs busy on average between two readings: the container's own, and
- * the rest of the machine's (every other container on the VM, and its
- * kernel). The bench's client runs on the host, outside the VM, and is in
- * neither.
+ * the rest of the machine's (other containers, the kernel, the network path).
+ * Under podman or Docker on a Mac the bench's client runs on the host,
+ * outside the VM, and is in neither; on a Linux host with no VM between, the
+ * client's CPU is the machine's and lands in `others`. Not clamped: /proc/stat
+ * is sampled by ticks and usage_usec is exact, so a small negative `others` is
+ * the two clocks' skew, printed rather than hidden (review pass 2).
  */
 export function cpuShare(before: { busyS: number; dbS: number; at: number }, after: { busyS: number; dbS: number; at: number }): { db: number; others: number } {
   const s = (after.at - before.at) / 1000;
   const db = (after.dbS - before.dbS) / s;
-  return { db, others: Math.max(0, (after.busyS - before.busyS) / s - db) };
+  return { db, others: (after.busyS - before.busyS) / s - db };
 }
 
 /** The pool's backends, each asked its pid at once: refused unless every connection is a backend of its own, since N calls on fewer backends queue and are not N calls at once. */
@@ -216,7 +220,7 @@ export type LoadRun = {
  * and is thrown once the calls in flight have returned. Through `memory`, a
  * connection outside the pool, the CPU clocks and the container's memory are
  * read before the first call, the memory every `sampleMs` until the last
- * return, and the CPU clocks again after it.
+ * return, and the CPU clocks again at it.
  */
 export async function closedLoop(opts: {
   pool: SQL[];
@@ -265,9 +269,11 @@ export async function closedLoop(opts: {
   );
   const elapsedMs = performance.now() - t0;
   running = false;
+  // At the last return, not after the sampler's last sleep: the window is the
+  // run's, give or take one memory read queued ahead on the same connection.
+  const cpuAfter = opts.memory && failed === null ? await readCpu(opts.memory) : unread;
   await sampler;
   if (failed !== null) throw failed;
-  const cpuAfter = opts.memory ? await readCpu(opts.memory) : unread;
   const cpu = typeof cpuBefore === "string" ? cpuBefore : typeof cpuAfter === "string" ? cpuAfter : { ...cpuShare(cpuBefore, cpuAfter), cpus: cpuAfter.cpus };
   return { records, elapsedMs, memory: typeof idle === "string" ? idle : { idle, peak: peak!, samples }, cpu };
 }
