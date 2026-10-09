@@ -37,7 +37,7 @@ import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { pluginIdents } from "../db/config.mjs";
+import { pluginForeignOwned, pluginIdents } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -87,17 +87,17 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
              CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
                   WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(current_user, ${role}, 'SET')
                   ELSE pg_has_role(current_user, ${role}, 'MEMBER') END AS can_set,
-             (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner,
-             (SELECT string_agg(c.relname || ' (' || pg_get_userbyid(c.relowner) || ')', ', ' ORDER BY c.relname)
-                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S') AND pg_get_userbyid(c.relowner) <> ${role}) AS foreign_owned`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null; foreign_owned: string | null }[];
+             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null }[];
     if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
     if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
     if (!r.can_set) problems.push(`${name}: this server's role cannot SET ROLE ${role} (GRANT ${role} TO the server's role, WITH SET TRUE on PG 16 and later)`);
-    // Owned by another role — a restore with --no-owner, say — the plugin's
-    // role reaches none of it, and every ctx.db call is refused.
-    if (r.schema_owner !== role) problems.push(`${name}: schema ${schema} is owned by ${r.schema_owner}, not ${role} (ALTER SCHEMA ${schema} OWNER TO ${role})`);
-    if (r.foreign_owned) problems.push(`${name}: in ${schema}, not owned by ${role}: ${r.foreign_owned} (ALTER TABLE … OWNER TO ${role})`);
+    // Owned by another role — a brain restored without the plugin's role, say
+    // — the plugin's role reaches none of it, and every ctx.db call is
+    // refused. What the migrator hands back, read by its own query
+    // (db/config.mjs's pluginForeignOwned).
+    const foreign = await pluginForeignOwned(sql, schema, role);
+    if (r.schema_owner !== role || foreign.length > 0)
+      problems.push(`${name}: not owned by ${role}: ${[...(r.schema_owner !== role ? [`schema ${schema} (${r.schema_owner})`] : []), ...foreign.map((f) => `${f.ident} (${f.owner})`)].join(", ")} — a migrator run that names the plugin hands them back`);
     const pending = files.filter((f) => !recorded.has(`${name}/${f}`));
     const drifted = files.filter((f) => recorded.has(`${name}/${f}`) && recorded.get(`${name}/${f}`) !== migrationSha(readFileSync(join(dir, f), "utf8")));
     if (pending.length) problems.push(`${name}: ${pending.length} migration(s) not applied (${pending.join(", ")})`);

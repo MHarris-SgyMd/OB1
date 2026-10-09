@@ -60,6 +60,7 @@ import {
   PLUGIN_NAME_RE,
   alignVectorSearchPath,
   pinPublicFirst,
+  pluginForeignOwned,
   pluginIdents,
   migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
@@ -1341,6 +1342,31 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
           err(`  ✗  plugin ${p.name}: its role and schema could not be made: ${(caught as Error).message}`);
           err("  The migrating role must be able to CREATE ROLE and CREATE SCHEMA, and to SET ROLE to what it creates; the compose stack's postgres can.");
           return 1;
+        }
+      }
+      // A schema that was here, and what is in it, handed back to the role
+      // where another owns it: a brain restored into a cluster without the
+      // role comes back owned by the restoring role (the dump's ALTER … OWNER
+      // fails there, or --no-owner skips it), and the plugin's role reaches
+      // none of it (final review). Read first, as above; an ALTER … OWNER
+      // needs the migrator to own the object, or be a superuser, and to SET
+      // ROLE to the role.
+      if (!dryRun && state.schema) {
+        const [{ owner }] = (await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[];
+        const foreign = await pluginForeignOwned(sql, p.schema, p.role);
+        if (owner !== p.role || foreign.length > 0) {
+          try {
+            await begin(async (tx: SQL) => {
+              if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
+              if (owner !== p.role) await tx.unsafe(`ALTER SCHEMA ${quoteIdent(p.schema)} OWNER TO ${quoteIdent(p.role)}`);
+              for (const f of foreign) await tx.unsafe(`ALTER ${f.kind} ${f.ident} OWNER TO ${quoteIdent(p.role)}`);
+            });
+            out(`  ✓  ${owner !== p.role ? `schema ${p.schema} and ` : ""}${foreign.length} object(s) in it handed back to ${p.role}`);
+          } catch (caught) {
+            err(`  ✗  plugin ${p.name}: what another role owns in ${p.schema} could not be handed back to ${p.role}: ${(caught as Error).message}`);
+            err("  The migrating role must own them, or be a superuser, and be able to SET ROLE to the plugin's role.");
+            return 1;
+          }
         }
       }
       for (const m of p.files) {

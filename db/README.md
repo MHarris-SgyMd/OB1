@@ -180,10 +180,18 @@ only when the core's are clean:
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
   hyphen in the name reads as `_`). Both are made by any run that names the
-  plugin, even with nothing pending (a brain restored into a new cluster has
-  no roles), and are never dropped. A migrator that is no superuser takes
-  membership in the role it made (`WITH SET TRUE, INHERIT FALSE` on PG 16),
-  so it may hand it the schema and run as it.
+  plugin and finds one missing, even with nothing pending, and are never
+  dropped. A migrator that is no superuser takes membership in the role it
+  made (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand it the schema
+  and run as it.
+- **A restored brain.** A dump restored without its owners brings the schema
+  back owned by the restoring role: with `--no-owner`, as a tier's refresh
+  restores (`tier.ts`), or into a cluster without the plugin's role (roles
+  are the cluster's, not the dump's), where the dump's `ALTER … OWNER` fails. A run
+  that names the plugin makes the role and hands it back the schema and every
+  table, view, sequence, routine and type in it that another role owns
+  (`db/config.mjs`'s `pluginForeignOwned`). An `ALTER … OWNER` needs the
+  migrator to own the object, or be a superuser.
 - **Between files.** After each file the migrator discards the session's temp
   tables and restores its search path, so one plugin's leftovers never meet
   the next plugin's SQL.
@@ -213,8 +221,8 @@ The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
 reaches a plugin's tables as the same role (`ctx.db`), so its own role must be
 able to `SET ROLE` to it (the `SET` option on PG 16). Preflight's `plugin
 tables` row checks that, the role, the schema, that both the schema and every
-table in it are the plugin role's (a restore with `--no-owner` leaves them
-another's), and every file recorded at its sha. `--grant` does not yet give a
+object in it are the plugin role's, by the migrator's own list, and every
+file recorded at its sha. `--grant` does not yet give a
 non-superuser server role that membership: SMD-2728. The server runs each
 plugin's transactions on a small pool of their own, so what a plugin's SQL
 leaves on a session, such as a temp table (which Postgres searches before any

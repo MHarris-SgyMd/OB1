@@ -962,7 +962,13 @@ export class SqlStore implements ThoughtStore {
       this.pluginPools.set(plugin, pool);
     }
     return pool.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`);
+      // No role: a plugin with no migrations, or one the migrator has not run
+      // for — said as that, not as Postgres's bare "does not exist".
+      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`).catch((e: Error) => {
+        throw /does not exist/.test(e.message)
+          ? new Error(`plugin ${plugin} has no role ${role}: ctx.db reaches the tables its migrations make (plugins/${plugin}/migrations/), and the migrator makes the role when it applies them`)
+          : e;
+      });
       await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
       const query: PluginSql = (strings, ...values) => tx(strings, ...values) as never;
       return fn(query);

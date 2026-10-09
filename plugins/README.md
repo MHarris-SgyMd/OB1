@@ -27,7 +27,7 @@ A directory, `plugins/<name>/`, with:
 A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned by a role of its own, `ob1_plugin_<name>` (hyphens read as `_`).
 
 - **Migrating.** The migrator applies an enabled plugin's `migrations/` after the core's, each file run as that role with its schema first on the path. It records them in their own ledger, `plugin_migrations` ([db/README.md](../db/README.md), "Plugin migrations"). Run it with the same `OB1_PLUGINS`; the compose migrator reads it from `deploy/.env`.
-- **At runtime.** A handler reaches them through `ctx.db.tx(async (sql) => …)`: one transaction as the same role, in the same schema. Tables are named bare, and each `${value}` is a bound parameter.
+- **At runtime.** A handler reaches them through `ctx.db.tx(async (sql) => …)`: one transaction as the same role, in the same schema. Tables are named bare, and each `${value}` is a bound parameter. A plugin with no `migrations/` has no role or schema, so its `ctx.db` refuses, naming them.
 - **The boundary.** The role holds nothing on the core's tables, so Postgres refuses a migration or a handler that reaches for one. The brain's thoughts are reached through `ctx.call` alone.
 - **No foreign keys into the core.** A row that names a thought holds its id, and the operation checks the thought through the core, as the example's `add_note` does.
 - **Turning a plugin off** removes its operations and runs none of its migrations. Its schema, tables and rows are left as they are.
