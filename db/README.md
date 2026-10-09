@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2531 assertions: 2531 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-three (83) migrations applied, and
+`bun test-schema.ts` prints `2583 assertions: 2583 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-four (84) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -643,7 +643,7 @@ SMD-2117's.
 Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
 SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
 table, `derivations`: a row per artifact per producing pass — `artifact_kind`
-in chunks / entities / proposal / vector / metadata (and section since 064), `artifact_id` (the
+in chunks / entities / proposal / vector / metadata (and section since 064, relation since 084), `artifact_id` (the
 thought's id, or the proposal's), `input_ids` and `input_fingerprints`
 (parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
 with a boolean `deterministic`, what 063's rebuild reads, and the
@@ -1328,7 +1328,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
-| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
@@ -1337,7 +1337,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
-| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
@@ -2410,10 +2410,41 @@ again) — and when one outdates the other, which is current, decided from what
 the texts say and not from the dates, with the words that show it quoted. A
 supersession whose texts do not say is recorded `conflict_undirected` for the
 reviewer to direct. Only `outdates` becomes a row; `related`, `evolves` and
-`duplicate` relate two thoughts that both stand (a relation edge, SMD-1873's
-next PR) — a proposed duplicate would hand one writer's near-copy the
-standing of another's thought, which three review passes each found a way to
-do. The verdict rides
+`duplicate` relate two thoughts that both stand — a proposed duplicate would
+hand one writer's near-copy the standing of another's thought, which three
+review passes each found a way to do. Since 084 each is a **relation**: a
+`relation` facet on the newer thought naming the older (`thought_facets`, kind
+`relation`, origin `judged` — the kind's mark, not proof of the writer), stored
+at the token probability of its word (else the written number) and written
+only when the mass of related, evolves and duplicate together reaches the
+floor (else the written number does), its lineage row (`derivations`, kind
+`relation`) at the fingerprints judged, one standing per pair. A relation is
+written once and only closed, and since 084 no facet changes its kind.
+`record_thought_relation` keeps it when the pair is judged the same again,
+replaces it when judged another word, key or score, and closes it
+(`valid_until`) when a well-formed judgement sees none — unrelated, outdates,
+or under the floor (a malformed or timed-out pair leaves it standing); the other
+thought's delete closes it too, and the newer thought's takes it and its
+lineage. `--status` counts the relations standing and `--list relations`
+lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
+(until SMD-2726's `rebuild_derived` arm closes such an edge, clearing the
+newer thought's claim — `DELETE FROM thought_work_claims WHERE work_type =
+'<key>' AND thought_id = '<newer id>'` — has the next run judge the pair
+again), one whose side is superseded or that another judge key wrote marked so
+— the pass judges such a pair no more. On a brain without 084, or under a role
+that cannot write them, the verdicts are counted only, and the run says so at
+its start, in `--status` and in its summary; a follower re-checks on every poll,
+and a write refused mid-pass stops relations there rather than failing the
+thought. A pair judged then gets no relation until its claim is cleared. A role
+granted before 084 that consolidates needs the structure group added (`bun
+migrate.ts --url <owner's url> --grant <role> --groups
+capture,server,worker,extraction,structure`; 084 adds no grant of its own). For a
+brain that ran prompt 4 before 084, `--status` counts the thoughts judged
+before 084 was applied and prints the `DELETE FROM thought_work_claims …`
+that puts exactly those back in the pool, with the key (`--status`'s `job:`
+line) filled in; check first that `--status` does not say a run under this
+role would store none, since the re-judge costs the model calls of those
+thoughts again whether or not it stores. The verdict rides
 with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
@@ -2449,6 +2480,7 @@ bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
+bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -3724,8 +3756,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2531 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1166 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2583 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1189 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -245,7 +245,7 @@ const entries = sources.filter((f) => {
   const limitList = run("consolidate.ts", "--url", DEAD, "--list", "--limit", "5");
   ok(limitList.code === 2 && /--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status/.test(limitList.err), `consolidate.ts refuses --limit beside --list rather than dropping it (exit ${limitList.code})`);
   const listWord = run("consolidate.ts", "--url", DEAD, "--list", "postgres://u:s3cret@h/db");
-  ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale, lineage or all/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
+  ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale, lineage, all or relations/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
   const hex = run("extract-entities.ts", "--url", DEAD, "--workers", "0x10");
   ok(hex.code === 2 && /--workers must be a decimal integer >= 1 and <= 2147483647$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");
