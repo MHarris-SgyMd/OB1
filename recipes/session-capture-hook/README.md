@@ -142,7 +142,7 @@ To have a local model write the summary instead of the derived one, add the mode
 bun recipes/session-capture-hook/session-capture.mjs --check
 ```
 
-`ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
+`ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture. A url at the origin's root, the one given before the proxy, warns too: it answers through the proxy's deprecated legacy route, which v2.0.0 closes, and the warning names the `/mcp` url to set (SMD-2686).
 
 Then see what a session of yours would send, without sending it:
 
