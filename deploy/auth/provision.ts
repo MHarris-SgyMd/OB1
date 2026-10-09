@@ -505,8 +505,9 @@ async function selfCheck(): Promise<number> {
     expect("compose: no password, POC switch or Postgres credential reaches it", !Object.keys(env).some((k) => /PASSWORD$|POC|POSTGRES|DATABASE/.test(k)) && auth.env_file === undefined);
     expect("compose: it publishes no port", auth.ports === undefined);
     expect(
-      "compose: it is on the internal mesh as auth.ob1.internal and on the egress network, and nowhere else",
-      JSON.stringify(Object.keys(auth.networks ?? {}).sort()) === '["egress","mesh"]' && JSON.stringify(auth.networks.mesh?.aliases) === '["auth.ob1.internal"]' && doc.networks?.mesh?.internal === true && !doc.networks?.egress?.internal,
+      "compose: it is on the internal mesh as auth.ob1.internal and on its own outward network, auth-egress, which no other service joins, and nowhere else (SMD-2583)",
+      JSON.stringify(Object.keys(auth.networks ?? {}).sort()) === '["auth-egress","mesh"]' && JSON.stringify(auth.networks.mesh?.aliases) === '["auth.ob1.internal"]' && doc.networks?.mesh?.internal === true && !doc.networks?.["auth-egress"]?.internal
+        && Object.entries(doc.services ?? {}).every(([name, s]: [string, any]) => name === "auth" || !JSON.stringify(s?.networks ?? null).includes('"auth-egress"')),
     );
     expect(
       "compose: its files are read-only, it keeps no capability or new privilege, and init forwards the stop",
@@ -520,7 +521,7 @@ async function selfCheck(): Promise<number> {
     );
     expect(
       "compose: it builds deploy/auth/, its networks are this project's own (mesh internal) and joined as written, and its volume is a plain named one",
-      JSON.stringify(auth.build) === '{"context":"./auth"}' && JSON.stringify(doc.networks) === '{"mesh":{"internal":true},"egress":{}}' && JSON.stringify(auth.networks) === '{"mesh":{"aliases":["auth.ob1.internal"]},"egress":{}}' && doc.volumes?.["auth-data"] === null,
+      JSON.stringify(auth.build) === '{"context":"./auth"}' && JSON.stringify(doc.networks?.mesh) === '{"internal":true}' && JSON.stringify(doc.networks?.["auth-egress"]) === "{}" && JSON.stringify(auth.networks) === '{"mesh":{"aliases":["auth.ob1.internal"]},"auth-egress":{}}' && doc.volumes?.["auth-data"] === null,
       `build ${JSON.stringify(auth.build)}, networks ${JSON.stringify(doc.networks)}, joined ${JSON.stringify(auth.networks)}, volume ${JSON.stringify(doc.volumes?.["auth-data"])}`,
     );
     expect("compose: its one mount is the auth-data volume at /data", JSON.stringify(auth.volumes) === '["auth-data:/data"]' && JSON.stringify(auth.tmpfs) === '["/tmp"]' && "auth-data" in (doc.volumes ?? {}));

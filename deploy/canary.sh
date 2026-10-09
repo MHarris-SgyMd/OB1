@@ -2,12 +2,30 @@
 # Stand a canary brain beside a running stack, and take it down again (SMD-2038).
 #
 # The canary is this same deploy/compose.yaml run again as its own compose
-# project, open-brain-canary, with its own Postgres, volume, network and images,
-# OB1_TIER=canary, and two servers: the MCP server and the REST core. It reads
-# the stack's env file, so the canary's servers get stable's knobs and none is
-# copied. The tier and the profiles (none) are the canary's own. `down` acts on
-# that project alone, so it cannot reach stable. SMD-1806 calls the running
-# stack stable, the record the canary is refreshed from.
+# project, open-brain-canary, with its own Postgres, volume, networks and
+# images, OB1_TIER=canary, and two servers: the MCP server and the REST core.
+# It runs on an env file of its own (SMD-2583), `.env.canary.local` beside
+# stable's unless --canary-env-file names another; the root .gitignore's
+# `.env.*.local` ignores it in any checkout, an old release's included. `up`
+# writes it the first time from stable's file as compose reads it: every
+# setting, each value as compose read it, but the database password, which is
+# a fresh one of the canary's, and the secrets of the profiles the canary
+# never runs (the authorization server's, n8n's, the import runner's, the
+# workers' key, Linear's). It refuses a stable setting that carries stable's
+# database password in its value. From then on the file is the canary's: a
+# change to stable's does not reach it, and `up` names the settings that
+# differ (names, never values). Edit it to carry one across, or delete it to
+# make it again. So the canary holds no credential to stable's database: its
+# own password, and stable's (12 characters or more; a shorter one would match
+# ordinary text) in none of its values, which every `up` checks. The
+# database password comes from that file alone: one set only in the shell is
+# unset here, since compose would let it win. It does hold stable's access
+# keys, as it always has (a client reaches it with them), and on stable's
+# mesh stable's REST core answers api.ob1.internal, which compose.canary.yaml
+# says the canary must never dial. The tier
+# and the profiles (none) are the canary's own. `down` acts on that project
+# alone, so it cannot reach stable. SMD-1806 calls the running stack stable,
+# the record the canary is refreshed from.
 #
 # Where it answers (SMD-2294): at /canary/mcp on stable's own origin. The
 # canary's servers join stable's mesh network (deploy/compose.canary.yaml) as
@@ -30,20 +48,34 @@
 #   1. refuses, before changing anything, when:
 #      - the canary's servers could not reach their provider: an OB1_LLM_BASE_URL,
 #        OB1_CHAT_BASE_URL or OB1_JEV_BASE_URL naming a service on stable's
-#        default network (`ollama`, `jev`, from a compose profile), which the
-#        canary's own network does not have;
+#        `egress` network (`ollama`, `jev`, from a compose profile), which the
+#        canary's own networks do not have;
 #      - stable's running proxy carries no /canary route, or stable has no mesh
 #        network, and no --port was given;
 #      - with --port, that port is taken, by another container or a process on
 #        the host;
 #      - --connect finds another connector under the name;
 #      - stable's Postgres is stamped canary or working, or carries a
-#        refresh's mark (canary, working): that is a copy, not the record.
+#        refresh's mark (canary, working): that is a copy, not the record;
+#      - stable's Postgres is on neither <stable>_data nor <stable>_default,
+#        where the refresh would reach it (SMD-2583);
+#      - the canary's env file, when it has one, holds no POSTGRES_PASSWORD
+#        of its own (or one built from the shell, or spanning lines), or holds
+#        stable's database password anywhere;
+#      - the canary's env file, when this run makes it, cannot be made as
+#        compose reads stable's (a value built from the shell, a byte that is
+#        not UTF-8, stable's database password inside a value).
 #      Stable with no tier stamp is stamped tier=stable;
-#   2. starts the canary's Postgres;
-#   3. refreshes it from stable through deploy/tier.sh, on both projects'
-#      networks. The refresh copies stable's database settings, 014's HNSW
-#      bounds among them (SMD-2037), and migrates the copy with this checkout;
+#   2. makes the canary's env file if there is none, and starts the canary's
+#      Postgres; once its standing servers are stopped (4), sets its database's
+#      password to that file's, which a canary from before SMD-2583 had as
+#      stable's;
+#   3. refreshes it from stable through deploy/tier.sh (stable's password from
+#      stable's env file, the canary's from its own), on each project's
+#      database network — `data` (SMD-2583), or `default` for a stable from
+#      before it, read off its Postgres container. The refresh copies
+#      stable's database settings, 014's HNSW bounds among them (SMD-2037),
+#      and migrates the copy with this checkout;
 #   4. builds the server from this checkout and (re)creates it and the REST
 #      core, which runs the server's image, so their pools open on the
 #      refreshed database. Standing servers are stopped before the refresh, so
@@ -87,6 +119,9 @@
 # Options, all optional:
 #   --env-file PATH       the running stack's env file (default deploy/.env beside
 #                         this script — which a branch worktree does not have)
+#   --canary-env-file PATH  the canary's own env file (default .env.canary.local
+#                         beside stable's), made by `up` when absent; never
+#                         stable's own file, by any path
 #   --runtime CLI         docker or podman (default: docker when on PATH, else podman)
 #   --stable-project NAME stable's compose project (default open-brain)
 #   --port N              serve the canary from its own proxy on 127.0.0.1:N, not
@@ -109,6 +144,21 @@ unset CDPATH
 # not die of the signal (a docker CLI mid-startup exits 125), and a caller must
 # not read an interrupted run as anything but interrupted.
 trap 'exit 130' INT
+# …and so are a hangup and a TERM, so the EXIT trap below runs and removes
+# what is half-made: the canary's env file in the making holds stable's
+# settings, its keys among them (review pass 1). Not left to bash's own
+# handling: bash 5 skipped the EXIT trap on a hangup to the process group (a
+# closed terminal) in up to 12 runs of 20 and left the finished temporary
+# file, where with these traps it ran in 20 of 20 (review pass 4, measured;
+# bash 3.2 ran it either way). A `kill` of this script's pid alone then waits
+# for the command in hand to end, however long that is; a signal to its
+# process group (a Ctrl-C at the terminal) ends that command too, at once.
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+CONFIG_ERR=""
+CANARY_TMP=""
+cleanup() { rm -f ${CONFIG_ERR:+"$CONFIG_ERR"} ${CANARY_TMP:+"$CANARY_TMP"}; }
+trap cleanup EXIT
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -120,6 +170,7 @@ usage() {
 }
 
 ENV_FILE="$HERE/.env"
+CANARY_ENV=""
 RUNTIME=""
 STABLE=open-brain
 PORT=""
@@ -130,10 +181,11 @@ SMOKE=1
 VOLUMES=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env-file|--runtime|--stable-project|--port|--name)
+    --env-file|--canary-env-file|--runtime|--stable-project|--port|--name)
       [ $# -ge 2 ] && [ -n "${2//[[:space:]]/}" ] && [ "${2#--}" = "$2" ] || { echo "$1 takes a value." >&2; exit 2; }
       case "$1" in
         --env-file) ENV_FILE="$2" ;;
+        --canary-env-file) CANARY_ENV="$2" ;;
         --runtime) RUNTIME="$2" ;;
         --stable-project) STABLE="$2" ;;
         --port) PORT="$2" ;;
@@ -162,6 +214,17 @@ fi
 [ $CONNECT = 0 ] || [ $SMOKE = 1 ] || { echo "--connect needs the smoke's key; drop --no-smoke." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
+# The canary's own env file (SMD-2583): beside stable's unless named, made by
+# `up` from stable's the first time. Its directory must exist; the file need not.
+CANARY_ENV="${CANARY_ENV:-$(dirname "$ENV_FILE")/.env.canary.local}"
+[ -d "$(dirname "$CANARY_ENV")" ] || { echo "no directory for the canary's env file: $(dirname "$CANARY_ENV")" >&2; exit 2; }
+CANARY_ENV="$(cd "$(dirname "$CANARY_ENV")" && pwd)/$(basename "$CANARY_ENV")"
+[ ! -e "$CANARY_ENV" ] || [ -f "$CANARY_ENV" ] || { echo "the canary's env file, $CANARY_ENV, exists and is not a file." >&2; exit 2; }
+# By path or by file (a symlink, /private/tmp for /tmp; review pass 2).
+if [ "$CANARY_ENV" = "$ENV_FILE" ] || [ "$CANARY_ENV" -ef "$ENV_FILE" ]; then echo "--canary-env-file names stable's env file; the canary's is its own." >&2; exit 2; fi
+# The canary's database password is its env file's. A value in the shell would
+# win over that file in compose, and hand the canary stable's.
+unset POSTGRES_PASSWORD
 
 if [ -z "$RUNTIME" ]; then
   if command -v docker >/dev/null 2>&1; then RUNTIME=docker
@@ -187,11 +250,218 @@ MODE=""
 # says when that is more than this host's loopback.
 # No profiles, so the canary's server advertises no OAuth: on stable's mesh it
 # would find stable's authorization server, for stable's resource.
+# The env file is the canary's own once `up` has made it (SMD-2583); before
+# that — `up`'s refusals, a `down` of a canary from before it — stable's, the
+# file the canary's is made from.
 canary_compose() {
-  local files=(-f "$HERE/compose.yaml")
+  local files=(-f "$HERE/compose.yaml") env="$ENV_FILE"
   [ "$MODE" != path ] || files+=(-f "$HERE/compose.canary.yaml")
+  [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
   SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" CANARY_STABLE_MESH="${STABLE}_mesh" \
-    "$RUNTIME" compose -p "$CANARY" --env-file "$ENV_FILE" "${files[@]}" "$@"
+    "$RUNTIME" compose -p "$CANARY" --env-file "$env" "${files[@]}" "$@"
+}
+
+# What the canary's env file leaves out of stable's: its database password,
+# which is its own, and the secrets of the profiles the canary never runs
+# (the authorization server's, n8n's, the import runner's, the workers' key,
+# Linear's), in any letter case.
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_API_KEY'
+# What canary_compose sets in the shell for the canary, whatever the file says,
+# so a difference there is no drift.
+CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY_STABLE_MESH'
+
+# Env files as compose reads them, by value (review pass 2: copying stable's
+# file line by line, less the left-out lines, kept a left-out value's
+# comment-shaped tail, broke on a BOM and cut a quoted value in two). Every
+# value is rendered through a service's environment and read back as JSON,
+# with compose run on a bare environment — the container runtime's own
+# variables (DOCKER_*, PODMAN_*, CONTAINER(S)_*, the ssh agent, PATH, HOME,
+# XDG_*) and nothing else — so the files are compared as files and the
+# shell's variables, which compose would otherwise print and let win, play no
+# part. The names are those `config --environment` prints for the file and
+# not for an empty one: a superset, since a quoted value's second line can
+# read as a name, which then renders unset on both sides.
+#   env_file write STABLE OUT   writes OUT, which must exist (it is never
+#                               created here, so a file the EXIT trap removed
+#                               is not made again by a writer still running;
+#                               review pass 3): every setting of STABLE's but
+#                               CANARY_DROPPED's, each "double-quoted" with
+#                               \\ \" \$ \n escaped, which compose reads back
+#                               exactly (measured), then POSTGRES_PASSWORD as
+#                               $CANARY_PW (the environment's, never argv). A
+#                               value STABLE builds from the shell (`${X}`),
+#                               which reads otherwise with the shell's
+#                               variables than without, is refused, not
+#                               frozen
+#   env_file made STABLE OUT    exit 0 when OUT reads as STABLE but for
+#                               CANARY_DROPPED's names, each unset there but
+#                               POSTGRES_PASSWORD, which is $CANARY_PW, and
+#                               the guard below holds
+#   env_file guard STABLE OUT   exit 0 when OUT's POSTGRES_PASSWORD is set,
+#                               reads alike with and without the shell's
+#                               variables, spans no lines, and neither is nor
+#                               holds STABLE's (read with and without the
+#                               shell); and no value of OUT's holds STABLE's
+#                               (one of 12 characters or more; a shorter one
+#                               would match ordinary text) or a line setting
+#                               POSTGRES_PASSWORD. Every `up` that finds the
+#                               file runs it first, as an edit can undo it
+#   env_file drift STABLE OUT   the names whose values differ, CANARY_DROPPED's
+#                               and CANARY_SET's aside, on one line
+#   env_file password OUT       OUT's POSTGRES_PASSWORD, exactly, on stdout
+# A refusal names the setting, never its value.
+env_file() {
+  # shellcheck disable=SC2016 # Python's text, which the shell must not expand
+  RT="$RUNTIME" PROJ="$CANARY-env" DROPPED="$CANARY_DROPPED" SET_BY_CANARY="$CANARY_SET" FROM="$ENV_FILE" python3 -c '
+import datetime, json, os, re, subprocess, sys
+mode, args = sys.argv[1], sys.argv[2:]
+dropped = re.compile("(?:%s)" % os.environ["DROPPED"], re.I)
+set_by_canary = re.compile("(?:%s)" % os.environ["SET_BY_CANARY"])
+runtime_var = re.compile(r"(?:DOCKER|PODMAN|CONTAINERS?)_[A-Za-z0-9_]*|PATH|HOME|USER|LOGNAME|TMPDIR|SSH_AUTH_SOCK|XDG_[A-Z_]+")
+bare = {k: v for k, v in os.environ.items() if runtime_var.fullmatch(k)}
+UNSET = "OB1-CANARY-UNSET-7f3a9c"
+STRONG = 12
+def compose(env_file, text, *cmd, env=bare):
+    # On the shell'"'"'s environment, a variable of the shell'"'"'s that is not
+    # UTF-8 is not the file'"'"'s fault: read past it (review pass 4).
+    try:
+        r = subprocess.run([os.environ["RT"], "compose", "-p", os.environ["PROJ"], "--env-file", env_file, "-f", "-", *cmd], input=text, capture_output=True, text=True, env=env, errors="strict" if env is bare else "surrogateescape", timeout=120)
+    except UnicodeError:
+        sys.exit("%s, or a container runtime variable in the environment, holds bytes that are not UTF-8" % env_file)
+    except subprocess.TimeoutExpired:
+        sys.exit("compose did not answer in 120 s reading %s" % env_file)
+    if r.returncode:
+        sys.exit("compose could not read %s" % env_file)
+    return r.stdout
+def names(env_file, env=bare):
+    return set(re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)=", compose(env_file, "services: {}\n", "config", "--environment", env=env), re.M))
+def values(env_file, cand, env=bare):
+    # Unset renders as UNSET and reads as None: a name read off a value'"'"'s
+    # second line is no setting, and is neither written nor compared as one.
+    body = "".join("      \"%s\": \"${%s-%s}\"\n" % (n, n, UNSET) for n in cand)
+    doc = json.loads(compose(env_file, "services:\n  probe:\n    image: probe\n" + ("    environment:\n" + body if cand else ""), "config", "--format", "json", env=env))
+    got = doc["services"]["probe"].get("environment") or {}
+    # compose writes a value'"'"'s $ as $$ in its output, on both sides alike.
+    raw = {n: got.get(n) or "" for n in cand}
+    return {n: None if raw[n] == UNSET else raw[n].replace("$$", "$") for n in cand}
+def file_names(env_file):
+    return sorted(names(env_file) - names(os.devnull))
+def guard(stable, out):
+    # Stable'"'"'s password as compose reads it on its own and with the shell
+    # (one stable builds from a shell variable; review pass 4).
+    pws = {v for v in (values(stable, ["POSTGRES_PASSWORD"], env)["POSTGRES_PASSWORD"] for env in (bare, os.environ)) if v}
+    cand = file_names(out)
+    c = values(out, cand)
+    mine = c.get("POSTGRES_PASSWORD") or ""
+    mine_with_shell = values(out, ["POSTGRES_PASSWORD"], os.environ)["POSTGRES_PASSWORD"] or ""
+    problems = []
+    if not mine and mine_with_shell:
+        problems.append("its POSTGRES_PASSWORD reads otherwise with the shell'"'"'s variables")
+    elif not mine:
+        problems.append("it sets no POSTGRES_PASSWORD")
+    elif mine in pws:
+        problems.append("its POSTGRES_PASSWORD is stable'"'"'s")
+    elif any(len(pw) >= STRONG and pw in mine for pw in pws):
+        problems.append("its POSTGRES_PASSWORD holds stable'"'"'s")
+    # The password ALTER ROLE sets is the one compose hands the servers: not
+    # built from the shell (compose reads it otherwise there), and with no
+    # newline, which the shell'"'"'s $(…) would cut from its end (review pass 4).
+    if mine and mine_with_shell != mine:
+        problems.append("its POSTGRES_PASSWORD reads otherwise with the shell'"'"'s variables")
+    if "\n" in mine:
+        problems.append("its POSTGRES_PASSWORD spans lines")
+    for n in cand:
+        v = c[n] or ""
+        if n != "POSTGRES_PASSWORD" and any(len(pw) >= STRONG and pw in v for pw in pws):
+            problems.append("%s holds stable'"'"'s database password" % n)
+        if "\nPOSTGRES_PASSWORD=" in v:
+            problems.append("%s holds a line setting POSTGRES_PASSWORD" % n)
+    return problems
+if mode == "password":
+    sys.stdout.write(values(args[0], ["POSTGRES_PASSWORD"])["POSTGRES_PASSWORD"] or "")
+    sys.exit(0)
+stable, out = args
+if mode == "write":
+    cand = file_names(stable)
+    s = values(stable, cand)
+    shell = names(os.devnull, os.environ)
+    live = values(stable, [n for n in cand if n not in shell], os.environ)
+    built = [n for n in live if not dropped.fullmatch(n) and live[n] != s[n]]
+    if built:
+        sys.exit("%s in %s take part of their value from the shell (${...}); write the canary'"'"'s file yourself, with the values it should have" % (", ".join(built), stable))
+    quote = lambda v: "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("\n", "\\n") + "\""
+    with os.fdopen(os.open(out, os.O_WRONLY | os.O_TRUNC), "w") as f:
+        f.write("# The canary'"'"'s own env file (deploy/canary.sh, SMD-2583), written by `up`\n# on %s from %s as compose read it: every setting but\n# its database password, which is its own, and the other profiles'"'"' secrets.\n# Edit it to carry a change of stable'"'"'s across, or delete it to make it\n# again at the next `up`.\n" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), os.environ["FROM"]))
+        for n in cand:
+            if not dropped.fullmatch(n) and s[n] is not None:
+                f.write("%s=%s\n" % (n, quote(s[n])))
+        f.write("POSTGRES_PASSWORD=%s\n" % quote(os.environ["CANARY_PW"]))
+    sys.exit(0)
+if mode == "guard":
+    problems = guard(stable, out)
+    if problems:
+        sys.exit("; ".join(problems))
+    sys.exit(0)
+cand = sorted(set(file_names(stable)) | set(file_names(out)))
+s, c = values(stable, cand), values(out, cand)
+if mode == "drift":
+    print(" ".join(n for n in cand if not dropped.fullmatch(n) and not set_by_canary.fullmatch(n) and s[n] != c[n]))
+    sys.exit(0)
+problems = []
+if c.get("POSTGRES_PASSWORD") != os.environ["CANARY_PW"]:
+    problems.append("POSTGRES_PASSWORD is not the one written")
+for n in cand:
+    if n == "POSTGRES_PASSWORD":
+        continue
+    if dropped.fullmatch(n):
+        if c[n]:
+            problems.append("%s, a left-out setting, is set" % n)
+    elif c[n] != s[n]:
+        problems.append("%s reads otherwise than in stable'"'"'s" % n)
+problems += [g for g in guard(stable, out) if g not in problems]
+if problems:
+    sys.exit("; ".join(problems))
+' "$@"
+}
+
+# Makes the canary's env file from stable's (env_file write), checks it
+# (env_file made), and only then puts it in place, mode 600: written whole
+# or not at all. The file in the making, beside it, is made with noclobber
+# (O_EXCL) under a name ending in .local, as the final one does: the root
+# .gitignore has ignored `.env.*.local` since before this script made one,
+# so stable's checkout, whatever its age, ignores both. CANARY_TMP names it
+# before it exists, so the EXIT trap removes it however the run ends.
+make_canary_env() {
+  local pw
+  pw="$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
+  CANARY_TMP="$(dirname "$CANARY_ENV")/.env.canary-$$-$RANDOM.local"
+  (umask 077 && set -o noclobber && : > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not create a temporary file beside $CANARY_ENV." >&2; exit 1; }
+  local why=""
+  if ! why="$(CANARY_PW="$pw" env_file write "$ENV_FILE" "$CANARY_TMP" 2>&1 && CANARY_PW="$pw" env_file made "$ENV_FILE" "$CANARY_TMP" 2>&1)"; then
+    rm -f "$CANARY_TMP"
+    CANARY_TMP=""
+    echo "could not make the canary's env file from $ENV_FILE: ${why:-compose did not answer} (read back through compose). Write $CANARY_ENV yourself — stable's settings with a POSTGRES_PASSWORD of the canary's own and without the other profiles' secrets — and re-run up." >&2
+    exit 2
+  fi
+  mv "$CANARY_TMP" "$CANARY_ENV"
+  CANARY_TMP=""
+}
+
+# Sets the canary database's postgres password to its env file's, through
+# psql on the container's own socket. The value reaches psql in the exec's
+# environment, never on a command line. Every `up` runs it: a canary volume
+# made before SMD-2583 holds stable's password, and the one written later
+# is the file's own.
+set_canary_password() {
+  local pw
+  # By value: a value spanning lines in the file could hold a line that reads
+  # POSTGRES_PASSWORD= in `config --environment`'s output (review pass 3).
+  pw="$(env_file password "$CANARY_ENV")"
+  [ -n "$pw" ] || { echo "$CANARY_ENV sets no POSTGRES_PASSWORD." >&2; exit 1; }
+  OB1_CANARY_PW="$pw" "$RUNTIME" exec -i -e OB1_CANARY_PW "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null <<'SQL'
+\getenv pw OB1_CANARY_PW
+ALTER ROLE postgres PASSWORD :'pw';
+SQL
 }
 GIT_SHA="${OB1_GIT_SHA:-$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)}"
 
@@ -201,6 +471,19 @@ container_of() {
   id="$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2" | head -n 1)"
   [ -n "$id" ] || return 0
   "$RUNTIME" inspect -f '{{.Name}}' "$id" | sed 's|^/||'
+}
+
+# The network a project's Postgres container is reached on: the project's
+# `data` (SMD-2583), or `default` for a stack from before it; nothing when it
+# is on neither. Never the other networks it may join, compose.host-ports.yaml's
+# outward one among them.
+db_network_of() {
+  local nets
+  # shellcheck disable=SC2016 # a Go template's variables, not the shell's
+  nets="$("$RUNTIME" inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$1")"
+  if grep -qxF "$2_data" <<<"$nets"; then echo "$2_data"
+  elif grep -qxF "$2_default" <<<"$nets"; then echo "$2_default"
+  fi
 }
 
 # One value from a database, through psql in its own container (the image's
@@ -386,6 +669,14 @@ if [ "$CMD" = down ]; then
   elif [ -n "$CONN_SCOPE" ]; then CONN_ACTION=foreign
   fi
   canary_compose down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
+  # A canary from before SMD-2583 made a default network, which compose.yaml
+  # no longer names, so `down` leaves it: removed here when compose made it
+  # for this project and nothing is on it.
+  old_net="${CANARY}_default"
+  if [ "$("$RUNTIME" network inspect -f '{{index .Labels "com.docker.compose.project"}}' "$old_net" 2>/dev/null || true)" = "$CANARY" ] \
+    && [ -z "$("$RUNTIME" ps -aq --filter "network=$old_net")" ]; then
+    if "$RUNTIME" network rm "$old_net" >/dev/null 2>&1; then say "removed $old_net, the canary's network from before SMD-2583"; fi
+  fi
   case "$CONN_ACTION" in
     remove)
       if claude mcp remove --scope user "$NAME" >/dev/null 2>&1; then say "connector $NAME removed"
@@ -402,6 +693,16 @@ if [ "$CMD" = down ]; then
 fi
 
 # ── up ──────────────────────────────────────────────────────────────────────
+# The canary's own env file, when it has one, on every `up` (an edit can undo
+# it; review pass 3), first: before anything changes, and before compose
+# reads it below, whose own message for a broken file names deploy/.env
+# (pass 5). A POSTGRES_PASSWORD of its own and nothing of stable's database
+# password. A file this run makes is checked as it is made (env_file made).
+if [ -f "$CANARY_ENV" ] && ! why="$(env_file guard "$ENV_FILE" "$CANARY_ENV" 2>&1)"; then
+  echo "the canary's env file, $CANARY_ENV: ${why:-compose did not answer} — it must hold a POSTGRES_PASSWORD of the canary's own and nothing of stable's. Fix it, or delete it to make it again." >&2
+  exit 2
+fi
+
 KEY="${OB1_SMOKE_KEY:-}"
 [ $SMOKE = 0 ] || [ -n "$KEY" ] || { echo "up smoke-tests the canary with OB1_SMOKE_KEY — a raw write key whose hash is in MCP_ACCESS_KEYS. Set it, or pass --no-smoke." >&2; exit 2; }
 
@@ -410,7 +711,6 @@ KEY="${OB1_SMOKE_KEY:-}"
 # network the server is on, and the canary's has none of stable's; an address
 # (a dotted name, IPv4 or IPv6) is reached as stable reaches it.
 CONFIG_ERR="$(mktemp "${TMPDIR:-/tmp}/ob1-canary-config.XXXXXX")"
-trap 'rm -f "$CONFIG_ERR"' EXIT
 # Stable's public origin comes along (OB1_PUBLIC_ORIGIN, which the canary's
 # server is handed too): a tunnel or TLS proxy in front of stable's port
 # reaches /canary/mcp as well.
@@ -433,6 +733,8 @@ PUBLIC_ORIGIN="$(sed -n 's/^ORIGIN=//p' <<<"$said")"
 
 STABLE_PG="$(container_of "$STABLE" postgres)"
 [ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE — start the stack first, or name it with --stable-project." >&2; exit 2; }
+STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
+[ -n "$STABLE_DB_NET" ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
 
 # Where the canary answers (SMD-2294). On stable's origin when stable's
 # running proxy routes /canary/mcp — its route table, which it carries as a
@@ -495,12 +797,27 @@ stable_mark="$(mark_of "$STABLE_PG")"
 [ -z "$stable_mark" ] || { echo "$STABLE_PG carries the refresh mark '$stable_mark' — it is a tier copy, not the record. Refusing: name stable's project with --stable-project." >&2; exit 2; }
 stable_stamp="$(stamp_of "$STABLE_PG")"
 case "$stable_stamp" in
-  stable) ;;
-  "")
-    psql_in "$STABLE_PG" "INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO NOTHING" >/dev/null
-    say "stamped $STABLE_PG tier=stable (it had no tier stamp)" ;;
+  stable|"") ;;
   *) echo "$STABLE_PG is stamped tier '$stable_stamp' — it is a tier copy, not the record. Refusing: name stable's project with --stable-project." >&2; exit 2 ;;
 esac
+
+# The canary's own env file (SMD-2583), made from stable's the first time —
+# after every other refusal and before stable's stamp, the first change, so a
+# file that cannot be made is a refusal like the rest (review pass 5). After
+# that it is the canary's, and `up` names what differs from stable's (names
+# only), since a change to stable's no longer reaches the canary.
+if [ ! -f "$CANARY_ENV" ]; then
+  make_canary_env
+  say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password is its own"
+else
+  drift="$(env_file drift "$ENV_FILE" "$CANARY_ENV" 2>/dev/null)" || drift=""
+  [ -z "$drift" ] || say "note: the canary's env file ($CANARY_ENV) differs from stable's on $drift — it is the canary's own since its first up; edit it to carry a change across"
+fi
+
+if [ -z "$stable_stamp" ]; then
+  psql_in "$STABLE_PG" "INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO NOTHING" >/dev/null
+  say "stamped $STABLE_PG tier=stable (it had no tier stamp)"
+fi
 stable_server="$(container_of "$STABLE" server)"
 if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -qx 'OB1_TIER=stable'; then
   say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
@@ -534,6 +851,9 @@ if [ -n "$(container_of "$CANARY" api)" ]; then
   canary_compose stop api >/dev/null
   STOPPED_API=1
 fi
+# With its servers stopped, the canary's database takes its env file's
+# password; they come back below on that file.
+set_canary_password "$CANARY_PG"
 # Whether stable holds a thought the probe could use (a vector from the
 # brain's model), read before the refresh: a canary with none after it is a
 # migration that emptied them or a model switch, not an empty brain.
@@ -541,7 +861,7 @@ stable_vectors="$(psql_in "$STABLE_PG" "SELECT count(*) FROM (SELECT 1 FROM thou
   AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
 say "refresh $STABLE_PG → $CANARY_PG"
 refresh_rc=0
-"$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$ENV_FILE" --network "${STABLE}_default,${CANARY}_default" \
+"$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$CANARY_ENV" --from-env-file "$ENV_FILE" --network "$STABLE_DB_NET,${CANARY}_data" \
   --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary || refresh_rc=$?
 if [ "$refresh_rc" != 0 ]; then
   # tier.sh's own usage errors exit 2, which from here would read as "refused
