@@ -12510,25 +12510,23 @@ console.log("\n[73] bench-hnsw's section F under load: the schedule, the percent
   assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
 }
 
-console.log("\n[74] memorySizing: the HNSW indexes against shared_buffers, a whole-heap filter's bitmap against work_mem, and the walk cap a larger work_mem moves (SMD-1499, db/config.mjs)");
+console.log("\n[74] memorySizing: the HNSW indexes against shared_buffers, and a whole-heap filter's bitmap against work_mem (SMD-1499, db/config.mjs)");
 {
   // Pure arithmetic: preflight reads the numbers and prints what this returns.
   const MB = 1048576;
-  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 65536 * 8192, blockSize: 8192, workMemBytes: 4 * MB, scanMemMultiplier: 8 };
+  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 65536 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
   assert(BITMAP_BYTES_PER_PAGE === 64, "an exact bitmap page costs 64 bytes (PagetableEntry 48 + two hash pointers, PostgreSQL 16)");
   const fits = memorySizing(base);
   assert(fits.resident.fits && fits.bitmap.fits && fits.bitmap.heapPages === 65536 && fits.bitmap.needBytes === 4 * MB,
     `at the image's defaults 100 MB of index fits 128 MB of shared_buffers, and 4 MB of work_mem holds a bitmap over exactly 65,536 heap pages (${JSON.stringify(fits.bitmap)})`);
   const over = memorySizing({ ...base, hnswBytes: 129 * MB, heapBytes: 65537 * 8192 });
   assert(!over.resident.fits && over.resident.recommend === "192MB", `an index 1 MB past the pool does not fit, and the pool it needs is rounded up to 64 MB (${over.resident.recommend})`);
-  assert(!over.bitmap.fits && over.bitmap.recommend === "5MB", `one heap page more than work_mem covers goes lossy, and the work_mem it needs is rounded up to a whole MB (${over.bitmap.recommend})`);
-  assert(over.bitmap.capBytes === 32 * MB && over.bitmap.keepMultiplier === 6 && !over.bitmap.capRises,
-    `the walk's cap is work_mem × multiplier, 32 MB; at 5 MB of work_mem a multiplier of 6 keeps it at or under that (keep ${over.bitmap.keepMultiplier})`);
+  assert(!over.bitmap.fits && over.bitmap.recommend === "5MB" && over.bitmap.recommendBytes === 5 * MB, `one heap page more than work_mem covers goes lossy, and the work_mem it needs is rounded up to a whole MB (${over.bitmap.recommend})`);
   const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 6536 * MB });
-  assert(tenMillion.bitmap.recommend === "31MB" && tenMillion.bitmap.keepMultiplier === 1 && !tenMillion.bitmap.capRises && tenMillion.resident.recommend === "6592MB",
-    `change 28's ten-million-row corpus (3,907 MiB heap, 6,536 MiB of HNSW): work_mem ${tenMillion.bitmap.recommend} at multiplier ${tenMillion.bitmap.keepMultiplier}, shared_buffers ${tenMillion.resident.recommend}`);
-  const huge = memorySizing({ ...base, heapBytes: 39 * 1024 * MB });
-  assert(huge.bitmap.capRises && huge.bitmap.keepMultiplier === 1, `where the work_mem a heap needs passes the cap even at multiplier 1, the cap rises and says so (${huge.bitmap.recommend})`);
+  assert(tenMillion.bitmap.recommend === "31MB" && tenMillion.resident.recommend === "6592MB",
+    `change 28's ten-million-row corpus (3,907 MiB heap, 6,536 MiB of HNSW): work_mem ${tenMillion.bitmap.recommend}, shared_buffers ${tenMillion.resident.recommend} — the settings SMD-1499's sized run used`);
+  const tiny = memorySizing({ ...base, hnswBytes: 1024, heapBytes: 8192 });
+  assert(tiny.resident.recommend === "64MB" && tiny.bitmap.recommend === "1MB" && tiny.bitmap.heapPages === 1, `a recommendation never rounds below its step (${tiny.resident.recommend}, ${tiny.bitmap.recommend})`);
   assert(bytesText(512) === "1 kB" && bytesText(6488 * 1024) === "6 MB" && bytesText(128 * MB) === "128 MB" && bytesText(6.4 * 1024 * MB) === "6.4 GB", "sizes read as kB, MB, or GB to one decimal");
 }
 

@@ -3439,7 +3439,6 @@ if (configFailed) {
               current_setting('block_size')::int AS block,
               pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
               pg_size_bytes(current_setting('work_mem'))::bigint AS work,
-              COALESCE(current_setting('hnsw.scan_mem_multiplier', true), '1')::int AS multiplier,
               to_regclass('thoughts') IS NOT NULL AS found`;
           if (!m.found) {
             // Sizes of nothing would read as fitting; say what was not found instead.
@@ -3453,7 +3452,6 @@ if (configFailed) {
               heapBytes: Number(m.heap),
               blockSize: Number(m.block),
               workMemBytes: Number(m.work),
-              scanMemMultiplier: Number(m.multiplier),
             });
             const r = s.resident;
             if (r.fits) {
@@ -3464,15 +3462,17 @@ if (configFailed) {
                   `Set shared_buffers to at least ${r.recommend} (more for the hot heap) and restart Postgres — POSTGRES_SHARED_BUFFERS=${r.recommend} in deploy/.env on the compose stack, -c shared_buffers=${r.recommend} elsewhere, or the platform's parameter group. A host whose free memory keeps the indexes in the OS page cache serves the walk from there too; this check reads shared_buffers alone.`);
             }
             const b = s.bitmap;
-            const capNote = b.capRises
-              ? `it rises from ${bytesText(b.capBytes)} to ${b.recommend} even at hnsw.scan_mem_multiplier = 1;`
-              : `keep it at ${bytesText(b.capBytes)} with ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = ${b.keepMultiplier};`;
+            // What the recommendation costs: about one work_mem per busy pooled
+            // connection (measured, memorySizing's note), so the remedy prices it
+            // at this server's pool.
+            const { poolSizeFrom } = await import("./store-sql.ts");
+            const pool = poolSizeFrom(process.env.OB1_PG_POOL);
             if (b.fits) {
               add("filter bitmap memory", "ok", `a bitmap over the whole thoughts heap (${b.heapPages.toLocaleString()} pages) needs ${bytesText(b.needBytes)}, within work_mem (${bytesText(b.haveBytes)})`);
             } else {
               add("filter bitmap memory", "warn",
                   `a filter whose matches lie across the thoughts heap (${b.heapPages.toLocaleString()} pages) needs a ${bytesText(b.needBytes)} bitmap to stay exact and work_mem is ${bytesText(b.haveBytes)}: past it the bitmap goes lossy, and every lossy page is rechecked row by row (SMD-1018: 11.6 s for a broad filter at ten million rows)`,
-                  `Set work_mem to at least ${b.recommend} — ALTER DATABASE <db> SET work_mem = '${b.recommend}' and restart the servers so their pools reconnect, or POSTGRES_WORK_MEM=${b.recommend} in deploy/.env on the compose stack. Raising work_mem raises the HNSW walk's memory cap (work_mem × hnsw.scan_mem_multiplier, 014's header): ${capNote} then restart the servers.`);
+                  `Set work_mem to at least ${b.recommend} — ALTER DATABASE <db> SET work_mem = '${b.recommend}' and restart the servers so their pools reconnect, or POSTGRES_WORK_MEM=${b.recommend} in deploy/.env on the compose stack. Each busy connection may then spend about that much more: budget ${b.recommend} × this server's pool of ${pool} (OB1_PG_POOL), up to ${bytesText(b.recommendBytes * pool)}, beside shared_buffers (SMD-1499 measured ten concurrent broad filters growing by 260 MiB at 31MB).`);
             }
           }
         } catch (e) {

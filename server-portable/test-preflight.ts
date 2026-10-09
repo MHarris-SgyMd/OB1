@@ -739,8 +739,8 @@ else {
   /**
    * SMD-1499: the server sized for the table. On this small fixture both rows
    * are ok. A thoughts heap past what a lowered work_mem's bitmap covers is a
-   * warning that names the work_mem the heap needs and the multiplier that
-   * keeps the HNSW walk's memory cap. shared_buffers cannot be lowered for one
+   * warning that names the work_mem the heap needs and what it costs across
+   * the server's pool. shared_buffers cannot be lowered for one
    * database (it is the postmaster's), so the index row's warning is held by
    * test-schema's arithmetic on memorySizing, and here only as ok.
    */
@@ -758,8 +758,8 @@ else {
       assert(lowered.code === 0 && pages > 1024
              && /filter bitmap memory\s+a filter whose matches lie across the thoughts heap \([\d,]+ pages\) needs a \d+ kB bitmap to stay exact and work_mem is 64 kB: past it the bitmap goes lossy/.test(lowered.out)
              && /Set work_mem to at least \d+MB — ALTER DATABASE <db> SET work_mem = '\d+MB'/.test(lowered.out)
-             && /hnsw\.scan_mem_multiplier/.test(lowered.out),
-             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs and the walk's memory cap (${pages} pages; exit ${lowered.code})`);
+             && /budget \d+MB × this server.s pool of \d+ \(OB1_PG_POOL\)/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs and its cost across the pool (${pages} pages; exit ${lowered.code})`);
     } finally {
       await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
       await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);

@@ -1721,35 +1721,27 @@ export const BITMAP_BYTES_PER_PAGE = 64;
  *   the advice says so.
  * - Bitmap: a filter's matches are collected one entry per heap page (above),
  *   so a filter whose matches lie on every page of the thoughts heap needs
- *   heap pages × BITMAP_BYTES_PER_PAGE of work_mem to stay exact. Raising
- *   work_mem raises the HNSW walk's memory cap with it (work_mem ×
- *   hnsw.scan_mem_multiplier, 014's header); `keepMultiplier` is the
- *   multiplier that keeps the cap where it is under the recommended work_mem.
+ *   heap pages × BITMAP_BYTES_PER_PAGE of work_mem to stay exact. work_mem is
+ *   also what each busy connection may spend: on the ten-million-row bench
+ *   corpus, ten concurrent broad filters grew the backends' memory by 260 MiB
+ *   at 31MB of work_mem against 51 MiB at 4MB, and lowering
+ *   hnsw.scan_mem_multiplier to 1 changed neither that nor the walk's latency
+ *   (SMD-1499's measurement) — so the cost of the recommendation is about one
+ *   work_mem per pooled connection, and that is what the remedy says.
  *
  * Pure: preflight reads the numbers and prints what this returns, and the
  * schema suite holds the arithmetic. Sizes in bytes; recommendations are
  * PostgreSQL size strings, rounded up to whole MB (shared_buffers to 64 MB).
  */
-export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes, scanMemMultiplier }) {
+export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
   const MB = 1048576;
   const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
   const heapPages = Math.ceil(heapBytes / blockSize);
   const bitmapBytes = heapPages * BITMAP_BYTES_PER_PAGE;
   const workMemMB = upTo(bitmapBytes, 1);
-  const capBytes = workMemBytes * scanMemMultiplier;
   return {
     resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
-    bitmap: {
-      fits: bitmapBytes <= workMemBytes,
-      heapPages,
-      needBytes: bitmapBytes,
-      haveBytes: workMemBytes,
-      recommend: `${workMemMB}MB`,
-      capBytes,
-      keepMultiplier: Math.max(1, Math.floor(capBytes / (workMemMB * MB))),
-      /** The recommended work_mem alone exceeds today's cap, so no multiplier keeps it. */
-      capRises: workMemMB * MB > capBytes,
-    },
+    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, needBytes: bitmapBytes, haveBytes: workMemBytes, recommend: `${workMemMB}MB`, recommendBytes: workMemMB * MB },
   };
 }
 

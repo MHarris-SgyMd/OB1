@@ -171,8 +171,9 @@ setting. The first compares the HNSW indexes over `thoughts` and
 holds serve a walk too. The second compares the bitmap a filter spanning the
 `thoughts` heap needs (64 bytes a heap page; past `work_mem` it goes lossy and
 rechecks whole pages) with `work_mem`. Each remedy names the setting the brain
-needs, the second also the `hnsw.scan_mem_multiplier` that keeps the walk's
-memory cap where it was; `db/config.mjs`'s `memorySizing` holds the arithmetic.
+needs; the second also prices it at about one `work_mem` per connection of the
+server's pool (`OB1_PG_POOL`), as measured. `db/config.mjs`'s `memorySizing`
+holds the arithmetic.
 Over PostgREST every
 direct-connection check — this one included — prints a row: six are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid
