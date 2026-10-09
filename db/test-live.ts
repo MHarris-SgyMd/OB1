@@ -10697,7 +10697,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
   }
 }
 
-console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row sizes work_mem by (SMD-1499)");
+console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row reports the bitmap against work_mem by (SMD-1499)");
 {
   // ~4,000 pages with a matching row on every one, a forced bitmap heap scan,
   // and work_mem 8 kB either side of the rule (this layout: 34 rows a page,

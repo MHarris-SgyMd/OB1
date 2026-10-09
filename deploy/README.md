@@ -2076,7 +2076,7 @@ so the profile builds from a checkout.
   throughput at ten connections — and prints the size to set: `ALTER SYSTEM
   SET shared_buffers` and a restart of postgres, where the host has the memory
   (`deploy/.env.example` has the commands, and the way back if postgres then
-  will not start). Its `filter bitmap memory` row is information only: what a
+  will not start). Preflight's `filter bitmap memory` row is information only: what a
   filter's bitmap needs against `work_mem`, with no recommendation until
   SMD-1464 settles `match_thoughts`' plan mode.
 - **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway

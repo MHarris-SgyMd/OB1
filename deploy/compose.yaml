@@ -343,8 +343,9 @@ services:
   # filtered search that reaches the HNSW walk may use work_mem x 8 (32 MB at
   # the 4 MB default) per scan node, two per call, per connection — a ceiling
   # across every pooled connection (server and api each hold OB1_PG_POOL, so
-  # twenty at the default), on top of shared_buffers. 014's tuple cap usually
-  # binds first (SMD-1499 measured a few MiB for ten broad filters). Thin
+  # twenty at the default), on top of shared_buffers. On SMD-1499's 64-dimension
+  # bench corpus 014's tuple cap bound first (ten broad filters grew 4-5 MiB in
+  # the bench, 51 MiB with fresh connections; deploy/.env.example). Thin
   # filters never walk (they are answered exactly); lower the multiplier with
   # ALTER DATABASE where memory is tighter than latency (deploy/.env.example has
   # the form). Size shared_buffers to the HNSW indexes (preflight's "vector

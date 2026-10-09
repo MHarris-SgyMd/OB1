@@ -3420,20 +3420,19 @@ if (configFailed) {
         }
 
         /**
-         * SMD-1499: the server sized for the table. `vector index memory` is a
-         * warning — a warning, not a failure, since a managed platform may not
-         * let the operator change the setting: the valid HNSW indexes over
-         * thoughts and thought_chunks (found by access method, so 039's
-         * halfvec swap and any later rename read alike; an INVALID index the
-         * planner ignores is not counted, though a valid staging index built
-         * before 039 adopts it is) against shared_buffers. `filter bitmap
-         * memory` is information only: the bitmaps a filter may build against
-         * work_mem, and no recommendation, until SMD-1464 settles the plan
-         * mode the expensive one depends on. db/config.mjs's memorySizing
-         * holds the arithmetic and why.
+         * SMD-1499: the server sized for the table. `vector index memory`
+         * warns (a managed platform may not let the operator change the
+         * setting) when the valid HNSW indexes over thoughts and
+         * thought_chunks outgrow shared_buffers — found by access method, so
+         * 039's halfvec swap and any later rename read alike; an INVALID
+         * index the planner ignores is not counted, though a valid staging
+         * index built before 039 adopts it is. `filter bitmap memory` is
+         * information only, until SMD-1464 settles the plan mode the
+         * expensive bitmap depends on. db/config.mjs's memorySizing holds the
+         * arithmetic and memoryRows the wording.
          */
         try {
-          const { memorySizing, bytesText, ROUTE_ESTIMATE_MIN_PAGES } = await import("../db/config.mjs");
+          const { memorySizing, memoryRows } = await import("../db/config.mjs");
           const [m] = await sql`
             SELECT
               (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
@@ -3457,28 +3456,8 @@ if (configFailed) {
               blockSize: Number(m.block),
               workMemBytes: Number(m.work),
             });
-            const r = s.resident;
-            if (r.fits) {
-              add("vector index memory", "ok", `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})`);
-            } else {
-              add("vector index memory", "warn",
-                  `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
-                  `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`: the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. On compose.tiers.yaml each tier's postgres is set on its own. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`.`);
-            }
-            // Information only (memorySizing says why): both bitmaps against
-            // work_mem, and nothing to do about either until SMD-1464.
-            const b = s.bitmap;
-            const route = b.gated
-              ? `a filter at 037's gate boundary (about one match a heap page) takes the GIN route on about half its calls and touches about ${b.bitmapPages.toLocaleString("en-US")} of the thoughts heap's ${b.heapPages.toLocaleString("en-US")} pages`
-              : `on a heap under ${ROUTE_ESTIMATE_MIN_PAGES.toLocaleString("en-US")} pages every filter takes the GIN route, the broadest touching up to all ${b.heapPages.toLocaleString("en-US")} pages`;
-            const routeBitmap = b.fits
-              ? `its routing count's bitmap (${bytesText(b.needBytes)}) fits work_mem (${bytesText(b.haveBytes)})`
-              : `its routing count's bitmap (${bytesText(b.needBytes)}) passes work_mem (${bytesText(b.haveBytes)}) and goes lossy, which costs little: under LIMIT v_exact + 1 it rechecks pages only until it has its rows`;
-            const generic = b.gated
-              ? `; a generic-plan GIN walk's bitmap can cover the whole heap (${bytesText(b.wholeHeapBytes)})`
-              : "";
-            add("filter bitmap memory", "ok",
-                `${route}: ${routeBitmap}${generic}. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle, and at ten million rows a larger work_mem moved those plans both ways, so nothing here recommends raising it`);
+            // The rows' wording is memoryRows', where test-schema holds every branch.
+            for (const row of memoryRows(s)) add(row.name, row.status, row.detail, row.fix);
           }
         } catch (e) {
           // Both rows, so each direct check still prints exactly one.

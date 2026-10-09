@@ -324,6 +324,8 @@ export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: num
 };
 /** A byte count for a preflight line: kB, MB, or GB to one decimal. */
 export function bytesText(bytes: number): string;
+/** Preflight's two SMD-1499 rows from memorySizing's result: `vector index memory` (ok, or warn with the size and the way back) and `filter bitmap memory` (always ok, information only). */
+export function memoryRows(s: ReturnType<typeof memorySizing>): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */

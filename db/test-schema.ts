@@ -73,6 +73,7 @@ import {
   BITMAP_BYTES_PER_PAGE,
   BITMAP_PAGE_SHARE_GATED,
   bytesText,
+  memoryRows,
   memorySizing,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
@@ -12511,13 +12512,13 @@ console.log("\n[73] bench-hnsw's section F under load: the schedule, the percent
   assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
 }
 
-console.log("\n[74] memorySizing: the valid HNSW indexes against shared_buffers, and the broadest GIN-routed filter's bitmap against work_mem (SMD-1499, db/config.mjs)");
+console.log("\n[74] memorySizing and memoryRows: the valid HNSW indexes against shared_buffers (a warning), and the filter bitmaps against work_mem (information only) (SMD-1499, db/config.mjs)");
 {
   // Pure arithmetic: preflight reads the numbers and prints what this returns.
   const MB = 1048576;
   const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 8000 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
   assert(BITMAP_BYTES_PER_PAGE === 64 && Math.abs(BITMAP_PAGE_SHARE_GATED - (1 - 1 / Math.E)) < 1e-12 && ROUTE_ESTIMATE_MIN_PAGES === 8192,
-    "an exact bitmap page costs 64 bytes, and on a heap 037's gate samples (8,192 pages up) the broadest GIN-routed filter touches 1 - 1/e of its pages");
+    "an exact bitmap page costs 64 bytes, and on a heap 037's gate samples (8,192 pages up) a filter at its boundary touches at least 1 - 1/e of the pages");
   const atPool = memorySizing({ ...base, hnswBytes: 128 * MB });
   const overPool = memorySizing({ ...base, hnswBytes: 128 * MB + 1 });
   assert(atPool.resident.fits && !overPool.resident.fits && overPool.resident.recommend === "192MB",
@@ -12528,7 +12529,7 @@ console.log("\n[74] memorySizing: the valid HNSW indexes against shared_buffers,
     `under 8,192 pages the bitmap is every page (${ungated.bitmap.bitmapPages}), and work_mem one byte short of it is short`);
   const gated = memorySizing({ ...base, heapBytes: 100000 * 8192 });
   assert(gated.bitmap.gated && gated.bitmap.bitmapPages === 63213 && gated.bitmap.needBytes === 63213 * 64 && gated.bitmap.fits,
-    `at 100,000 pages the gate leaves about 1 - 1/e of them to the broadest GIN-routed filter: ${gated.bitmap.bitmapPages} pages, ${gated.bitmap.needBytes} bytes, within 4 MB`);
+    `at 100,000 pages a filter at the gate's boundary touches about 1 - 1/e of them: ${gated.bitmap.bitmapPages} pages, ${gated.bitmap.needBytes} bytes, within 4 MB`);
   const partial = memorySizing({ ...base, heapBytes: 8191 * 8192 + 1, workMemBytes: 64 * MB });
   assert(partial.bitmap.heapPages === 8192 && partial.bitmap.gated, `a heap a byte past a page boundary counts the page it reaches into (${partial.bitmap.heapPages})`);
   const bigBlocks = memorySizing({ ...base, heapBytes: 100000 * 8192, blockSize: 32768 });
@@ -12539,6 +12540,32 @@ console.log("\n[74] memorySizing: the valid HNSW indexes against shared_buffers,
   const empty = memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 });
   assert(empty.resident.recommend === "64MB" && empty.resident.fits && empty.bitmap.fits && empty.bitmap.needBytes === 0,
     `an empty brain fits, and its recommendation never rounds below its step (${empty.resident.recommend})`);
+  // memoryRows: every branch's wording, the resident warning's included,
+  // which no live test reaches (a pool cannot be lowered for one database).
+  const [okRes] = memoryRows(memorySizing(base));
+  const [warnRes] = memoryRows(overPool);
+  assert(okRes.status === "ok" && okRes.fix === undefined && okRes.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB)"
+         && warnRes.status === "warn" && /are 129 MB and shared_buffers is 128 MB: a vector search walks an index the buffer pool cannot hold\. The OS page cache serves the walk, but not as well — at ten million rows, .* about a third of the throughput/.test(warnRes.detail),
+    `the resident row: ok with both sizes; a warning past the pool, with the page cache's measured third (${warnRes.detail.slice(0, 60)}…)`);
+  assert(/^Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB'; then restart postgres/.test(warnRes.fix ?? "")
+         && /`<tier>-postgres`/.test(warnRes.fix ?? "")
+         && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
+         && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"`),
+    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf");
+  const ungatedRows = memoryRows(memorySizing({ ...base, heapBytes: 8000 * 8192 }));
+  const gatedFits = memoryRows(memorySizing({ ...base, heapBytes: 100000 * 8192 }));
+  const gatedPast = memoryRows(memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 4980 * MB }));
+  const emptyRows = memoryRows(memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 }));
+  assert([ungatedRows, gatedFits, gatedPast, emptyRows].every(([, b]) => b.name === "filter bitmap memory" && b.status === "ok" && b.fix === undefined && /\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle/.test(b.detail)),
+    "the bitmap row is ok with no remedy in every regime, and names SMD-1464");
+  assert(ungatedRows[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all 8,000 of its pages: its routing count's bitmap (500 kB) fits work_mem (4 MB). Information only")
+         && !/generic-plan/.test(ungatedRows[1].detail),
+    "under the gate: every page, the routing count's bitmap, no separate generic-plan figure (it is the same heap)");
+  assert(gatedFits[1].detail.startsWith("a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least about 63,213 of the thoughts heap's 100,000 pages: its routing count's bitmap (4 MB) fits work_mem (4 MB); a generic-plan GIN walk's bitmap can cover the whole heap (7 MB, past work_mem)"),
+    `above the gate: a floor of 1 - 1/e of the pages, and the whole heap for a generic-plan walk with its verdict (${gatedFits[1].detail.slice(0, 80)}…)`);
+  assert(/touches at least about 316,121 of the thoughts heap's 500,096 pages: its routing count's bitmap \(20 MB\) passes work_mem \(4 MB\) and goes lossy, which costs little: under LIMIT v_exact \+ 1 it rechecks pages only until it has its rows; a generic-plan GIN walk's bitmap can cover the whole heap \(31 MB, past work_mem\)/.test(gatedPast[1].detail)
+         && emptyRows[1].detail.startsWith("the thoughts heap is empty, so no filter builds a bitmap. Information only"),
+    "past work_mem the routing count's lossiness is said to cost little; an empty heap says it builds none");
   assert(bytesText(512) === "1 kB" && bytesText(MB - 1) === "1024 kB" && bytesText(MB) === "1 MB" && bytesText(1024 * MB - 1) === "1024 MB" && bytesText(1024 * MB) === "1.0 GB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
     "sizes read as kB, MB, or GB to one decimal, rounded up: a size a byte past a setting never reads as equal to it");
 }

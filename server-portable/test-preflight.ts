@@ -747,9 +747,9 @@ else {
    * postmaster's), so the index row's warning is held by test-schema's
    * arithmetic on memorySizing, and here only as ok.
    */
-  const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) pages: its routing count's bitmap/;
+  const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) of its pages: its routing count's bitmap/;
   assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
-         && new RegExp(`${ungatedRow.source} \\([^)]+\\) fits work_mem \\(4 MB\\)\\. Information only`).test(withKw.out),
+         && new RegExp(`(?:${ungatedRow.source} \\([^)]+\\) fits work_mem \\(4 MB\\)|✓\\s+filter bitmap memory\\s+the thoughts heap is empty, so no filter builds a bitmap)\\. Information only`).test(withKw.out),
          "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and the bitmap of every page fits work_mem, said as information");
   {
     // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
