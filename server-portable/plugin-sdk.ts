@@ -140,13 +140,16 @@ export interface HookContext {
    */
   readonly captureSeconds: number;
   /**
-   * Runs `work` after the answer is sent (SMD-2767), for a sender that wants
-   * one sooner than the work takes (Slack: three seconds). The runtime owns
-   * it: a failure is caught and written to the REST core's fault log as one
-   * line, never a rejection that would stop the process, and the server's
-   * stop waits for it as for a request, within OB1_STOP_GRACE. Its sender has
-   * its 2xx by then, so nothing resends work that fails or that a crash or
-   * the stop's cut ends: the fault log is the only word of it.
+   * Runs `work` once the handler's answer is on its way (SMD-2767), for a
+   * sender that wants one sooner than the work takes (Slack: three seconds):
+   * it starts on the event loop's next turn after the handler returns an
+   * answer the runtime takes, and not at all if the handler throws or answers
+   * what is refused. The runtime owns it: a failure is caught and written to
+   * the REST core's fault log as one line, never a rejection that would stop
+   * the process, and the server's stop waits for it as for a request, within
+   * OB1_STOP_GRACE. Its sender has its 2xx by then and resends nothing: work
+   * that fails is told only to the fault log, and work a crash or the stop's
+   * cut ends only to the stop's count of what it cut, if to anything.
    */
   defer(work: () => Promise<unknown>): void;
 }
@@ -296,12 +299,16 @@ export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlig
  * With `defer` (SMD-2767), the claim is made and answered now — `deferred`, a
  * duplicate or one still running — and the run, its record and its release
  * are left to `ctx.defer`: the sender is answered within its deadline, and a
- * resend while the run goes on is still told to retry. A deferred run's
- * failure, and a `thoughtId` that is no uuid, reach the fault log, not the
- * sender, who has its answer.
+ * resend while the run goes on is still told to retry. A deferred run that
+ * throws, hands back no thought (a refusal of the core's, say) or a
+ * `thoughtId` that is no uuid reaches the fault log, its message naming the
+ * delivery (`delivery <scope> <id>: …`), and not the sender, who has its
+ * answer; a run that throws with the refusal's code says more than one that
+ * hands back nothing.
  */
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer: true }): Promise<OnceDeferred>;
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: false }): Promise<Once<T>>;
+export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: boolean }): Promise<Once<T> | OnceDeferred>;
 export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"> & Partial<Pick<HookContext, "defer">>, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: boolean }): Promise<Once<T> | OnceDeferred> {
   if (options.defer && typeof ctx.defer !== "function") throw new Error("onceById: defer needs the hook's ctx.defer");
   const scope = options.scope;
@@ -335,6 +342,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   // One that cannot be given back lapses with the lease.
   const release = () =>
     ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).catch(() => undefined);
+  let released = false;
   const finish = async (): Promise<T> => {
     let done: OnceRun<T>;
     try {
@@ -346,6 +354,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     const thoughtId = done.thoughtId;
     if (thoughtId === null) {
       await release();
+      released = true;
       return done.value;
     }
     // Anything else would fail the record unseen. Not given back: a resend is
@@ -359,7 +368,18 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     return done.value;
   };
   if (options.defer) {
-    ctx.defer!(finish);
+    // Its sender has its answer: a run that captured nothing is a fault to
+    // tell, not a claim given back for a retry that will not come.
+    ctx.defer!(() =>
+      finish().then(
+        (value) => {
+          if (released) throw new Error(`delivery ${key}: no thought captured; its id given back`);
+          return value;
+        },
+        (err: unknown) => {
+          throw new Error(`delivery ${key}: ${err instanceof Error ? err.message : String(err)}`);
+        },
+      ));
     return { deferred: true };
   }
   return { ran: await finish() };
