@@ -126,8 +126,9 @@ export class SqlStore implements ThoughtStore {
   private readonly pluginPools = new Map<string, SQL>();
   /** The plugins whose pool has been seen logged in as PLUGIN_LOGIN_ROLE: checked once, at its first transaction. */
   private readonly pluginLogins = new Set<string>();
-  /** Where plugins' SQL connects: as the plugin login role (PLUGIN_LOGIN_ROLE), never as this store's role; null with no password set. */
-  private readonly pluginUrl: string | null;
+  /** The store's own database URL and OB1_PLUGIN_DB_PASSWORD: the plugin login URL is built from them at a plugin's first transaction. */
+  private readonly url: string;
+  private readonly pluginPassword: string | undefined;
 
   /** `pluginPassword`: OB1_PLUGIN_DB_PASSWORD, the plugin login role's (SMD-2310). */
   constructor(url: string, opts: { max?: number; pluginPassword?: string } = {}) {
@@ -135,7 +136,11 @@ export class SqlStore implements ThoughtStore {
     // concurrency for us any more — an unbounded pool would let a burst of
     // captures exhaust the server's connection slots.
     this.sql = new SQL({ url, max: opts.max ?? poolSizeFrom(process.env.OB1_PG_POOL) });
-    this.pluginUrl = opts.pluginPassword ? pluginLoginUrl(url, opts.pluginPassword) : null;
+    // Kept, not turned into the login URL here: a URL that cannot carry the
+    // login role (no host) is the plugin's transaction to refuse, not the
+    // whole server's start (final review).
+    this.url = url;
+    this.pluginPassword = opts.pluginPassword;
   }
 
   async matchThoughts(opts: {
@@ -960,11 +965,17 @@ export class SqlStore implements ThoughtStore {
    */
   pluginTx<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> {
     if (!PLUGIN_NAME_RE.test(plugin) || plugin.length > 32) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
-    if (!this.pluginUrl) return Promise.reject(new Error(`a plugin's tables need OB1_PLUGIN_DB_PASSWORD, the password of the ${PLUGIN_LOGIN_ROLE} role the migrator made`));
+    if (!this.pluginPassword) return Promise.reject(new Error(`a plugin's tables need OB1_PLUGIN_DB_PASSWORD, the password of the ${PLUGIN_LOGIN_ROLE} role the migrator made`));
     const { schema, role } = pluginIdents(plugin);
     let pool = this.pluginPools.get(plugin);
     if (!pool) {
-      pool = new SQL({ url: this.pluginUrl, max: PLUGIN_POOL_SIZE });
+      let loginUrl: string;
+      try {
+        loginUrl = pluginLoginUrl(this.url, this.pluginPassword);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      pool = new SQL({ url: loginUrl, max: PLUGIN_POOL_SIZE });
       this.pluginPools.set(plugin, pool);
     }
     return pool.begin(async (tx: SQL) => {
@@ -974,7 +985,13 @@ export class SqlStore implements ThoughtStore {
         if (who !== PLUGIN_LOGIN_ROLE) throw new Error(`a plugin's pool logged in as ${who}, not ${PLUGIN_LOGIN_ROLE}`);
         this.pluginLogins.add(plugin);
       }
-      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`);
+      // No role: a plugin with no migrations, or one the migrator has not run
+      // for — said as that, not as Postgres's bare "does not exist".
+      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`).catch((e: Error) => {
+        throw /does not exist/.test(e.message)
+          ? new Error(`plugin ${plugin} has no role ${role}: ctx.db reaches the tables its migrations make (plugins/${plugin}/migrations/), and the migrator makes the role when it applies them`)
+          : e;
+      });
       await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
       // A template's own strings array alone: frozen, with its frozen raw
       // twin — an array built at run time is text, not a template.

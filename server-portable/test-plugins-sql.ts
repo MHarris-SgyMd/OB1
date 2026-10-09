@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import { migrationSha } from "../db/version.mjs";
-import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginLoginUrl } from "../db/config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -120,7 +120,7 @@ console.log("\n[3] The role's boundary: its own schema, and none of the core's t
     const said = await asRole(statement);
     assert(/permission denied/.test(said), `refused by Postgres: ${statement} (${said.slice(0, 80)})`);
   }
-  // The SQL check 28 is meant to refuse, run anyway: it leaves the plugin's
+  // The SQL check 31 is meant to refuse, run anyway: it leaves the plugin's
   // role and lands on the login role, which holds nothing on the core.
   for (const escape of ["RESET ROLE; SELECT count(*) FROM thoughts", "SET ROLE NONE; SELECT count(*) FROM thoughts", "END; SELECT count(*) FROM thoughts", "SELECT set_config('role', 'none', true); SELECT count(*) FROM thoughts", "RESET ROLE; INSERT INTO thoughts (content) VALUES ('x')"]) {
     const said = await asRole(escape);
@@ -283,6 +283,9 @@ console.log("\n[7] The plugin's handle: its own table, named bare; a core table 
     said = "";
     try { await store.pluginTx("Example", async () => 1); } catch (e) { said = (e as Error).message; }
     assert(/is not a plugin name/.test(said), "a name that is no plugin's shape is refused before it reaches SQL");
+    said = "";
+    try { await store.pluginTx(`unmigrated${RUN}`, async () => 1); } catch (e) { said = (e as Error).message; }
+    assert(said.startsWith(`plugin unmigrated${RUN} has no role ob1_plugin_unmigrated${RUN}: ctx.db reaches the tables its migrations make`), `a plugin with no role — no migrations, or none applied — is told so (${said.slice(0, 120)})`);
     // What a plugin's SQL leaves on its session — a temp table, which Postgres
     // searches before any schema, a session search_path — is on the plugin's
     // own connections: the core's queries, on a pool of one connection here,
@@ -324,11 +327,11 @@ console.log("\n[8] Preflight: the enabled plugin's tables in place; a migration 
   // A table owned by another role (a restore with --no-owner, say) is one the plugin's role cannot reach.
   await sql`ALTER TABLE plugin_example.notes OWNER TO postgres`;
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
-  assert(/✗\s+plugin tables\s+example: in plugin_example, not owned by ob1_plugin_example: notes \(postgres\)/.test(row(r.out)), `a table owned by another role: fail, named (${row(r.out)})`);
+  assert(/✗\s+plugin tables\s+example: not owned by ob1_plugin_example: plugin_example\.notes \(postgres\) — a migrator run that names the plugin hands them back/.test(row(r.out)), `a table owned by another role: fail, named (${row(r.out)})`);
   await sql`ALTER TABLE plugin_example.notes OWNER TO ob1_plugin_example`;
   await sql`ALTER SCHEMA plugin_example OWNER TO postgres`;
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
-  assert(/✗\s+plugin tables\s+example: schema plugin_example is owned by postgres, not ob1_plugin_example/.test(row(r.out)), `a schema owned by another role: fail, named (${row(r.out)})`);
+  assert(/✗\s+plugin tables\s+example: not owned by ob1_plugin_example: schema plugin_example \(postgres\) — /.test(row(r.out)), `a schema owned by another role: fail, named (${row(r.out)})`);
   await sql`ALTER SCHEMA plugin_example OWNER TO ob1_plugin_example`;
   // The login role a member without the SET option (PG 16): MEMBER would
   // pass it, and every ctx.db call would fail at SET ROLE.
@@ -400,7 +403,7 @@ console.log("\n[9] A migrator that is no superuser, with CREATEROLE: it takes th
   }
 }
 
-console.log("\n[10] A run that names a plugin makes its role and schema though nothing is pending; one plugin file's temp table never meets the next plugin's");
+console.log("\n[10] A brain restored without the plugin's role: a run makes the role and hands it back its schema and all in it, though nothing is pending; one plugin file's temp table never meets the next plugin's");
 {
   const dir = mkdtempSync(join(tmpdir(), "smd2310-plugins-"));
   try {
@@ -411,12 +414,31 @@ console.log("\n[10] A run that names a plugin makes its role and schema though n
       writeFileSync(join(dir, name, "index.ts"), "export default {};\n");
       writeFileSync(join(dir, name, "migrations", "001_x.sql"), body);
     }
-    // Recorded, with no role and no schema: a brain restored into a cluster that never had them.
+    // A dump restored into a cluster that never had the role: the schema, a
+    // table with its serial, a view, a function and an enum, all the restoring
+    // role's (the dump's ALTER … OWNER failed, or --no-owner skipped it), and
+    // the ledger recording the file.
+    const [rs, rr] = [`plugin_${restored}`, `ob1_plugin_${restored}`];
+    await sql.unsafe(`CREATE SCHEMA ${rs}; CREATE TABLE ${rs}.kept (id serial PRIMARY KEY, mood text); CREATE VIEW ${rs}.kept_ids AS SELECT id FROM ${rs}.kept;
+      CREATE FUNCTION ${rs}.kept_count() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM ${rs}.kept'; CREATE TYPE ${rs}.mood AS ENUM ('calm');
+      INSERT INTO ${rs}.kept (mood) VALUES ('calm')`);
     await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES (${restored}, '001_x.sql', ${migrationSha("CREATE TABLE IF NOT EXISTS kept (id int);\n")})`;
     const r = await runMigrate({ plugins: `${restored},${aa},${bb}`, pluginsDir: dir });
     assert(r.code === 0, `exit 0 (${r.code}: ${r.err.slice(0, 200)})`);
-    const made = await one<{ role: boolean; schema: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${`ob1_plugin_${restored}`}) AS role, EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${`plugin_${restored}`}) AS schema`);
-    assert(made.role && made.schema, `the recorded plugin's role and schema are made again (${JSON.stringify(made)})`);
+    const made = await one<{ role: boolean; schema_owner: string }>(sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${rr}) AS role, (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${rs}) AS schema_owner`);
+    assert(made.role && made.schema_owner === rr, `the role is made again and owns the restored schema (${JSON.stringify(made)})`);
+    const left = await pluginForeignOwned(sql, rs, rr);
+    assert(left.length === 0, `the table, its sequence, the view, the function and the type are the role's (${JSON.stringify(left)})`);
+    assert(r.out.includes(`  ✓  schema ${rs} and 4 object(s) in it handed back to ${rr}`), `the run says what it handed back (${r.out.split("\n").filter((l) => l.includes(restored)).join(" | ")})`);
+    // As the plugin's role, on the restored rows: read, write through the serial, the function.
+    const asRole = await one<{ n: number; c: number }>(sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL ROLE ${rr}`);
+      await tx.unsafe(`INSERT INTO ${rs}.kept (mood) VALUES ('calm')`);
+      return tx.unsafe(`SELECT (SELECT count(*)::int FROM ${rs}.kept_ids) AS n, ${rs}.kept_count()::int AS c`);
+    }).catch((e: Error) => [{ n: -1, c: -1, error: e.message }]));
+    assert(asRole.n === 2 && asRole.c === 2, `the plugin's role reaches its restored rows (${JSON.stringify(asRole)})`);
+    const quiet = await runMigrate({ plugins: restored, pluginsDir: dir });
+    assert(quiet.code === 0 && !quiet.out.includes("handed back"), "a second run finds nothing to hand back");
     const landed = await one<{ n: number }>(sql.unsafe(`SELECT count(*)::int AS n FROM "plugin_${bb}".shadow_me`));
     assert(landed.n === 1, `the next plugin's row lands in its own table, not the temp table the one before left (${landed.n})`);
   } finally {

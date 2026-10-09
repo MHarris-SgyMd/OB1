@@ -17,6 +17,7 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 **The webhook**, `POST /hooks/example/capture`, takes `{"text": "…"}` with `x-example-signature`, the hex HMAC-SHA256 of the raw body under the secret `OB1_HOOK_SECRETS` gives the example. Signed, it captures the text through the core as `hook:example` (trust `ingested`, source `example-hook`) and answers 202 with the thought's id. Unsigned or mis-signed, it answers 401; with no secret configured, 503. It is served only while `OB1_HOOKS` names the example, and reachable from outside only with `deploy/compose.hooks-public.yaml`:
 
 ```bash
+SECRET=<the example's secret in OB1_HOOK_SECRETS>
 BODY='{"text":"from a webhook"}'
 SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
 curl -X POST -H 'content-type: application/json' -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
@@ -44,6 +45,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
    - `GET /v1/plugins` lists the plugin and its Notes page;
    - an MCP client sees the same tools.
+4. For the webhook, add `OB1_HOOKS=example` and `OB1_HOOK_SECRETS=example=<openssl rand -hex 32>` to `deploy/.env`, recreate the REST core (`docker compose up -d api`), and name the overlay with the stack's other `-f` files: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy`. The REST core's preflight `plugin webhooks` row then says `example` is served (the MCP server serves no webhook, and is not given the knobs).
 
 Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
 

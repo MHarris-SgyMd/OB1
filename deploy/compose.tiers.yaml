@@ -122,6 +122,14 @@ x-tier-routes: &tier-routes |
           servers:
             - url: "http://mcp.working.ob1.internal.:8000"
 
+# Every service's log, bounded as compose.yaml's are (its x-logging says why;
+# SMD-1849).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 # The server environment every tier shares: compose.yaml's server knobs that a
 # tier's servers read (this stack runs no typed-decision tier, extraction or
 # authorization server, so their knobs are not here), less DATABASE_URL and
@@ -213,6 +221,7 @@ services:
     <<: *tier-postgres
     volumes:
       - stable-pgdata:/var/lib/postgresql/data
+    logging: *logging
 
   stable-migrate:
     <<: *tier-migrate
@@ -222,6 +231,7 @@ services:
     depends_on:
       stable-postgres:
         condition: service_healthy
+    logging: *logging
 
   # The stable tier's MCP server, named so its REST core runs this image by name.
   stable-server:
@@ -248,6 +258,7 @@ services:
       default: {}
       mesh:
         aliases: [mcp.ob1.internal]
+    logging: *logging
 
   # The stable tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
   # the server's environment. Reached on the mesh, and on the default network
@@ -275,12 +286,14 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+    logging: *logging
 
   # ── canary ─────────────────────────────────────────────────────────────────
   canary-postgres:
     <<: *tier-postgres
     volumes:
       - canary-pgdata:/var/lib/postgresql/data
+    logging: *logging
 
   canary-migrate:
     <<: *tier-migrate
@@ -290,6 +303,7 @@ services:
     depends_on:
       canary-postgres:
         condition: service_healthy
+    logging: *logging
 
   # The canary tier's MCP server, named so its REST core runs this image by name.
   canary-server:
@@ -316,6 +330,7 @@ services:
       default: {}
       mesh:
         aliases: [mcp.canary.ob1.internal]
+    logging: *logging
 
   # The canary tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
   # the server's environment. Reached on the mesh, and on the default network
@@ -343,12 +358,14 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+    logging: *logging
 
   # ── working ────────────────────────────────────────────────────────────────
   working-postgres:
     <<: *tier-postgres
     volumes:
       - working-pgdata:/var/lib/postgresql/data
+    logging: *logging
 
   working-migrate:
     <<: *tier-migrate
@@ -358,6 +375,7 @@ services:
     depends_on:
       working-postgres:
         condition: service_healthy
+    logging: *logging
 
   # The working tier's MCP server, named so its REST core runs this image by name.
   working-server:
@@ -384,6 +402,7 @@ services:
       default: {}
       mesh:
         aliases: [mcp.working.ob1.internal]
+    logging: *logging
 
   # The working tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
   # the server's environment. Reached on the mesh, and on the default network
@@ -411,6 +430,7 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+    logging: *logging
 
   # ── the proxy ────────────────────────────────────────────────────────────
   # The stack's one published port, and compose.yaml's proxy in every key but
@@ -462,6 +482,7 @@ services:
     # is up, as compose.yaml's does while it starts. Name the services to
     # start part of the stack: `up proxy` alone brings no tier.
     restart: unless-stopped
+    logging: *logging
 
   # ── the shared model provider ────────────────────────────────────────────
   # One Ollama for all three tiers (the cost SMD-1806 contains — one model server,
@@ -480,6 +501,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    logging: *logging
 
   ollama-pull:
     image: *ollama-image
@@ -499,6 +521,7 @@ services:
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
         [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
+    logging: *logging
 
 volumes:
   stable-pgdata:

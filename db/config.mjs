@@ -492,9 +492,11 @@ export function malformedAlarm(answers, malformed) {
  * SMD-2424, do the claim workers (`--profile workers`); a checkout's command
  * follows for a follower run by hand, the one that can carry a custom --job.
  * Consolidation takes no --job: its key follows the judge model, so the job
- * is named beside it.
+ * is named beside it. The sleep scheduler (SMD-1794) runs in a one-off container
+ * of the extract service until its own service (SMD-2678), or from a checkout.
  */
 export function restartCommand(worker, job) {
+  if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow, with the -f files and -p the stack was started with (docker compose alike; a one-off container of the extract service, in the foreground); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
@@ -1387,6 +1389,42 @@ export function pluginLoginUrl(url, password) {
   u.password = encodeURIComponent(password);
   if (u.username !== PLUGIN_LOGIN_ROLE) throw new Error(`the database URL names no host, so a plugin's connection cannot log in as ${PLUGIN_LOGIN_ROLE}: give DATABASE_URL a host (a socket directory as ?host= keeps a host in the URL's own part)`);
   return u.toString();
+}
+
+/**
+ * What in a plugin's schema its role does not own (SMD-2310), each with the
+ * ALTER … OWNER TO keyword that hands it back and its owner: a relation, a
+ * routine or a type a brain restored without the role left the restoring
+ * role's — a dump's ALTER … OWNER fails where the role is missing, and
+ * `--no-owner` skips it. An index follows its table, and a sequence a column
+ * owns (serial, identity) its table, so neither is listed. One query for the
+ * migrator, which hands each back, and preflight, which names them. None for a
+ * role that does not exist.
+ * @param {(strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>} sql
+ * @param {string} schema
+ * @param {string} role
+ * @returns {Promise<{ kind: string, ident: string, owner: string }[]>}
+ */
+export async function pluginForeignOwned(sql, schema, role) {
+  return /** @type {{ kind: string, ident: string, owner: string }[]} */ (await sql`
+    SELECT kind, ident, pg_get_userbyid(owner) AS owner FROM (
+      SELECT CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
+                            WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'c' THEN 'TYPE' ELSE 'TABLE' END AS kind,
+             format('%I.%I', n.nspname, c.relname) AS ident, c.relowner AS owner, 0 AS ord
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+         AND NOT (c.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i')))
+      UNION ALL
+      SELECT CASE p.prokind WHEN 'a' THEN 'AGGREGATE' ELSE 'ROUTINE' END, p.oid::regprocedure::text, p.proowner, 1
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = ${schema}
+      UNION ALL
+      SELECT 'TYPE', format('%I.%I', n.nspname, t.typname), t.typowner, 2
+        FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+       WHERE n.nspname = ${schema} AND t.typtype IN ('e', 'd', 'r')
+    ) o
+    WHERE o.owner <> (SELECT oid FROM pg_roles WHERE rolname = ${role})
+    ORDER BY ord, ident`);
 }
 
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";

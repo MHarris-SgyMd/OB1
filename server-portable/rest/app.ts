@@ -20,6 +20,7 @@ import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOpti
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
+import { knowTools, logRequest, outcomeOf, requestLine, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -34,12 +35,18 @@ export interface RestDeps {
   resolve(principal: Principal): Promise<AgentOutcome>;
   /** Wraps a detached run (a job), so the stop waits for it. */
   track: CallOptions["track"];
-  /** Where the one line per request goes; console.log unless a suite listens. */
+  /** Where the one line per request goes (telemetry.ts's requestLine); telemetry.ts's request log unless a suite listens. */
   log?: (line: string) => void;
   /** The enabled plugins (root.ts's plugins), read at the first request that needs them; none when absent (SMD-2310). */
   plugins?: () => readonly LoadedPlugin[];
   /** The webhooks served and their secrets (root.ts's hooks), read at the first delivery; none when absent (SMD-2310). */
   hooks?: () => { hooks: readonly LoadedHook[]; secrets: ReadonlyMap<string, string> };
+  /**
+   * Where a webhook fault's one line goes — the message its anonymous sender
+   * is not told — stderr unless a suite listens. Not the request line, which
+   * holds no free text (telemetry.ts); that line still says the 500 and FAILED.
+   */
+  faultLog?: (line: string) => void;
 }
 
 /** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
@@ -65,6 +72,32 @@ async function boundedBody(req: Request, limit: number): Promise<Uint8Array | nu
   let at = 0;
   for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
   return out;
+}
+
+/**
+ * What a request's line learns as it is handled: the operation its route
+ * runs and the name of the key that authenticated. Keyed by the request, so
+ * the line's middleware reads what the handler below it found.
+ */
+const SEEN = new WeakMap<Request, { tool?: string; agent?: string }>();
+
+/**
+ * An error answer's code, for its line: every 4xx and 5xx this server sends
+ * is JSON carrying one (`refuse`, a refusal's value, `failure`), read from a
+ * copy so the answer itself is untouched. A success, or a body that is not
+ * JSON or carries no code, gives none; telemetry.ts holds what it gives to
+ * the enum spelling. A refused HEAD's line has its GET's code: Hono answers a
+ * HEAD as its GET and drops the body after this middleware has read it.
+ */
+async function errorCode(res: Response): Promise<string | undefined> {
+  if (res.status < 400 || !/^application\/json\b/i.test(res.headers.get("content-type") ?? "")) return undefined;
+  const body = await res.clone().json().catch(() => null) as { code?: unknown } | null;
+  return typeof body?.code === "string" ? body.code : undefined;
+}
+function seen(c: Context): { tool?: string; agent?: string } {
+  let s = SEEN.get(c.req.raw);
+  if (!s) SEEN.set(c.req.raw, (s = {}));
+  return s;
 }
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
@@ -155,15 +188,16 @@ type RestEnv = { Variables: { template?: string } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const app = new Hono<RestEnv>();
-  const log = deps.log ?? ((line: string) => console.log(line));
+  const log = (r: RequestRecord) => (deps.log ? deps.log(requestLine(r)) : logRequest(r));
+  const faultLog = deps.faultLog ?? ((line: string) => console.error(line));
 
   // The enabled plugins' operations (SMD-2310), read at the first request that
   // needs them — the environment is seeded by then — and the document with
-  // them.
+  // them; their tool names join the core's in the request line.
   type PluginRoute = { op: LoadedOp; method: Method; pattern: RegExp; fields: string[] };
   let pluginRouteList: PluginRoute[] | null = null;
   const pluginRoutes = (): PluginRoute[] =>
-    (pluginRouteList ??= (deps.plugins?.() ?? []).flatMap((pl) => pl.operations).map((op) => ({
+    (pluginRouteList ??= (deps.plugins?.() ?? []).flatMap((pl) => pl.operations).map((op) => (knowTools([op.tool]), {
       op,
       method: op.method,
       // A manifest's path is lower-case words, hyphens and {field} (plugins.ts), so nothing in it needs escaping.
@@ -172,19 +206,33 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     })));
   let doc: Record<string, unknown> | null = null;
 
-  // One line per request: the method, the route's template — never the path
-  // it was given (an id), the query string, a key or a body — the status and
-  // the time. Registered first, so every answer below is counted — but the
-  // liveness probe's: the container's healthcheck asks every 30 s, and half
-  // the log was its 200 (SMD-2284 PR 3 review pass 1). A /health that is not
-  // a 200 is still logged.
+  // One JSON line per request (SMD-1849, telemetry.ts): the method, the
+  // route's template — never the path it was given (an id), the query string,
+  // a key or a body — the operation it runs, the key's name once it has
+  // authenticated, the status, how it ended (its status's outcome, or
+  // `abandoned` for a client gone before the answer — a body read the client
+  // cut off is a throw, and onError's 500, which no one receives and is no
+  // fault of the server's), an error answer's code and the time — to the
+  // answer, so a job stream's line is written as it opens. Registered first,
+  // so every answer below is counted — but the liveness probe's: the
+  // container's healthcheck asks every 30 s, and half the log was its 200
+  // (SMD-2284 PR 3 review pass 1). A /health that is not a 200 is still logged.
   app.use("*", async (c, next) => {
     deps.init();
     const started = performance.now();
     await next();
-    const template = c.get("template") ?? (c.req.routePath === "*" || c.req.routePath === "/*" ? "-" : c.req.routePath);
-    if (template === "/health" && c.res.status === 200) return;
-    log(`api ${c.req.method} ${template} ${c.res.status} ${Math.round(performance.now() - started)}ms`);
+    const ms = performance.now() - started;
+    // A plugin operation's route is the template its dispatcher set ("-" for none it takes), not the wildcard's.
+    const template = c.get("template");
+    const route = template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
+    if (route === "/health" && c.res.status === 200) return;
+    const seen = SEEN.get(c.req.raw);
+    const gone = c.req.raw.signal.aborted;
+    const code = gone ? undefined : await errorCode(c.res);
+    log({
+      door: "api", method: c.req.method, route, tool: seen?.tool, agent: seen?.agent, status: c.res.status,
+      outcome: gone ? "abandoned" : outcomeOf(c.res.status, code), code, ms,
+    });
   });
 
   // Liveness, for the container's healthcheck: no key, no store, no answer
@@ -226,6 +274,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
+    seen(c).agent = principal.name;
     // Present at all, even empty, the forwarder slot must hold a forwarder's
     // key: a slot the caller filled is never ignored (an empty one is no
     // carrier named). Its digest is checked before either key reaches the
@@ -337,6 +386,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const route = ROUTES[name];
     const fields = pathFields(route.path);
     app.on(route.method, honoPath(route.path), async (c) => {
+      seen(c).tool = name;
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
@@ -383,7 +433,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       return c.notFound();
     }
     const { op } = found;
-    c.set("template", op.path);
+    c.set("template", honoPath(op.path));
+    seen(c).tool = op.tool;
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (!unlocks(p, op.scope)) return refuse(c, 403, { code: "FORBIDDEN", needs: op.scope });
@@ -419,6 +470,14 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // `hook:<plugin>`, a capture-only caller. Off, or a name it does not serve,
   // the path is NO_ROUTE, as any unrouted one.
   app.all("/hooks/:plugin/:hook", async (c) => {
+    // Reached through a prefix another route strips — compose.api-public.yaml's
+    // /api, whose router sends X-Forwarded-Prefix — not through
+    // compose.hooks-public.yaml, which keeps the path: the operator who named
+    // /api did not open /hooks, so it is no route here (final review).
+    if (c.req.header("x-forwarded-prefix") !== undefined) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
     const served = deps.hooks?.();
     const hook = served?.hooks.find((h) => h.plugin === c.req.param("plugin") && h.name === c.req.param("hook"));
     if (!hook || !served) {
@@ -452,9 +511,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     try {
       answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
-      // The sender is anonymous: it is told FAILED and nothing of why; the operator's log has the message.
-      // One line, bounded: the request log is one line per request.
-      log(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
+      // The sender is anonymous: it is told FAILED and nothing of why; the
+      // operator's stderr has the message, one line, bounded.
+      faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
       return c.json({ code: "FAILED", retryable: false }, 500);
     }
     if (answer.status === 204) return c.body(null, 204);

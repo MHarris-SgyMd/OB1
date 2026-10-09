@@ -158,7 +158,7 @@ import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { PROPOSAL_TEXT_MAX, snipText } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { passStamper, stampKey } from "./pass-stamp.ts";
+import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -254,6 +254,12 @@ export interface ConsolidateOptions {
   writer?: Writer;
   signal?: AbortSignal;
   onPass?: (stop: PassStop) => void;
+  /**
+   * A follower's heartbeat in place of its own `heartbeat:consolidate:<job>`
+   * row (db/pass-stamp.ts): sleep.ts's, so a wake does not end a row
+   * (SMD-1794). Null stamps nothing. Unused by a one-shot run.
+   */
+  stamper?: PassStamper | null;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -1569,8 +1575,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const unreturned = new Set<string>();
 
   // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
-  // pass and re-stamped while one runs. A one-shot run stamps nothing.
-  const stamper = FOLLOW
+  // pass and re-stamped while one runs. A one-shot run stamps nothing. A
+  // caller's stamper stands in for the row (sleep.ts's, SMD-1794).
+  const stamper = opts.stamper !== undefined ? (FOLLOW ? opts.stamper : null) : FOLLOW
     ? passStamper({
         sql, worker: "consolidate", job: JOB, intervalS: FOLLOW,
         onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),

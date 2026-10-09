@@ -37,7 +37,7 @@ import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PLUGIN_LOGIN_ROLE, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
+import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
@@ -104,14 +104,24 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
   if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
   else {
     const { SQL } = await import("bun");
-    const probe = new SQL({ url: pluginLoginUrl(url, password), max: 1 });
+    // A URL with no host cannot carry the login role: failed, as the plugin's
+    // first transaction would be, not a warning (final review).
+    let loginUrl: string | null = null;
     try {
-      const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
-      if (who !== login) problems.push(`the plugins' connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
+      loginUrl = pluginLoginUrl(url, password);
     } catch (e) {
-      problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
-    } finally {
-      await probe.close().catch(() => {});
+      problems.push((e as Error).message);
+    }
+    if (loginUrl) {
+      const probe = new SQL({ url: loginUrl, max: 1 });
+      try {
+        const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
+        if (who !== login) problems.push(`the plugins' connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
+      } catch (e) {
+        problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
+      } finally {
+        await probe.close().catch(() => {});
+      }
     }
   }
   const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
@@ -132,17 +142,17 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
              CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
                   WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(${login}, ${role}, 'SET')
                   ELSE pg_has_role(${login}, ${role}, 'MEMBER') END AS can_set,
-             (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner,
-             (SELECT string_agg(c.relname || ' (' || pg_get_userbyid(c.relowner) || ')', ', ' ORDER BY c.relname)
-                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S') AND pg_get_userbyid(c.relowner) <> ${role}) AS foreign_owned`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null; foreign_owned: string | null }[];
+             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null }[];
     if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
     if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
     if (!r.can_set) problems.push(`${name}: ${login} cannot SET ROLE ${role} (the migrator grants it; GRANT ${role} TO ${login}, WITH SET TRUE, INHERIT FALSE on PG 16 and later)`);
-    // Owned by another role — a restore with --no-owner, say — the plugin's
-    // role reaches none of it, and every ctx.db call is refused.
-    if (r.schema_owner !== role) problems.push(`${name}: schema ${schema} is owned by ${r.schema_owner}, not ${role} (ALTER SCHEMA ${schema} OWNER TO ${role})`);
-    if (r.foreign_owned) problems.push(`${name}: in ${schema}, not owned by ${role}: ${r.foreign_owned} (ALTER TABLE … OWNER TO ${role})`);
+    // Owned by another role — a brain restored without the plugin's role, say
+    // — the plugin's role reaches none of it, and every ctx.db call is
+    // refused. What the migrator hands back, read by its own query
+    // (db/config.mjs's pluginForeignOwned).
+    const foreign = await pluginForeignOwned(sql, schema, role);
+    if (r.schema_owner !== role || foreign.length > 0)
+      problems.push(`${name}: not owned by ${role}: ${[...(r.schema_owner !== role ? [`schema ${schema} (${r.schema_owner})`] : []), ...foreign.map((f) => `${f.ident} (${f.owner})`)].join(", ")} — a migrator run that names the plugin hands them back`);
     const pending = files.filter((f) => !recorded.has(`${name}/${f}`));
     const drifted = files.filter((f) => recorded.has(`${name}/${f}`) && recorded.get(`${name}/${f}`) !== migrationSha(readFileSync(join(dir, f), "utf8")));
     if (pending.length) problems.push(`${name}: ${pending.length} migration(s) not applied (${pending.join(", ")})`);
@@ -4094,12 +4104,21 @@ if (configFailed) {
               const l = leases.get(key) ?? NO_LEASES;
               const beat = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
               const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
+              // The sleep scheduler, fresh, on this server's judge's key
+              // (SMD-1794): heartbeat:sleep carries no job, so the key is matched
+              // to this server's judge (SMD-2678's own row can match the
+              // scheduler's), and a key whose model does not parse is not its.
+              const sleeping = model !== undefined && envPrefix === ""
+                ? facts.workers?.heartbeats.find((h) => h.worker === "sleep" && !h.stale && !h.ended)
+                : undefined;
               // A follower killed outright leaves its claims' leases live until
               // they lapse (900 s by default) while its heartbeat goes stale: the
               // heartbeat is the fresher word, so the row says the follower is
               // gone rather than "running" beside a workers row that says it is
-              // (review pass 3, a walkthrough).
-              if (beat && !follower && l.live > 0) {
+              // (review pass 3, a walkthrough) — unless the scheduler is asleep,
+              // whose own claims those live leases may be, beside an old
+              // workers-profile row (SMD-1794 review pass 3).
+              if (beat && !follower && l.live > 0 && !sleeping?.running) {
                 add("consolidate pass", "warn",
                     `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC${queue ? `; ${queue}` : ""}`,
                     `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
@@ -4111,6 +4130,26 @@ if (configFailed) {
                   : "";
                 const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`, queue ? `; ${queue}` : "");
                 add("consolidate pass", r.status, r.detail, r.fix);
+                continue;
+              }
+              // No lease live, none left by a dead worker, no follower: the
+              // sleep scheduler works the key between its sleeps — its
+              // followers stamp through heartbeat:sleep, and awake it holds no
+              // lease. The row is its, with no remedy that starts a worker
+              // beside it, where it would read stopped (an old workers-profile
+              // row included). Only that case: a dead worker's leases keep
+              // their words below (review pass 2).
+              const sleeper = l.expired === 0 ? sleeping : undefined;
+              if (sleeper) {
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
+                if (sleeper.outcome === "failed") {
+                  const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
+                  add("consolidate pass", "warn", `${words}, and its last pass failed${queue ? `; ${queue}` : ""}`,
+                      `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
+                } else {
+                  const r = runningRow(key, c, words, queue ? `; ${queue}` : "");
+                  add("consolidate pass", r.status, r.detail, r.fix);
+                }
                 continue;
               }
               // A follower of this key that stopped or went stale: the workers
@@ -4322,9 +4361,11 @@ if (configFailed) {
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
         // board-sync's --loop and the extraction and consolidation followers
-        // stamp one after every pass. One older than three of its own intervals
-        // is a stopped worker — board-sync was down four days (2026-09-27 to
-        // 10-01) while the tier row above passed. A fresh one whose last pass
+        // stamp one after every pass, and the sleep scheduler at least every
+        // minute, its followers through it (SMD-1794). One older than three
+        // of its own intervals is a stopped worker — board-sync was down four
+        // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
+        // one whose last pass
         // failed, or whose last block of answers passed SMD-2266's malformed
         // alarm, warns too: a follower says the alarm only on stderr. A worker
         // that never ran on this brain has no row and nothing is said.
@@ -4349,7 +4390,9 @@ if (configFailed) {
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
-                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
+                  : h.worker === "sleep"
+                    ? `sleep's last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).`
+                    : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
               });
               add("workers", "warn", detail, fixes.join(" "));
             }

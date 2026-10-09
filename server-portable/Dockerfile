@@ -90,12 +90,12 @@ USER bun
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
 CMD ["index.ts"]
 
-# Liveness only — the MCP server's. The MCP endpoint requires auth, so a probe
-# cannot exercise a real tool; an unauthenticated POST returns HTTP 200 with a
-# JSON-RPC -32001 envelope, which proves the process is serving and leaks
-# nothing. The REST core answers that POST 405; its service names its own
-# check, a GET of its /health (deploy/compose.yaml). Readiness — is the
-# database actually reachable — is the entrypoint's job, above.
+# Liveness only: a keyless GET of /health, which both servers answer 200 with
+# no key, no store and nothing about the brain. Not a POST to the MCP
+# endpoint, as before: that was an unauthenticated request every 30 s, which
+# the server's request log (SMD-1849, telemetry.ts) would write as a refusal —
+# half the log, as the REST core's liveness was before it was left out there;
+# the REST core answered it 404 besides. Readiness — is the database actually
+# reachable — is the entrypoint's job, above.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- --post-data='{}' --header='Content-Type: application/json' \
-      http://127.0.0.1:${PORT:-8000}/ >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:${PORT:-8000}/health >/dev/null || exit 1

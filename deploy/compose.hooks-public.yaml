@@ -11,10 +11,16 @@
 # no brain key — its sender holds none — so each handler verifies a delivery
 # against the secret OB1_HOOK_SECRETS gives its plugin, and runs as a caller of
 # capture scope alone. The forwarder slot (x-brain-forwarder) is deleted on the
-# way in, as /api's is. Nothing limits the rate of deliveries here; a sender
+# way in, as /api's is (`hooks-no-forwarder`: an empty value deletes the
+# header, as compose.yaml's not-legacy does). Nothing limits the rate of
+# deliveries here; a sender
 # that floods one is the plugin's to refuse. Dropping the file and running
 # `up -d` again recreates the proxy without it (the label below changes,
 # which is what makes compose recreate; an inline config alone does not).
+# The table holds no comment of its own: Traefik renders it as a Go template
+# first, so a comment line there is not inert, and check 28
+# (scripts/check-fork-consistency.ts, HOOKS_ROUTE_TABLE) holds it byte for
+# byte (SMD-2658).
 
 x-hooks-route: &hooks-route |
   http:
@@ -26,7 +32,6 @@ x-hooks-route: &hooks-route |
         middlewares: [hooks-no-forwarder]
         service: hooks
     middlewares:
-      # An empty value deletes the header, as compose.yaml's not-legacy does.
       hooks-no-forwarder:
         headers:
           customRequestHeaders:

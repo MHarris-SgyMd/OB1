@@ -111,7 +111,7 @@ export const EXTRACT_MALFORMED_ALARM_MIN: number;
 /** Whether `malformed` of a run's `answers` are more than EXTRACT_MALFORMED_ALARM_SHARE of at least EXTRACT_MALFORMED_ALARM_MIN. */
 export function malformedAlarm(answers: number, malformed: number): boolean;
 /** The command that starts a long-running worker again, from its heartbeat's worker and job (SMD-2261). */
-export function restartCommand(worker: "board-sync" | "extract" | "consolidate", job: string | null): string;
+export function restartCommand(worker: "board-sync" | "extract" | "consolidate" | "sleep", job: string | null): string;
 /** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
 export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 
@@ -270,6 +270,8 @@ export function pluginIdents(name: string): { schema: string; role: string };
 export const PLUGIN_LOGIN_ROLE: string;
 /** `url` as PLUGIN_LOGIN_ROLE with `password`, every other part kept. */
 export function pluginLoginUrl(url: string, password: string): string;
+/** What in a plugin's schema its role does not own — relations, routines, types — each with the ALTER keyword that hands it back and its owner; none for a missing role (SMD-2310). */
+export function pluginForeignOwned(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>, schema: string, role: string): Promise<{ kind: string; ident: string; owner: string }[]>;
 /** The SET list that returns a claim row to its pool — requeue()'s. */
 export const REQUEUE_SET_SQL: string;
 
