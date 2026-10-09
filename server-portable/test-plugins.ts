@@ -16,8 +16,8 @@ import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { unlocks, visibleToolNames } from "./tools.ts";
 import { enabledHooks, hookSecrets, loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
-import { hmacSha256Hex, verifyTimestamped, type HookRequest } from "./plugin-sdk.ts";
-import type { Core } from "./core/index.ts";
+import { hmacSha256Hex, isDeliveryId, onceById, verifyTimestamped, type HookRequest, type PluginSql } from "./plugin-sdk.ts";
+import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -598,11 +598,15 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const claimedAt = new Map<string, string>();
   let tick = 0;
   let recordFails = false;
+  /** The seconds the last prune and claim were bound: the window and the lease (SMD-2768). */
+  let pruneBound: unknown[] = [];
+  let leaseBound: unknown;
   const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ").trim();
     const id = values[0] as string;
-    if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve([]);
+    if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve((pruneBound = values, []));
     if (q.startsWith("INSERT INTO deliveries (id) VALUES (?) ON CONFLICT (id) DO UPDATE SET claimed_at = now() WHERE deliveries.thought_id IS NULL AND")) {
+      leaseBound = values[1];
       if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) {
         const at = `t${++tick}`;
         return Promise.resolve((claims.set(id, null), claimedAt.set(id, at), [{ claimed: at }]));
@@ -617,7 +621,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
     }
     throw new Error(`the stand-in table has no answer for: ${q}`);
   };
-  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
+  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : prop === "captureSeconds" ? () => 120 : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
   const withIds = hookApp("example", `example=${SECRET}`, tableCore);
   const send = (id: string) => { const b = JSON.stringify({ id, text: `delivery ${id}` }); return deliver(withIds, b, sign(b)); };
   const captures = () => calls.filter((c) => c.name === "capture").length;
@@ -625,6 +629,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   answer = async () => coreOk({ id: "t-once" });
   r = await send("evt-1");
   assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-once" && claims.get("evt-1") === "t-once", "a delivery with an id: 202, its id kept with its thought");
+  assert(JSON.stringify(pruneBound) === "[660,180]" && leaseBound === 180, `its window eleven minutes, its lease the core's capture deadline and a minute (${JSON.stringify(pruneBound)}, ${leaseBound})`);
   r = await send("evt-1");
   const dup = (await r.json()) as { id?: string; duplicate?: boolean };
   assert(r.status === 200 && dup.id === "t-once" && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
@@ -728,6 +733,50 @@ console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separato
   let thrown = "";
   try { v({ "x-ts": String(at), "x-sig": sig(String(at)) }, at * 1000, -5); } catch (e) { thrown = (e as Error).message; }
   assert(/toleranceSeconds -5 is not a positive number/.test(thrown), "a tolerance that is no positive number is the plugin's fault: thrown");
+}
+
+console.log("\n[13] onceById: its lease the core's own capture deadline and a minute, so a raised OB1_LLM_TIMEOUT lengthens it; what it binds, gives back and refuses (SMD-2768)");
+{
+  /** captureSeconds as a core over `env` reads it: no store, which the deadline never asks for. */
+  const deadline = (env: Record<string, string>) => createCore({ env: () => env as never, store: () => Promise.reject(new Error("no store")), door: "test" }).captureSeconds();
+  assert(deadline({}) === 120, `by default one round of model calls at OB1_LLM_TIMEOUT's 120 s (${deadline({})})`);
+  assert(deadline({ OB1_LLM_TIMEOUT: "600" }) === 600, `OB1_LLM_TIMEOUT=600: 600 s (${deadline({ OB1_LLM_TIMEOUT: "600" })})`);
+  assert(deadline({ OB1_LLM_TIMEOUT: "600", OB1_CHUNK_CONTEXT: "on" }) === 1200, "with OB1_CHUNK_CONTEXT on, two rounds: a long text's windows are blurbed, then embedded");
+  assert(deadline({ OB1_LLM_TIMEOUT: "10", OB1_JEV_BASE_URL: "http://jev:8080" }) === 31, "the genre tier's deadline, 30 s and 1 s for its one decision, when it is the longer");
+  /** A handle that records each statement's bound values, and answers a claim with `claimed`. */
+  const bound: { q: string; values: unknown[] }[] = [];
+  let claimed: { claimed: string }[] = [{ claimed: "2026-10-09 20:00:00.123456+00" }];
+  const record = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const q = strings.join("?").replace(/\s+/g, " ").trim();
+    bound.push({ q, values });
+    return Promise.resolve(q.includes("RETURNING claimed_at") ? claimed : q.startsWith("SELECT thought_id") ? [{ thought_id: null }] : []);
+  }) as unknown as PluginSql;
+  const db = { tx: <T>(fn: (sql: PluginSql) => Promise<T>) => fn(record) };
+  const leaseOf = () => bound.find((b) => b.q.startsWith("INSERT INTO deliveries (id) VALUES"))?.values[1];
+  const done = await onceById({ db, captureSeconds: deadline({ OB1_LLM_TIMEOUT: "600" }) }, "evt-1", async () => ({ value: "v", thoughtId: "t-1" }), { keepSeconds: 660 });
+  assert(JSON.stringify(done) === '{"ran":"v"}' && leaseOf() === 660 && JSON.stringify(bound[0].values) === "[660,660]", `with OB1_LLM_TIMEOUT=600, the lease is 660 s, longer than one capture's model calls, and the prune keeps a claim that long (${leaseOf()}, ${JSON.stringify(bound[0].values)})`);
+  assert(bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true && JSON.stringify(bound.at(-1)?.values) === '["evt-1","t-1"]', "the run's thought is recorded against its id");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120.3 }, "evt-2", async () => ({ value: "v", thoughtId: null }), { keepSeconds: 660 });
+  assert(leaseOf() === 181, `a fractional deadline is rounded up, whole seconds bound (${leaseOf()})`);
+  assert(bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz") === true && JSON.stringify(bound.at(-1)?.values) === '["evt-2","2026-10-09 20:00:00.123456+00"]', "a run that hands back no thought gives back its own claim, by the claimed_at text the claim returned");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "evt-3", async () => ({ value: "v", thoughtId: "t-3" }), { keepSeconds: 660, leaseSeconds: 30 });
+  assert(leaseOf() === 30, "a lease the plugin names is its own");
+  claimed = [];
+  const busy = await onceById({ db, captureSeconds: 120 }, "evt-4", async () => { throw new Error("never run"); }, { keepSeconds: 660 });
+  assert(JSON.stringify(busy) === '{"inFlight":true}', `an id claimed and not yet captured: in flight, the run not called (${JSON.stringify(busy)})`);
+  const refusedWith = async (id: string, captureSeconds: number, options: { keepSeconds: number; leaseSeconds?: number }) => {
+    try {
+      await onceById({ db, captureSeconds }, id, async () => ({ value: 0, thoughtId: null }), options);
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  assert(/printable ASCII/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown, before any claim");
+  assert(/keepSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /leaseSeconds NaN is not a positive/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })), "a window or a lease that is no positive number: thrown");
+  assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some(isDeliveryId), "isDeliveryId: 1 to 200 printable ASCII characters");
 }
 
 report();

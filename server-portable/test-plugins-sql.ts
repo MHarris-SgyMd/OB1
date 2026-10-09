@@ -314,9 +314,9 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   const store = new SqlStore(URL_, { max: 1, pluginPassword: PLUGIN_PW });
   const [hook] = enabledHooks(loadPlugins("example"), "example");
   const rowOf = async (id: string) => one<{ thought_id: string | null; claimed_at: string } | undefined>(sql`SELECT thought_id::text, claimed_at::text FROM plugin_example.deliveries WHERE id = ${id}`);
-  /** One signed delivery of `id` through the hook, its capture `capture`: the answer, or the message it threw. */
-  const viaHook = async (id: string, capture: () => Promise<unknown>) => {
-    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : capture) }) as never;
+  /** One signed delivery of `id` through the hook, its capture `capture`, under a core whose captures may run `captureSeconds`: the answer, or the message it threw. */
+  const viaHook = async (id: string, capture: () => Promise<unknown>, captureSeconds = 120) => {
+    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => captureSeconds : capture) }) as never;
     const text = JSON.stringify({ id, text: `smd2755: ${id}` });
     const ts = Math.floor(Date.now() / 1000);
     try {
@@ -352,6 +352,26 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     });
     const recorded = await rowOf(prunedId);
     assert(typeof answered === "object" && answered.status === 202 && recorded?.thought_id === thought, `a capture whose claim was pruned meanwhile is recorded, and answered 202 (${JSON.stringify(answered)}, ${JSON.stringify(recorded)})`);
+    // The lease follows the core's deadline (SMD-2768): at OB1_LLM_TIMEOUT=600
+    // a claim four minutes old is a capture that may still be running.
+    const slowId = `evt-${RUN}-slow`;
+    const never = async () => { throw new Error("the capture ran"); };
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${slowId}, now() - interval '4 minutes')`;
+    const slowHeld = await viaHook(slowId, never, 600);
+    assert(typeof slowHeld === "object" && slowHeld.status === 409, `a core whose captures may run 600 s: a claim four minutes old is 409, not taken (${JSON.stringify(slowHeld)})`);
+    await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '661 seconds' WHERE id = ${slowId}`;
+    const slowTaken = await viaHook(slowId, async () => coreOk({ id: thought }), 600);
+    assert(typeof slowTaken === "object" && slowTaken.status === 202 && (await rowOf(slowId))?.thought_id === thought, `past its 660 s lease, taken (${JSON.stringify(slowTaken)})`);
+    // A lease longer than the window: the prune keeps an unfinished claim
+    // until its lease ends, and still drops a captured id at the window.
+    const longId = `evt-${RUN}-long`;
+    const doneId = `evt-${RUN}-done`;
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${longId}, now() - interval '12 minutes')`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${doneId}, ${thought}, now() - interval '12 minutes')`;
+    const longHeld = await viaHook(longId, never, 1200);
+    const kept = await rowOf(longId);
+    assert(typeof longHeld === "object" && longHeld.status === 409 && kept !== undefined && kept.thought_id === null && (await rowOf(doneId)) === undefined,
+      `a core whose captures may run 1200 s: a claim twelve minutes old outlives the eleven-minute window, 409, while a captured id that old is pruned (${JSON.stringify(longHeld)}, ${JSON.stringify(kept)})`);
   } finally {
     await store.close();
   }
