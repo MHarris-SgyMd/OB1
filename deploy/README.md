@@ -270,7 +270,10 @@ The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
 hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
 file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
-`compose.api-public.yaml` does. The same text is a label on the proxy, so
+`compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
+table built in `scripts/check-fork-consistency.ts` (check 28) and a
+combination in CI's "The proxy loads only the held route tables"; no compose
+file defines a config that is not a route table (SMD-2658). The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -294,7 +297,12 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
 `ports:`, and a router for its path in `x-proxy-routes`, at a priority above
-`legacy` (1). Not container labels: Traefik's label-driven registry reads them
+`legacy` (1). The same router, and its backend under `services:`, go in
+`PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
+holds the table byte for byte. A note on a route goes in the YAML comments
+above the block, never in it: Traefik renders a route file as a Go template
+before it reads the YAML, so a comment line in the table is not inert
+(SMD-2658). Not container labels: Traefik's label-driven registry reads them
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
@@ -849,8 +857,12 @@ A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 This is the baseline for the sleep scheduler (SMD-1794): always on, at low
-concurrency. The scheduler will run these passes when the logs go quiet, under
-a budget, and yield to live traffic.
+concurrency. `db/sleep.ts` runs these passes only while the logs are quiet
+and stops them on a live call; until its compose service (SMD-2678) it runs
+in a one-off container of this profile's `extract` service, with the
+profile's own followers stopped — `db/README.md`, "Sleep", gives the command
+and how to move off this profile, whose followers do not yield. It has no
+budget yet (SMD-2679).
 
 ## Refreshing a tier
 
@@ -1187,7 +1199,9 @@ proxy is bound to, or a canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
 `--connect` leaves the connector where it was, and says how to move it.
-Moving off `--port`, pass `--connect` in that same `up`, which moves the
+One at the root of `--port`'s port, the URL from before `/mcp`, still
+answers through the deprecated root until v2.0.0 (SMD-2532), and `up` says
+so; `--port N --connect` moves it to `/mcp`. Moving off `--port`, pass `--connect` in that same `up`, which moves the
 connector before the canary's proxy goes; afterwards its old port is no
 longer the canary's, and the connector must be removed by hand first
 (`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
@@ -1216,7 +1230,7 @@ On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
 started, stamped or registered: an old stable by its proxy's route label, a
 stable proxy off its mesh, an empty `--port` and a `--stable-project` no
-project could be named among them. The second is the canary's life, in three
+project could be named among them. The second is the canary's life, in four
 `up`s:
 - `up --connect` over a stable carrying the protective mark `stable`. The
   canary must answer at `/canary/mcp` with tier `canary` and OAuth not
@@ -1228,7 +1242,10 @@ project could be named among them. The second is the canary's life, in three
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
-- a third `up`, back on stable's origin: the canary's proxy removed, its port
+- a third `up` on the same port, with a connector at its root: named as on
+  the deprecated root, not as one the canary no longer answers, and the root
+  answering 200 with a `Deprecation` header;
+- a fourth `up`, back on stable's origin: the canary's proxy removed, its port
   free, and a connector left at that port named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope

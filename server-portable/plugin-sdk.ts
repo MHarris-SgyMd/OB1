@@ -1,7 +1,8 @@
 // What a plugin imports (SMD-2310): the one module a `plugins/<name>/` file
 // reaches outside its own directory. A plugin is a curated contribution that
-// runs inside the REST core's process — its operations join the brain's one
-// contract (SMD-1931), so the REST core routes them, the MCP server lists them
+// runs inside the brain's servers (the REST core and the MCP server) — its
+// operations join the brain's one contract (SMD-1931), so the REST core routes
+// them, the MCP server lists them
 // as tools and the OpenAPI document describes them, each behind the same scope
 // gate as a core operation (tools.ts's UNLOCKS). zod comes from here, not from
 // a bare import in the plugin: a plugin's directory has no node_modules of its

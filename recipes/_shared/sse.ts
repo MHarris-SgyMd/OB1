@@ -120,10 +120,12 @@ export function stalledRequestLine(label: string, elapsedMs: number): string {
 }
 
 /**
- * The same, from a vendored server (review pass 3). No OB1_LLM_TIMEOUT bounds
- * its provider calls — some carry no timeout at all — so the line names
- * neither that bound nor the database: the stuck part is a provider call or a
- * query, and the server's own log above it says which.
+ * The same, from a vendored server (review pass 3). The core's advice does not
+ * carry over: of these servers only kubernetes-deployment calls a provider,
+ * under its own OB1_LLM_TIMEOUT (SMD-2692), which may be set past the ceiling,
+ * and the rest make queries alone. So the line names neither that bound nor the
+ * database alone: the stuck part is a provider call or a query, and the
+ * server's own log above it says which.
  */
 export function vendoredStalledLine(label: string, elapsedMs: number): string {
   return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; the call is stuck on a provider call or a query (SMD-2001)`;

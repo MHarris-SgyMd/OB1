@@ -50,7 +50,8 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # first proposed: the socket is root on the host, and the proxy is the one
 # process a client on the network reaches — docs/orchestration-tool.md declined
 # the same socket for n8n. So adding a service is two edits in this file, the
-# service and its router here.
+# service and its router here, and a third in check 28's PROXY_ROUTE_TABLE
+# (scripts/check-fork-consistency.ts), which holds this table byte for byte.
 #
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
@@ -78,17 +79,22 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           (the proxy's dns_search);
 #   resource the MCP server's protected-resource document,
 #           /.well-known/oauth-protected-resource/mcp (RFC 9728), to the
-#           server, which serves it only while the stack is configured and the
-#           authorization server answers it on the mesh, and answers 404
-#           otherwise (SMD-2382; server-portable/oauth-edge.ts). A server that
-#           is down is `auth-absent`'s 404 too, never a 502 a connector could
-#           read as "OAuth here";
+#           server, which serves it only while the stack is configured, the
+#           request's Host is the origin's and the authorization server
+#           answers it on the mesh, and answers 404 otherwise (SMD-2382;
+#           server-portable/oauth-edge.ts). A server that is down is
+#           `auth-absent`'s 404 too, never a 502 a connector could read as
+#           "OAuth here";
 #   oauth-fallback-off  /register, /authorize and /token at the origin root:
 #           a bare 404 (`not-served`). An MCP client that finds the document
 #           but no authorization-server metadata registers and signs in at the
 #           issuer's root, and the legacy route would hand that POST to the
 #           MCP server, whose 200 envelope the client cannot read (SMD-2382
 #           review). The authorization server's own are under /auth;
+#   api-off /api and everything under it. Unless the operator names
+#           deploy/compose.api-public.yaml, whose router (priority 36) wins
+#           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
+#           legacy route, where the MCP server takes a POST at every path;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -102,8 +108,12 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #   tier-off every other path that starts with /canary or /working, in
 #           any case and whatever follows: a bare 404 (`not-served`), so a
 #           client handed a tier's URL changed in any way after the prefix
-#           never reaches this stack's server by the legacy route (a typo of
-#           the prefix itself, `/canry/mcp`, still does until SMD-2532);
+#           (its case, an escaped slash, a pasted invisible space) never
+#           reaches this stack's server by the legacy route, to write with
+#           the same key (a typo of the prefix itself, `/canry/mcp`, still
+#           does until SMD-2532). No boundary after the prefix: each one
+#           tried left some character through (SMD-2294 review passes 2-4),
+#           and nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -129,6 +139,30 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # none of the server's CORS headers; the SDK's discovery reads a CORS failure
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
+# The middlewares:
+#   legacy-window  marks the request for the server, which logs each key
+#           name still on the root once (X-OB1-Legacy-Route, set, so a
+#           client's own value is replaced), and adds to every answer a
+#           Deprecation header (RFC 9745) dated 2026-10-02 and a Link to the
+#           upgrade guide;
+#   not-legacy  deletes that marker (an empty value deletes the header), so a
+#           client cannot send it on /mcp and be logged as a straggler;
+#   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
+#           listening, or a request the server dropped mid-flight, as its
+#           registration stall does at 30 s; the server never answers 502
+#           itself — is answered by noop@internal and becomes a 404 with no
+#           body. The server's 500, 503 and 504 are its answers and are left
+#           alone (measured);
+#   api-off, not-served  noop@internal's 418 becomes the 404 a path nothing
+#           serves gets (measured on this pin).
+# Every backend is dialled by its mesh name, written rooted. Not `server`:
+# compose gives each container its service name as an alias on every network
+# it joins, so a tier of another project on this mesh (SMD-2294) would answer
+# to `server` beside this stack's.
+# The table holds no comment of its own: Traefik renders it as a Go template
+# first, so a comment line there is not inert, and check 28
+# (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
+# byte (SMD-2658).
 x-proxy-routes: &proxy-routes |
   http:
     routers:
@@ -138,28 +172,18 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [auth-absent]
         service: auth
-      # The MCP server's protected-resource document (SMD-2382): the server
-      # answers it, 404 unless OAuth is advertised (configured, the origin's
-      # Host, the authorization server answering); a server that is down is a
-      # 404 too (auth-absent), not a 502.
       resource:
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
         middlewares: [not-legacy, auth-absent]
         service: server
-      # An MCP client's fallback sign-in at the issuer's root (SMD-2382): a
-      # bare 404, so the legacy route never hands it to the MCP server.
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
         priority: 35
         entryPoints: [web]
         middlewares: [not-served]
         service: noop@internal
-      # The REST core's public path (SMD-2284), off unless the operator names
-      # deploy/compose.api-public.yaml, whose router (priority 36) wins over
-      # this one. Off, /api answers a bodyless 404 rather than falling to
-      # legacy, where the MCP server takes a POST at every path.
       api-off:
         rule: "Path(`/api`) || PathPrefix(`/api/`)"
         priority: 35
@@ -172,7 +196,6 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      # The other tiers' MCP servers (SMD-2294), each a 404 while absent.
       canary:
         rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
         priority: 30
@@ -185,32 +208,18 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy, tier-absent]
         service: working
-      # Under a tier's prefix, only its /mcp is served: every other path that
-      # starts with /canary or /working, in any case, is a bare 404 rather
-      # than the legacy route's way into this stack's server, where a client
-      # handed a tier's URL with anything changed after the prefix (its
-      # case, an escaped slash, a pasted invisible space) would write with
-      # the same key. No boundary after the prefix: each one tried left some
-      # character through (review passes 2-4), and nothing this stack serves
-      # starts with either word.
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
         entryPoints: [web]
         middlewares: [not-served]
         service: noop@internal
-      # OPTIONS too: a browser's CORS preflight for a keyed GET /health is
-      # the server's to answer, not the legacy route's.
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      # The root URL clients were given before SMD-1846, kept for a
-      # compatibility window that closes with v2.0.0 (SMD-2306; SMD-2532
-      # deletes this router). Every answer says so in its headers, and the
-      # server logs each key name that comes this way once.
       legacy:
         rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
         priority: 1
@@ -218,9 +227,6 @@ x-proxy-routes: &proxy-routes |
         middlewares: [legacy-window]
         service: server
     middlewares:
-      # Deprecation (RFC 9745) since 2026-10-02, and a Link to the upgrade
-      # guide. The request is marked for the server, which logs the key
-      # names still on the root; set, so a client's own value is replaced.
       legacy-window:
         headers:
           customRequestHeaders:
@@ -228,50 +234,34 @@ x-proxy-routes: &proxy-routes |
           customResponseHeaders:
             Deprecation: "@1790899200"
             Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"'
-      # An empty value deletes the header: a client cannot send the marker
-      # on /mcp and be logged as a straggler.
       not-legacy:
         headers:
           customRequestHeaders:
             X-OB1-Legacy-Route: ""
-      # Any 502: Traefik's own (no such name, nothing listening, or a request
-      # the server dropped mid-flight, as its registration stall does at
-      # 30 s), since the server never answers 502 itself. noop@internal
-      # answers, and the status becomes 404 with no body. The server's 500,
-      # 503 and 504 are its answers and are left alone (measured).
       auth-absent:
         errors:
           status: ["502"]
           service: noop@internal
           statusRewrites:
             "502": 404
-      # The same, for a tier's MCP server (SMD-2294): no tier by that name
-      # on the mesh, or one stopped, is the 404 of a path nothing serves.
       tier-absent:
         errors:
           status: ["502"]
           service: noop@internal
           statusRewrites:
             "502": 404
-      # noop@internal answers 418; the same errors middleware turns it into
-      # the 404 a path nothing serves gets (measured on this pin).
       api-off:
         errors:
           status: ["418"]
           service: noop@internal
           statusRewrites:
             "418": 404
-      # The same, for the fallback sign-in paths (SMD-2382).
       not-served:
         errors:
           status: ["418"]
           service: noop@internal
           statusRewrites:
             "418": 404
-    # Every backend by its mesh name, written rooted. Not `server`: compose
-    # gives each container its service name as an alias on every network it
-    # joins, so a tier of another project on this mesh (SMD-2294) would
-    # answer to `server` beside this stack's.
     services:
       server:
         loadBalancer:
@@ -1228,8 +1218,15 @@ services:
       # which git and every build context ignore (deploy/imports/README.md).
       # `z` relabels both mounts for a container on an SELinux host, where the
       # runner otherwise meets EACCES and restarts (review pass 4); elsewhere
-      # it is a no-op.
-      - ${IMPORTS_DIR:-./imports}:/imports:ro,z
+      # it is a no-op. In long form: compose 2.38–2.40.0, the CI runner's,
+      # reads the short `${IMPORTS_DIR…}:/imports:ro,z` as too many colons when
+      # it renders without substituting, as CI's proxy check does (SMD-2658).
+      - type: bind
+        source: ${IMPORTS_DIR:-./imports}
+        target: /imports
+        read_only: true
+        bind:
+          selinux: z
       # The allowlist provisioning reads, so the two cannot disagree: a line
       # the runner does not hold would load an import that fails every run
       # (review pass 1). The runner reads it at start, so recreate it after an
