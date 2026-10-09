@@ -196,6 +196,8 @@ x-tier-postgres: &tier-postgres
     interval: 5s
     timeout: 5s
     retries: 12
+  # Back after a reboot with the tier's servers (SMD-2760).
+  restart: unless-stopped
 
 # The migrator image compose.yaml builds (db/Dockerfile — the ob1-migrate image
 # the release job publishes, SMD-1860), one build shared by the three tiers.
@@ -501,6 +503,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
     logging: *logging
 
   ollama-pull:

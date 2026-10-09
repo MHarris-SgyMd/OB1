@@ -384,6 +384,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    # As the servers': with none, a reboot would bring the servers back
+    # (Docker, or podman with its restart unit) without the database they
+    # read (SMD-2760; deploy/README.md, "After a reboot").
+    restart: unless-stopped
     logging: *logging
 
   # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
@@ -1031,6 +1035,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    # The server embeds through it, so it comes back with the server (SMD-2760).
+    restart: unless-stopped
     logging: *logging
 
   # Pulls the two models — more when OB1_JUDGE_MODEL or
