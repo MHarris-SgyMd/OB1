@@ -550,7 +550,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   for (const id of [7, "", "x".repeat(201), "a\u0000b", "\ud800", "has space", "é"]) {
     const withId = JSON.stringify({ text: "t", id });
     r = await deliver(on, withId, sign(withId));
-    assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is no string of 1 to 200 characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
+    assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is not 1 to 200 printable ASCII characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
   }
   calls.length = 0;
   r = await deliver(hookApp("example", undefined), body, signed);

@@ -27,8 +27,8 @@ It is served only while `OB1_HOOKS` names the example, and reachable from outsid
 
 ```bash
 SECRET=<the example's secret in OB1_HOOK_SECRETS>
-BODY='{"id":"delivery-1","text":"from a webhook"}'
 TS=$(date +%s)
+BODY='{"id":"delivery-'"$TS"'","text":"from a webhook"}'   # a new id each run: a resent id within eleven minutes runs nothing
 SIG=$(printf %s "$TS.$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
 curl -X POST -H 'content-type: application/json' -H "x-example-timestamp: $TS" -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
 ```

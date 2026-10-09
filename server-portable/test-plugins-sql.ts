@@ -305,32 +305,56 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   assert(taken.status === 202 && (await captures(orphanText)) === 1 && recorded?.thought_id === takenBody.id, `past it, the retry takes the claim and captures (${taken.status}, recorded ${recorded?.thought_id})`);
   const fresh = await one<{ fresh: boolean }>(sql`SELECT claimed_at > now() - interval '1 minute' AS fresh FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-orphan`}`);
   assert(fresh?.fresh === true, "the claim taken is dated afresh: its lease and its window start again");
-  // A capture that fails gives its claim back, on this database: the
-  // example's hook run over the plugin's real table, its core's capture
-  // throwing. The release matches its own claim's time, kept to the
-  // microsecond, so the sender's retry is not refused.
+  // The example's hook run over the plugin's real table, its core's capture
+  // scripted: the claim's release and record as Postgres holds them, not as
+  // test-plugins' stand-in table does.
   const { enabledHooks, loadPlugins, runHook } = await import("./core/plugins.ts");
+  const { ok: coreOk } = await import("./core/refusal.ts");
   const { SqlStore } = await import("./store-sql.ts");
   const store = new SqlStore(URL_, { max: 1, pluginPassword: PLUGIN_PW });
-  const failing = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : async () => { throw new Error("embedder down"); }) }) as never;
   const [hook] = enabledHooks(loadPlugins("example"), "example");
-  const failText = JSON.stringify({ id: `evt-${RUN}-fail`, text: "a capture whose embedder is down" });
-  const ts = Math.floor(Date.now() / 1000);
-  let thrown = "";
+  const rowOf = async (id: string) => one<{ thought_id: string | null; claimed_at: string } | undefined>(sql`SELECT thought_id::text, claimed_at::text FROM plugin_example.deliveries WHERE id = ${id}`);
+  /** One signed delivery of `id` through the hook, its capture `capture`: the answer, or the message it threw. */
+  const viaHook = async (id: string, capture: () => Promise<unknown>) => {
+    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : capture) }) as never;
+    const text = JSON.stringify({ id, text: `smd2755: ${id}` });
+    const ts = Math.floor(Date.now() / 1000);
+    try {
+      return await runHook(hook, { core: scripted, secret: HOOK_SECRET }, {
+        headers: { "x-example-timestamp": String(ts), "x-example-signature": hmacSha256Hex(HOOK_SECRET, `${ts}.${text}`) },
+        query: {},
+        body: new TextEncoder().encode(text),
+        text,
+      });
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
   try {
-    await runHook(hook, { core: failing, secret: HOOK_SECRET }, {
-      headers: { "x-example-timestamp": String(ts), "x-example-signature": hmacSha256Hex(HOOK_SECRET, `${ts}.${failText}`) },
-      query: {},
-      body: new TextEncoder().encode(failText),
-      text: failText,
+    // A capture that throws gives its claim back, matched to the microsecond, so the sender's retry runs.
+    const failId = `evt-${RUN}-fail`;
+    const thrown = await viaHook(failId, async () => { throw new Error("embedder down"); });
+    assert(thrown === "embedder down" && (await rowOf(failId)) === undefined, `a capture that throws gives its claim back (${JSON.stringify(thrown)})`);
+    // One that throws after a retry took its claim past the lease leaves the retry's claim alone.
+    const takenId = `evt-${RUN}-taken`;
+    const retaken = await viaHook(takenId, async () => {
+      await sql`UPDATE plugin_example.deliveries SET claimed_at = now() + interval '1 second' WHERE id = ${takenId}`;
+      throw new Error("timed out after the lease");
     });
-  } catch (e) {
-    thrown = (e as Error).message;
+    const left = await rowOf(takenId);
+    assert(retaken === "timed out after the lease" && left !== undefined && left.thought_id === null, `a first attempt failing after a retry took its claim leaves the retry's claim standing (${JSON.stringify(left)})`);
+    // A capture that outlived the prune is recorded all the same: the record is an upsert.
+    const prunedId = `evt-${RUN}-pruned`;
+    const thought = crypto.randomUUID();
+    const answered = await viaHook(prunedId, async () => {
+      await sql`DELETE FROM plugin_example.deliveries WHERE id = ${prunedId}`;
+      return coreOk({ id: thought });
+    });
+    const recorded = await rowOf(prunedId);
+    assert(typeof answered === "object" && answered.status === 202 && recorded?.thought_id === thought, `a capture whose claim was pruned meanwhile is recorded, and answered 202 (${JSON.stringify(answered)}, ${JSON.stringify(recorded)})`);
   } finally {
     await store.close();
   }
-  const failLeft = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-fail`}`);
-  assert(thrown === "embedder down" && failLeft.n === 0, `a capture that throws gives its claim back (${thrown || "no throw"}, ${failLeft.n} left)`);
 }
 
 console.log("\n[7] The plugin's handle: its own table, named bare; a core table refused by Postgres");
