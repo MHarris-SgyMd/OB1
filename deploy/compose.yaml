@@ -78,8 +78,12 @@ x-plugin-env: &plugin-env
 # first proposed: the socket is root on the host, and the proxy is the one
 # process a client on the network reaches — docs/orchestration-tool.md declined
 # the same socket for n8n. So adding a service is two edits in this file, the
-# service and its router here, and a third in check 28's PROXY_ROUTE_TABLE
-# (scripts/check-fork-consistency.ts), which holds this table byte for byte.
+# service and its router here, and in check 28 of
+# scripts/check-fork-consistency.ts its router in PROXY_ROUTE_TABLE, which
+# holds this table byte for byte, its mesh name in SERVICE_NETWORKS, which
+# holds who answers to each name, and its keys, mounts, build, confinement and
+# named volumes in SERVICE_KEYS, SERVICE_MOUNTS, SERVICE_BUILDS, CONFINEMENT
+# and COMPOSE_VOLUMES; the proxy itself is PROXY_SERVICE there (SMD-2685).
 #
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
