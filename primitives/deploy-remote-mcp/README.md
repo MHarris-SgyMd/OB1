@@ -37,7 +37,7 @@ Once per checkout:
 (cd extensions && bun install)
 ```
 
-`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server has no `node_modules` of its own and resolves the same install through `NODE_PATH=extensions/node_modules`, as its README's run line shows.
+`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server resolves the same install through `integrations/node_modules` or `recipes/node_modules`, committed links to `../extensions/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 
@@ -127,7 +127,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Something holds the port. `PORT` unset is 8000, the core server's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the clients the new URL.
 
 **`Cannot find package 'hono'` (or `zod`, `@hono/mcp`)**
-- Step 2 was skipped: `(cd extensions && bun install)`. For an integration or recipe server, add `NODE_PATH=extensions/node_modules` to the command, as its README shows.
+- Step 2 was skipped: `(cd extensions && bun install)`. An integration or recipe server needs the same install; it finds it through the `node_modules` link in `integrations/` or `recipes/`.
 
 **401 on every request**
 - The URL or header must carry the **key**, the environment its **hash**. An entry that is not `name:read|write|capture|forward:<64 hex characters>` is ignored, and the vendored servers do not log it (a `capture` or `forward` key, well formed, is no key to them either — they admit read and write): check each entry is three fields, the scope lower-case, the digest 64 hex characters. `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem.

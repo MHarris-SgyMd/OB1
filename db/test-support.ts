@@ -600,13 +600,12 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The MCP stack — the four packages extensions/package.json installs for the
  * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
- * holds server-portable's and the Kubernetes image's package.json to them, and
- * both extension loaders (test-auth, test-writes) rewrite exactly these bare
- * names to that install. A name added here alone reaches every reader.
+ * holds server-portable's and the Kubernetes image's package.json to them. The
+ * recipes and integrations reach that install through the committed
+ * recipes/node_modules and integrations/node_modules links (SMD-1991). A name
+ * added here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
-/** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
-export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
 
 /**
  * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2
