@@ -891,7 +891,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { ago, boardSyncValue, brainInfo, formatBytes, heartbeatState, ledgerStatus, parseHeartbeats, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { ago, boardPairsValue, boardSyncValue, brainInfo, deniedObject, formatBytes, heartbeatState, ledgerStatus, newProgress, snapshotFacts, parseHeartbeats, parseHnswOptions, proposalsValue, readDatabaseFacts, relationsValue, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -914,6 +914,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let answerLedger = false;
   const answer = (text: string): unknown[] => {
     statements.push(text);
+    if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
     if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
     if (/FROM schema_migrations/.test(text)) {
       if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
@@ -923,20 +924,35 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/server_version/.test(text)) {
       return [{
         postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
-        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true },
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true },
         anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public" },
         hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
+        tickets_linked: catalogLinked,
       }];
     }
     if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
     if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
     if (/LIKE 'heartbeat:%'/.test(text)) return heartbeatRows;
+    if (/NOT consolidation_tickets_linked/.test(text)) {
+      if (boardTimeout) throw pgError("canceling statement due to statement timeout", "57014");
+      return [{ n: /FROM supersession_proposals/.test(text) ? proposalsAnswer.board_pairs : 11 }];
+    }
+    if (/FROM supersession_proposals/.test(text)) return [proposalsAnswer];
+    if (/FROM thought_facets/.test(text)) return [relationsAnswer];
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
+    if (lockThoughts && /FROM thoughts\b/.test(text) && /count\(\*\)::float8/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
   let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
   let heartbeatRows: unknown[] = [];
+  let lockThoughts = false;
+  let catalogLinked = true;
+  let boardTimeout = false;
+  let lockFacets = false;
+  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  let failRelease: RegExp | null = null;
+  let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   const slow = new Set<string>();
   const tag = (strings: TemplateStringsArray) => {
     const text = strings.join("?");
@@ -952,8 +968,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const tx = Object.assign(tag, {
     savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => {
       if (savepointMs) await Bun.sleep(savepointMs);
+      const before = statements.length;
       const r = await fn(tag);
       if (releaseMs) await Bun.sleep(releaseMs);
+      if (failRelease && statements.slice(before).some((t) => failRelease!.test(t))) throw pgError("server closed the connection unexpectedly", "08006");
       return r;
     },
   });
@@ -987,6 +1005,128 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   boardAnswer = "2026-09-24T12:00:00.000Z";
   assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
     `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
+  // What consolidation found (SMD-2680): the queue on the lean read too, for
+  // preflight's proposals row; the standing relations with the counts only.
+  // The board pairs are read where 079's function is there — two reads of
+  // their own — and not otherwise: null, with no entry in unread.
+  catalogLinked = false;
+  statements.length = 0;
+  const noRule = await readDatabaseFacts(fake);
+  catalogLinked = true;
+  const without = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  statements.length = 0;
+  await readDatabaseFacts(fake);
+  const withRule = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  assert(without === 0 && withRule === 2 && noRule.proposals?.pending === 6 && noRule.proposals?.boardPairs === null && noRule.relations?.boardPairs === null && !Object.keys(noRule.unread).some((k) => /boardPairs/.test(k)),
+    `the board pairs read 079's rule when the catalog has it — two reads — and are null, unnamed, without it (${without}, ${withRule}, ${JSON.stringify(noRule.proposals)})`);
+  // An empty queue and no standing relation pair nothing: neither board
+  // statement is sent, so a refusal of 079's predicate cannot speak for them
+  // (run-it, review pass 4).
+  proposalsAnswer = { pending: 0, stale: 2, oldest_s: null, board_pairs: 4 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  boardTimeout = true;
+  statements.length = 0;
+  const emptyQueue = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  assert(emptyQueue.proposals?.boardPairs === 0 && emptyQueue.relations?.boardPairs === 0 && !Object.keys(emptyQueue.unread).some((k) => /boardPairs/.test(k)) && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `an empty queue and no relation send no board statement and count none (${JSON.stringify(emptyQueue.proposals)}, ${JSON.stringify(emptyQueue.unread)})`);
+  // …and under a refused lock on thoughts, or at a deadline, an empty queue
+  // still reads 0 with no entry, and a queue not read leaves no board entry
+  // beside its own (review pass 5).
+  proposalsAnswer = { pending: 0, stale: 0, oldest_s: null, board_pairs: 0 };
+  lockThoughts = true;
+  const emptyLocked = await readDatabaseFacts(fake);
+  lockThoughts = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  // At a deadline in the queue's board read, with no relation standing, the
+  // snapshot names the queue's board count and settles the relations' to 0.
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  hang.add("NOT consolidation_tickets_linked");
+  const dlProgress = newProgress();
+  void readDatabaseFacts(fake, {}, dlProgress);
+  await Bun.sleep(200);
+  const dl = snapshotFacts(dlProgress)!;
+  hang.delete("NOT consolidation_tickets_linked");
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  proposalsAnswer = { pending: 1, stale: "x", oldest_s: 1, board_pairs: 0 };
+  const parentLost = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(emptyLocked.proposals?.boardPairs === 0 && !("proposals.boardPairs" in emptyLocked.unread) && dl.unread["proposals.boardPairs"]?.reason === "deadline" && dl.relations?.boardPairs === 0 && !("relations.boardPairs" in dl.unread)
+      && parentLost.proposals === null && !("proposals.boardPairs" in parentLost.unread),
+    `an empty queue under a lock reads 0, unnamed; a deadline names a board count only beside a read queue; a queue not read leaves no board entry (${JSON.stringify(emptyLocked.proposals)}, ${JSON.stringify(Object.keys(dl.unread))}, ${JSON.stringify(Object.keys(parentLost.unread))})`);
+  // A board read that times out takes its count alone: the queue and the
+  // relations stand (run-it, review pass 2: at ~45k pending the one statement
+  // passed the health cap and the whole queue went unread).
+  boardTimeout = true;
+  const slowBoard = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  assert(slowBoard.proposals?.pending === 6 && slowBoard.proposals?.boardPairs === null && slowBoard.unread["proposals.boardPairs"]?.reason === "timeout"
+      && slowBoard.relations?.related === 9 && slowBoard.relations?.boardPairs === null && slowBoard.unread["relations.boardPairs"]?.reason === "timeout" && !("proposals" in slowBoard.unread),
+    `a board-pair read that times out leaves the queue and the relations read (${JSON.stringify(slowBoard.proposals)}, ${JSON.stringify(Object.keys(slowBoard.unread))})`);
+  statements.length = 0;
+  const leanFindings = await readDatabaseFacts(fake, { stats: false });
+  assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
+      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
+    `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
+  const qShapes = [
+    { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },
+    { pending: -1, stale: 0, oldest_s: null }, { pending: 1.5, stale: 0, oldest_s: 1 }, { pending: 1, stale: "x", oldest_s: 1 }, { pending: 1, stale: 0, oldest_s: "soon" }, undefined,
+  ].map((r) => { try { return JSON.stringify(proposalsValue(r)); } catch { return "threw"; } });
+  assert(qShapes.join("|") === '{"pending":0,"stale":0,"oldestPendingS":null,"boardPairs":null}|{"pending":3,"stale":0,"oldestPendingS":13,"boardPairs":null}|{"pending":0,"stale":1,"oldestPendingS":null,"boardPairs":null}|{"pending":1,"stale":0,"oldestPendingS":0,"boardPairs":null}|threw|threw|threw|threw|threw',
+    `the queue's counts are counts and its age whole seconds, or the read did not answer (${qShapes.join("|")})`);
+  const rShapes = [{ related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: null, duplicate: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0 }, undefined]
+    .map((r) => { try { return JSON.stringify(relationsValue(r)); } catch { return "threw"; } });
+  const bShapes = [{ n: 4 }, { n: "4" }, { n: -1 }, { n: null }, {}, undefined].map((r) => { try { return String(boardPairsValue("x", r)); } catch { return "threw"; } });
+  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"boardPairs":null}|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
+    `the relations' and the board pairs' counts are counts, or the read did not answer (${rShapes.join("|")} / ${bShapes.join("|")})`);
+  proposalsAnswer = { pending: 1, stale: "two", oldest_s: 1, board_pairs: 0 };
+  const oddQueue = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(oddQueue.proposals === null && oddQueue.unread.proposals?.reason === "error" && oddQueue.counts?.thoughts === 7,
+    `a queue answer that is not counts is unread, the other facts read (${JSON.stringify(oddQueue.unread.proposals)})`);
+  // A table whose lock a read of it alone was refused is not waited on again
+  // in the same read (SMD-2680): the watermark and the two board counts touch
+  // thoughts, and none is sent once its count was refused; the queue and the
+  // relations, which do not, stand.
+  lockThoughts = true;
+  statements.length = 0;
+  const lockProgress = newProgress();
+  const lockedOut = await readDatabaseFacts(fake, {}, lockProgress);
+  lockThoughts = false;
+  // …and leaves nothing pending, so a deadline after it cannot rename it (run-it, review pass 1).
+  assert(lockProgress.pending.size === 0, `a read not tried leaves nothing pending (${[...lockProgress.pending].join(", ")})`);
+  const skipped = ["boardSync", "relations.boardPairs", "proposals.boardPairs"].filter((f) => lockedOut.unread[f]?.reason === "timeout" && /^not tried — a lock on thoughts \(the table or one of its indexes\) was refused/.test(lockedOut.unread[f]?.message ?? ""));
+  assert(lockedOut.unread["counts.thoughts"]?.reason === "timeout" && skipped.length === 3 && lockedOut.proposals?.pending === 6 && lockedOut.relations?.related === 9 && !statements.some((t) => /linear_updated_at|NOT consolidation_tickets_linked/.test(t)) && lockedOut.schemaVersion !== null,
+    `after a refused lock on thoughts the reads that touch it are named, not sent (${skipped.join(", ")})`);
+  // A lock refused to the relations' read (thought_facets alone) is not
+  // waited on by the queue's board count, which reads it through 079's
+  // predicate (run-it, review pass 3).
+  lockFacets = true;
+  statements.length = 0;
+  const facetsLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  assert(facetsLocked.unread.relations?.reason === "timeout" && /^not tried — a lock on thought_facets/.test(facetsLocked.unread["proposals.boardPairs"]?.message ?? "")
+      && facetsLocked.proposals?.pending === 6 && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `after a refused lock on thought_facets the queue's board count is not sent (${JSON.stringify(facetsLocked.unread["proposals.boardPairs"])})`);
+  // A board read whose release fails takes its count back (review pass 3).
+  failRelease = /NOT consolidation_tickets_linked/;
+  const boardReleaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  assert(boardReleaseFailed.proposals?.pending === 6 && boardReleaseFailed.proposals?.boardPairs === null && boardReleaseFailed.unread["proposals.boardPairs"]?.reason === "error"
+      && boardReleaseFailed.relations?.related === 9 && boardReleaseFailed.relations?.boardPairs === null && boardReleaseFailed.unread["relations.boardPairs"]?.reason === "error",
+    `a failed release after a board read leaves its count null and unread, the queue and the relations read (${JSON.stringify(boardReleaseFailed.proposals)}, ${JSON.stringify(boardReleaseFailed.relations)})`);
+  // A savepoint that fails after the findings reads wrote takes the values
+  // back: neither field is both read and unread (the `clear`s; run-it, review pass 1).
+  failRelease = /FROM supersession_proposals|FROM thought_facets/;
+  const releaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  // …and the board reads after them, finding no field to fill, send nothing and record nothing.
+  assert(releaseFailed.proposals === null && releaseFailed.unread.proposals?.reason === "error" && releaseFailed.relations === null && releaseFailed.unread.relations?.reason === "error"
+      && !("proposals.boardPairs" in releaseFailed.unread) && !("relations.boardPairs" in releaseFailed.unread),
+    `a failed release after the queue and relations reads leaves both null and unread (${JSON.stringify(releaseFailed.proposals)}, ${JSON.stringify(releaseFailed.relations)})`);
   // The workers' heartbeats (SMD-2261, PR 2) are read on preflight's lean read too.
   assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
     `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
@@ -1092,6 +1232,26 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const lostBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null, unread: { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
   assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
     `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
+  // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
+  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
+  const boardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "timeout", message: "canceling statement due to statement timeout" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const execLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "refused", message: "permission denied for function consolidation_tickets_linked" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
+  const pre079 = renderBrainInfo(await brainInfo(server, async () => planted(78, { proposals: { pending: 2, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const denied = [deniedObject("permission denied for table thoughts"), deniedObject("permission denied for function consolidation_tickets_linked"), deniedObject("canceling statement due to lock timeout")];
+  assert(JSON.stringify(denied) === '[{"kind":"table","name":"thoughts"},{"kind":"function","name":"consolidation_tickets_linked"},null]', `a refusal names its table or function (${JSON.stringify(denied)})`);
+  const noTables = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null }), 1000));
+  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const line = (t: string, label: string) => t.split("\n").find((l) => l.startsWith(label)) ?? "";
+  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\)$/m.test(readText)
+      && /^Relations: +none — migration 084 is not applied$/m.test(pre084)
+      && /^Proposals: +none pending$/m.test(quiet) && /^Relations: +none standing$/m.test(quiet)
+      && /^Proposals: +none pending; 3 stale$/m.test(staleOnly) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\)$/m.test(staleOnly)
+      && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
+      && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
+    `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,
