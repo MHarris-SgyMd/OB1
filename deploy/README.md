@@ -2298,6 +2298,16 @@ so the profile builds from a checkout.
   prints the vector count and the setting in force just before 039. On a brain
   past a million rows build the two staging indexes `CONCURRENTLY` first, as
   the migration's header says, and let it adopt them.
+- **Memory for the brain's size** (SMD-1499). The postgres service runs on the
+  image's `shared_buffers` (128MB) and `work_mem` (4MB). Preflight's `vector
+  index memory` row warns when the HNSW indexes outgrow `shared_buffers` — at
+  ten million rows, sizing it to the indexes gave about three times the
+  throughput at ten connections — and prints the size to set: `ALTER SYSTEM
+  SET shared_buffers` and a restart of postgres, where the host has the memory
+  (`deploy/.env.example` has the commands, and the way back if postgres then
+  will not start). Preflight's `filter bitmap memory` row is information only: what a
+  filter's bitmap needs against `work_mem`, with no recommendation until
+  SMD-1464 settles `match_thoughts`' plan mode.
 - **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open

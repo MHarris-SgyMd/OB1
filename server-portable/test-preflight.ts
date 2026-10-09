@@ -166,7 +166,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 23, "…twenty-three of them as the catalog-only skip (061's lineage, the workers' heartbeats, the proposal queue and the plugin tables among them), the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 25, "…twenty-five of them as the catalog-only skip (061's lineage, the workers' heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -735,6 +735,43 @@ else {
   await tamper.close();
   assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
          "…and dropped, the claim functions are the shipped four, said as such");
+
+  /**
+   * SMD-1499: the server sized for the table. On this small fixture both rows
+   * are ok. `filter bitmap memory` is information only: a thoughts heap past
+   * what a lowered work_mem's bitmap covers is still an ok row, saying the
+   * routing count's bitmap goes lossy at little cost and pointing at SMD-1464,
+   * with nothing recommending a larger work_mem. The heap here is under 037's
+   * gate (8,192 pages), so the broadest filter may touch every page; the
+   * fixture's own heap is empty, so its row says no filter builds a bitmap.
+   * shared_buffers cannot be lowered for one database (it is the
+   * postmaster's), so the index row's warning is held by test-schema on
+   * memoryRows' wording, and here only as ok.
+   */
+  const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) of its pages: its routing count's bitmap/;
+  assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
+         && /✓\s+filter bitmap memory\s+the thoughts heap is empty, so no filter builds a bitmap\. Information only/.test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and an empty heap builds no bitmap, said as information");
+  {
+    // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
+    // 6,000 of them fill ~1,500 heap pages: past the 1,024 that 64 kB of
+    // work_mem covers at 64 bytes each, with room if a column shifts the fit.
+    const sizing = new SQL({ url: LIVE, max: 1 });
+    try {
+      await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 6000) i`);
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '64kB'); END $s$`);
+      const lowered = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      const pages = Number(ungatedRow.exec(lowered.out)?.[1]?.replace(/,/g, "") ?? NaN);
+      assert(lowered.code === 0 && pages > 1024
+             && new RegExp(`${ungatedRow.source} \\(\\d+ kB\\) passes work_mem \\(64 kB\\) and goes lossy, which costs little: under LIMIT v_exact \\+ 1 it rechecks pages only until it has its rows\\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle`).test(lowered.out)
+             && !/Set work_mem|SET work_mem/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap is information, not a warning: the routing count's lossy bitmap costs little, SMD-1464 named, no work_mem recommended (${pages} pages; exit ${lowered.code})`);
+    } finally {
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
+      await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);
+      await sizing.close();
+    }
+  }
 
   /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later

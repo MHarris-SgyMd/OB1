@@ -146,6 +146,32 @@ trap 'exit 143' TERM
 # ordinary backend memory and needs no /dev/shm at all.
 SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 
+# Server settings for the run, as the postgres command line takes them:
+#   OB1_PG_ARGS="-c shared_buffers=4GB -c work_mem=64MB" ./with-postgres.sh bun bench-hnsw.ts
+# so a bench can measure the server sized for the table beside the image's
+# defaults (SMD-1499). Only `-c name=value` pairs, each checked: a name of
+# letters, digits, '_' and '.', a value of letters, digits, '_', '.' and '-'.
+# Under OB1_PG_KEEP the container is a fresh one on the kept volume, so a run
+# takes the settings named now, whatever an earlier run was given.
+PG_ARGS=()
+PG_WORDS=()
+if [ -n "${OB1_PG_ARGS:-}" ]; then
+  read -r -a PG_WORDS <<< "$OB1_PG_ARGS"
+fi
+if [ ${#PG_WORDS[@]} -gt 0 ]; then
+  if [ $(( ${#PG_WORDS[@]} % 2 )) -ne 0 ]; then
+    echo "OB1_PG_ARGS must be '-c name=value' pairs, got: $OB1_PG_ARGS" >&2
+    exit 2
+  fi
+  for ((i = 0; i < ${#PG_WORDS[@]}; i += 2)); do
+    if [ "${PG_WORDS[i]}" != "-c" ] || ! [[ "${PG_WORDS[i + 1]}" =~ ^[A-Za-z_][A-Za-z0-9_.]*=[A-Za-z0-9_.-]+$ ]]; then
+      echo "OB1_PG_ARGS must be '-c name=value' pairs (name: letters, digits, '_', '.'; value: letters, digits, '_', '.', '-'), got: $OB1_PG_ARGS" >&2
+      exit 2
+    fi
+  done
+  PG_ARGS=(postgres "${PG_WORDS[@]}")
+fi
+
 MOUNT_ARGS=()
 VOLUME_NOTE=""
 if [ -n "$KEEP" ]; then
@@ -203,7 +229,8 @@ CID="$("$RUNTIME" create --name "$NAME" \
   -p "$PORT:5432" \
   --shm-size "$SHM_SIZE" \
   ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
-  "$IMAGE")"
+  "$IMAGE" \
+  ${PG_ARGS[@]+"${PG_ARGS[@]}"})"
 "$RUNTIME" start "$CID" >/dev/null
 STARTED=1
 

@@ -163,13 +163,26 @@ best-effort. When `query_log` is present the check names it and whether
 `OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
-cites a returned id logs no cite row there (SMD-1719). Over PostgREST every
+cites a returned id logs no cite row there (SMD-1719). `vector index memory` and
+`filter bitmap memory` (SMD-1499): the server sized for the table. The first
+is a warning, since a managed platform may not let the operator change the
+setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
+`shared_buffers`, with the size to set and the statement that sets it. The OS
+page cache serves a walk too, but measured at ten million rows it gave ten
+connections about a third of the throughput. The second is information only:
+the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
+under 037's gate, at least 1 − 1/e of them for a filter at its boundary above it, more on a heap under ten times v_exact pages)
+against `work_mem`, and a generic-plan walk's over the whole heap. A lossy
+routing count costs little under its LIMIT, and whether `match_thoughts` takes
+a generic plan is SMD-1464's to settle, so it recommends nothing.
+`db/config.mjs`'s `memorySizing` holds the arithmetic.
+Over PostgREST every
 direct-connection check — this one included — prints a row: six are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid
 search`, `search signatures`, `edit signature`, `delete signature`), five say
-what catalog fact they would have read, and the sixteen catalog-only ones say
+what catalog fact they would have read, and the catalog-only ones say
 they have no PostgREST form (change 97's first review pass; before it those
-sixteen printed nothing on that path).
+printed nothing on that path).
 
 ## Choosing a data layer
 

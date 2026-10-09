@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2627 assertions: 2627 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2644 assertions: 2644 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-five (85) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -2914,6 +2914,11 @@ OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts   # section F: under lo
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
+# Server settings for a run (SMD-1499): `-c name=value` pairs handed to
+# postgres, each checked before the container starts. SMD-1499's sized runs
+# set shared_buffers to the HNSW indexes' size this way.
+OB1_PG_ARGS="-c shared_buffers=1GB -c work_mem=16MB" OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts
+
 # Before/after a redefinition of match_thoughts, from one tree: the after
 # arm's schema stops at the named migration (the function before 040 here;
 # 038 for the function before 039, 037 for the one before 038). Not with
@@ -3828,8 +3833,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2627 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1189 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2644 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1190 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
