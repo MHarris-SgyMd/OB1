@@ -1040,6 +1040,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
   const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
   assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  // The sleep scheduler's row (SMD-1794): read as board-sync's is, with no job.
+  const slept = parseHeartbeats([
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true }), at, age_s: 30 },
+    { key: "heartbeat:sleep:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, job: "x" }), at, age_s: 1 },
+  ]);
+  assert(slept.heartbeats.length === 1 && slept.ignored === 2 && slept.heartbeats[0].worker === "sleep" && slept.heartbeats[0].job === null && slept.heartbeats[0].running === true,
+    `heartbeat:sleep is read with no job, and one carrying a job, in its key or its value, is not (${slept.heartbeats.length}, ${slept.ignored})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
@@ -2403,6 +2411,189 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   const kindOf = (url: string) => { try { return edgeModule.presentedKind(new RuntimeUrl(url)); } catch (e) { return `threw ${(e as Error).message}`; } };
   const kinds = [kindOf("http://x:99999/mcp?key="), kindOf("/mcp")];
   assert(kinds.join() === "key,none", `presentedKind under a URL that will not parse: an empty ?key= is a key client, none is none (${kinds.join()})`);
+}
+
+console.log("\n[21] One JSON line per request, from an allow-list: the method, the tool, the key's name, how it ended — never the URL, the key or the arguments (SMD-1849)");
+{
+  const { outcomeOf, requestLine, useRequestLog } = await import("./telemetry.ts");
+  const cells: [number, string | undefined, string][] = [[200, undefined, "ok"], [202, undefined, "ok"], [404, "NO_ROUTE", "refused"], [503, "BUSY", "refused"],
+    [501, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "refused"], [503, "STORE_UNAVAILABLE", "error"], [500, "FAILED", "error"], [500, undefined, "error"]];
+  const wrong = cells.filter(([s, c, want]) => outcomeOf(s, c) !== want);
+  assert(wrong.length === 0, `an answer's outcome: a fault's 5xx (or a codeless one) \`error\`, any other 4xx or 5xx \`refused\`, else \`ok\` (wrong: ${JSON.stringify(wrong)})`);
+  const at = new Date("2026-10-08T00:00:00.000Z");
+  const ORDER = ["ts", "door", "method", "route", "rpc", "tool", "agent", "status", "outcome", "code", "ms", "bytes"];
+  const full = JSON.parse(requestLine({ door: "mcp", method: "POST", route: "/v1/thoughts/:id", rpc: "tools/call", tool: "capture_thought", agent: "laptop", status: 200, outcome: "refused", code: "NOT_FOUND", ms: 12.4, bytes: 30 }, at)) as Record<string, unknown>;
+  assert(JSON.stringify(Object.keys(full)) === JSON.stringify(ORDER) && full.ts === at.toISOString() && full.ms === 12 && full.tool === "capture_thought" && full.code === "NOT_FOUND",
+    `every field in its place, ts first, numbers whole (${JSON.stringify(full)})`);
+  const odd = JSON.parse(requestLine({
+    door: "the private door" as never, method: "BREW", route: "/v1/thoughts?key=the-key", rpc: "x/the private thought", tool: "the private thought", agent: "laptop\n{\"forged\":1}",
+    status: -200, outcome: "maybe" as never, code: "the private code", ms: -3, bytes: Number.POSITIVE_INFINITY,
+    ...({ url: "http://brain/mcp?key=the-key", query: "the private thought" } as object),
+  } as never, at)) as Record<string, unknown>;
+  assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
+    `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
+    "…the agent's name held to printable ASCII (a line break is `?`); a field the record does not declare is not written");
+
+  // Through the server: the key in ?key=, a search whose text is planted, a
+  // tool that is no tool, a real tool's input the SDK refuses, no key at all.
+  const said: string[] = [];
+  const previous = useRequestLog((l) => said.push(l));
+  const PLANTED = "planted-words-in-a-query";
+  try {
+    const send = async (body: object, path = `/mcp?key=${KEY}`) => {
+      const r = await fetch(`${BASE}${path}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(body) });
+      await r.text();
+    };
+    await send({ jsonrpc: "2.0", id: 71, method: "tools/call", params: { name: "search_thoughts", arguments: { query: PLANTED } } });
+    await send({ jsonrpc: "2.0", id: 72, method: "tools/call", params: { name: `no_such_tool\n${PLANTED}`, arguments: {} } });
+    await send({ jsonrpc: "2.0", id: 73, method: "tools/call", params: { name: "search_thoughts", arguments: { query: 5 } } });
+    await send({ jsonrpc: "2.0", id: 74, method: "tools/call", params: { name: "brain_info", arguments: {} } });
+    await send({ jsonrpc: "2.0", id: 75, method: "tools/list" }, `/mcp?key=wrong-${PLANTED}`);
+    for (let i = 0; i < 50 && said.length < 5; i++) await Bun.sleep(20); // a stream's line is written as it ends
+  } finally {
+    useRequestLog(previous);
+  }
+  const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert(lines.length === 5, `five requests, five lines (${said.length})`);
+  const [search, noTool, badInput, info, noKey] = lines;
+  assert(search?.door === "mcp" && search.rpc === "tools/call" && search.tool === "search_thoughts" && search.agent === "MCP_ACCESS_KEY" && search.status === 200
+    && search.outcome === "error" && search.code === "FAILED" && typeof search.bytes === "number" && (search.bytes as number) > 0,
+    `a search with no store: the tool, the key's name, \`error\` with its code, the bytes it answered (${said[0]})`);
+  assert(noTool?.tool === "?" && noTool.outcome === "unrun", `a tool that is no tool is \`?\`, and never ran (${said[1]})`);
+  assert(badInput?.tool === "search_thoughts" && badInput.outcome === "unrun", `an input the SDK refuses: the tool named, never run (${said[2]})`);
+  assert(info?.tool === "brain_info" && info.outcome === "ok" && !("code" in info), `a tool that answers is \`ok\` (${said[3]})`);
+  assert(noKey?.rpc === "tools/list" && noKey.outcome === "refused" && noKey.code === "UNAUTHORIZED" && !("agent" in noKey), `a key that does not authenticate: refused, no one named (${said[4]})`);
+  const all = said.join("\n");
+  assert(!all.includes(KEY) && !all.includes(PLANTED) && !all.includes("?key") && !all.includes("/mcp"), "no key, no query text, no URL in any line");
+  assert(lines.every((l) => Object.keys(l).every((k) => ORDER.includes(k))), "no key outside the allow-list");
+  assert(noKey?.status === 200, `…and its status is the envelope's 200 (${said[4]})`);
+
+  // Exactly one line, never zero and never two, however the request ends —
+  // each case collected apart, and given time for anything late to arrive.
+  type Timing = { intervalMs: number; maxMs: number };
+  const { useKeepaliveTiming } = await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing };
+  const { agents } = await import("./root.ts");
+  const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
+    const got: string[] = [];
+    const before = useRequestLog((l) => got.push(l));
+    try {
+      await run();
+      await Bun.sleep(settleMs);
+    } finally {
+      useRequestLog(before);
+    }
+    return got.map((l) => JSON.parse(l) as Record<string, unknown>);
+  };
+  const post = (body: object, init: RequestInit = {}) =>
+    fetch(`${BASE}/mcp`, { method: "POST", headers: AUTH, body: JSON.stringify(body), ...init }).then((r) => r.text());
+  const callOf = (name: string, args: object, id = 80) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+
+  const refusal = await linesOf(() => post(callOf("job_status", { job_id: crypto.randomUUID() })));
+  assert(refusal.length === 1 && refusal[0]?.outcome === "refused" && refusal[0].code === "NOT_FOUND" && refusal[0].tool === "job_status",
+    `a refusal as a value is \`refused\` with its code (${JSON.stringify(refusal)})`);
+
+  const batch = await linesOf(() => post([callOf("brain_info", {}, 81), callOf("search_thoughts", { query: "batched" }, 82)]));
+  assert(batch.length === 1 && batch[0]?.rpc === "batch" && !("tool" in batch[0]) && batch[0].outcome === "error" && batch[0].code === "FAILED",
+    `a batch is one line, \`batch\`, naming no tool, with its worst call's outcome and code — not the first call's name beside the last call's end (${JSON.stringify(batch)})`);
+  // A batch's calls end in whatever order they run: the worst is kept whichever ends last.
+  const { recordCall } = await import("./index.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
+  const merged = (ends: [string, string?][]) => { const r: { ended?: number; outcome?: string; code?: string } = {}; for (const [o, c] of ends) recordCall(r, o, c); return r; };
+  const worstFirst = merged([["error", "FAILED"], ["ok"], ["refused", "NOT_FOUND"]]);
+  const worstLast = merged([["ok"], ["refused", "NOT_FOUND"], ["error", "FAILED"]]);
+  const equals = merged([["refused", "NOT_FOUND"], ["refused", "REFUSED_INPUT"]]);
+  assert(worstFirst.outcome === "error" && worstFirst.code === "FAILED" && worstFirst.ended === 3 && worstLast.outcome === "error" && worstLast.code === "FAILED" && equals.code === "NOT_FOUND",
+    `the worst call's outcome and code are kept in either order, the first of equals, every call counted (${JSON.stringify([worstFirst, worstLast, equals])})`);
+  const batchUnrun = await linesOf(() => post([callOf("no_such_tool", {}, 83), callOf("brain_info", {}, 84)]));
+  assert(batchUnrun.length === 1 && batchUnrun[0]?.outcome === "unrun" && !("code" in batchUnrun[0]),
+    `a batch with a call that never ran is \`unrun\`, though another answered (${JSON.stringify(batchUnrun)})`);
+  const prompt = await linesOf(() => post({ jsonrpc: "2.0", id: 85, method: "prompts/get", params: { name: "search" } }));
+  assert(prompt.length === 1 && prompt[0]?.rpc === "prompts/get" && !("tool" in prompt[0]),
+    `a message that names something but calls no tool names no tool (${JSON.stringify(prompt)})`);
+  // A request that calls no tool says its status's outcome, so every line has one.
+  const listed = await linesOf(() => post({ jsonrpc: "2.0", id: 92, method: "tools/list" }));
+  const notAccepted = await linesOf(() => fetch(`${BASE}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json", "x-brain-key": KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 93, method: "tools/list" }) }).then((r) => r.text()));
+  assert(listed[0]?.outcome === "ok" && listed[0].status === 200 && notAccepted[0]?.outcome === "refused" && notAccepted[0].status === 406,
+    `a request with no tool call: \`ok\` at 200, \`refused\` at the transport's 406 (${JSON.stringify([listed[0], notAccepted[0]])})`);
+
+  // A client that leaves mid-stream: one `abandoned` line, and none when the tool ends after.
+  embedDelayMs = 600;
+  const left = await linesOf(async () => {
+    const aborter = new AbortController();
+    const gone = post(callOf("search_thoughts", { query: "left mid-stream" }, 86), { signal: aborter.signal }).catch(() => "left");
+    await Bun.sleep(150);
+    aborter.abort();
+    await gone;
+  }, 900);
+  assert(left.length === 1 && left[0]?.outcome === "abandoned" && left[0].tool === "search_thoughts" && left[0].status === 200,
+    `a client that leaves mid-stream: one \`abandoned\` line, none at the tool's end (${JSON.stringify(left)})`);
+
+  // A batch left after its first call answered: `abandoned`, and not that call's code beside it.
+  embedDelayMs = 600;
+  const leftBatch = await linesOf(async () => {
+    const aborter = new AbortController();
+    const r = await fetch(`${BASE}/mcp`, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify([callOf("job_status", { job_id: crypto.randomUUID() }, 90), callOf("search_thoughts", { query: "a batch left mid-stream" }, 91)]) });
+    const reader = r.body!.getReader();
+    let seen = "";
+    while (!seen.includes("NOT_FOUND")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += new TextDecoder().decode(value);
+    }
+    aborter.abort();
+    await reader.cancel().catch(() => {});
+  }, 900);
+  embedDelayMs = 0;
+  assert(leftBatch.length === 1 && leftBatch[0]?.rpc === "batch" && leftBatch[0].outcome === "abandoned" && !("code" in leftBatch[0]),
+    `a batch left after its refused call answered: \`abandoned\`, with no call's code (${JSON.stringify(leftBatch)})`);
+
+  // A call past the keepalive's ceiling: one `stalled` line, and none when it answers after.
+  embedDelayMs = 600;
+  const timing = useKeepaliveTiming({ intervalMs: 30, maxMs: 150 });
+  const { SSE_KEEPALIVE_MS: frameMs, SSE_KEEPALIVE_MAX_MS: ceilingMs } = await import("./sse.ts");
+  assert(timing.intervalMs === frameMs && timing.maxMs === ceilingMs, `the route's keepalive timing is sse.ts's defaults until a suite sets it (${JSON.stringify(timing)})`);
+  let stalled: Record<string, unknown>[] = [];
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    stalled = await linesOf(() => post(callOf("search_thoughts", { query: "past the ceiling" }, 87)), 300);
+  } finally {
+    useKeepaliveTiming(timing);
+    console.warn = realWarn;
+    embedDelayMs = 0;
+  }
+  assert(stalled.length === 1 && stalled[0]?.outcome === "stalled" && (stalled[0].ms as number) < 600,
+    `a call past the ceiling: one \`stalled\` line at the ceiling, none when it answers (${JSON.stringify(stalled)})`);
+
+  // The registry's answer: a throw is one 500 `error` line, a revocation one `refused` line — each naming the key, and the call.
+  const registry = agents();
+  const resolve = registry.resolve.bind(registry);
+  let thrown: Record<string, unknown>[] = [];
+  let revoked: Record<string, unknown>[] = [];
+  const realError = console.error;
+  try {
+    console.error = () => {};
+    registry.resolve = async () => { throw new Error("the registry threw"); };
+    thrown = await linesOf(() => post(callOf("brain_info", {}, 88)));
+    registry.resolve = async () => ({ status: "revoked", agentId: "agent-r", revokedAt: "2026-10-08T00:00:00.000Z", reason: null });
+    revoked = await linesOf(() => post(callOf("brain_info", {}, 89)));
+  } finally {
+    registry.resolve = resolve;
+    console.error = realError;
+  }
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === "MCP_ACCESS_KEY",
+    `a throw in the route: one 500 \`error\` line, by the key's name (${JSON.stringify(thrown)})`);
+  assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
+    `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
+
+  // The bytes are the body's, keepalive frames apart.
+  const { withSseKeepalive } = await import("./sse.ts");
+  let counted: number | undefined;
+  const payload = new TextEncoder().encode("data: {\"result\":1}\n\n");
+  const slow = new ReadableStream<Uint8Array>({ async start(c) { await Bun.sleep(120); c.enqueue(payload); c.close(); } });
+  const kept = withSseKeepalive(new Response(slow, { headers: { "content-type": "text/event-stream" } }), { intervalMs: 20, onEnd: (b) => { counted = b; } });
+  const received = (await kept.arrayBuffer()).byteLength;
+  assert(received > payload.byteLength && counted === payload.byteLength, `bytes counts the body (${counted}), not the keepalive frames sent beside it (${received} received)`);
 }
 
 server.stop();

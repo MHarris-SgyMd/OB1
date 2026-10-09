@@ -318,9 +318,20 @@
  *      each file's networks, and who joins them under which names, exactly as
  *      held; each rule is the only catch of one of its probes (what the files
  *      make together, CI's "The proxy loads only the held route tables")
+ *  29. every service deploy/compose.yaml defines has its x-logging bound —
+ *      the json-file driver with a max-size and a max-file — as its
+ *      `logging:`, value for value (the file writes `logging: *logging`), so
+ *      no container's log grows until the disk is full (SMD-1849; the tiers
+ *      file is check 27's)
+ *  30. no Go template in the tree names a port binding's address field —
+ *      `.HostIp` is docker's struct field and `.HostIP` podman's, so an
+ *      `inspect -f` template naming either fails under the other CLI
+ *      (SMD-2677); the address is read from the binding's JSON, whose key
+ *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
+ *      or would track, a `{{ … }}` action at a time; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27 and 28 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28 and 29 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -5262,6 +5273,8 @@ const INDEX_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./render.ts", "*"],
     // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
     ["./oauth-edge.ts", "*"],
+    // The request's JSON line (SMD-1849): an allow-list and a sink, no store, no provider.
+    ["./telemetry.ts", "*"],
     // The core's deadlines and filter parser — its operations are reached through createCore.
     ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
     ["./core/filter.ts", new Set(["parseFilter", "withActorFilter"])],
@@ -5300,6 +5313,7 @@ const REST_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
   ["../core/index.ts", "*"],
   ["../core/refusal.ts", new Set(["failure", "ok", "refusalValue", "Refusal", "RefusalCode"])],
   ["./routes.ts", "*"], ["./openapi.ts", "*"],
+  ["../telemetry.ts", "*"],
 ]);
 const REST_ROLE: TransportRole = { imports: REST_IMPORTS, wiring: false, mustImport: "../core/index.ts" };
 const TRANSPORT_FILES = new Map<string, TransportRole>([
@@ -5909,7 +5923,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\n  # ── the proxy "]],
   ["Ollama extending the canary's server", ["  ollama:\n    image: *ollama-image\n", "  ollama:\n    extends: {service: canary-server}\n    image: *ollama-image\n"]],
   ["a hosts entry on the proxy naming a tier", ["    dns_search: [\".\"]\n", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n"]],
-  ["the proxy waiting on stable", ["    restart: unless-stopped\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n\n  # ── the shared model provider"]],
+  ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
   ["every server on another port than the routes dial", ["  PORT: \"8000\"\n", "  PORT: \"8001\"\n"]],
   ["the migrators on another embedding size than the servers", ["x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}\n", "x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-768}\n"]],
   ["every migrator told to do nothing", ["  restart: \"no\"\n\n# The host's", "  restart: \"no\"\n  command: [\"true\"]\n\n# The host's"]],
@@ -5988,8 +6002,8 @@ checkTierStack();
 //       Bun.YAML reads past them (SMD-2685); any other local tag Bun.YAML
 //       reads past as compose does, and CI renders each file against
 //       Bun.YAML's reading of it;
-//   proxy  compose.yaml's proxy is PROXY_SERVICE, its label aside (the
-//       table's): image, user, capabilities, environment, mounts, networks,
+//   proxy  compose.yaml's proxy is PROXY_SERVICE, its label (the table's)
+//       and its logging (check 29's) aside: image, user, capabilities, environment, mounts, networks,
 //       search domains, waits — so a hook, a hosts entry, a volume, another
 //       provider or a variable a deploy/.env could move is a change here too,
 //       made on purpose (SMD-2685); an overlay that carries a table mounts
@@ -6049,7 +6063,7 @@ const ROUTE_FILES = [
   ["compose.yaml", "proxy-routes", "/etc/traefik/dynamic/routes.yaml", "ob1.proxy-routes", "PROXY_ROUTE_TABLE", PROXY_ROUTE_TABLE],
   ["compose.api-public.yaml", "proxy-api-route", "/etc/traefik/dynamic/api.yaml", "ob1.proxy-api-route", "API_ROUTE_TABLE", API_ROUTE_TABLE],
 ] as const;
-/** compose.yaml's proxy as Bun.YAML reads it, its label aside (that is the table rule's). */
+/** compose.yaml's proxy as Bun.YAML reads it, its label (the table rule's) and its `logging` (check 29's, x-logging for every service) aside. */
 const PROXY_SERVICE = {
   image: "docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0",
   user: "65534:65534",
@@ -6167,7 +6181,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
   // What a file may do to the proxy: compose.yaml defines it, as PROXY_SERVICE; an overlay with a table adds that table's mount.
   if (base) {
     const diffs: string[] = [];
-    pathDiffs(JSON.parse(JSON.stringify(omitKeys(proxy, ["labels"]))), PROXY_SERVICE, "services.proxy", diffs);
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(proxy, ["labels", "logging"]))), PROXY_SERVICE, "services.proxy", diffs);
     if (diffs.length) flag("proxy", `${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — compose.yaml's proxy is check 28's PROXY_SERVICE, its label aside: a hook, a hosts entry, a volume, another provider or a variable a deploy/.env could move reaches the origin, so a change to the proxy is made there too, on purpose (SMD-2685)`);
   }
   const configs = Object.keys(isMapping(doc.configs) ? doc.configs : {});
@@ -6338,6 +6352,111 @@ function checkRouteTables() {
   if (clean) for (const rule of ROUTE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 28's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
 }
 checkRouteTables();
+
+// ── 29. Every service's log is bounded (SMD-1849) ───────────────────────────
+//
+// Docker's default json-file log is one file per container that grows until
+// the disk is full, and the servers now write a line per request
+// (server-portable/telemetry.ts). deploy/compose.yaml's x-logging names the
+// bound — the json-file driver with a max-size and a max-file — and every
+// service there names it as `logging: *logging`. The parsed value is what is
+// held, so a service added without it, or with a bound of its own, fails
+// here, and one that writes the same mapping out passes. compose.tiers.yaml is held to
+// compose.yaml's services by check 27, and the overlays define no service of
+// their own, so this file is the one to read. Parsed with Bun.YAML, as the
+// other compose checks are; probes on in-memory text.
+
+/** One unbounded log: the service (null for the file's own x-logging) and what is wrong. */
+type LogGap = [service: string | null, detail: string];
+function unboundedLogsIn(text: string): LogGap[] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: LogGap[] = [];
+  const bound = doc["x-logging"];
+  const options = isMapping(bound) ? bound.options : undefined;
+  const bounded = isMapping(bound) && bound.driver === "json-file" && isMapping(options)
+    && /^[1-9]\d*[kmg]$/.test(String(options["max-size"])) && /^[1-9]\d*$/.test(String(options["max-file"]));
+  if (!bounded) gaps.push([null, `x-logging is ${JSON.stringify(bound ?? null)}, not the json-file driver with a max-size (\`10m\`) and a max-file (\`3\`)`]);
+  for (const [service, def] of Object.entries(doc.services)) {
+    const logging = isMapping(def) ? def.logging : undefined;
+    if (logging === undefined || JSON.stringify(logging) !== JSON.stringify(bound)) gaps.push([service, `names ${logging === undefined ? "no `logging:`" : `\`logging: ${JSON.stringify(logging)}\``}, not x-logging's bound`]);
+  }
+  return gaps;
+}
+
+const LOG_GOOD = `x-logging: &logging\n  driver: json-file\n  options:\n    max-size: "10m"\n    max-file: "3"\nservices:\n  server:\n    image: x\n    logging: *logging\n`;
+/** [what, text, the services (null = x-logging) the rule reports]. */
+const LOG_PROBES: [string, string, (string | null)[]][] = [
+  ["every service bounded", LOG_GOOD, []],
+  ["a service with no logging", `${LOG_GOOD}  extra:\n    image: y\n`, ["extra"]],
+  ["a service with its own, larger bound", `${LOG_GOOD}  extra:\n    image: y\n    logging: {driver: json-file, options: {max-size: "1g", max-file: "3"}}\n`, ["extra"]],
+  ["a service with no driver at all", `${LOG_GOOD}  extra:\n    image: y\n    logging: {driver: none}\n`, ["extra"]],
+  ["x-logging with no max-size", LOG_GOOD.replace(`    max-size: "10m"\n`, ""), [null]],
+  ["x-logging with no max-file", LOG_GOOD.replace(`    max-file: "3"\n`, ""), [null]],
+  ["x-logging on the local driver", LOG_GOOD.replace("driver: json-file", "driver: local"), [null]],
+  ["no x-logging, and nothing names one", `services:\n  server:\n    image: x\n`, [null, "server"]],
+];
+
+function checkBoundedLogs() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 29 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1849)`);
+    return;
+  }
+  for (const [what, text, expected] of LOG_PROBES) {
+    const got = unboundedLogsIn(text).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 29 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of unboundedLogsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"))) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — every service names \`logging: *logging\`, so no container's log grows until the disk is full (SMD-1849)`);
+  }
+}
+checkBoundedLogs();
+
+// ── 30: no inspect template names a port binding's address field (SMD-2677) ──
+//
+// A Go template's field is the runtime's Go struct field, not the JSON key:
+// a port binding's address is `HostIp` in docker's struct and `HostIP` in
+// podman's, while both runtimes' JSON spell the key `HostIp`. deploy/canary.sh
+// read it as `{{.HostIp}}`, which the docker CLI evaluates (against podman
+// machine too) and podman's refuses: path-mode `up` ended on exit 125 under
+// --runtime podman, and a connector check lost stable's LAN address from the
+// hosts it matches. CI runs docker alone, so no job sees a template that only
+// one CLI evaluates; this does. The address comes from `{{json .}}` of the
+// binding.
+/** A `{{ … }}` action naming `.HostIp` or `.HostIP` as a field: the action may span lines, not cross its closing `}}`. */
+const HOST_IP_FIELD = /\{\{(?:[^}]|\}(?!\}))*?\.HostI[pP]/g;
+/** [text, hit] — what check 30 must catch, and what it must not. */
+const HOST_IP_PROBES: [string, boolean][] = [
+  [`inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}{{"\\n"}}{{end}}{{end}}' "$1"`, true],
+  ["podman inspect -f '{{ .HostIP }}' c", true],
+  [`{{- (index (index .HostConfig.PortBindings "80/tcp") 0).HostIp -}}`, true],
+  ["{{range $b}}{{\n  .HostIp\n}}{{end}}", true],
+  [`inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{json .}}{{"\\n"}}{{end}}{{end}}' "$1"`, false],
+  [`sed -n 's/.*"HostIp":"\\([^"]*\\)".*/\\1/p'`, false],
+  ["(b ?? []).map((x) => `${service(c)}@${x.HostIp}`)", false],
+  ["{{.HostPort}} — the field .HostIp, outside any action", false],
+];
+/** The 1-based lines of `text` where an action names the field, ascending: the line of the field itself, not of the action's `{{`. */
+function hostIpFieldsIn(text: string): number[] {
+  const lineOf = lineIndexer(text);
+  return [...new Set([...text.matchAll(HOST_IP_FIELD)].map((m) => lineOf(m.index! + m[0].length - 1)))];
+}
+function checkHostIpTemplates() {
+  for (const [probe, hit] of HOST_IP_PROBES) {
+    const n = hostIpFieldsIn(probe).length;
+    if (hit && n === 0) fail(SELF, `check 30 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 30 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const files = citationFiles();
+  if (!files.includes("deploy/canary.sh")) fail(SELF, "check 30's listing does not reach deploy/canary.sh — the listing is broken, not the tree clean");
+  for (const rel of files) {
+    for (const line of hostIpFieldsIn(readFileSync(join(ROOT, rel), "utf8"))) {
+      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/canary.sh's bound_ip does");
+    }
+  }
+}
+checkHostIpTemplates();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

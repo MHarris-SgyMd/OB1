@@ -854,9 +854,10 @@ export function extractionKey(model: string): string {
  * transport or provider error; a malformed answer is returned with
  * `malformed: true`. `max_tokens` is the output budget for the text sent
  * (SMD-1879): an answer that does not converge ends at the budget as a
- * malformed answer — visible, retryable — not at the context's end.
+ * malformed answer — visible, retryable — not at the context's end. `stop`
+ * aborts the call as the deadline does, a streamed answer's read included.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort" | "budgetTimes" | "observe">, second: { penalty?: boolean; model?: string } = {}, stop?: AbortSignal): Promise<Extraction & { runaway: boolean }> {
   // Named by the windowing, not positional booleans (second review pass).
   const { outputBudget: budget, streamAbort: stream } = w;
   // The retry dials the escalation model when given (SMD-2000), the metadata
@@ -880,7 +881,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     headers: cfg.chat.headers,
     // Always a deadline (third review pass narrowed the type): with Bun's idle
     // cut below disabled, a call without one would wait for ever.
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: stop ? AbortSignal.any([AbortSignal.timeout(timeoutMs), stop]) : AbortSignal.timeout(timeoutMs),
     // Bun's fetch has its own 300 s idle timeout, and a chat completion that
     // is not streamed is silent until it ends — so the worker's --timeout 900
     // was 300 whatever it said (measured for SMD-1879: a 330 s signal against
@@ -1121,18 +1122,21 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, base: string
  * model under RUNAWAY_PENALTY. The retry is read WHOLE, never aborted
  * (ExtractWindowing.streamAbort says why). `onCall` is told of every call
  * BEFORE it is made, so a retry that throws is still counted (third review pass).
+ * `stop` aborts the call in hand, and no call is made once it has.
  */
-async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
+async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void, stop?: AbortSignal): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
+  stop?.throwIfAborted();
   onCall();
-  const first = await extractOnce(text, cfg, timeoutMs, part, w);
+  const first = await extractOnce(text, cfg, timeoutMs, part, w, {}, stop);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
+  stop?.throwIfAborted();
   onCall();
   // The retry dials the larger model unpenalised when one is set, else the same
   // model under the penalty — the same messages either way.
   const retryW = { outputBudget: w.outputBudget, streamAbort: false };
   const second = w.escalateModel
-    ? await extractOnce(text, cfg, timeoutMs, part, retryW, { model: w.escalateModel })
-    : await extractOnce(text, cfg, timeoutMs, part, retryW, { penalty: true });
+    ? await extractOnce(text, cfg, timeoutMs, part, retryW, { model: w.escalateModel }, stop)
+    : await extractOnce(text, cfg, timeoutMs, part, retryW, { penalty: true }, stop);
   // The first call's abort rides on the thought's answer; the retry has none.
   // `escalated` names the model that answered when it was the larger one.
   return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs, ...(first.abortedBy ? { abortedBy: first.abortedBy } : {}) } : {}), retried: true, ...(w.escalateModel ? { escalated: w.escalateModel } : {}) };
@@ -1285,8 +1289,10 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
  * malformed, left out when at least one other window parsed (SMD-2260).
  * `windowing` is the
  * configuration's unless a harness measures another (evals/eval-extract-windows.ts).
+ * `stop`, the claim worker's hard stop, aborts the call in hand and sends no
+ * further window or retry: the extraction rejects with the stop's reason.
  */
-export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg)): Promise<Extraction> {
+export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg), stop?: AbortSignal): Promise<Extraction> {
   const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
   if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
   // A call always has a deadline: with Bun's idle cut disabled, an undefined
@@ -1312,7 +1318,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   try {
     if (of <= 1) {
       // The thought itself, or its cut when it is over the text bound.
-      const { runaway: _r, retried, ...one } = await extractCall(windows[0].content, cfg, deadline, undefined, windowing, onCall);
+      const { runaway: _r, retried, ...one } = await extractCall(windows[0].content, cfg, deadline, undefined, windowing, onCall, stop);
       return { ...one, retried: retried || undefined, ...(coverage ? { coverage } : {}) };
     }
     const header = windowing.header ? documentHeader(content) : undefined;
@@ -1324,7 +1330,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
     let escalatedModel: string | undefined;
     for (const w of windows) {
       const t0 = Date.now();
-      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall);
+      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall, stop);
       retriedAny ||= ex.retried;
       if (ex.escalated) escalatedModel = ex.escalated;
       parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs, ...(ex.abortedBy ? { abortedBy: ex.abortedBy } : {}) } : {}), ms: Date.now() - t0 });
