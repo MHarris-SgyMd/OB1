@@ -29,7 +29,7 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
-import { ago, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ago, deniedObject, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -273,6 +273,17 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
   };
 }
 
+/** How long a pending proposal may wait before the proposals row warns, in days (SMD-2680). */
+const PROPOSALS_WARN_DAYS = 7;
+
+/** OB1_PROPOSALS_WARN_DAYS read: whole days, 1 to 3650; the default when unset, and when not that, with the reason. */
+function proposalsWarnDays(raw: string | undefined): { days: number; problem?: string } {
+  if (raw === undefined || raw === "") return { days: PROPOSALS_WARN_DAYS };
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isInteger(n) && n >= 1 && n <= 3650) return { days: n };
+  return { days: PROPOSALS_WARN_DAYS, problem: `OB1_PROPOSALS_WARN_DAYS is ${JSON.stringify(raw.slice(0, 40))}, not whole days from 1 to 3650` };
+}
+
 // Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -282,7 +293,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -4039,7 +4050,7 @@ if (configFailed) {
         }
 
         /**
-         * An unfinished consolidation pass, and the review queue (SMD-1294).
+         * An unfinished consolidation pass (SMD-1294).
          * db/consolidate.ts is the third consumer of the claim table, under
          * keys with the consolidate: prefix (one per judge model and prompt
          * version), and its product is migration 029's proposal table. The
@@ -4047,10 +4058,8 @@ if (configFailed) {
          * row under its key is pending, leased or failed — read from the same
          * counts; "not yet in the pool" is the worker's own pool rule, the
          * thoughts WITH entities and no row under the key, since a thought
-         * without entities has no candidates and is not pooled. Pending
-         * proposals are not a defect — the pass proposes and a reviewer
-         * decides — so they ride the ok line as a count with the command that
-         * lists them, and appear on the warn line too while a pass is open.
+         * without entities has no candidates and is not pooled. The queue a
+         * pass leaves for a reviewer is the proposals row's, below (SMD-2680).
          */
         try {
           const { CONSOLIDATE_KEY_PREFIX, formatPassCounts, passUnfinished } = await import("../db/config.mjs");
@@ -4075,16 +4084,6 @@ if (configFailed) {
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               ({ work_type: string; status: string; c: number; thoughts: number } & LeaseRow)[];
             const leases = leasesByKey(rows);
-            // 063 (SMD-1732): a stale row is a pending verdict whose texts
-            // moved; 067 (SMD-2297): the next pass replaces one it finds in
-            // conflict again and settles one it does not — said here, since
-            // no other row counts them (063's third review pass, cold read);
-            // the reviewer's --list shows them, and may decide one sooner.
-            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
-            const queue = [
-              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
-              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
-            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
@@ -4131,7 +4130,7 @@ if (configFailed) {
               // workers-profile row (SMD-1794 review pass 3).
               if (beat && !follower && l.live > 0 && !sleeping?.running) {
                 add("consolidate pass", "warn",
-                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC${queue ? `; ${queue}` : ""}`,
+                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC`,
                     `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
                 continue;
               }
@@ -4139,7 +4138,7 @@ if (configFailed) {
                 const followerWords = follower
                   ? `a follower is running this key (stamped ${ago(follower.ageS)} ago): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
                   : "";
-                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`, queue ? `; ${queue}` : "");
+                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("consolidate pass", r.status, r.detail, r.fix);
                 continue;
               }
@@ -4155,10 +4154,10 @@ if (configFailed) {
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
-                  add("consolidate pass", "warn", `${words}, and its last pass failed${queue ? `; ${queue}` : ""}`,
+                  add("consolidate pass", "warn", `${words}, and its last pass failed`,
                       `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
                 } else {
-                  const r = runningRow(key, c, words, queue ? `; ${queue}` : "");
+                  const r = runningRow(key, c, words);
                   add("consolidate pass", r.status, r.detail, r.fix);
                 }
                 continue;
@@ -4170,16 +4169,73 @@ if (configFailed) {
               const stoppedFollower = facts.workers?.heartbeats.some((h) => h.worker === "consolidate" && h.job === key);
               const failedNote = c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : "";
               add("consolidate pass", "warn",
-                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}${queue ? `; ${queue}` : ""}`,
+                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}`,
                   `${l.expired > 0 ? reclaim(key) : ""}${stoppedFollower
                     ? `Its follower is not running: start it again as the workers row says${failedNote}; it finishes the pass.`
                     : `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${failedNote}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`}`);
             }
-            if (unfinished === 0) add("consolidate pass", "ok", `none unfinished${queue ? `; ${queue}` : ""}`);
+            if (unfinished === 0) add("consolidate pass", "ok", `none unfinished`);
           }
         } catch (e) {
           add("consolidate pass", "warn", `could not verify: ${(e as Error).message}`,
-              "The check reads thought_work_claims, consolidation_pool() and supersession_proposals.");
+              "The check reads thought_work_claims and consolidation_pool().");
+        }
+
+        // The review queue (SMD-2680): what consolidation proposed and nobody
+        // has decided, from the record's own read (brain-info.ts), so this row,
+        // brain_info and keyed /health say one thing. A backlog, not a broken
+        // brain: it warns once the oldest pending row has waited past the
+        // threshold, and never fails. Relations are not here — nothing waits
+        // on one.
+        {
+          const p = facts.proposals;
+          const knob = proposalsWarnDays(env.OB1_PROPOSALS_WARN_DAYS);
+          if (p === null) {
+            const u = facts.unread.proposals;
+            if (!u) add("proposals", "skip", "no supersession_proposals — migration 029 is not applied.");
+            // The queue's read touches supersession_proposals alone.
+            else if (u.reason === "refused")
+              add("proposals", "warn", `could not verify: ${u.message}`,
+                  "Grant the server's role SELECT on supersession_proposals — the server group's row (SMD-2680): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).");
+            else if (u.reason === "invisible")
+              add("proposals", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
+            else add("proposals", "warn", `could not verify: ${u.message}`,
+                     u.reason === "timeout"
+                       ? "A migration or a long transaction may hold supersession_proposals, or the scan outran the statement cap; run preflight again once it has finished."
+                       : "The check reads supersession_proposals; the message says why it failed.");
+          } else {
+            // The board pairs are a read of their own (review pass 2): one
+            // that did not answer is said, never shown as none (review pass
+            // 3), and a refusal — the function's EXECUTE, or a table 079's
+            // predicate reads — warns with its grant.
+            const bu = facts.unread["proposals.boardPairs"];
+            const denied = bu?.reason === "refused" ? deniedObject(bu.message) : null;
+            const boardFix = bu?.reason !== "refused" ? null
+              : denied?.kind === "function"
+                ? `GRANT EXECUTE ON FUNCTION ${denied.name}(jsonb, jsonb) TO <the server's role>; — PUBLIC holds it unless a REVOKE took it (079).`
+                : `Grant the server's role SELECT on ${denied?.name ?? "thoughts and thought_facets"} — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).`;
+            const board = bu
+              ? `; board pairs not counted (${bu.reason === "refused" ? bu.message : bu.reason === "timeout" ? "not read in time" : bu.reason === "deadline" ? "not read before the deadline" : bu.message})`
+              : p.boardPairs ? `; ${p.boardPairs} pair two tickets the board does not link` : "";
+            const stale = p.stale ? `; ${p.stale} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not)` : "";
+            const words = p.pending === 0
+              ? `none pending${stale}`
+              : `${p.pending} pending review, the oldest judged ${p.oldestPendingS === null ? "at an unknown time" : `${ago(p.oldestPendingS)} ago`}${board}${stale}`;
+            const old = p.pending > 0 && p.oldestPendingS !== null && p.oldestPendingS > knob.days * 86400;
+            const review = `cd db && bun consolidate.ts --url $DATABASE_URL --list${p.stale ? " (--list stale for the stale ones)" : ""}, or the list_supersession_proposals tool, then --accept or --reject each`;
+            // A knob that is not whole days and a refused board count warn on
+            // their own; an old queue still says so beside them, with its remedy.
+            const backlog = `A backlog, not a fault: review them — ${review}. OB1_PROPOSALS_WARN_DAYS (${knob.days}) sets how long after its verdict a proposal may wait before this row warns; a pass that re-judges a stale proposal restarts its clock.`;
+            const knobFix = knob.problem ? `Set OB1_PROPOSALS_WARN_DAYS to whole days, 1 to 3650, or unset it for ${PROPOSALS_WARN_DAYS}.` : null;
+            // The remedies in the detail's order: the board, the backlog, the knob (review pass 4).
+            const fixes = [boardFix, old ? backlog : null, knobFix].filter((f): f is string => f !== null);
+            const detail = `${words}${old ? ` — unreviewed past ${knob.days} day(s)` : ""}${knob.problem ? `${old ? ";" : " —"} ${knob.problem}, so ${PROPOSALS_WARN_DAYS} days are used` : ""}`;
+            if (fixes.length) add("proposals", "warn", detail, fixes.join(" "));
+            // Stale alone: the next pass settles them, and --list stale shows each with the decision it takes (review pass 5).
+            else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
+              : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
+              : words);
+          }
         }
 
         // The ledger's highest migration against the tree this server was built
