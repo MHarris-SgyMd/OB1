@@ -591,6 +591,8 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // table (test-plugins-sql runs the real one): claimed before the capture,
   // given back when the capture fails so the sender's retry runs; a resend of
   // a captured one runs nothing, and of one still running is told to retry.
+  /** A thought id the stub core answers: a uuid, as onceById records. */
+  const thought = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const claims = new Map<string, string | null>();
   /** Unfinished claims past their lease, which the next claim of the id takes. */
   const lapsed = new Set<string>();
@@ -621,25 +623,25 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
     }
     throw new Error(`the stand-in table has no answer for: ${q}`);
   };
-  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : prop === "captureSeconds" ? () => 120 : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
+  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : prop === "captureSeconds" ? () => 300 : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
   const withIds = hookApp("example", `example=${SECRET}`, tableCore);
   const send = (id: string) => { const b = JSON.stringify({ id, text: `delivery ${id}` }); return deliver(withIds, b, sign(b)); };
   const captures = () => calls.filter((c) => c.name === "capture").length;
   calls.length = 0;
-  answer = async () => coreOk({ id: "t-once" });
+  answer = async () => coreOk({ id: thought(1) });
   r = await send("evt-1");
-  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-once" && claims.get("evt-1") === "t-once", "a delivery with an id: 202, its id kept with its thought");
-  assert(JSON.stringify(pruneBound) === "[660,180]" && leaseBound === 180, `its window eleven minutes, its lease the core's capture deadline and a minute (${JSON.stringify(pruneBound)}, ${leaseBound})`);
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === thought(1) && claims.get("evt-1") === thought(1), "a delivery with an id: 202, its id kept with its thought");
+  assert(JSON.stringify(pruneBound) === "[660,360]" && leaseBound === 360, `its window eleven minutes, its lease the core's capture deadline (300 s here) and a minute, through the REST app (${JSON.stringify(pruneBound)}, ${leaseBound})`);
   r = await send("evt-1");
   const dup = (await r.json()) as { id?: string; duplicate?: boolean };
-  assert(r.status === 200 && dup.id === "t-once" && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
+  assert(r.status === 200 && dup.id === thought(1) && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
   answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
   r = await send("evt-2");
   assert(r.status === 422 && !claims.has("evt-2"), "a capture the core refuses gives its claim back");
   answer = async () => { throw new Error("embedder down"); };
   r = await send("evt-3");
   assert(r.status === 500 && !claims.has("evt-3"), "a capture that throws gives its claim back too");
-  answer = async () => coreOk({ id: "t-retry" });
+  answer = async () => coreOk({ id: thought(2) });
   calls.length = 0;
   r = await send("evt-2");
   const retried = r.status;
@@ -652,11 +654,11 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(r.status === 409 && busy.code === "IN_FLIGHT" && busy.retryable === true && captures() === 0, `a delivery whose first is still running: 409 IN_FLIGHT, retryable, nothing run (${r.status} ${JSON.stringify(busy)})`);
   lapsed.add("evt-4");
   r = await send("evt-4");
-  assert(r.status === 202 && captures() === 1 && claims.get("evt-4") === "t-retry", `one whose claim outlived its lease — the server stopped mid-capture — is taken and captured (${r.status}, ${captures()} captures)`);
+  assert(r.status === 202 && captures() === 1 && claims.get("evt-4") === thought(2), `one whose claim outlived its lease — the server stopped mid-capture — is taken and captured (${r.status}, ${captures()} captures)`);
   recordFails = true;
   r = await send("evt-5");
   recordFails = false;
-  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-retry", `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === thought(2), `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
   // A first attempt that outlives its lease and then fails gives back its own claim, not the retry's that took it.
   let failFirst: (e: Error) => void = () => {};
   answer = () => new Promise((_ok, fail) => { failFirst = fail; });
@@ -675,11 +677,14 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const retry = send("evt-7");
   await until("the retry's claim", () => !lapsed.has("evt-7"));
   failFirst(new Error("embedder timed out"));
-  r = await slow;
+  /** An answer awaited with a deadline, so a regression fails the suite rather than hanging it. */
+  const within = (what: string, answer: Response | Promise<Response>) =>
+    Promise.race([answer, Bun.sleep(5000).then(() => { throw new Error(`evt-7: ${what} never answered`); })]);
+  r = await within("the first attempt", slow);
   assert(r.status === 500 && claims.has("evt-7") && claims.get("evt-7") === null, `the first attempt's late failure leaves the retry's claim standing (${r.status})`);
-  finishRetry(coreOk({ id: "t-seven" }));
-  r = await retry;
-  assert(r.status === 202 && claims.get("evt-7") === "t-seven", `and the retry records its thought (${r.status})`);
+  finishRetry(coreOk({ id: thought(3) }));
+  r = await within("the retry", retry);
+  assert(r.status === 202 && claims.get("evt-7") === thought(3), `and the retry records its thought (${r.status})`);
   answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
   r = await send("evt-6");
   const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
@@ -743,6 +748,7 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   assert(deadline({ OB1_LLM_TIMEOUT: "600" }) === 600, `OB1_LLM_TIMEOUT=600: 600 s (${deadline({ OB1_LLM_TIMEOUT: "600" })})`);
   assert(deadline({ OB1_LLM_TIMEOUT: "600", OB1_CHUNK_CONTEXT: "on" }) === 1200, "with OB1_CHUNK_CONTEXT on, two rounds: a long text's windows are blurbed, then embedded");
   assert(deadline({ OB1_LLM_TIMEOUT: "10", OB1_JEV_BASE_URL: "http://jev:8080" }) === 31, "the genre tier's deadline, 30 s and 1 s for its one decision, when it is the longer");
+  assert(deadline({ OB1_LLM_TIMEOUT: "10", OB1_CHUNK_CONTEXT: "on", OB1_JEV_BASE_URL: "http://jev:8080" }) === 31, "and with chunk context on, still the longer of the two: the tier runs beside both rounds, once");
   /** A handle that records each statement's bound values, and answers a claim with `claimed`. */
   const bound: { q: string; values: unknown[] }[] = [];
   let claimed: { claimed: string }[] = [{ claimed: "2026-10-09 20:00:00.123456+00" }];
@@ -752,17 +758,26 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
     return Promise.resolve(q.includes("RETURNING claimed_at") ? claimed : q.startsWith("SELECT thought_id") ? [{ thought_id: null }] : []);
   }) as unknown as PluginSql;
   const db = { tx: <T>(fn: (sql: PluginSql) => Promise<T>) => fn(record) };
+  const T1 = "00000000-0000-4000-8000-000000000001";
   const leaseOf = () => bound.find((b) => b.q.startsWith("INSERT INTO deliveries (id) VALUES"))?.values[1];
-  const done = await onceById({ db, captureSeconds: deadline({ OB1_LLM_TIMEOUT: "600" }) }, "evt-1", async () => ({ value: "v", thoughtId: "t-1" }), { keepSeconds: 660 });
+  const done = await onceById({ db, captureSeconds: deadline({ OB1_LLM_TIMEOUT: "600" }) }, "evt-1", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660 });
   assert(JSON.stringify(done) === '{"ran":"v"}' && leaseOf() === 660 && JSON.stringify(bound[0].values) === "[660,660]", `with OB1_LLM_TIMEOUT=600, the lease is 660 s, longer than one capture's model calls, and the prune keeps a claim that long (${leaseOf()}, ${JSON.stringify(bound[0].values)})`);
-  assert(bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true && JSON.stringify(bound.at(-1)?.values) === '["evt-1","t-1"]', "the run's thought is recorded against its id");
+  assert(bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true && JSON.stringify(bound.at(-1)?.values) === `["evt-1","${T1}"]`, "the run's thought is recorded against its id");
   bound.length = 0;
   await onceById({ db, captureSeconds: 120.3 }, "evt-2", async () => ({ value: "v", thoughtId: null }), { keepSeconds: 660 });
   assert(leaseOf() === 181, `a fractional deadline is rounded up, whole seconds bound (${leaseOf()})`);
   assert(bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz") === true && JSON.stringify(bound.at(-1)?.values) === '["evt-2","2026-10-09 20:00:00.123456+00"]', "a run that hands back no thought gives back its own claim, by the claimed_at text the claim returned");
   bound.length = 0;
-  await onceById({ db, captureSeconds: 120 }, "evt-3", async () => ({ value: "v", thoughtId: "t-3" }), { keepSeconds: 660, leaseSeconds: 30 });
+  await onceById({ db, captureSeconds: 120 }, "evt-3", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660, leaseSeconds: 30 });
   assert(leaseOf() === 30, "a lease the plugin names is its own");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "evt-6", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: Infinity });
+  assert(!bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE claimed_at")) && leaseOf() === 180, "keepSeconds Infinity, for a sender that signs no time: nothing pruned, the lease as ever");
+  bound.length = 0;
+  let notUuid = "";
+  try { await onceById({ db, captureSeconds: 120 }, "evt-7", async () => ({ value: "v", thoughtId: "U024BE7LH-1531420618" }), { keepSeconds: 660 }); } catch (e) { notUuid = (e as Error).message; }
+  assert(/a uuid, or null/.test(notUuid) && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true && !bound.some((b) => b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
+    `a run that hands back no thought id of the core's (a sender's own id) is thrown, its claim given back, nothing recorded (${notUuid})`);
   claimed = [];
   const busy = await onceById({ db, captureSeconds: 120 }, "evt-4", async () => { throw new Error("never run"); }, { keepSeconds: 660 });
   assert(JSON.stringify(busy) === '{"inFlight":true}', `an id claimed and not yet captured: in flight, the run not called (${JSON.stringify(busy)})`);
@@ -774,8 +789,13 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
       return (e as Error).message;
     }
   };
-  assert(/printable ASCII/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown, before any claim");
-  assert(/keepSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /leaseSeconds NaN is not a positive/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })), "a window or a lease that is no positive number: thrown");
+  bound.length = 0;
+  assert(/printable ASCII/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown");
+  assert(/keepSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /keepSeconds NaN is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: NaN }))
+    && /leaseSeconds NaN is not a positive/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })) && /leaseSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 0 }))
+    && /leaseSeconds Infinity is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: Infinity })),
+    "a window that is no positive number or Infinity, or a lease that is no positive number, the plugin's own or the default: thrown");
+  assert(bound.length === 0, `and each before any claim: no statement run (${bound.length})`);
   assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some(isDeliveryId), "isDeliveryId: 1 to 200 printable ASCII characters");
 }
 

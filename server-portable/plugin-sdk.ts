@@ -221,14 +221,16 @@ export function isDeliveryId(id: unknown): id is string {
  * How long onceById remembers (SMD-2768), in seconds. `keepSeconds`: an id,
  * from its claim — for a sender that signs its time, twice verifyTimestamped's
  * tolerance and a minute's margin, past which the same bytes resent are
- * stale. `leaseSeconds`: a claim whose run never finished (the server stopped
- * mid-run), before a retry may take it — by default one capture's model calls
- * under the core's settings (ctx.captureSeconds) and a minute; a run that
- * outlives it may run twice.
+ * stale; for one that signs none, as long as it may resend, `Infinity` for
+ * good (nothing is pruned). `leaseSeconds`: a claim whose run never finished
+ * (the server stopped mid-run), before a retry may take it — by default one
+ * capture's model calls under the core's settings (ctx.captureSeconds) and a
+ * minute; a run that outlives it may run twice. An unfinished claim is kept
+ * past the window while its lease runs.
  */
 export type OnceOptions = { keepSeconds: number; leaseSeconds?: number };
 
-/** What a run hands back: the value to answer with, and the thought to remember the id by — null gives the claim back, so the sender's retry runs. */
+/** What a run hands back: the value to answer with, and the thought to remember the id by — the core's thought id, a uuid; null gives the claim back, so the sender's retry runs. */
 export type OnceRun<T> = { value: T; thoughtId: string | null };
 
 /** onceById's answer: the run's value; the thought a delivery of the id already captured; or that one is still running. */
@@ -237,8 +239,10 @@ export type Once<T> = { ran: T } | { duplicate: string } | { inFlight: true };
 /**
  * Runs `run` once per delivery id (SMD-2768), over the plugin's own table
  * `deliveries`, which its migration makes as plugins/example/migrations/
- * 002_deliveries.sql does. One table per plugin: a plugin with two hooks that
- * remember ids prefixes each hook's.
+ * 002_deliveries.sql does. One table per plugin, and each claim prunes every
+ * row in it by its own options: a plugin with two hooks that remember ids
+ * prefixes each hook's, and passes both the same options — the longest window
+ * and lease either needs — or one hook's prune drops the other's ids early.
  *
  * The id is claimed in a transaction of its own, never held across the run's
  * model calls, which would hold one of the plugin's two connections for as
@@ -255,13 +259,14 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   if (!isDeliveryId(id)) throw new Error("onceById: an id is 1 to 200 printable ASCII characters (isDeliveryId)");
   const keep = options.keepSeconds;
   const lease = options.leaseSeconds ?? Math.ceil(ctx.captureSeconds) + 60;
-  for (const [name, seconds] of [["keepSeconds", keep], ["leaseSeconds", lease]] as const) {
-    if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`onceById: ${name} ${seconds} is not a positive number of seconds`);
-  }
+  if (!(keep > 0) || Number.isNaN(keep)) throw new Error(`onceById: keepSeconds ${keep} is not a positive number of seconds, or Infinity`);
+  if (!Number.isFinite(lease) || lease <= 0) throw new Error(`onceById: leaseSeconds ${lease} is not a positive number of seconds`);
   const claim = await ctx.db.tx(async (sql) => {
     // A claim still inside its lease outlives the window: pruned, its id would run again beside it.
-    await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${keep} * interval '1 second'
-               AND (thought_id IS NOT NULL OR claimed_at < now() - ${lease} * interval '1 second')`;
+    if (keep !== Infinity) {
+      await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${keep} * interval '1 second'
+                 AND (thought_id IS NOT NULL OR claimed_at < now() - ${lease} * interval '1 second')`;
+    }
     const [mine] = await sql<{ claimed: string }>`
       INSERT INTO deliveries (id) VALUES (${id})
       ON CONFLICT (id) DO UPDATE SET claimed_at = now()
@@ -287,6 +292,11 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   if (thoughtId === null) {
     await release();
     return { ran: done.value };
+  }
+  // Anything else would fail the record unseen, and the id would run again on every resend.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(thoughtId)) {
+    await release();
+    throw new Error("onceById: a run's thoughtId is the core's thought id, a uuid, or null");
   }
   await ctx.db
     .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${id}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
