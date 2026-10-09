@@ -109,8 +109,9 @@
 # marked by a refresh, or holds nothing (a first refresh that died before its
 # mark); a refusal puts its Postgres back as it was. With no canary volume
 # there is nothing to delete, and nothing is created to find out.
-# A canary proxy's port is read from its container, running or stopped; once
-# that is gone, only --port says it.
+# A canary proxy's port is read from the container that publishes it — its
+# forwarder since SMD-2583, its proxy before — running or stopped; once that
+# is gone, only --port says it.
 #
 # While a canary is attached, stable's `compose down` leaves stable's mesh in
 # place (the network is in use), so take the canary down first when stable is.
@@ -558,14 +559,15 @@ host_of() {
   ip="$(bound_ip "$1")"
   case "$ip" in ""|0.0.0.0|::) printf '127.0.0.1' ;; *:*) printf '[%s]' "$ip" ;; *) printf '%s' "$ip" ;; esac
 }
-# The canary's published container in any state, or nothing: its proxy, the
-# one container of the project that publishes a port when it has its own
-# (--port, or a canary from before SMD-2294) — or the server of a canary
-# stood up before the proxy (SMD-1846), which published the port itself until
-# `up` recreates it, so that `up` and `down` know its port.
+# The canary's published container in any state, or nothing: its forwarder,
+# the one container of the project that publishes a port when it has its own
+# (--port, or a canary from before SMD-2294) — or the proxy of a canary stood
+# up before the forwarder (SMD-2583), or the server of one stood up before
+# the proxy (SMD-1846), each of which published the port itself until `up`
+# recreates it, so that `up` and `down` know its port.
 published_id() {
   local svc id
-  for svc in proxy server; do
+  for svc in forwarder proxy server; do
     id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$svc" | head -n 1)"
     if [ -n "$id" ] && [ -n "$(port_of "$id")" ]; then printf '%s\n' "$id"; return 0; fi
   done
@@ -601,14 +603,17 @@ endpoint_of() {
   if [[ "$u" =~ $ENDPOINT_URL ]]; then printf '%s %s' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]%/}"; else printf '%s' "$u"; fi
 }
 # The hosts a connector at /canary/mcp counts as this canary's on: loopback in
-# its three spellings, and the address stable's proxy is bound to (a LAN or
+# its three spellings, and the address stable's origin is bound to (a LAN or
 # tailnet address under SERVER_BIND), which `up` registers the connector at,
-# read from that container, running or stopped. One a line.
+# read from the container that publishes it — stable's forwarder, or its proxy
+# for a stable from before SMD-2583 — running or stopped. One a line.
 canary_hosts() {
   printf '%s\n' 127.0.0.1 localhost '[::1]'
-  local id
-  id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$STABLE" --filter "label=com.docker.compose.service=proxy" | head -n 1)"
-  [ -z "$id" ] || { host_of "$id"; echo; }
+  local id svc
+  for svc in forwarder proxy; do
+    id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$STABLE" --filter "label=com.docker.compose.service=$svc" | head -n 1)"
+    if [ -n "$id" ] && [ -n "$(port_of "$id")" ]; then host_of "$id"; echo; return 0; fi
+  done
 }
 # Whether a connector URL is this canary's: http, and either /canary/mcp on one
 # of those hosts and any port — the canary's path on stable's origin, which no
@@ -752,12 +757,22 @@ else
   grep -qF 'mcp.canary.ob1.internal' <<<"$routes" || { echo "$STABLE_PROXY routes no /canary/mcp: stable runs a release from before SMD-2294. Upgrade stable, or stand the canary behind its own proxy on a loopback port as before, with --port N (the canary's old port, where its connector points)." >&2; exit 2; }
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's
   "$RUNTIME" inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$STABLE_PROXY" | grep -qxF "$STABLE_MESH" \
-    || { echo "$STABLE_PROXY is not on $STABLE_MESH, the mesh the canary's servers would join, so it could not reach them there — recreate stable's proxy (compose up -d proxy), or pass --port N." >&2; exit 2; }
-  STABLE_PORT="$(port_of "$STABLE_PROXY")"
-  [ -n "$STABLE_PORT" ] || { echo "$STABLE_PROXY publishes no port, so /canary/mcp cannot be reached from this host. Pass --port N." >&2; exit 2; }
-  STABLE_HOST="$(host_of "$STABLE_PROXY")"
+    || { echo "$STABLE_PROXY is not on $STABLE_MESH, the mesh the canary's servers would join, so it could not reach them there — recreate stable's proxy from stable's own checkout (compose up -d proxy, and forwarder where its compose.yaml has one), or pass --port N." >&2; exit 2; }
+  # The port is stable's forwarder's (SMD-2583), in front of its proxy; a
+  # stable from before it publishes from the proxy itself.
+  STABLE_FRONT="$(container_of "$STABLE" forwarder)"
+  if [ -z "$STABLE_FRONT" ] && [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$STABLE" --filter "label=com.docker.compose.service=forwarder")" ]; then
+    echo "$STABLE's forwarder, which publishes its port, is not running, so /canary/mcp cannot be reached from this host. Start it (compose up -d forwarder), or pass --port N." >&2; exit 2
+  fi
+  [ -n "$STABLE_FRONT" ] || STABLE_FRONT="$STABLE_PROXY"
+  STABLE_PORT="$(port_of "$STABLE_FRONT")"
+  if [ -z "$STABLE_PORT" ] && [ "$STABLE_FRONT" = "$STABLE_PROXY" ]; then
+    echo "$STABLE_PROXY publishes no port and $STABLE has no forwarder: since SMD-2583 the port is the forwarder's, in front of the proxy, so /canary/mcp cannot be reached from this host. Start it (compose up -d forwarder), or pass --port N." >&2; exit 2
+  fi
+  [ -n "$STABLE_PORT" ] || { echo "$STABLE_FRONT publishes no port, so /canary/mcp cannot be reached from this host. Pass --port N." >&2; exit 2; }
+  STABLE_HOST="$(host_of "$STABLE_FRONT")"
   MODE=path
-  STABLE_BOUND="$(bound_ip "$STABLE_PROXY")"
+  STABLE_BOUND="$(bound_ip "$STABLE_FRONT")"
 fi
 
 if [ "$MODE" = port ]; then
@@ -828,7 +843,7 @@ fi
 # keys, and it runs this checkout. Said when that is more than loopback, once
 # nothing is left to refuse.
 if [ "$MODE" = path ]; then
-  case "$STABLE_BOUND" in 127.*|::1|localhost) ;; *) say "note: stable's proxy listens on ${STABLE_BOUND:-every interface}, so this canary — this checkout's build, taking stable's keys — answers at /canary/mcp there too; pass --port N for one on loopback alone" ;; esac
+  case "$STABLE_BOUND" in 127.*|::1|localhost) ;; *) say "note: stable's published port (its forwarder's, or its proxy's before SMD-2583) listens on ${STABLE_BOUND:-every interface}, so this canary — this checkout's build, taking stable's keys — answers at /canary/mcp there too; pass --port N for one on loopback alone" ;; esac
   [ -z "$PUBLIC_ORIGIN" ] || say "note: stable has a public origin ($PUBLIC_ORIGIN): whatever carries it to stable's port carries /canary/mcp to this canary too; pass --port N for one on loopback alone"
 fi
 
@@ -885,15 +900,18 @@ if [ "$MODE" = path ]; then
   # with --connect moves it; one that fails after the health wait (the smoke,
   # the connector) leaves it serving the canary there too (a failed refresh
   # or health wait stops the servers).
-  OLD_PROXY="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")"
+  OLD_PROXY="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=proxy")$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=forwarder")"
   [ -z "$OLD_PROXY" ] || OLD_PORT="$(published_port)"
   BASE="http://$STABLE_HOST:$STABLE_PORT/canary/mcp"
 else
-  # Its own proxy (SMD-1846), left running across a refresh: while the server
-  # is stopped it answers 502, and the server's new container is the same
-  # name on the network. Recreated only when its own configuration changed
-  # (another --port).
+  # Its own proxy (SMD-1846) and the forwarder that publishes its port
+  # (SMD-2583), left running across a refresh: while the server is stopped
+  # the proxy answers 502, and the server's new container is the same name on
+  # the network. Recreated only when their own configuration changed (another
+  # --port), the proxy first, so a canary from before the forwarder hands its
+  # port over.
   canary_compose up -d --no-deps proxy
+  canary_compose up -d --no-deps forwarder
   BASE="http://127.0.0.1:$PORT/mcp"
 fi
 say "canary at $BASE"
@@ -904,7 +922,7 @@ done
 if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
   echo "the canary server did not answer $BASE/health in 60 tries (2 to 4 minutes). Its log${PORT:+, then the log of its proxy}:" >&2
   canary_compose logs --no-color --tail 40 server >&2 || true
-  [ "$MODE" != port ] || canary_compose logs --no-color --tail 10 proxy >&2 || true
+  [ "$MODE" != port ] || canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
   # restart: unless-stopped would otherwise restart it without end (hundreds
   # of times a minute under podman), and a registered connector points at it.
   # The REST core, recreated above on the same image and environment, would too.
@@ -1050,7 +1068,7 @@ else
 fi
 
 if [ -n "$OLD_PROXY" ]; then
-  removal="$(canary_compose rm -sf proxy 2>&1)" || { echo "could not remove the canary's own proxy, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove it with compose -p $CANARY rm -sf proxy (this checkout's -f files). Compose said: $(tail -n 3 <<<"$removal")" >&2; exit 1; }
+  removal="$(canary_compose rm -sf forwarder proxy 2>&1)" || { echo "could not remove the canary's own proxy and forwarder, which may still publish port ${OLD_PORT:-?}; the canary answers at $BASE. Remove them with compose -p $CANARY rm -sf forwarder proxy (this checkout's -f files). Compose said: $(tail -n 3 <<<"$removal")" >&2; exit 1; }
   say "canary proxy removed: the canary answers on $STABLE's origin now"
 fi
 

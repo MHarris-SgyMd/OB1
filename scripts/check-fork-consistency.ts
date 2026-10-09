@@ -307,8 +307,10 @@
  *      compose.tiers.yaml (check 27's), no control, format or separator
  *      character but space and line feed, no `!!`, named-handle, verbatim or
  *      percent-escaped YAML tag, no !reset or !override and no directive;
- *      compose.yaml's proxy as held, an overlay's only its own table's mount,
- *      no config but the file's own table's, no name compose takes with no -f
+ *      compose.yaml's proxy as held, and its forwarder (SMD-2583), with the
+ *      forwarder's script, as config and as label, byte for byte
+ *      deploy/forwarder.ts; an overlay's only its own table's mount,
+ *      no config but the file's own table's (compose.yaml's forwarder's too), no name compose takes with no -f
  *      and none outside printable ASCII; every overlay declared with the keys
  *      it sets, compose.yaml's services setting only keys that act inside
  *      their own container (no shared namespace, privilege or hook), each
@@ -2246,16 +2248,17 @@ function documentedEnvKnobs(pattern: RegExp) {
 
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {
-  // The proxy, the stack's one origin (SMD-1846): the server is `/mcp` on it
-  // and publishes nothing itself; and n8n under `--profile orchestration`
+  // The forwarder, in front of the stack's one origin (SMD-1846, SMD-2583):
+  // the proxy behind it is on internal networks alone and the server is
+  // `/mcp` on it, neither publishing; and n8n under `--profile orchestration`
   // (SMD-2210): its editor, API, webhooks and MCP endpoint on loopback, for
   // the provisioning step and an AI client on this host.
-  "compose.yaml": ["proxy", "n8n"],
+  "compose.yaml": ["forwarder", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
-  // The three-brain pipeline (SMD-1806): its proxy, where each tier is a path
-  // (SMD-2294); the tiers' servers, REST cores and Postgres services and the
-  // shared Ollama publish nothing.
-  "compose.tiers.yaml": ["proxy"],
+  // The three-brain pipeline (SMD-1806): its forwarder, in front of its proxy,
+  // where each tier is a path (SMD-2294, SMD-2583); the tiers' servers, REST
+  // cores and Postgres services and the shared Ollama publish nothing.
+  "compose.tiers.yaml": ["forwarder"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
@@ -5809,6 +5812,7 @@ function tierStack(compose: Mapping): Mapping {
       configs: ((c.proxy?.configs ?? []) as Mapping[]).map((cf) => cf.source === "proxy-routes" ? { ...cf, source: "tier-routes" } : cf),
       labels: { ...(c.proxy?.labels as Mapping), "ob1.proxy-routes": TIER_ROUTE_TABLE },
     },
+    forwarder: c.forwarder,
     ollama: c.ollama,
     "ollama-pull": c["ollama-pull"],
   };
@@ -5845,7 +5849,7 @@ function tierStack(compose: Mapping): Mapping {
     services,
     volumes: { ...Object.fromEntries(TIERS.map((t) => [`${t}-pgdata`, volumes.pgdata])), ollama: volumes.ollama },
     networks: Object.fromEntries(Object.keys(networks).filter((n) => joined.has(n)).map((n) => [n, networks[n]])),
-    configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE } },
+    configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE }, forwarder: configs.forwarder },
   };
 }
 /** What tierStack() generated that every tier would share, or that points a canary or working value at stable's — each to be renamed per tier in tierStack() or left out, never copied. */
@@ -5949,7 +5953,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["the canary's volume named as stable's", ["  canary-pgdata:\n  working-pgdata:\n", "  canary-pgdata: {name: open-brain-tiers_stable-pgdata}\n  working-pgdata:\n"]],
   ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\n  # ── the proxy "]],
   ["Ollama extending the canary's server", ["  ollama:\n    image: *ollama-image\n", "  ollama:\n    extends: {service: canary-server}\n    image: *ollama-image\n"]],
-  ["a hosts entry on the proxy naming a tier", ["    dns_search: [\".\"]\n", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n"]],
+  ["a hosts entry on the proxy naming a tier", ["    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"]],
   ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
   ["every server on another port than the routes dial", ["  PORT: \"8000\"\n", "  PORT: \"8001\"\n"]],
   ["the migrators on another embedding size than the servers", ["x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}\n", "x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-768}\n"]],
@@ -6031,7 +6035,8 @@ checkTierStack();
 //       Bun.YAML reads past them (SMD-2685); any other local tag Bun.YAML
 //       reads past as compose does, and CI renders each file against
 //       Bun.YAML's reading of it;
-//   proxy  compose.yaml's proxy is PROXY_SERVICE, its label (the table's)
+//   proxy  compose.yaml's proxy is PROXY_SERVICE, and its forwarder FORWARDER_SERVICE
+//       (SMD-2583), each its label (the table's, the script's)
 //       and its logging (check 29's) aside: image, user, capabilities, environment, mounts, networks,
 //       search domains, waits — so a hook, a hosts entry, a volume, another
 //       provider or a variable a deploy/.env could move is a change here too,
@@ -6107,6 +6112,7 @@ const PROXY_SERVICE = {
   security_opt: ["no-new-privileges:true"],
   environment: {
     TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000",
+    TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
     TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete",
     TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
     TRAEFIK_ACCESSLOG: "true",
@@ -6121,11 +6127,27 @@ const PROXY_SERVICE = {
     TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false",
   },
   configs: [{ source: "proxy-routes", target: "/etc/traefik/dynamic/routes.yaml" }],
-  ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
-  networks: ["edge", "mesh"],
+  networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
   depends_on: { server: { condition: "service_started" }, api: { condition: "service_started" } },
+  restart: "unless-stopped",
+};
+/** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
+const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
+/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy. */
+const FORWARDER_SERVICE = {
+  image: "docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb",
+  user: "65534:65534",
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  command: ["bun", "/forwarder.ts"],
+  configs: [{ source: "forwarder", target: "/forwarder.ts" }],
+  ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
+  networks: ["edge", "front"],
+  dns_search: ["."],
+  healthcheck: { test: ["CMD-SHELL", "grep -qE ':1F40 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"], interval: "5s", timeout: "3s", retries: 5 },
+  depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
@@ -6168,7 +6190,7 @@ const SERVICE_BUILDS: Record<string, unknown> = {
 };
 /** The networks each file defines, exactly; a file not named here defines none. */
 const FILE_NETWORKS: Record<string, Mapping> = {
-  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {} },
+  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true } },
   "compose.host-ports.yaml": { "postgres-port": {} },
   "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
 };
@@ -6235,9 +6257,24 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const diffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(proxy, ["labels", "logging"]))), PROXY_SERVICE, "services.proxy", diffs);
     if (diffs.length) flag("proxy", `${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — compose.yaml's proxy is check 28's PROXY_SERVICE, its label aside: a hook, a hosts entry, a volume, another provider or a variable a deploy/.env could move reaches the origin, so a change to the proxy is made there too, on purpose (SMD-2685)`);
+    // The forwarder, whole, and its script byte for byte in its config and its label (SMD-2583).
+    const forwarder = isMapping(services.forwarder) ? services.forwarder : undefined;
+    const fdiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(forwarder, ["labels", "logging"]))), FORWARDER_SERVICE, "services.forwarder", fdiffs);
+    if (fdiffs.length) flag("proxy", `${fdiffs.slice(0, 6).join("; ")}${fdiffs.length > 6 ? `; and ${fdiffs.length - 6} more` : ""} — compose.yaml's forwarder is check 28's FORWARDER_SERVICE, its label aside: it holds the stack's published port and every client's bytes, so a change to it is made there too, on purpose (SMD-2583)`);
+    const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
+    const sdiffs: string[] = [];
+    pathDiffs(fconfig?.content, FORWARDER_SCRIPT, "configs.forwarder.content", sdiffs);
+    if (fconfig && canonJson(Object.keys(fconfig)) !== canonJson(["content"])) sdiffs.push(`configs.forwarder carries ${Object.keys(fconfig).filter((k) => k !== "content").join(", ")} beside its content, where the script is its content alone`);
+    pathDiffs(forwarder && isMapping(forwarder.labels) ? forwarder.labels["ob1.forwarder"] : undefined, FORWARDER_SCRIPT, "services.forwarder.labels.ob1.forwarder", sdiffs);
+    const fotherLabels = Object.keys(forwarder && isMapping(forwarder.labels) ? forwarder.labels : {}).filter((k) => k !== "ob1.forwarder");
+    if (fotherLabels.length) sdiffs.push(`services.forwarder.labels carries ${fotherLabels.join(", ")} beside ob1.forwarder, where its one label is its script`);
+    const odd = [...new Set([...FORWARDER_SCRIPT].filter((ch) => ch === "$" || ch === "!"))];
+    if (odd.length) sdiffs.push(`deploy/forwarder.ts holds ${odd.map((ch) => `\`${ch}\``).join(" and ")}: compose reads a \`$\` in the inline copy as a variable, from deploy/.env or the shell, so the script that runs is not this file (review pass 1), and check 27 refuses a \`!\` in compose.tiers.yaml`);
+    if (sdiffs.length) flag("table", `${sdiffs.join("; ")} — the forwarder's config and its label are each deploy/forwarder.ts, byte for byte (FORWARDER_SCRIPT): the script that chooses where every client's bytes go is changed there, where CI runs its --self-check (SMD-2583)`);
   }
   const configs = Object.keys(isMapping(doc.configs) ? doc.configs : {});
-  const foreign = configs.filter((c) => c !== spec?.[1]);
+  const foreign = configs.filter((c) => c !== spec?.[1] && !(base && c === "forwarder"));
   if (foreign.length) flag("proxy", `defines config${foreign.length > 1 ? "s" : ""} ${foreign.join(", ")} — each file defines only its own table's config (ROUTE_FILES: ${ROUTE_FILES.map(([f, c]) => `${f}: ${c}`).join("; ")}), so an overlay cannot replace another's table in a combination CI does not render`);
   if (proxy && spec && !base) {
     const [, config, target] = spec;
@@ -6262,7 +6299,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
       continue;
     }
-    if (name === "proxy") continue;
+    if (name === "proxy" || name === "forwarder") continue;
     const extra = Object.keys(svc).filter((k) => !SERVICE_KEYS.includes(k));
     if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — a compose.yaml service sets only check 28's SERVICE_KEYS, which act inside its own container: \`pid: service:proxy\` with a capability wrote a route file through /proc/<pid>/root that Traefik loaded live (SMD-2685, measured), and a hook may run privileged; a key that is safe is added there on purpose`);
     const confinement = Object.fromEntries(CONFINEMENT_KEYS.filter((k) => k in svc).map((k) => [k, svc[k]]));
@@ -6275,7 +6312,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
   const wantNets = FILE_NETWORKS[file] ?? null;
   if (canonJson(doc.networks ?? null) !== canonJson(wantNets)) flag("networks", `defines networks ${JSON.stringify(doc.networks ?? null)} where check 28's FILE_NETWORKS holds ${JSON.stringify(wantNets)} — a network renamed, made external or defined twice under one name puts the proxy, or a service that answers as a backend, on another network (SMD-2658 review pass 3; SMD-2685's second key into stable's mesh)`);
   for (const [name, def] of Object.entries(services)) {
-    if (base && name === "proxy") continue;
+    if (base && (name === "proxy" || name === "forwarder")) continue;
     const got = isMapping(def) ? def.networks ?? null : null;
     const want = SERVICE_NETWORKS[file]?.[name] ?? null;
     // compose.yaml's every service is named there: one that names no network lands on compose's default, beside nothing else (SMD-2583 review pass 1: null held null).
@@ -6376,7 +6413,14 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["the import runner mounting deploy/, which holds deploy/.env, as ../deploy (SMD-2685 review pass 3)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ../deploy:/d:ro\n"],
   ["n8n mounting the authorization server's store", "compose.yaml", "      - n8n-data:/home/node/.n8n\n", "      - n8n-data:/home/node/.n8n\n      - auth-data:/auth-data\n"],
   ["the Postgres volume binding a host directory by its driver options", "compose.yaml", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    driver_opts: {type: none, o: bind, device: /var/run}\n"],
-  ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n"],
+  ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"],
+  // The forwarder and the proxy behind it (SMD-2583).
+  ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
+  ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "    networks: [edge, front]\n", "    networks: [edge, front, mesh]\n"],
+  ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
+  ["the forwarder's inline script dialling whatever its lookup answers", "compose.yaml", "return addresses.find((a) => own.has(a.toLowerCase()) === false", "return addresses[0] ?? addresses.find((a) => own.has(a.toLowerCase()) === false"],
+  ["the forwarder's label a script other than its config's", "compose.yaml", "    labels:\n      ob1.forwarder: *forwarder\n", "    labels:\n      ob1.forwarder: \"an older script\"\n"],
+  ["compose.yaml's front given a route out", "compose.yaml", "  front:\n    internal: true\n", "  front: {}\n"],
   ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.0-alpine\n"],
 ];
 function checkRouteTables() {

@@ -253,7 +253,7 @@ and your **MCP Connection URL** adds the key — save both in your tracker:
 http://127.0.0.1:8000/mcp?key=your-access-key
 ```
 
-That URL works from this machine and nowhere else, on purpose: the stack's proxy is the only port it publishes by default, with the server at `/mcp` on it, and it listens on your machine's loopback address. (A client set up before the proxy, at `http://127.0.0.1:8000/?key=…`, still works until v2.0.0; [`deploy/README.md`](../deploy/README.md), "Moving a client to /mcp", says how to move it.) Clients that run on this machine — Claude Code, Cursor, Codex — take it as is. Skip to Step 7 for those.
+That URL works from this machine and nowhere else, on purpose: the port in front of the stack's proxy is the only one it publishes by default, with the server at `/mcp` on it, and it listens on your machine's loopback address. (A client set up before the proxy, at `http://127.0.0.1:8000/?key=…`, still works until v2.0.0; [`deploy/README.md`](../deploy/README.md), "Moving a client to /mcp", says how to move it.) Clients that run on this machine — Claude Code, Cursor, Codex — take it as is. Skip to Step 7 for those.
 
 <details>
 <summary>🌐 <strong>6.1 — Reaching it from Claude Desktop, claude.ai or ChatGPT</strong> (click to expand)</summary>
