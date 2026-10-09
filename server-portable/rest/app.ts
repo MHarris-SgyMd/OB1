@@ -13,7 +13,7 @@ import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
-import { runOperation, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
+import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -38,7 +38,12 @@ export interface RestDeps {
   log?: (line: string) => void;
   /** The enabled plugins (root.ts's plugins), read at the first request that needs them; none when absent (SMD-2310). */
   plugins?: () => readonly LoadedPlugin[];
+  /** The webhooks served and their secrets (root.ts's hooks), read at the first delivery; none when absent (SMD-2310). */
+  hooks?: () => { hooks: readonly LoadedHook[]; secrets: ReadonlyMap<string, string> };
 }
+
+/** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
+export const HOOK_BODY_LIMIT = 1024 * 1024;
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
 const RETRY_AFTER_SECONDS = 2;
@@ -382,6 +387,39 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (outcome.ok) return c.json(outcome.value, 200);
     const { status, ...facts } = outcome.refusal;
     return c.json(facts, status);
+  });
+
+  // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
+  // for a plugin OB1_HOOKS names, with no key — the sender holds none — so the
+  // handler verifies the delivery against its secret. Its body is read whole
+  // up to HOOK_BODY_LIMIT, and handed over raw, as a signature is over the
+  // bytes; the handler runs as `hook:<plugin>`, a capture-only caller. Off,
+  // or a name it does not serve, the path is NO_ROUTE, as any unrouted one.
+  app.all("/hooks/:plugin/:hook", async (c) => {
+    const served = deps.hooks?.();
+    const hook = served?.hooks.find((h) => h.plugin === c.req.param("plugin") && h.name === c.req.param("hook"));
+    if (!hook || !served) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
+    c.set("template", hook.path);
+    if (c.req.method !== "POST") return refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
+    const declared = Number(c.req.header("content-length") ?? "0");
+    if (declared > HOOK_BODY_LIMIT) return c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    const body = await c.req.text();
+    if (Buffer.byteLength(body) > HOOK_BODY_LIMIT) return c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((value, name) => { headers[name.toLowerCase()] = value; });
+    const query: Record<string, string> = {};
+    for (const [k, v] of queryOf(c.req.url)) query[k] = v;
+    let answer;
+    try {
+      answer = await runHook(hook, { core: deps.core, secret: served.secrets.get(hook.plugin), track: deps.track }, { headers, query, body });
+    } catch (err) {
+      return c.json(failure(err), 500);
+    }
+    if (answer.status === 204) return c.body(null, 204);
+    return c.json(answer.body ?? {}, answer.status);
   });
 
   // A path a route serves, sent with another method, is a 405 naming the

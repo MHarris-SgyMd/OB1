@@ -5215,7 +5215,7 @@ const ROOT_ROLE: TransportRole = {
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
     // The enabled plugins, read once from the environment (SMD-2310): manifests checked, nothing run.
-    ["./core/plugins.ts", new Set(["loadPlugins", "LoadedPlugin"])],
+    ["./core/plugins.ts", new Set(["enabledHooks", "hookSecrets", "loadPlugins", "LoadedHook", "LoadedPlugin"])],
   ]),
   wiring: true,
   mustImport: "./store.ts",
@@ -5225,7 +5225,7 @@ const ROOT_ROLE: TransportRole = {
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere"])],
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
@@ -5688,7 +5688,7 @@ const TIER_ROUTE_TABLE = (() => {
     + TIERS.map((t) => `    ${t}:\n      loadBalancer:\n        servers:\n          - url: "http://${tierMeshName("mcp", t)}.:8000"\n`).join("");
 })();
 /** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD"];
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;

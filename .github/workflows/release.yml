@@ -386,6 +386,9 @@ jobs:
           # the other two and adds its route to the proxy.
           docker compose -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml config --format json \
             | jq -e '.services.proxy.labels | has("ob1.proxy-api-route")' >/dev/null
+          # The /hooks overlay too (SMD-2310), beside /api's.
+          docker compose -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml config --format json \
+            | jq -e '.services.proxy.labels | has("ob1.proxy-api-route") and has("ob1.proxy-hooks-route")' >/dev/null
           docker compose -f compose.yaml -f compose.release.yaml down -v
 
       - name: Keep the rehearsal's overlay and notes

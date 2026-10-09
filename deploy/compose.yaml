@@ -89,6 +89,11 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 #           issuer's root, and the legacy route would hand that POST to the
 #           MCP server, whose 200 envelope the client cannot read (SMD-2382
 #           review). The authorization server's own are under /auth;
+#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`), so
+#           a delivery to a plugin's webhook never falls to the legacy route
+#           and the MCP server, until the operator names
+#           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
+#           it to the REST core (SMD-2310);
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -165,6 +170,14 @@ x-proxy-routes: &proxy-routes |
         priority: 35
         entryPoints: [web]
         middlewares: [api-off]
+        service: noop@internal
+      # The plugins' webhooks (SMD-2310), off unless the operator names
+      # deploy/compose.hooks-public.yaml, whose router (priority 36) wins.
+      hooks-off:
+        rule: "Path(`/hooks`) || PathPrefix(`/hooks/`)"
+        priority: 35
+        entryPoints: [web]
+        middlewares: [not-served]
         service: noop@internal
       mcp:
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
@@ -560,6 +573,10 @@ services:
       # The password of ob1_plugins, the login role every plugin's SQL runs on
       # (SMD-2310): the plugins' pools log in with it, never as postgres.
       OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
+      # The plugins whose webhooks the REST core serves, and their secrets
+      # (SMD-2310); the proxy reaches /hooks only with compose.hooks-public.yaml.
+      OB1_HOOKS: ${OB1_HOOKS:-}
+      OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at

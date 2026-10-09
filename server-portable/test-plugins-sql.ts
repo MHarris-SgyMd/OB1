@@ -204,6 +204,9 @@ delete process.env.MCP_ACCESS_KEY;
 process.env.DATABASE_URL = URL_;
 process.env.OB1_PLUGINS = "example";
 process.env.OB1_PLUGIN_DB_PASSWORD = PLUGIN_PW;
+const HOOK_SECRET = "smd2310-hook-secret";
+process.env.OB1_HOOKS = "example";
+process.env.OB1_HOOK_SECRETS = `example=${HOOK_SECRET}`;
 const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [`writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`, `hook:capture:${hashKey(KEYS.hook)}`].join(",");
 const mcpServer = Bun.serve({ port: 0, fetch: (await import("./index.ts")).default.fetch });
@@ -245,6 +248,21 @@ console.log("\n[6] The example's operations through both servers: a note pinned 
   assert(nowhere.status === 404 && nowhere.body.code === "NO_SUCH_THOUGHT", `a thought that is not there: 404 NO_SUCH_THOUGHT, nothing written (${JSON.stringify(nowhere.body)})`);
   const viaMcp = await mcp("tools/call", { name: "example_add_note", arguments: { thought_id: thoughtId, note: "second" } }, KEYS.writer);
   assert(viaMcp.result?.isError !== true && (viaMcp.result?.structuredContent?.note as Record<string, unknown>)?.written_by === "writer", "a write key pins one over MCP too");
+}
+
+console.log("\n[6b] The example's webhook through the REST core: a signed delivery captured as the hook's own caller");
+{
+  const { hmacSha256Hex } = await import("./plugin-sdk.ts");
+  const body = JSON.stringify({ text: "smd2310: a capture through the example webhook" });
+  const r = await fetch(`${API}/hooks/example/capture`, { method: "POST", headers: { "content-type": "application/json", "x-example-signature": hmacSha256Hex(HOOK_SECRET, body) }, body });
+  const got = (await r.json()) as { id?: string };
+  assert(r.status === 202 && typeof got.id === "string", `a signed delivery: 202 and the thought's id (${r.status} ${JSON.stringify(got)})`);
+  const audit = await one<{ actor_name: string; trust: string; source: string }>(sql`
+    SELECT a.actor_name, a.trust, t.metadata->>'source' AS source FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+     WHERE a.thought_id = ${got.id ?? ""} ORDER BY a.seq LIMIT 1`);
+  assert(audit?.actor_name === "hook:example" && audit.trust === "ingested" && audit.source === "example-hook", `its audit row names the hook as the writer, its trust ingested (${JSON.stringify(audit)})`);
+  const unsigned = await fetch(`${API}/hooks/example/capture`, { method: "POST", headers: { "content-type": "application/json" }, body });
+  assert(unsigned.status === 401, "an unsigned delivery: 401");
 }
 
 console.log("\n[7] The plugin's handle: its own table, named bare; a core table refused by Postgres");

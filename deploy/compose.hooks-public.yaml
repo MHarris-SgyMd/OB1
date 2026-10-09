@@ -1,0 +1,53 @@
+# The plugins' webhooks at the proxy's /hooks (SMD-2310): an overlay, as
+# compose.api-public.yaml is for /api. The base route table answers /hooks
+# with a bare 404 (compose.yaml's hooks-off), so no delivery falls to the
+# legacy route and the MCP server; this file adds a router of higher priority
+# that takes /hooks/<plugin>/<name> to the REST core on the mesh, path kept.
+#
+#   docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
+#
+# The REST core serves a webhook only for the plugins OB1_HOOKS names (each
+# also in OB1_PLUGINS); any other path under /hooks is its 404. A webhook takes
+# no brain key — its sender holds none — so each handler verifies a delivery
+# against the secret OB1_HOOK_SECRETS gives its plugin, and runs as a caller of
+# capture scope alone. The forwarder slot (x-brain-forwarder) is deleted on the
+# way in, as /api's is. Nothing limits the rate of deliveries here; a sender
+# that floods one is the plugin's to refuse. Dropping the file and running
+# `up -d` again recreates the proxy without it (the label below changes,
+# which is what makes compose recreate; an inline config alone does not).
+
+x-hooks-route: &hooks-route |
+  http:
+    routers:
+      hooks-public:
+        rule: "PathPrefix(`/hooks/`)"
+        priority: 36
+        entryPoints: [web]
+        middlewares: [hooks-no-forwarder]
+        service: hooks
+    middlewares:
+      # An empty value deletes the header, as compose.yaml's not-legacy does.
+      hooks-no-forwarder:
+        headers:
+          customRequestHeaders:
+            X-Brain-Forwarder: ""
+    services:
+      hooks:
+        loadBalancer:
+          servers:
+            - url: "http://api.ob1.internal.:8000"
+
+services:
+  proxy:
+    configs:
+      - source: proxy-hooks-route
+        target: /etc/traefik/dynamic/hooks.yaml
+    labels:
+      ob1.proxy-hooks-route: *hooks-route
+    depends_on:
+      api:
+        condition: service_started
+
+configs:
+  proxy-hooks-route:
+    content: *hooks-route
