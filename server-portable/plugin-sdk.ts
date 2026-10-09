@@ -265,7 +265,7 @@ export type Once<T> = { ran: T } | { duplicate: string } | { inFlight: true };
  * `scope` (`<scope> <id>`, the space no id holds) when it has one. A plugin
  * with a scope kept for good beside one that prunes adds the index the prune
  * reads, or each claim scans every kept row:
- * `CREATE INDEX deliveries_by_scope ON deliveries ((CASE WHEN strpos(id, ' ') = 0 THEN '' ELSE split_part(id, ' ', 1) END), claimed_at)`.
+ * `CREATE INDEX IF NOT EXISTS deliveries_by_scope ON deliveries ((CASE WHEN strpos(id, ' ') = 0 THEN '' ELSE split_part(id, ' ', 1) END), claimed_at)`.
  *
  * The id is claimed in a transaction of its own, never held across the run's
  * model calls, which would hold one of the plugin's two connections for as

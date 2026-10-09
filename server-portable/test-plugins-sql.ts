@@ -389,7 +389,7 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     // The index onceById's doc comment gives a plugin keeping one scope for
     // good beside one that prunes: the prune, as onceById sends it, reads it
     // past a kept scope's old rows rather than scanning them.
-    const docIndex = /`(CREATE INDEX deliveries_by_scope ON deliveries [^`]+)`/.exec(readFileSync(new URL("./plugin-sdk.ts", import.meta.url), "utf8"))?.[1] ?? "";
+    const docIndex = /`(CREATE INDEX IF NOT EXISTS deliveries_by_scope ON deliveries [^`]+)`/.exec(readFileSync(new URL("./plugin-sdk.ts", import.meta.url), "utf8"))?.[1] ?? "";
     await sql.unsafe(docIndex.replace(" ON deliveries ", " ON plugin_example.deliveries "));
     await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) SELECT 'kept ' || ${RUN} || '-' || n, ${thought}, now() - interval '1 day' FROM generate_series(1, 5000) n`;
     await sql`ANALYZE plugin_example.deliveries`;
