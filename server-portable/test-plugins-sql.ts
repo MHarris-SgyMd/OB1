@@ -386,6 +386,29 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     const again = await once("readwise", forGood, Infinity);
     const elsewhere = await once("events", forGood, 660);
     assert("duplicate" in again && again.duplicate === thought && "ran" in elsewhere, `so a hook kept for good still knows its id twelve minutes on, and the same id under another scope is another delivery (${JSON.stringify(again)}, ${JSON.stringify(elsewhere)})`);
+    // The index onceById's doc comment gives a plugin keeping one scope for
+    // good beside one that prunes: the prune, as onceById sends it, reads it
+    // past a kept scope's old rows rather than scanning them.
+    const docIndex = /`(CREATE INDEX deliveries_by_scope ON deliveries [^`]+)`/.exec(readFileSync(new URL("./plugin-sdk.ts", import.meta.url), "utf8"))?.[1] ?? "";
+    await sql.unsafe(docIndex.replace(" ON deliveries ", " ON plugin_example.deliveries "));
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) SELECT 'kept ' || ${RUN} || '-' || n, ${thought}, now() - interval '1 day' FROM generate_series(1, 5000) n`;
+    await sql`ANALYZE plugin_example.deliveries`;
+    let plan = "";
+    const explaining = {
+      db: {
+        tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", (q) => fn(((strings: TemplateStringsArray, ...values: unknown[]) => {
+          if (!strings[0].startsWith("DELETE FROM deliveries WHERE claimed_at")) return q(strings, ...values);
+          // Frozen, as a template's are: pluginTx takes nothing else.
+          const explain = Object.freeze(Object.assign(["EXPLAIN " + strings[0], ...strings.slice(1)], { raw: Object.freeze(["EXPLAIN " + strings.raw[0], ...strings.raw.slice(1)]) }));
+          return q(explain as unknown as TemplateStringsArray, ...values).then((rows) => { plan = rows.map((r) => String(Object.values(r)[0])).join("\n"); return []; });
+        }) as PluginSql)),
+      },
+      captureSeconds: 120,
+    };
+    await onceById(explaining, `ev-${RUN}-plan`, async () => ({ value: 0, thoughtId: thought }), { keepSeconds: 660, scope: "events" });
+    assert(/deliveries_by_scope/.test(plan) && /Index Cond: .*CASE/.test(plan), `the doc comment's index is the one the scoped prune reads (${plan.replace(/\s+/g, " ").slice(0, 160)})`);
+    await sql`DELETE FROM plugin_example.deliveries WHERE id LIKE ${`kept ${RUN}-%`}`;
+    await sql.unsafe("DROP INDEX plugin_example.deliveries_by_scope");
   } finally {
     await store.close();
   }

@@ -224,7 +224,7 @@ export function isDeliveryId(id: unknown, scope?: string): id is string {
   return typeof id === "string" && /^[\x21-\x7e]+$/.test(id) && id.length <= 200 - (scope === undefined ? 0 : scope.length + 1);
 }
 
-/** The longest window or lease onceById binds, in seconds (about 31 years): past about 10^12, Postgres's timestamps overflow and every claim would fail. */
+/** The longest window or lease onceById binds, in seconds (about 31 years): past about 2 × 10^11, Postgres's timestamps overflow and every claim would fail. */
 const ONCE_MAX_SECONDS = 1e9;
 
 /**
@@ -246,6 +246,8 @@ export type OnceOptions = {
    * them: lower-case words and hyphens, at most 32 characters — the hook's
    * name, say. A claim prunes only its own scope's ids, so each hook keeps
    * its own window and lease in the one table, and two hooks' ids never meet.
+   * Chosen before the hook first runs: the scope is part of the key, so adding
+   * or changing one forgets the ids kept without it, and no claim prunes them.
    */
   scope?: string;
 };
@@ -260,7 +262,10 @@ export type Once<T> = { ran: T } | { duplicate: string } | { inFlight: true };
  * Runs `run` once per delivery id (SMD-2768), over the plugin's own table
  * `deliveries`, which its migration makes as plugins/example/migrations/
  * 002_deliveries.sql does: one table per plugin, a hook's ids kept under its
- * `scope` (`<scope> <id>`, the space no id holds) when it has one.
+ * `scope` (`<scope> <id>`, the space no id holds) when it has one. A plugin
+ * with a scope kept for good beside one that prunes adds the index the prune
+ * reads, or each claim scans every kept row:
+ * `CREATE INDEX deliveries_by_scope ON deliveries ((CASE WHEN strpos(id, ' ') = 0 THEN '' ELSE split_part(id, ' ', 1) END), claimed_at)`.
  *
  * The id is claimed in a transaction of its own, never held across the run's
  * model calls, which would hold one of the plugin's two connections for as

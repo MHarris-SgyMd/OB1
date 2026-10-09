@@ -802,7 +802,7 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
     "a window that is no positive number or Infinity, or a lease that is no positive number, the plugin's own or the default: thrown");
   assert(/keepSeconds 660 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: "660" as never })) && /keepSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 1e10 }))
     && /leaseSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 1e10 })) && /leaseSeconds 9999999940 is not/.test(await refusedWith("evt-5", 9999999880, { keepSeconds: 660 })),
-    "a window or lease that is no number, or past 10^9 s, where Postgres's timestamps would overflow on every claim: thrown");
+    "a window or lease that is no number, or past 10^9 s (Postgres's timestamps overflow on every claim at about 2 × 10^11): thrown");
   assert(/scope "Events" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "Events" })) && /scope "a b" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "a b" }))
     && /scope "x{33}" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "x".repeat(33) })) && /an id is 1 to 200/.test(await refusedWith("", 120, { keepSeconds: 660, scope: "events" })),
     "a scope that is not lower-case words and hyphens of at most 32 characters, or an empty id under one: thrown");

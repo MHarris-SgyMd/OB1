@@ -23,6 +23,8 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 - **Text with a NUL character**, which Postgres will not store, is answered 400 `BAD_TEXT` before any model call; a malformed id, 400 `BAD_ID`.
 - **With no secret configured**, it answers 503 `HOOK_NOT_CONFIGURED`.
 
+Its 4xx answers suit a sender that reads them. A sender that retries anything but a 2xx (Slack, Telegram) would resend each one, so its plugin answers a 2xx for a delivery it will never capture ([../README.md](../README.md)'s webhooks section).
+
 It is served only while `OB1_HOOKS` names the example, and reachable from outside only with `deploy/compose.hooks-public.yaml`:
 
 ```bash

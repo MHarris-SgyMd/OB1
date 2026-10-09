@@ -714,7 +714,7 @@ bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 244 — store conformance, real Postgres in a container
 bun run test:e2e          # 540 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
-../db/with-postgres.sh bun test-plugins-sql.ts  # 100 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
+../db/with-postgres.sh bun test-plugins-sql.ts  # 101 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
