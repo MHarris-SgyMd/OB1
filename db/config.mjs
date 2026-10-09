@@ -1711,39 +1711,41 @@ export const BOUNDS_IN_FORCE_SQL =
 export const BITMAP_BYTES_PER_PAGE = 64;
 
 /**
- * The share of heap pages the broadest filter that still reaches a GIN bitmap
- * touches, on a heap large enough for 037's gate. The gate (074) sends a
- * filter to the HNSW walk, which builds no bitmap, only when its
- * ROUTE_SAMPLE_PAGES-page sample holds at least 8 hits on at least 3 pages
- * and puts the filter at ten times v_exact; every filter averaging under about
- * one match a heap page fails the first test and takes the GIN route, where
- * the routing count's bitmap holds every page with a match. A filter at one
- * match a page, placed at random, touches 1 - 1/e of the pages. Below the
- * gate's ROUTE_ESTIMATE_MIN_PAGES every filter takes the GIN route, so there
- * the share is the whole heap.
+ * The share of heap pages a GIN-routed filter at the gate's boundary touches,
+ * on a heap large enough for 037's gate. The gate (074) sends a filter to the
+ * HNSW walk only when its ROUTE_SAMPLE_PAGES-page sample, drawn again on every
+ * call, holds at least 8 hits on at least 3 pages and puts the filter at ten
+ * times v_exact, so a filter averaging about one match a heap page takes the
+ * GIN route on about half its calls — the boundary is a median, not a cutoff,
+ * and under 10 x v_exact pages the third test moves it a little above one
+ * match a page. A filter at one match a page, placed at random, touches
+ * 1 - 1/e of the pages. Below the gate's ROUTE_ESTIMATE_MIN_PAGES every filter
+ * takes the GIN route, so there it is the whole heap.
  */
 export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
 
 /**
- * Sizing the server for the table (SMD-1499): what the brain's relations need
- * against what the server is set to, as two comparisons.
+ * Sizing the server for the table (SMD-1499).
  *
- * - Resident: the HNSW indexes over thoughts and thought_chunks are walked on
- *   every vector search. The lever an operator sets is shared_buffers, so that
- *   is what the indexes are compared with. The OS page cache serves a walk
- *   too, but not as well: on the ten-million-row bench corpus, with the
- *   indexes read into the page cache before every run, ten connections got
- *   about a third of the throughput they got with the indexes in
- *   shared_buffers (SMD-1499's record).
- * - Bitmap: a filter's matches are collected one entry per heap page (above),
- *   for the filters the router sends down the GIN route (the share above), so
- *   the broadest of them needs that many pages × BITMAP_BYTES_PER_PAGE of
- *   work_mem to stay exact. Raising work_mem raises what each busy connection
- *   may spend, so the remedy prices it against the pools.
+ * - Resident, the warning: the HNSW indexes over thoughts and thought_chunks
+ *   are walked on every vector search, and the lever an operator sets is
+ *   shared_buffers. The OS page cache serves a walk too, but not as well: on
+ *   the ten-million-row bench corpus, with the indexes read into the page
+ *   cache before every run, ten connections got about a third of the
+ *   throughput they got with the indexes in shared_buffers (SMD-1499's
+ *   record). The recommendation is the indexes' size rounded up to 64 MB.
+ * - Bitmap, information only: a filter's matches are collected one entry per
+ *   heap page (BITMAP_BYTES_PER_PAGE). On the custom plans match_thoughts
+ *   runs, the bitmap a GIN-routed filter builds is the routing count's, under
+ *   `LIMIT v_exact + 1`, so a lossy one rechecks pages only until it has its
+ *   rows — little. The bitmap that costs when lossy is a generic-plan GIN
+ *   walk's, over every page with a match (up to the whole heap), and whether
+ *   match_thoughts takes a generic plan is SMD-1464's to settle; a larger
+ *   work_mem moved those plans both ways at ten million rows. So preflight
+ *   reports both sizes against work_mem and recommends nothing.
  *
  * Pure: preflight reads the numbers and prints what this returns, and the
- * schema suite holds the arithmetic. Sizes in bytes; recommendations are
- * PostgreSQL size strings, rounded up to whole MB (shared_buffers to 64 MB).
+ * schema suite holds the arithmetic. Sizes in bytes.
  */
 export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
   const MB = 1048576;
@@ -1752,10 +1754,9 @@ export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSi
   const gated = heapPages >= ROUTE_ESTIMATE_MIN_PAGES;
   const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
   const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
-  const workMemMB = upTo(bitmapBytes, 1);
   return {
     resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
-    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, haveBytes: workMemBytes, recommend: `${workMemMB}MB`, recommendBytes: workMemMB * MB },
+    bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, wholeHeapBytes: heapPages * BITMAP_BYTES_PER_PAGE, haveBytes: workMemBytes },
   };
 }
 

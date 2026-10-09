@@ -12534,12 +12534,12 @@ console.log("\n[74] memorySizing: the valid HNSW indexes against shared_buffers,
   const bigBlocks = memorySizing({ ...base, heapBytes: 100000 * 8192, blockSize: 32768 });
   assert(bigBlocks.bitmap.heapPages === 25000 && bigBlocks.bitmap.gated, `pages are counted in the server's block size (${bigBlocks.bitmap.heapPages} at 32 kB)`);
   const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: (4143 + 837) * MB });
-  assert(tenMillion.bitmap.recommend === "20MB" && tenMillion.resident.recommend === "4992MB",
-    `SMD-1499's ten-million-row corpus (3,907 MiB heap; 4,143 + 837 MiB of HNSW): work_mem ${tenMillion.bitmap.recommend}, shared_buffers ${tenMillion.resident.recommend}`);
+  assert(tenMillion.resident.recommend === "4992MB" && tenMillion.bitmap.bitmapPages === 316121 && tenMillion.bitmap.wholeHeapBytes === 500096 * 64 && !tenMillion.bitmap.fits,
+    `SMD-1499's ten-million-row corpus (3,907 MiB heap; 4,143 + 837 MiB of HNSW): shared_buffers ${tenMillion.resident.recommend}; the gate-boundary filter's bitmap ${tenMillion.bitmap.bitmapPages} pages, the whole heap's ${tenMillion.bitmap.wholeHeapBytes} bytes, both past 4 MB`);
   const empty = memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 });
-  assert(empty.resident.recommend === "64MB" && empty.bitmap.recommend === "1MB" && empty.resident.fits && empty.bitmap.fits,
-    `an empty brain fits, and its recommendations never round below their step (${empty.resident.recommend}, ${empty.bitmap.recommend})`);
-  assert(bytesText(512) === "1 kB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
+  assert(empty.resident.recommend === "64MB" && empty.resident.fits && empty.bitmap.fits && empty.bitmap.needBytes === 0,
+    `an empty brain fits, and its recommendation never rounds below its step (${empty.resident.recommend})`);
+  assert(bytesText(512) === "1 kB" && bytesText(MB - 1) === "1024 kB" && bytesText(MB) === "1 MB" && bytesText(1024 * MB - 1) === "1024 MB" && bytesText(1024 * MB) === "1.0 GB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
     "sizes read as kB, MB, or GB to one decimal, rounded up: a size a byte past a setting never reads as equal to it");
 }
 

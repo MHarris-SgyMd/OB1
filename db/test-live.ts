@@ -10700,9 +10700,10 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
 console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row sizes work_mem by (SMD-1499)");
 {
   // ~4,000 pages with a matching row on every one, a forced bitmap heap scan,
-  // and work_mem 8 kB either side of the rule. Measured on PostgreSQL 16.15
-  // at 4,243 pages: lossy at 256 kB, exact from 272 kB, the rule's 265 kB
-  // between. At ~4,000 pages and 8 kB, a server whose entry is outside about
+  // and work_mem 8 kB either side of the rule (this layout: 34 rows a page,
+  // ~4,118 pages, rule ~257 kB). A separate first measurement on PostgreSQL
+  // 16.15, at 4,243 pages: lossy at 256 kB, exact from 272 kB, the rule's 265
+  // kB between. At ~4,000 pages and 8 kB, a server whose entry is outside about
   // 62-66 bytes (a 32-bit build's 56, a 32 kB block's ~176) fails here rather
   // than leaving preflight's arithmetic quietly wrong.
   const sql = new SQL({ url: URL_, max: 1 });

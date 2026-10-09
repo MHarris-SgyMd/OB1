@@ -341,11 +341,14 @@ services:
   #
   # Memory: 014 seeds hnsw.scan_mem_multiplier = 8 on the database, so a
   # filtered search that reaches the HNSW walk may use work_mem x 8 (32 MB at
-  # the 4 MB default) per scan node, two per call, per connection — up to
-  # ~640 MB across the server's default pool of ten on top of shared_buffers.
-  # Thin filters never walk (they are answered exactly), so this is a ceiling
-  # for broad filters on large tables; lower the multiplier with ALTER DATABASE
-  # where memory is tighter than latency (deploy/.env.example has the form).
+  # the 4 MB default) per scan node, two per call, per connection — a ceiling
+  # across every pooled connection (server and api each hold OB1_PG_POOL, so
+  # twenty at the default), on top of shared_buffers. 014's tuple cap usually
+  # binds first (SMD-1499 measured a few MiB for ten broad filters). Thin
+  # filters never walk (they are answered exactly); lower the multiplier with
+  # ALTER DATABASE where memory is tighter than latency (deploy/.env.example has
+  # the form). Size shared_buffers to the HNSW indexes (preflight's "vector
+  # index memory" row says when, and deploy/.env.example how).
   #
   # No random_page_cost here. It was measured as the cost-model remedy for the
   # planner preferring a sequential scan over the HNSW index at the shipped

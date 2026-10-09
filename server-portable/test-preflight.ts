@@ -738,18 +738,19 @@ else {
 
   /**
    * SMD-1499: the server sized for the table. On this small fixture both rows
-   * are ok. A thoughts heap past what a lowered work_mem's bitmap covers is a
-   * warning that names the work_mem it needs, prices it per pooled connection
-   * and says why to raise it watchfully. The heap here is under 037's gate
-   * (8,192 pages), so the bitmap is every page. shared_buffers cannot be
-   * lowered for one database (it is the postmaster's), so the index row's
-   * warning is held by test-schema's arithmetic on memorySizing, and here
-   * only as ok.
+   * are ok. `filter bitmap memory` is information only: a thoughts heap past
+   * what a lowered work_mem's bitmap covers is still an ok row, saying the
+   * routing count's bitmap goes lossy at little cost and pointing at SMD-1464,
+   * with nothing recommending a larger work_mem. The heap here is under 037's
+   * gate (8,192 pages), so the broadest filter may touch every page.
+   * shared_buffers cannot be lowered for one database (it is the
+   * postmaster's), so the index row's warning is held by test-schema's
+   * arithmetic on memorySizing, and here only as ok.
    */
-  const ungatedRow = /filter bitmap memory\s+every filter, since on a heap under 8,192 pages none is gated to the walk, touches about ([\d,]+) of the thoughts heap's ([\d,]+) pages/;
+  const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) pages: its routing count's bitmap/;
   assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
-         && new RegExp(`${ungatedRow.source}: a [^,]+ bitmap, within work_mem \\(4 MB\\)`).test(withKw.out),
-         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and the bitmap of every page fits work_mem");
+         && new RegExp(`${ungatedRow.source} \\([^)]+\\) fits work_mem \\(4 MB\\)\\. Information only`).test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and the bitmap of every page fits work_mem, said as information");
   {
     // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
     // 6,000 of them fill ~1,500 heap pages: past the 1,024 that 64 kB of
@@ -759,14 +760,11 @@ else {
       await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 6000) i`);
       await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '64kB'); END $s$`);
       const lowered = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      const seen = ungatedRow.exec(lowered.out);
-      const pages = Number(seen?.[1]?.replace(/,/g, "") ?? NaN);
-      assert(lowered.code === 0 && pages > 1024 && seen?.[1] === seen?.[2]
-             && new RegExp(`${ungatedRow.source}, a \\d+ kB bitmap, and work_mem is 64 kB: past it the bitmap goes lossy`).test(lowered.out)
-             && /Set work_mem to at least 1MB: ALTER DATABASE <db> SET work_mem = '1MB', then restart the servers/.test(lowered.out)
-             && /the MCP server and the REST core each hold OB1_PG_POOL \(10 here\)/.test(lowered.out)
-             && /cached generic plan after five calls.*SMD-1464 settles the plan mode/.test(lowered.out),
-             `a heap past a lowered work_mem's bitmap warns, naming the work_mem it needs, its cost per pooled connection and the plan-mode caveat (${pages} pages; exit ${lowered.code})`);
+      const pages = Number(ungatedRow.exec(lowered.out)?.[1]?.replace(/,/g, "") ?? NaN);
+      assert(lowered.code === 0 && pages > 1024
+             && new RegExp(`${ungatedRow.source} \\(\\d+ kB\\) passes work_mem \\(64 kB\\) and goes lossy, which costs little: under LIMIT v_exact \\+ 1 it rechecks pages only until it has its rows\\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle`).test(lowered.out)
+             && !/Set work_mem|SET work_mem/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap is information, not a warning: the routing count's lossy bitmap costs little, SMD-1464 named, no work_mem recommended (${pages} pages; exit ${lowered.code})`);
     } finally {
       await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
       await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);

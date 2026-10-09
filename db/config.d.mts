@@ -315,12 +315,12 @@ export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Prom
 export const BOUNDS_IN_FORCE_SQL: string;
 /** Bytes one exact heap page costs a TID bitmap (PostgreSQL 16 tidbitmap.c); past work_mem / this, a bitmap goes lossy. */
 export const BITMAP_BYTES_PER_PAGE: number;
-/** The share of heap pages the broadest filter still on the GIN route touches, where 037's gate runs (1 - 1/e). */
+/** The share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e; the boundary is a median, not a cutoff). */
 export const BITMAP_PAGE_SHARE_GATED: number;
-/** SMD-1499's two comparisons: the HNSW indexes against shared_buffers, and the broadest GIN-routed filter's bitmap against work_mem. Sizes in bytes. */
+/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
 export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
   resident: { fits: boolean; needBytes: number; haveBytes: number; recommend: string };
-  bitmap: { fits: boolean; heapPages: number; gated: boolean; bitmapPages: number; needBytes: number; haveBytes: number; recommend: string; recommendBytes: number };
+  bitmap: { fits: boolean; heapPages: number; gated: boolean; bitmapPages: number; needBytes: number; wholeHeapBytes: number; haveBytes: number };
 };
 /** A byte count for a preflight line: kB, MB, or GB to one decimal. */
 export function bytesText(bytes: number): string;

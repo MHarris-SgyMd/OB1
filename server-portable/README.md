@@ -164,21 +164,18 @@ best-effort. When `query_log` is present the check names it and whether
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
 cites a returned id logs no cite row there (SMD-1719). `vector index memory` and
-`filter bitmap memory` (SMD-1499): the server sized for the table, both
-warnings since a managed platform may not let the operator change either
-setting. The first compares the valid HNSW indexes over `thoughts` and
-`thought_chunks` with `shared_buffers`; the OS page cache serves a walk too,
-but measured at ten million rows it gave ten connections about a third of the
-throughput. The second compares with `work_mem` the bitmap of the broadest
-filter the router leaves on the GIN route: about one match a heap page on a
-heap 037's gate samples (1 − 1/e of the pages), every page below it, at 64
-bytes a page — past `work_mem` the bitmap goes lossy and rechecks whole pages.
-Each remedy names the setting the brain needs and the statement that sets it;
-the second also prices it per pooled connection (`OB1_PG_POOL`, held by the
-MCP server and the REST core each) and says why to raise it watchfully: a
-larger `work_mem` moved `match_thoughts`' generic plans at ten million rows,
-and its default walk can take one (SMD-1464). `db/config.mjs`'s
-`memorySizing` holds the arithmetic.
+`filter bitmap memory` (SMD-1499): the server sized for the table. The first
+is a warning, since a managed platform may not let the operator change the
+setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
+`shared_buffers`, with the size to set and the statement that sets it. The OS
+page cache serves a walk too, but measured at ten million rows it gave ten
+connections about a third of the throughput. The second is information only:
+the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
+under 037's gate, about 1 − 1/e of them for a filter at its boundary above it)
+against `work_mem`, and a generic-plan walk's over the whole heap. A lossy
+routing count costs little under its LIMIT, and whether `match_thoughts` takes
+a generic plan is SMD-1464's to settle, so it recommends nothing.
+`db/config.mjs`'s `memorySizing` holds the arithmetic.
 Over PostgREST every
 direct-connection check — this one included — prints a row: six are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid

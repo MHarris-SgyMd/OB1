@@ -2073,12 +2073,12 @@ so the profile builds from a checkout.
   image's `shared_buffers` (128MB) and `work_mem` (4MB). Preflight's `vector
   index memory` row warns when the HNSW indexes outgrow `shared_buffers` — at
   ten million rows, sizing it to the indexes gave about three times the
-  throughput at ten connections — and `filter bitmap memory` when the bitmap of
-  the broadest filter on the GIN route outgrows `work_mem`; each prints the
-  setting to use. Set them on the server, not here: `ALTER SYSTEM SET
-  shared_buffers` and a restart of postgres, `ALTER DATABASE … SET work_mem`
-  and a restart of the servers (`deploy/.env.example` has the rule and the
-  commands).
+  throughput at ten connections — and prints the size to set: `ALTER SYSTEM
+  SET shared_buffers` and a restart of postgres, where the host has the memory
+  (`deploy/.env.example` has the commands, and the way back if postgres then
+  will not start). Its `filter bitmap memory` row is information only: what a
+  filter's bitmap needs against `work_mem`, with no recommendation until
+  SMD-1464 settles `match_thoughts`' plan mode.
 - **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open
