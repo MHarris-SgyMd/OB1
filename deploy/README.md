@@ -270,7 +270,10 @@ The routes are `x-proxy-routes` at the top of `compose.yaml`, which compose
 hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
 file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
-`compose.api-public.yaml` does. The same text is a label on the proxy, so
+`compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
+table built in `scripts/check-fork-consistency.ts` (check 28) and a
+combination in CI's "The proxy loads only the held route tables"; no compose
+file defines a config that is not a route table (SMD-2658). The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -294,7 +297,12 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
 `ports:`, and a router for its path in `x-proxy-routes`, at a priority above
-`legacy` (1). Not container labels: Traefik's label-driven registry reads them
+`legacy` (1). The same router, and its backend under `services:`, go in
+`PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
+holds the table byte for byte. A note on a route goes in the YAML comments
+above the block, never in it: Traefik renders a route file as a Go template
+before it reads the YAML, so a comment line in the table is not inert
+(SMD-2658). Not container labels: Traefik's label-driven registry reads them
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
@@ -348,8 +356,8 @@ one JSON line per request with the query parameters, every header and the
 userinfo of an absolute-form target (`ClientUsername`) dropped: `compose logs
 proxy` shows the method, the path, the status and the timings. CI's "Full
 stack, no Supabase" job greps that log for the smoke key after calls carrying
-it in a query string and as userinfo. `compose.yaml` sets no rotation for that
-log; the engine's default driver decides (SMD-1849).
+it in a query string and as userinfo. The log is bounded as every service's
+is ("What the servers log", below).
 
 **Podman.** Nothing here needs the engine's socket, so there is no socket path
 to find and no SELinux label to relax. On podman machine (macOS), while
@@ -409,8 +417,9 @@ Measured on this stack (CI's "Full stack, no Supabase" job holds each): off,
 `/api` is a 404 and a POST there never reaches the MCP server; on the mesh
 `api.ob1.internal` answers; on, `/api/v1/whoami` answers, a key in `?key=` alone
 is a 401, a scan's poll link reads `/api/v1/jobs/…`; dropped again, a 404. The
-REST core's log is one line per request — method, route template, status, time —
-and neither its log nor the proxy's holds a key.
+REST core's log is one JSON line per request — method, route template, operation,
+key name, status, an error's code, time ("What the servers log", below) — and
+neither its log nor the proxy's holds a key.
 
 ## Moving a client to /mcp
 
@@ -502,9 +511,10 @@ endpoint, or whatever URL you configure outside the proxy; the exact match rule
 is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
 The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
 through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
-platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` POSTs to the endpoint instead, which also
-proves the MCP path serves; either is fine. Opening the connector URL in a
-browser shows `Method Not Allowed`, which is expected.
+platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
+not a POST to the endpoint, which the request log would write as a refusal every
+30 s (SMD-1849). Opening the connector URL in a browser shows `Method Not Allowed`,
+which is expected.
 
 With a read or write key, the same `GET <base>/health` answers what the brain is,
 as JSON — version, commit, store, tier, the Postgres and pgvector versions, the
@@ -606,6 +616,79 @@ path (a tier at `/canary/mcp`, reached with keys until SMD-2286 gives tiers
 OAuth) is asked at its own path form and
 the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
+
+## What the servers log
+
+Two servers write one JSON line to stdout per request (SMD-1849,
+`server-portable/telemetry.ts`): the MCP server for each request to its MCP
+endpoint, when the request ends, and the REST core for every request it
+answers. The MCP server's other routes — its keyed `/health`, the worker
+mirrors, `/jobs/`, its 405s, CORS preflights and `/.well-known/` — write none
+yet, and a REST request the stop cuts off writes none (the process exits
+before its answer); SMD-1849's second PR gives every route of both servers a
+line from one per-request record.
+
+```
+{"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
+```
+
+These keys, and no other, each held to its rule as the line is written — a
+value that fails its rule is `?`, and a key with nothing to say is left out:
+
+| Key | What it holds |
+| -- | -- |
+| `ts` | when the line was written, UTC |
+| `door` | `mcp` (the MCP server) or `api` (the REST core) |
+| `method` | the HTTP method |
+| `route` | the REST core's route template (`/v1/thoughts/:id`), never the path it was given |
+| `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods is `other` — so a newer client's (2025-11-25's `tasks/*`) is too |
+| `tool` | the tool an MCP tool call names or a REST route runs, from the manifest (`tools.ts`); a batch names none |
+| `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
+| `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said; 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — 408 when it was gone before the route ran) |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`, and a capture saved without its vector is `refused` with `EMBEDDING_NOT_ATTACHED` on the MCP server and `ok` (a 201 whose body says so, which the line does not) on the REST core. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before the MCP server's answer was complete, or before the REST core handed its answer over (one that leaves after keeps that answer's outcome); the MCP server adds `cut` (the stop) and `stalled` (still running at the keepalive's ten minutes — written then, and the call's own end writes no second line). An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply or, at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE`; the REST core's from its 4xx or 5xx answer |
+| `ms` | milliseconds from arrival to the line: an MCP answer's stream to its end, including the time a slow reader takes to drain it; a REST answer to its handing over, before its body is sent, so a job stream (`/v1/jobs/:job_id/stream`) is timed to its opening |
+| `bytes` | the bytes of an MCP answer's stream, the server's own keepalive frames apart (the SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
+
+A line never holds the URL, its query string, a header, a key, a body, a
+tool's arguments or a thought's or a search's text. Search text has its own
+home, the query log (migration 034), behind its own switch and retention; this
+is not a second copy. `test-server.ts` [21] sends a key in `?key=`, planted
+search text and a tool name carrying a line break and planted text through the
+server and looks for each, and holds a key's name with a line break and JSON in
+it to printable ASCII in a unit check (`JSON.stringify` escapes a line break
+anyway, so no line is forged either way); `test-rest.ts` [8] does the same with
+a key, an id and query text. The liveness checks are not logged: the image's `HEALTHCHECK` is a
+keyless `GET /health`, which the MCP server writes no line for and the REST
+core only when it is not a 200. The lines in words beside them — a client that
+left, a stop that cut a call, a stalled stream, a key on the old root URL — go
+to stderr, as before; their method and tool are the caller's strings, cut to
+64 printable characters. Stdout carries lines that are not JSON as well —
+preflight's report at every start (each check, then `preflight OK`), Bun's
+`Started server: …`, and a stop's two or three `SIGTERM: …` lines — so select
+the JSON lines before handing them to `jq`.
+
+The `agent` is a key's name as the operator wrote it in `MCP_ACCESS_KEYS`: name
+keys after the client or device they are for (`laptop`, `claude-desktop`), not
+after a person, so the log stays free of names and addresses.
+
+```bash
+# every request that did not end `ok`, on either server
+docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
+docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
+```
+
+**Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
+rotated at 10 MB with three files kept (`x-logging` in `compose.yaml`; check 29
+of `scripts/check-fork-consistency.ts` refuses a service there without it, and
+check 27 holds `compose.tiers.yaml` to the same). Podman takes the same keys
+and keeps one file, truncated at the bound rather than rotated: every line
+goes at once, so it holds anywhere from nothing to 10 MB (measured on podman
+6.0.2). The driver is named per service, so it
+replaces an engine-wide default an operator has set (journald, a log shipper's
+driver); to keep one, set each service's `logging:` in a second `-f` file
+(an anchor is read within its own file, so an `x-logging` there changes
+nothing here).
 
 ## Keeping the board in the brain
 
@@ -849,8 +932,12 @@ A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 This is the baseline for the sleep scheduler (SMD-1794): always on, at low
-concurrency. The scheduler will run these passes when the logs go quiet, under
-a budget, and yield to live traffic.
+concurrency. `db/sleep.ts` runs these passes only while the logs are quiet
+and stops them on a live call; until its compose service (SMD-2678) it runs
+in a one-off container of this profile's `extract` service, with the
+profile's own followers stopped — `db/README.md`, "Sleep", gives the command
+and how to move off this profile, whose followers do not yield. It has no
+budget yet (SMD-2679).
 
 ## Refreshing a tier
 
@@ -1187,7 +1274,9 @@ proxy is bound to, or a canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
 `--connect` leaves the connector where it was, and says how to move it.
-Moving off `--port`, pass `--connect` in that same `up`, which moves the
+One at the root of `--port`'s port, the URL from before `/mcp`, still
+answers through the deprecated root until v2.0.0 (SMD-2532), and `up` says
+so; `--port N --connect` moves it to `/mcp`. Moving off `--port`, pass `--connect` in that same `up`, which moves the
 connector before the canary's proxy goes; afterwards its old port is no
 longer the canary's, and the connector must be removed by hand first
 (`claude mcp remove --scope user open-brain-canary`). The proxy goes last,
@@ -1216,7 +1305,7 @@ On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
 started, stamped or registered: an old stable by its proxy's route label, a
 stable proxy off its mesh, an empty `--port` and a `--stable-project` no
-project could be named among them. The second is the canary's life, in three
+project could be named among them. The second is the canary's life, in four
 `up`s:
 - `up --connect` over a stable carrying the protective mark `stable`. The
   canary must answer at `/canary/mcp` with tier `canary` and OAuth not
@@ -1228,7 +1317,10 @@ project could be named among them. The second is the canary's life, in three
   loopback, its servers off stable's mesh, `/canary/mcp` the proxy's 404
   again; the thought put on stable just before it must reach the canary, and
   the smoke must fail on the floor;
-- a third `up`, back on stable's origin: the canary's proxy removed, its port
+- a third `up` on the same port, with a connector at its root: named as on
+  the deprecated root, not as one the canary no longer answers, and the root
+  answering 200 with a `Deprecation` header;
+- a fourth `up`, back on stable's origin: the canary's proxy removed, its port
   free, and a connector left at that port named;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope

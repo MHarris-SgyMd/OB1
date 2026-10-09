@@ -464,6 +464,8 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let prose = false;
   /** Set, a window whose text it matches is answered in prose, and the others as usual (SMD-2260). */
   let proseIf: RegExp | null = null;
+  /** Set, every answer is held this long after the request is counted (the hard stop, SMD-1794). */
+  let holdMs = 0;
   const providerD = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -473,6 +475,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       const part = /^\[Part [^\]]*\]/.exec(inner)?.[0];
       const text = part ? inner.slice(part.length).trimStart() : inner;
       reqs.push({ text, maxTokens: body.max_tokens, part });
+      if (holdMs) await Bun.sleep(holdMs);
       if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
       if (prose || proseIf?.test(text)) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
       // The subject "Open Brain" is in every window; each window also names one
@@ -751,11 +754,18 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const { RUNAWAY_PENALTY, RUNAWAY_REPEATS, TOKEN_REPEATS, REPEAT_UNIT_MAX, repeatedTail, callsMadeBy } = await import("./entities.ts");
   let runawayOnce = false;
   const penalties: (number | undefined)[] = [];
+  /** Set, the penalised retry is held this long, and `onRetry` told as it arrives (the hard stop, SMD-1794). */
+  let holdRetryMs = 0;
+  let onRetry: (() => void) | null = null;
   const providerE = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
       penalties.push(body.frequency_penalty);
+      if (body.frequency_penalty !== undefined && holdRetryMs) {
+        onRetry?.();
+        await Bun.sleep(holdRetryMs);
+      }
       if (runawayOnce && body.frequency_penalty === undefined) {
         runawayOnce = false;
         return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
@@ -782,6 +792,21 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   penalties.length = 0;
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+  // The hard stop reaches the retry too (SMD-1794): a stop while the penalised
+  // retry is in hand aborts it, not after its 3 s answer.
+  penalties.length = 0;
+  runawayOnce = true;
+  holdRetryMs = 3000;
+  const retryStop = new AbortController();
+  onRetry = () => { setTimeout(() => retryStop.abort(), 200); };
+  const retryAt = Date.now();
+  let retryErr: unknown = null;
+  try { await extractEntities(short, cfgE, undefined, { kind: "extraction" }, undefined, retryStop.signal); } catch (e) { retryErr = e; }
+  const retryMs = Date.now() - retryAt;
+  holdRetryMs = 0;
+  onRetry = null;
+  assert(retryErr !== null && retryMs < 1500 && penalties.length === 2 && callsMadeBy(retryErr) === 2,
+    `a stop during the runaway's retry aborts it, not after its answer (${retryMs} ms, ${penalties.length} call(s) sent, ${callsMadeBy(retryErr)} counted)`);
 
   // SMD-2000: with OB1_EXTRACT_ESCALATE_MODEL set, a runaway is remade on the
   // LARGER model with no penalty — not once more on the same model under one —
@@ -1314,6 +1339,28 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let refused = "";
   try { await extractEntities(long, cfgWide, undefined, { kind: "extraction" }); } catch (e) { refused = (e as Error).message; }
   assert(/input too long/.test(refused), "under a 1200-token window the 1,320-token thought is two calls or refused — the stub refused one over 700, so the windowing is what [10] measures, not the stub's leniency");
+
+  // The claim worker's hard stop (SMD-1794): a stop aborts the window in hand
+  // and sends no other; one already aborted sends nothing, and counts no call.
+  const { callsMadeBy: madeBy } = await import("./entities.ts");
+  const stopped = new AbortController();
+  stopped.abort();
+  reqs.length = 0;
+  let early: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stopped.signal); } catch (e) { early = e; }
+  assert(early !== null && reqs.length === 0 && madeBy(early) === 0,
+         `a stop already aborted sends no window and counts no call (${reqs.length} sent, ${madeBy(early)} counted)`);
+  holdMs = 3000;
+  reqs.length = 0;
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 200);
+  const stopAt = Date.now();
+  let midStop: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stop.signal); } catch (e) { midStop = e; }
+  const stopMs = Date.now() - stopAt;
+  holdMs = 0;
+  assert(midStop !== null && stopMs < 1500 && reqs.length === 1 && madeBy(midStop) === 1,
+         `a stop during the first of a long thought's windows aborts that call, not after its 3 s answer, and sends no other window (${stopMs} ms, ${reqs.length} sent, ${madeBy(midStop)} counted)`);
   providerD.stop();
 }
 

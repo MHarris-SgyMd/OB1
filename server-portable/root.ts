@@ -9,6 +9,7 @@ import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { setJobSink } from "./jobs.ts";
 import { loadPlugins, type LoadedPlugin } from "./core/plugins.ts";
+import { knowTools } from "./telemetry.ts";
 
 /**
  * Runtime-portable env access.
@@ -320,9 +321,13 @@ export function agents(): AgentResolver {
 
 // The enabled plugins (SMD-2310), read once from the seeded environment: both
 // entries serve the same set, and a serving entry asks at its start so a name
-// that is no plugin stops it there rather than at its first request.
+// that is no plugin stops it there rather than at its first request. Their
+// tool names join the core's in the request line (telemetry.ts).
 let _plugins: LoadedPlugin[] | null = null;
 export function plugins(): LoadedPlugin[] {
-  if (!_plugins) _plugins = loadPlugins(env().OB1_PLUGINS);
+  if (!_plugins) {
+    _plugins = loadPlugins(env().OB1_PLUGINS);
+    knowTools(_plugins.flatMap((p) => p.operations.map((op) => op.tool)));
+  }
   return _plugins;
 }

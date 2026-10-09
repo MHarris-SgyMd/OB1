@@ -549,6 +549,11 @@ MCP tools do rather than a copy of it:
   stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
   stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
   REST core (SMD-2284) can build on them rather than on a copy.
+- **`telemetry.ts`** — the one JSON line written per request to the MCP endpoint and
+  per request to the REST core (SMD-1849):
+  its keys an allow-list, each value held to its rule as the line is written, so no
+  URL, key, argument or thought text reaches it (`deploy/README.md`, "What the
+  servers log").
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
 for what a move would leave behind: an import outside the file's list, a SQL call or
@@ -678,8 +683,10 @@ stripped (`X-Forwarded-Prefix`).
   carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
   `list_thoughts` limit, a non-UUID id on update or delete) are still faults
   through both doors (SMD-2534).
-- **The log** is one line per request — the method, the route's template, the
-  status and the time — with no query string, key, id or content in it.
+- **The log** is one JSON line per request (`telemetry.ts`, SMD-1849) — the
+  method, the route's template, the operation, the key's name, the status, an
+  error answer's code and the time — with no query string, key, id or content
+  in it.
 - **`GET /health`** is liveness with no key, for the container's healthcheck; the
   keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
   as `open-brain-api` (thought_audit.origin).
@@ -699,11 +706,11 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 832 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, and a `Host` the URL parser refuses, or none
+bun test-server.ts        # 859 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
 bun test-auth.ts          # 187 — scoped, hashed, named keys
-bun test-rest.ts          # 306 — the REST core's routes, OpenAPI, authorization ladder and log, over a stub core
-bun test-plugins.ts       # 102 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
-bun run test:local        # 199 — fully local provider, no credential
+bun test-rest.ts          # 315 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
+bun test-plugins.ts       # 103 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
+bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 237 — store conformance, real Postgres in a container
 bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
@@ -791,14 +798,15 @@ stored in the same write").
   database. The idle timeout itself stays at the runtime's default, which is
   the right reaper for a dead socket, and the two intervals are constants, not
   knobs: 5 s is inside any proxy read timeout worth running (SMD-1846). A
-  client that closes the connection before the response is complete is the
-  other line the server logs per request — `request abandoned by the client
-  after 9.8 s: tools/call capture_thought …` — by method and tool (each capped
-  at 64 printable characters), never by content; the MCP SDK client gives up at
+  client that closes the connection before the response is complete is logged
+  in words beside the request's JSON line (`telemetry.ts`, SMD-1849) —
+  `request abandoned by the client after 9.8 s: tools/call capture_thought …` —
+  by the method and tool the body names (each the caller's string, cut to 64
+  printable characters), never by the arguments; the MCP SDK client gives up at
   60 s by default, so for a Claude Desktop-class client that is the line a
   stuck call produces, long before the ceiling. The call runs to its end on the
   server, and a retry of the same text is `upsert_thought`'s fingerprint no-op
-  rather than a second row. The rest of per-request logging is SMD-1849.
+  rather than a second row.
 - **A stop finishes what is in flight, for the grace period less 2 s**
   (SMD-2250). On SIGTERM or SIGINT the server stops accepting, waits for the
   requests in flight (a tool call's stream included) and for the tool calls
