@@ -1,8 +1,8 @@
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { agents, closeStore, db, env, initEnv, serveHere, type Env } from "./root.ts";
-import { authenticateRequest, CLIENT_SCOPES, routable, type Principal } from "./auth.ts";
+import { authenticateRequest, CLIENT_SCOPES, presentedKeys, routable, type Principal } from "./auth.ts";
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
@@ -11,7 +11,7 @@ import { mayCall, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
-import { logRequest, outcomeOf, type RequestOutcome } from "./telemetry.ts";
+import { beginRequest, cutOpenRequests, endsWithStream, errorCode, outcomeOf, traceOf, type RequestOutcome, type RequestTrace } from "./telemetry.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -568,6 +568,42 @@ function edgeRefusal(status: number, extra: Record<string, string>, target: Refu
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Every request's record (SMD-1849, telemetry.ts's RequestTrace), made first,
+// so every route below is counted — the MCP endpoint, the keyed mirrors, the
+// job routes, the preflight, the discovery 404s and notFound's 405s (and
+// notFound makes one for a path this middleware never sees). A route whose
+// answer outlives its handler (the MCP endpoint, a job stream) marks it
+// deferred and ends it itself; every other is ended here, with its answer's
+// status, outcome and code — or `abandoned` for a client already gone, or
+// what the handler said of it (a mirror that showed its caller nothing: `refused`).
+// The time is noted before the answer's code is read, so `ms` is the
+// request's. One request gets no record at all: the liveness probe — a GET or
+// HEAD at a health path that presents no key, which the health route answers
+// `ok` (a 200, unless the environment will not seed, a 500 the healthcheck itself sees) — sent every 30 s by the image's HEALTHCHECK; decided
+// as it arrives, so nothing (PR 2b's span included) starts for it. A wrong or
+// out-of-scope key there is logged `refused`, as at any mirror: a key that
+// does not answer is a guess worth seeing (review pass 2). A route's thrown
+// Error is Hono's 500, logged as any answer is here; the catch is for a throw
+// that is not an Error, which Hono passes up.
+app.use("*", async (c, next) => {
+  const probe = (c.req.method === "GET" || c.req.method === "HEAD") && HEALTH_PATH.test(c.req.path)
+    && !c.req.path.startsWith("/.well-known/") && presentedKeys(c.req.raw).length === 0;
+  if (probe) return next();
+  const trace = beginRequest("mcp", c.req.raw);
+  try {
+    await next();
+  } catch (err) {
+    trace.end({ status: 500, outcome: "error" });
+    throw err;
+  }
+  if (trace.deferred || trace.ended) return;
+  const at = performance.now();
+  const gone = trace.clientGone;
+  const code = gone ? undefined : trace.code ?? await errorCode(c.res);
+  const outcome = gone ? "abandoned" : trace.outcome ?? outcomeOf(c.res.status, code);
+  trace.end({ status: c.res.status, outcome, code }, at);
+});
+
 // Must run before anything reads env(). On Workers c.env carries the bindings;
 // elsewhere it is undefined and initEnv falls back to process.env.
 app.use("*", async (c, next) => {
@@ -645,6 +681,45 @@ function noteLegacyRoute(req: Request, name: string): void {
   console.warn(line);
 }
 
+/**
+ * A keyed mirror whose key the registry did not clear — revoked, busy, or no
+ * answer before the deadline — is shown `ok`, as a caller with no key is; its
+ * line says `refused`, with REVOKED or BUSY where the registry said which
+ * (review pass 3: it read `ok` with the key's name, so a revoked key at a
+ * mirror never showed among what did not end ok).
+ */
+function notCleared(c: Context, trace: RequestTrace | undefined, identity: { status: string } | null): Response {
+  if (trace) {
+    trace.outcome = "refused";
+    trace.code = identity?.status === "revoked" ? "REVOKED" : identity?.status === "busy" ? "BUSY" : undefined;
+  }
+  return c.text("ok", 200, corsHeaders);
+}
+
+/**
+ * A keyed mirror's answer to a caller with no key, a wrong one, or one whose
+ * scope lacks the mirror's tool: `ok`, a 200 that shows nothing — and its
+ * line says `refused`, by no key's name.
+ */
+function shownNothing(c: Context, trace: RequestTrace | undefined): Response {
+  if (trace) trace.outcome = "refused";
+  return c.text("ok", 200, corsHeaders);
+}
+
+/**
+ * A keyed mirror's name for its request's line (telemetry.ts): the route, as
+ * a template — never the path, which may carry a prefix or an id — and the
+ * tool it mirrors; the handler adds the key's name once it authenticates.
+ */
+function nameRoute(c: { req: { raw: Request } }, route: string, tool: ToolName) {
+  const trace = traceOf(c.req.raw);
+  if (trace) {
+    trace.route = route;
+    trace.tool = tool;
+  }
+  return trace;
+}
+
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
 // GET with 405 (below). Without a key, like /.well-known/*: it says the process
@@ -680,12 +755,14 @@ function noteLegacyRoute(req: Request, name: string): void {
 const HEALTH_PATH = /(^|\/)health\/?$/;
 app.get("*", async (c, next) => {
   if (!HEALTH_PATH.test(c.req.path)) return next();
+  const trace = nameRoute(c, "/health", "brain_info");
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
   // The keyed body is brain_info's record, so the key needs what that tool needs.
-  if (!principal || !mayCall(principal, "brain_info")) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "brain_info")) return shownNothing(c, trace);
+  if (trace) trace.agent = principal.name;
   // A HEAD has no body to carry the record: liveness, as without a key, and no
   // read for nothing (review pass 1: it paid the whole read, and the deadline).
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
@@ -711,7 +788,7 @@ app.get("*", async (c, next) => {
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
   noteLegacyRoute(c.req.raw, principal.name);
   return c.json({ ...(await info), oauth: await oauth }, 200, corsHeaders);
 });
@@ -724,11 +801,13 @@ app.get("*", async (c, next) => {
 const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
 app.get("*", async (c, next) => {
   if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
+  const trace = nameRoute(c, "/worker-status", "worker_status");
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !mayCall(principal, "worker_status")) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "worker_status")) return shownNothing(c, trace);
+  if (trace) trace.agent = principal.name;
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
   // The same identity gate as /health: a revoked or unresolved key is shown nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -737,7 +816,7 @@ app.get("*", async (c, next) => {
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
   noteLegacyRoute(c.req.raw, principal.name);
   try {
     // The operation answers an object (a tool result is one); this route has always answered the bare rows.
@@ -745,6 +824,8 @@ app.get("*", async (c, next) => {
     return c.json(status.ok ? status.value.pools : [], 200, corsHeaders);
   } catch (e) {
     // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
+    // Its line says `error`, whatever the 200 (review pass 4: it read `ok`).
+    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
   }
 });
@@ -767,11 +848,14 @@ app.post("*", async (c, next) => {
   const isRelease = WORKER_RELEASE_PATH.test(c.req.path);
   const isRun = WORKER_RUN_PATH.test(c.req.path);
   if (!isRetry && !isRelease && !isRun) return next();
+  const tool = isRetry ? "retry_failed" : isRelease ? "release_stale_leases" : "run_worker";
+  const trace = nameRoute(c, isRetry ? "/worker-retry-failed" : isRelease ? "/worker-release-leases" : "/worker-run", tool);
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !mayCall(principal, isRetry ? "retry_failed" : isRelease ? "release_stale_leases" : "run_worker")) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, tool)) return shownNothing(c, trace);
+  if (trace) trace.agent = principal.name;
   // The same identity gate as /worker-status: a revoked or unresolved key does nothing.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const identity = await Promise.race([
@@ -779,7 +863,7 @@ app.post("*", async (c, next) => {
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
   noteLegacyRoute(c.req.raw, principal.name);
   const body = await c.req.json().catch(() => null);
   const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
@@ -815,6 +899,7 @@ app.post("*", async (c, next) => {
     });
   } catch (e) {
     // SQL-only (the PostgREST shim throws), or a store failure: a reason, not a bare 500 (parity with /worker-status).
+    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
   }
 });
@@ -837,11 +922,13 @@ app.get("*", async (c, next) => {
   const pollMatch = streamMatch ? null : JOBS_PATH.exec(c.req.path);
   if (!streamMatch && !pollMatch) return next();
   const id = (streamMatch ?? pollMatch)![2];
+  const trace = nameRoute(c, streamMatch ? "/jobs/:id/stream" : "/jobs/:id", "job_status");
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   }, { admit: CLIENT_SCOPES });
-  if (!principal || !mayCall(principal, "job_status")) return c.text("ok", 200, corsHeaders);
+  if (!principal || !mayCall(principal, "job_status")) return shownNothing(c, trace);
+  if (trace) trace.agent = principal.name;
   // HEAD carries no body for a job's state or stream: liveness, before the
   // identity resolve, exactly as /health and the worker mirrors answer it.
   if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
@@ -852,7 +939,7 @@ app.get("*", async (c, next) => {
     new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
   ]);
   clearTimeout(timer);
-  if (!identity || identity.status !== "ok") return c.text("ok", 200, corsHeaders);
+  if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
   noteLegacyRoute(c.req.raw, principal.name);
   if (streamMatch) {
     const stream = await subscribeJob(principal, id);
@@ -860,7 +947,9 @@ app.get("*", async (c, next) => {
     const response = new Response(stream, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Kept alive by the same wrapper as the MCP stream (SMD-1864): the job's
     // events may be minutes apart, and a silent stream is reaped otherwise.
-    return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
+    // Its line is written where the stream ends, as the REST core's job stream's is.
+    const ends = trace ? endsWithStream(trace, c.req.raw.signal) : {};
+    return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, ...ends });
   }
   const job = await core.jobStatus(principal, { job_id: id });
   if (!job.ok) return c.json({ error: "not found" }, 404, corsHeaders);
@@ -928,36 +1017,36 @@ export function cutByStopLine(label: string, elapsedMs: number): string {
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
-  // Every request's JSON line (SMD-1849, telemetry.ts), written once, when it
-  // ends: answered, refused at the key, left by its client, cut by the stop,
-  // stalled, or thrown. `status` is the answer's, once there is one (0
-  // before; 408 for a client gone before the route ran); `parts` the
-  // JSON-RPC method and tool, once the body is read;
-  // `agent` the key's name once it authenticates; `call` how the tools ended,
-  // filled in by buildServer's registerOp. A tool call asked for that never
-  // ran to an end — the transport or the SDK refused it, or the key's scope
-  // does not register it — counts as `unrun`, and a batch says its worst.
-  const started = performance.now();
-  let status = 0;
+  // The request's record (SMD-1849, telemetry.ts), which the server's first
+  // middleware made: this route ends it itself, once, when the request ends —
+  // answered, refused at the key, left by its client, cut by the stop,
+  // stalled, or thrown — so the middleware leaves it. Filled in as the route
+  // learns: `status` the answer's, once there is one (0 before; 408 for a
+  // client gone before the route ran); the JSON-RPC method and tool once the
+  // body is read (`parts`); the key's name once it authenticates; `call` how
+  // the tools ended, filled in by buildServer's registerOp. A tool call asked
+  // for that never ran to an end — the transport or the SDK refused it, or
+  // the key's scope does not register it — counts as `unrun`, and a batch
+  // says its worst.
+  // The first middleware made it: a POST is never the liveness probe.
+  const trace = traceOf(c.req.raw)!;
+  trace.deferred = true;
   let parts: RequestParts = { toolCalls: 0 };
-  let agent: string | undefined;
+  const read = (bodyText: string | null) => {
+    parts = partsOf(parsedBody(bodyText));
+    trace.rpc = parts.rpc;
+    trace.tool = parts.tool;
+  };
   const call: CallRecord = {};
-  let logged = false;
   const finish = (end?: RequestOutcome, code?: string, bytes?: number) => {
-    if (logged) return;
-    logged = true;
+    if (trace.ended) return;
     const ran = (call.ended ?? 0) < parts.toolCalls ? worseOutcome(call.outcome, "unrun") : call.outcome;
-    const outcome = end ?? ran ?? outcomeOf(status);
-    const { toolCalls: _, ...said } = parts;
-    logRequest({
-      door: "mcp", method: c.req.method, ...said, agent, status, outcome,
-      code: code ?? (outcome === call.outcome ? call.code : undefined),
-      ms: performance.now() - started, bytes,
-    });
+    const outcome = end ?? ran ?? outcomeOf(trace.status);
+    trace.end({ outcome, code: code ?? (outcome === call.outcome ? call.code : undefined), bytes });
   };
   /** Refused before any tool ran: the key, the registry; the answer's status and why. */
   const refused = (response: Response, code: string): Response => {
-    status = response.status;
+    trace.status = response.status;
     finish("refused", code);
     return response;
   };
@@ -976,7 +1065,10 @@ app.on(MCP_METHODS, "*", async (c) => {
   let settled = false;
   const abandoned = () => {
     if (settled) return;
-    console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - started));
+    // Once: a client that leaves reaches here by the abort and, on a stream,
+    // by the body's cancel as well.
+    settled = true;
+    console.warn((cutByStop ? cutByStopLine : abandonedRequestLine)(label, performance.now() - trace.started));
     finish(cutByStop ? "cut" : "abandoned");
   };
   signal.addEventListener("abort", abandoned, { once: true });
@@ -984,7 +1076,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // Gone before the route ran: the line, and nothing else — no key check, no
     // registry resolve, no tool run for a client that will never read it. The
     // status reaches no one; 408 is the nearest name for what happened.
-    status = 408;
+    trace.status = 408;
     abandoned();
     return c.body(null, 408);
   }
@@ -1019,7 +1111,7 @@ app.on(MCP_METHODS, "*", async (c) => {
       const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
       const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
       const target = refusalTarget(bodyText);
-      parts = partsOf(parsedBody(bodyText));
+      read(bodyText);
       settled = true;
       if (answer.kind === "challenge") return refused(challengeResponse(answer.origin, answer.refusedToken, target), "UNAUTHORIZED");
       if (answer.kind === "unavailable") return refused(unavailableResponse(target), "AUTH_UNREACHABLE");
@@ -1029,7 +1121,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     }
     // Named from here on, so a line written during the registry's answer —
     // the client gone, a throw — says whose key it was.
-    agent = principal.name;
+    trace.agent = principal.name;
 
     /**
      * Resolve the stable agent id, and honour a revocation.
@@ -1047,7 +1139,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     if (identity.status === "revoked" || identity.status === "busy") {
       const bodyText = await readBodyText(c.req.raw);
       const target = refusalTarget(bodyText);
-      parts = partsOf(parsedBody(bodyText));
+      read(bodyText);
       settled = true;
       // Revoked never changes on a retry, so a notification gets a bare 202; busy
       // can, so it gets 503 + Retry-After (and a busy REQUEST keeps the 200
@@ -1072,7 +1164,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // mid-upload) is `?` here and the transport's 400 there, as before.
     const rawBody = await c.req.text().catch(() => null);
     label = requestLabel(rawBody);
-    parts = partsOf(parsedBody(rawBody));
+    read(rawBody);
 
     // Repeated slashes collapsed: a path that came as `//mcp` (a proxy that
     // does not clean paths, or none) made the link `//mcp/jobs/<id>`, which a
@@ -1094,25 +1186,27 @@ app.on(MCP_METHODS, "*", async (c) => {
     const response = await transport.handleRequest(mcpRequest);
     if (!response) {
       settled = true;
-      status = 500;
+      trace.status = 500;
       finish("error");
       return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
     }
     response.headers.delete("mcp-session-id");
     for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-    status = response.status;
+    trace.status = response.status;
     // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
     // route's entry (SMD-1864, sse.ts); a stall settles the request too, so the
     // reap that follows it is not a second line blaming the client. The line is
     // written at the stream's end, with the bytes the transport wrote.
     return withSseKeepalive(response, {
-      signal, label, startedAt: started, ...keepaliveTiming,
+      signal, label, startedAt: trace.started, ...keepaliveTiming,
       onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
       onStall: () => { settled = true; finish("stalled"); },
+      // The body let go of with no abort (a runtime whose signal never aborts): the client is gone.
+      onCancel: abandoned,
     });
   } catch (err) {
     settled = true;
-    status = 500;
+    trace.status = 500;
     finish("error");
     throw err;
   }
@@ -1129,9 +1223,13 @@ app.on(MCP_METHODS, "*", async (c) => {
 // not silently shadowed by dispatch order. `Allow` names the target resource's
 // methods (RFC 9110 §10.2.1): at a health path, GET and HEAD beside the MCP
 // methods. FORK.md change 75.
-app.notFound((c) =>
-  c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
-);
+app.notFound((c) => {
+  // A path the `*` middleware never matched (one holding an encoded line
+  // break) reaches here with no record: its line is written here, so such a
+  // probe is seen like any other (review pass 3).
+  if (!traceOf(c.req.raw)) beginRequest("mcp", c.req.raw).end({ status: 405, outcome: "refused" });
+  return c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS);
+});
 
 // Stopping on SIGTERM, what is in flight finished (SMD-2250; shutdown.ts says
 // why the image needs it). Bun serves the default export below itself and
@@ -1154,6 +1252,11 @@ if (SERVES_ON_BUN) {
     close: closeStore,
     onCut: () => {
       cutByStop = true;
+      // Every request still open gets its line — `cut`, or `abandoned` for a
+      // client already gone — before the process exits: the MCP endpoint's, the mirrors', the job streams'. This runs
+      // before the stop closes the sockets, so the MCP route's own abort
+      // handler, which follows, finds its record ended (it ends once).
+      cutOpenRequests();
       // Jobs still running when the stop cuts what is in flight are marked lost,
       // so a poll or stream in flight sees a terminal answer rather than hanging.
       // The job bodies are tracked through toolCalls (startJob's `track`), so the

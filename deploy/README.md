@@ -619,14 +619,19 @@ down inside one run (its probe's 30 s) can fail it once; run it again.
 
 ## What the servers log
 
-Two servers write one JSON line to stdout per request (SMD-1849,
-`server-portable/telemetry.ts`): the MCP server for each request to its MCP
-endpoint, when the request ends, and the REST core for every request it
-answers. The MCP server's other routes — its keyed `/health`, the worker
-mirrors, `/jobs/`, its 405s, CORS preflights and `/.well-known/` — write none
-yet, and a REST request the stop cuts off writes none (the process exits
-before its answer); SMD-1849's second PR gives every route of both servers a
-line from one per-request record.
+Both servers write one JSON line to stdout per request, every route of each
+(SMD-1849, `server-portable/telemetry.ts`) — the MCP endpoint, the MCP
+server's keyed `/health`, worker mirrors and `/jobs/`, its 405s, CORS
+preflights and `/.well-known/` answers, and every REST route — when the
+request ends: as its answer goes, or for a stream (an MCP answer, a job
+stream) at the stream's end. A request in flight when the stop cuts it is
+written then, as `cut` (or `abandoned`, its client already gone), before the
+process exits. A request Bun's own HTTP parser refuses — a path past its
+limit (431), `OPTIONS *`, a method it does not know — never reaches a route
+and has no line; the proxy's access log has it. The one request not
+written is the liveness probe's (below): on the MCP server a GET or HEAD at a
+health path that presents no key, on the REST core a GET or HEAD of `/health`
+— known as it arrives, and not written whatever it answers.
 
 ```
 {"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
@@ -640,15 +645,15 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `ts` | when the line was written, UTC |
 | `door` | `mcp` (the MCP server) or `api` (the REST core) |
 | `method` | the HTTP method |
-| `route` | the REST core's route template (`/v1/thoughts/:id`), never the path it was given |
+| `route` | the route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/health`, `/worker-status`, `/worker-run`, `/jobs/:id/stream` — under whatever prefix it came); the MCP endpoint, the MCP server's preflights, `/.well-known/` answers and 405s, the REST core's 404s and 405s, and an unmatched path have none |
 | `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods is `other` — so a newer client's (2025-11-25's `tasks/*`) is too |
-| `tool` | the tool an MCP tool call names or a REST route runs, from the manifest (`tools.ts`); a batch names none |
+| `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
-| `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said; 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — 408 when it was gone before the route ran) |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`, and a capture saved without its vector is `refused` with `EMBEDDING_NOT_ATTACHED` on the MCP server and `ok` (a 201 whose body says so, which the line does not) on the REST core. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before the MCP server's answer was complete, or before the REST core handed its answer over (one that leaves after keeps that answer's outcome); the MCP server adds `cut` (the stop) and `stalled` (still running at the keepalive's ten minutes — written then, and the call's own end writes no second line). An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
-| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply or, at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE`; the REST core's from its 4xx or 5xx answer |
-| `ms` | milliseconds from arrival to the line: an MCP answer's stream to its end, including the time a slow reader takes to drain it; a REST answer to its handing over, before its body is sent, so a job stream (`/v1/jobs/:job_id/stream`) is timed to its opening |
-| `bytes` | the bytes of an MCP answer's stream, the server's own keepalive frames apart (the SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
+| `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`, and a capture saved without its vector is `refused` with `EMBEDDING_NOT_ATTACHED` on the MCP server and `ok` (a 201 whose body says so, which the line does not) on the REST core. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
+| `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
+| `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
 
 A line never holds the URL, its query string, a header, a key, a body, a
 tool's arguments or a thought's or a search's text. Search text has its own
@@ -659,13 +664,26 @@ server and looks for each, and holds a key's name with a line break and JSON in
 it to printable ASCII in a unit check (`JSON.stringify` escapes a line break
 anyway, so no line is forged either way); `test-rest.ts` [8] does the same with
 a key, an id and query text. The liveness checks are not logged: the image's `HEALTHCHECK` is a
-keyless `GET /health`, which the MCP server writes no line for and the REST
-core only when it is not a 200. The lines in words beside them — a client that
-left, a stop that cut a call, a stalled stream, a key on the old root URL — go
+keyless `GET /health`, which neither server writes a line for — its 200, or the
+500 of an environment that will not seed, is the healthcheck's to read. On the MCP server a keyed `/health` (smoke.sh's, an operator's curl) is
+logged with its key's name when the key reaches `brain_info`; a wrong key or
+one out of scope is shown `ok` as the probe is, but logged, `refused` — a key
+that does not answer is a guess worth seeing — so only a request that
+presented no key goes unlogged. The REST core writes no line for a GET or
+HEAD of `/health` at all, keyed or not: its answer never reads a key. A keyed
+HEAD at an MCP mirror is `ok` by the key's name, revoked or not: it answers
+liveness before the registry is asked, and shows the caller nothing.
+Every keyed mirror alike, a HEAD whose key authenticates aside: one that shows a caller nothing answers `ok`, a 200,
+and its line is `refused`: with no key named when the key is missing (at a
+mirror other than `/health`), wrong or out of scope, and by the key's name,
+when the registry has not cleared it, with `REVOKED` or `BUSY` where it said
+which (none when it did not answer in time). The lines in words beside them —
+the MCP server's (a client that left, a stop that cut a call, a stalled stream,
+a key on the old root URL) and the REST core's job stream at its ceiling — go
 to stderr, as before; their method and tool are the caller's strings, cut to
 64 printable characters. Stdout carries lines that are not JSON as well —
 preflight's report at every start (each check, then `preflight OK`), Bun's
-`Started server: …`, and a stop's two or three `SIGTERM: …` lines — so select
+`Started server: …`, and a stop's `SIGTERM: …` or `SIGINT: …` lines (two, and one more for each further signal) — so select
 the JSON lines before handing them to `jq`.
 
 The `agent` is a key's name as the operator wrote it in `MCP_ACCESS_KEYS`: name
