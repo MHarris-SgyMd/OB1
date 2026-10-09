@@ -284,7 +284,8 @@ jobs:
           # proxy, as fork-checks' "The proxy loads only the held route tables"
           # holds of the generator's two other forms.
           # Every other service, the proxy, the networks, the configs and the
-          # project's name are compose.yaml's, with and without api-public,
+          # project's name are compose.yaml's, alone, with api-public and with
+          # hooks-public (SMD-2310),
           # under every profile, and it defines none compose.yaml lacks (a
           # service under a new one would go unrendered), variables
           # substituted and not; so no alias,
@@ -300,10 +301,10 @@ jobs:
           pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           rest='delpaths($pins) | with_entries(select(.key | startswith("x-") | not))'
-          for public in no yes; do
+          for public in no api hooks; do
             for mode in substituted raw; do
               files=(-f compose.yaml)
-              if [ "$public" = yes ]; then files+=(-f compose.api-public.yaml); fi
+              if [ "$public" != no ]; then files+=(-f "compose.$public-public.yaml"); fi
               extra=()
               if [ "$mode" = raw ]; then extra=(--no-interpolate); fi
               [ "$(docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" config --profiles)" = "$list" ]
@@ -419,6 +420,9 @@ jobs:
           # the other two and adds its route to the proxy.
           docker compose -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml config --format json \
             | jq -e '.services.proxy.labels | has("ob1.proxy-api-route")' >/dev/null
+          # The /hooks overlay too (SMD-2310), beside /api's.
+          docker compose -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml config --format json \
+            | jq -e '.services.proxy.labels | has("ob1.proxy-api-route") and has("ob1.proxy-hooks-route")' >/dev/null
           docker compose -f compose.yaml -f compose.release.yaml down -v
 
       - name: Keep the rehearsal's overlay and notes

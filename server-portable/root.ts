@@ -8,7 +8,7 @@ import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from 
 import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { setJobSink } from "./jobs.ts";
-import { loadPlugins, type LoadedPlugin } from "./core/plugins.ts";
+import { enabledHooks, hookSecrets, loadPlugins, type LoadedHook, type LoadedPlugin } from "./core/plugins.ts";
 import { knowTools } from "./telemetry.ts";
 
 /**
@@ -209,6 +209,14 @@ export type Env = {
    * pools log in with it. Required while an enabled plugin keeps tables.
    */
   OB1_PLUGIN_DB_PASSWORD?: string;
+  /**
+   * The plugins whose webhooks the REST core serves at /hooks/<plugin>/<name>
+   * (SMD-2310), comma-separated, each enabled in OB1_PLUGINS. Unset, none —
+   * and the proxy reaches /hooks only with deploy/compose.hooks-public.yaml.
+   */
+  OB1_HOOKS?: string;
+  /** Each webhook plugin's secret, `plugin=secret` pairs separated by spaces: what its handler verifies a delivery against. */
+  OB1_HOOK_SECRETS?: string;
 };
 
 let ENV: Env | null = null;
@@ -259,8 +267,10 @@ export function serveHere(door: string): void {
   // review pass 1). A store that fails to build here fails again, and says
   // so, at the first request.
   initEnv();
-  // A name in OB1_PLUGINS that is no plugin stops the server here, not at its first request (SMD-2310).
+  // A name in OB1_PLUGINS or OB1_HOOKS that is no plugin, or a malformed
+  // OB1_HOOK_SECRETS, stops the server here, not at its first request (SMD-2310).
   plugins();
+  hooks();
   void db().catch(() => {});
 }
 
@@ -336,4 +346,17 @@ export function plugins(): LoadedPlugin[] {
     knowTools(_plugins.flatMap((p) => p.operations.map((op) => op.tool)));
   }
   return _plugins;
+}
+
+// The webhooks the REST core serves and their secrets (SMD-2310), read once
+// like the plugins: a name in OB1_HOOKS that is no enabled plugin with a
+// webhook, or a malformed OB1_HOOK_SECRETS, stops the server at its start.
+let _hooks: { hooks: LoadedHook[]; secrets: Map<string, string> } | null = null;
+export function hooks(): { hooks: LoadedHook[]; secrets: Map<string, string> } {
+  if (!_hooks) {
+    const { secrets, problem } = hookSecrets(env().OB1_HOOK_SECRETS);
+    if (problem) throw new Error(problem);
+    _hooks = { hooks: enabledHooks(plugins(), env().OB1_HOOKS), secrets };
+  }
+  return _hooks;
 }
