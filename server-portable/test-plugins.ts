@@ -23,6 +23,7 @@ import { createRestApp } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
+import { pluginLoginUrl } from "../db/config.mjs";
 
 const { assert, report } = createAssert();
 
@@ -71,6 +72,11 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     ["no operations", [definePlugin({ name: "crm", title: "T", description: "D", operations: {} })], /no operations/],
     ["no title", [withOp("crm", "list", { title: " " })], /a title and a description are required/],
     ["no handler", [withOp("crm", "list", { handler: undefined })], /no handler/],
+    ["a page path with a field", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items/{id}", label: "Items" }] } }], /a page's path is segments of lower-case words and hyphens/],
+    ["two pages on one path", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "A" }, { path: "/items", label: "B" }] } }], /two pages share the path/],
+    ["a page label of two lines", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "Items\nSecond" }] } }], /a label is one line of at most 40 characters/],
+    ["a page label over 40 characters", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "x".repeat(41) }] } }], /a label is one line of at most 40 characters/],
+    ["a page that is no object", [{ ...withOp("crm", "list"), gui: { pages: [null as never] } }], /a page is \{ path, label \}/],
   ];
   for (const [label, manifests, want] of cases) {
     const problems = manifestProblems(manifests).join("; ");
@@ -127,6 +133,23 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   try { loadPlugins("", [withOp("Bad", "x")]); } catch (e) { thrown = (e as Error).message; }
   assert(/a plugin manifest is malformed/.test(thrown), "a malformed manifest in the tree throws even when no plugin is enabled");
   assert(pluginProblem("nope") !== null && pluginProblem("example") === null && pluginProblem(undefined) === null, "pluginProblem: the throw as a sentence, null when sound");
+  // The plugin login role's URL: its user replaced, its password encoded, and a URL with no host refused —
+  // the parser ignores a user set on one, and the connection would be the server's own role.
+  const login = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain?sslmode=disable", "a%41b@c:d/e#f?g&h=i"));
+  assert(login.username === "ob1_plugins" && decodeURIComponent(login.password) === "a%41b@c:d/e#f?g&h=i" && login.host === "db:5432" && login.search === "?sslmode=disable", "the login URL: the user replaced, the password encoded (a % kept), the rest kept");
+  let noHost = "";
+  try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p"); } catch (e) { noHost = (e as Error).message; }
+  assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);
+  // That refusal is a plugin transaction's, not the store's start: a server on
+  // such a URL with the password set still starts and serves the core.
+  const { SqlStore } = await import("./store-sql.ts");
+  let store: InstanceType<typeof SqlStore> | null = null;
+  let built = "";
+  try { store = new SqlStore("postgres:///brain?host=/var/run/postgresql", { pluginPassword: "p" }); } catch (e) { built = (e as Error).message; }
+  let txSaid = "";
+  if (store) await store.pluginTx("example", async () => 1).catch((e: Error) => { txSaid = e.message; });
+  assert(store !== null && built === "" && /names no host/.test(txSaid), `the store builds; the plugin's transaction is refused, naming why (${built || txSaid})`);
+  await store?.close();
 }
 
 // ── A stub core: each operation answers what the case below asks of it ──────
@@ -183,6 +206,22 @@ console.log("\n[3] Enabled, the operation is in whoami for the scopes that reach
   assert(!Object.keys(off.paths).some((p) => p.startsWith("/v1/plugins/")), "disabled, the document has no plugin path");
   const ids = Object.values(on.paths).flatMap((m) => Object.values(m).map((o) => o.operationId));
   assert(new Set(ids).size === ids.length, "operationIds stay unique with a plugin's beside the core's");
+  assert(on.paths["/v1/plugins"]?.get?.operationId === "plugins", "the document lists the plugin registry");
+  // The GUI's nav registry: an enabled plugin, its pages, the operations of it the key may call.
+  type Listed = { plugins: { name: string; title: string; pages: { path: string; label: string }[]; operations: string[] }[] };
+  for (const [key, scope] of [["read-raw", "read"], ["write-raw", "write"]] as const) {
+    const listed = (await (await hit(enabled, "/v1/plugins", { key })).json()) as Listed;
+    const ex = listed.plugins.find((pl) => pl.name === "example");
+    assert(listed.plugins.length === 1 && ex?.title === "Example plugin" && JSON.stringify(ex.pages) === '[{"path":"/notes","label":"Notes"}]', `a ${scope} key reads the enabled plugin and its nav page`);
+    assert(JSON.stringify([...(ex?.operations ?? [])].sort()) === JSON.stringify(exampleTools(scope)), `with the operations of it a ${scope} key may call (${ex?.operations.join(", ") || "none"})`);
+  }
+  const forCapture = (await (await hit(enabled, "/v1/plugins", { key: "cap-raw" })).json()) as Listed;
+  assert(forCapture.plugins.length === 0, "a capture key, which can call none of the example's operations, is listed no plugin: no nav entry to nothing it can use");
+  const offList = (await (await hit(disabled, "/v1/plugins", { key: "read-raw" })).json()) as Listed;
+  assert(offList.plugins.length === 0, "disabled, the registry lists nothing: the GUI's nav shows no page of it");
+  assert((await hit(enabled, "/v1/plugins")).status === 401, "the registry needs a key");
+  const post = await hit(enabled, "/v1/plugins", { key: "read-raw", method: "POST", body: "{}" });
+  assert(post.status === 405 && /GET/.test(post.headers.get("allow") ?? ""), "a POST to the registry is a 405 naming GET");
 }
 
 console.log("\n[4] The operation over REST: the gate, the input held to its schema, the answer held to its output; disabled, no route");

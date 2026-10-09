@@ -1363,6 +1363,35 @@ export function pluginIdents(name) {
 }
 
 /**
+ * The login role every plugin's SQL runs on (SMD-2310): NOINHERIT, no
+ * superuser, holding SET on each plugin's role and nothing on the core. The
+ * servers' plugin pools and the migrator's plugin phase connect as it, then
+ * SET LOCAL ROLE to the plugin's own; SQL that undoes that role lands here,
+ * where Postgres still refuses it the core's tables. Its password is the
+ * operator's secret, OB1_PLUGIN_DB_PASSWORD.
+ */
+export const PLUGIN_LOGIN_ROLE = "ob1_plugins";
+
+/**
+ * The connection string for PLUGIN_LOGIN_ROLE: `url` with its user and
+ * password replaced, every other part kept. Throws on a URL that names no
+ * host — a socket URL (`postgres:///db?host=/run/postgresql`) — where the URL
+ * parser ignores a user set on it, and the connection would fall back to the
+ * server's own role (PR 3 review pass 2): plugin SQL never runs as that. The
+ * password is percent-encoded, so a `%` in it reaches the server as itself.
+ * @param {string} url
+ * @param {string} password
+ * @returns {string}
+ */
+export function pluginLoginUrl(url, password) {
+  const u = new URL(url);
+  u.username = PLUGIN_LOGIN_ROLE;
+  u.password = encodeURIComponent(password);
+  if (u.username !== PLUGIN_LOGIN_ROLE) throw new Error(`the database URL names no host, so a plugin's connection cannot log in as ${PLUGIN_LOGIN_ROLE}: give DATABASE_URL a host (a socket directory as ?host= keeps a host in the URL's own part)`);
+  return u.toString();
+}
+
+/**
  * What in a plugin's schema its role does not own (SMD-2310), each with the
  * ALTER … OWNER TO keyword that hands it back and its owner: a relation, a
  * routine or a type a brain restored without the role left the restoring

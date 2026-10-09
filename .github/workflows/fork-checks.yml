@@ -155,7 +155,8 @@ jobs:
 
       # Plugins in the contract (SMD-2310) over a stub core: the manifests,
       # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
-      # whoami and MCP tools/list behind the scope gate, and ctx.call's gate.
+      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
+      # plugin login URL, and the GUI's registry at GET /v1/plugins.
       - name: Plugins in the contract
         working-directory: server-portable
         run: bun test-plugins.ts
@@ -1237,12 +1238,14 @@ jobs:
           # it), are handed the worker key, mount the checkout read-only,
           # reach a host model by the host alias, wait for the schema, keep
           # their grace periods (120 s, 60 s), and stop after three refusals
-          # rather than loop; and each command's last line is exactly its
+          # rather than loop; take no plugin knob — the plugin login role's
+          # password is the two servers' and the migrator's (SMD-2310); and
+          # each command's last line is exactly its
           # worker's exec'd --follow, so no flag (a --switch-key would lift
           # the model-change refusal) rides along. The refusals themselves
           # are run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'

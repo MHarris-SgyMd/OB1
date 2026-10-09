@@ -12,7 +12,7 @@ import { PLUGIN_NAME_RE } from "../../db/config.mjs";
 import { PLUGINS } from "../../plugins/registry.ts";
 import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
-import type { Method, PluginContext, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
+import type { GuiPage, Method, PluginContext, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
@@ -25,6 +25,8 @@ const PLUGIN_NAME = PLUGIN_NAME_RE;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
+/** A GUI page's path under the plugin's: `/` and segments of lower-case words and hyphens. */
+const GUI_PATH = /^(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
 /** A refusal's code: upper-case words joined by underscores, as the core's are. */
 const REFUSAL_CODE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;
 const SCOPES: readonly PluginScope[] = ["read", "capture", "write"];
@@ -52,7 +54,7 @@ export type LoadedOp = {
   handler: PluginOperation["handler"];
 };
 
-export type LoadedPlugin = { name: string; title: string; description: string; operations: LoadedOp[] };
+export type LoadedPlugin = { name: string; title: string; description: string; operations: LoadedOp[]; pages: GuiPage[] };
 
 /** An operation's tool name: `<plugin>_<key>`, the plugin's hyphens read as `_` so the name is one word to a client. */
 export const toolNameOf = (plugin: string, key: string): string => `${plugin.replace(/-/g, "_")}_${key}`;
@@ -130,6 +132,16 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
       }
       if (typeof op.handler !== "function") problems.push(`${where}: no handler`);
     }
+    // Its GUI pages: each a path of plain segments under the plugin's, once, with a label a nav entry can show.
+    const pages = new Set<string>();
+    for (const page of m.gui?.pages ?? []) {
+      if (!page || typeof page !== "object") { problems.push(`${at}: a page is { path, label }`); continue; }
+      const where = `${at} page ${JSON.stringify(page.path)}`;
+      if (!GUI_PATH.test(page.path ?? "")) problems.push(`${where}: a page's path is segments of lower-case words and hyphens`);
+      if (pages.has(page.path)) problems.push(`${where}: two pages share the path`);
+      pages.add(page.path);
+      if (!page.label?.trim() || page.label.length > 40 || /[\r\n]/.test(page.label)) problems.push(`${where}: a label is one line of at most 40 characters`);
+    }
   }
   return problems;
 }
@@ -153,6 +165,7 @@ export function loadPlugins(raw: string | undefined, registry: readonly PluginMa
     name: m.name,
     title: m.title,
     description: m.description,
+    pages: (m.gui?.pages ?? []).map((p) => ({ path: p.path, label: p.label })),
     operations: Object.entries(m.operations).map(([key, op]) => ({
       plugin: m.name,
       key,
