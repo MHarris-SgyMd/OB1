@@ -54,6 +54,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
+import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -10611,6 +10612,48 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await sql`DELETE FROM query_log`;
     await sql.close();
+  }
+}
+
+console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory is read or the reason it is not is given (SMD-1500)");
+{
+  const pool = Array.from({ length: 4 }, () => new SQL({ url: URL_, max: 1 }));
+  const memory = new SQL({ url: URL_, max: 1 });
+  /** Every run bounded: a loop that ignored its deadline would otherwise hang the suite. */
+  const bounded = <T,>(p: Promise<T>) => Promise.race([p, Bun.sleep(15_000).then(() => { throw new Error("the closed loop outran its deadline by 15 s"); })]);
+  try {
+    const pids = await assertDistinctBackends(pool);
+    assert(new Set(pids).size === 4, `four connections, four backends (pids ${pids.join(", ")})`);
+    let refused = "";
+    await assertDistinctBackends([pool[0], pool[0]]).catch((err) => (refused = (err as Error).message));
+    assert(/2 connections reached 1 backends/.test(refused), `one backend under two connections is refused, since its calls would queue (${refused || "not refused"})`);
+
+    const nap = 0.05;
+    const call = async (db: SQL, slot: number, query: number) => {
+      await db`SELECT pg_sleep(${nap})`;
+      return [`${slot}/${query}`];
+    };
+    const one = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1, slots: 2, queries: 3, call }));
+    const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, memory }));
+    assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
+    assert(one.records.length <= Math.ceil(1 / nap) + 1 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline: one connection made at most ${Math.ceil(1 / nap) + 1} calls (${one.records.length}), and the run ended within a call of it (${four.elapsedMs.toFixed(0)} ms)`);
+    assert(new Set(four.records.map((r) => `${r.slot}/${r.query}`)).size === 6 && four.records.every((r) => r.ids[0] === `${r.slot}/${r.query}` && r.ms >= nap * 1000 * 0.9), "every (slot, query) pair is reached, and each record is its own call's pair and time");
+    const m = four.memory;
+    if (typeof m === "string") assert(m.length > 0, `the container's memory is not readable here, and the run says why (${m})`);
+    else assert(m.samples >= 3 && m.peak.anon >= m.idle.anon && m.peak.current >= m.peak.anon && typeof four.loadBefore === "number" && one.loadBefore === null, `the container's memory was sampled through the run (${m.samples} samples, anon ${(m.idle.anon / 1048576).toFixed(0)} → ${(m.peak.anon / 1048576).toFixed(0)} MiB) and the load average read before it (${four.loadBefore}); a run given no connection to read through reads neither`);
+
+    let calls = 0;
+    const failing = async (db: SQL) => {
+      if (++calls === 3) throw new Error("a call refused");
+      await db`SELECT pg_sleep(0.02)`;
+      return [];
+    };
+    const t0 = performance.now();
+    const thrown = await bounded(closedLoop({ pool, seconds: 5, slots: 1, queries: 1, call: failing })).then(() => "not thrown", (err) => (err as Error).message);
+    const ms = performance.now() - t0;
+    assert(thrown === "a call refused" && ms < 1000 && calls <= 3 + pool.length, `the first error stops every connection and is thrown (${thrown}, after ${ms.toFixed(0)} ms of a 5 s run, ${calls} calls)`);
+  } finally {
+    await Promise.all([...pool, memory].map((db) => db.close()));
   }
 }
 

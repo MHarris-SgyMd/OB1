@@ -77,6 +77,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
+import { pairAt, parseCgroupMemory, parseLoadAvg, percentile, summarise as summariseLoad, type CallRecord } from "./bench-load.ts";
 import {
   BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
@@ -12439,6 +12440,54 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   const [{ trg }] = await q<{ trg: number }>(`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`);
   assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "082 re-applied: one trigger, and the standing pointer still stands");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[73] bench-hnsw's section F under load: the schedule, the percentiles, the summary and the cgroup parse (SMD-1500, bench-load.ts)");
+{
+  // Pure functions of their inputs. The closed loop that uses them needs a
+  // server, and test-live.ts [39] holds it to N concurrent backends.
+  const S = 3, Q = 5;
+  const key = (p: { slot: number; query: number }) => `${p.slot}/${p.query}`;
+  const cycle = Array.from({ length: S * Q }, (_, k) => pairAt(0, 1, k, S, Q));
+  assert(new Set(cycle.map(key)).size === S * Q && cycle.every((p) => p.slot < S && p.query < Q), `one connection asks every (slot, query) pair once per cycle of ${S * Q} calls`);
+  assert(cycle.slice(0, S).map((p) => p.slot).join() === "0,1,2" && key(pairAt(0, 1, S * Q, S, Q)) === key(cycle[0]), "a connection alternates its slots call by call, and the cycle repeats");
+  const firsts = Array.from({ length: 10 }, (_, c) => key(pairAt(c, 10, 0, S, Q)));
+  assert(new Set(firsts).size === 10, `ten connections start on ten different pairs (${firsts.join(" ")})`);
+  const spread = Array.from({ length: 4 }, (_, c) => pairAt(c, 4, 0, 1, 100).query);
+  assert(spread.join() === "0,25,50,75", `the connections' cycles start spread evenly round it (${spread.join()})`);
+
+  const hundred = Array.from({ length: 100 }, (_, i) => i + 1);
+  assert(percentile(hundred, 0.99) === 99 && percentile(hundred, 0.5) === 50 && percentile(hundred, 1) === 100, "nearest rank: p99 of 1..100 is 99, p50 is 50, p100 the maximum");
+  assert(percentile([7], 0.99) === 7 && percentile([7], 0.5) === 7 && Number.isNaN(percentile([], 0.5)), "one value is every percentile; none is NaN");
+  assert(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 1000], 0.99) === 1000, "p99 of ten calls is the slowest: the tail is not averaged away");
+
+  // Two slots. Query 0's exact answer is a..j; the loaded calls are recorded
+  // as given, one call alone answered each query with `alone`.
+  const ten = (p: string) => Array.from({ length: 10 }, (_, i) => `${p}${i}`);
+  const want = (_slot: number, q: number) => ten(`q${q}-`);
+  const alone = (_slot: number, q: number) => (q === 2 ? ten("x") : ten(`q${q}-`));
+  const records: CallRecord[] = [
+    { slot: 0, query: 0, ms: 5, ids: ten("q0-") },
+    { slot: 0, query: 0, ms: 6, ids: ten("q0-").reverse() },
+    { slot: 0, query: 0, ms: 7, ids: ten("q0-") },
+    { slot: 0, query: 1, ms: 50, ids: ten("y") },
+    { slot: 1, query: 0, ms: 1, ids: ten("q0-") },
+  ];
+  const [s0, s1] = summariseLoad(records, [{ key: "t50", label: "50%" }, { key: null, label: "unfiltered" }], want, alone);
+  assert(s0.calls === 4 && s1.calls === 1 && s0.label === "50%", "each slot counts its own calls");
+  assert(s0.recall === 5, `recall is averaged per query, then over queries: query 0 three times at 10, query 1 once at 0 → 5, not 7.5 (got ${s0.recall})`);
+  assert(s0.recallAlone === 10, `one call's recall is over the queries the run reached alone — query 2's answer, never asked here, is left out (got ${s0.recallAlone})`);
+  assert(s0.changed === 1, `a call is changed when its rows, as a set, are not one call alone's — the reversed list is the same set (got ${s0.changed})`);
+  assert(s0.p50 === 6 && s0.p99 === 50 && s1.p50 === 1, `the slot's own calls' percentiles (p50 ${s0.p50}, p99 ${s0.p99})`);
+  const [none] = summariseLoad([], [{ key: "t1", label: "1%" }], want, alone);
+  assert(none.calls === 0 && Number.isNaN(none.p50) && Number.isNaN(none.recall) && none.changed === 0, "a slot the run never reached has no calls and no numbers");
+
+  const stat = "anon 26214400\nfile 188743680\nkernel 1048576\nshmem 8388608\nfile_mapped 1024\nanon_thp 0\n";
+  const m = parseCgroupMemory("223346688\n", stat);
+  assert(m !== null && m.current === 223346688 && m.anon === 26214400 && m.file === 188743680 && m.shmem === 8388608, `memory.current and memory.stat parse to bytes (${JSON.stringify(m)})`);
+  assert(parseCgroupMemory("223346688\n", "anon_thp 0\nfile 1\nshmem 1\n") === null, "anon_thp is not anon: a stat without the anon line is refused");
+  assert(parseCgroupMemory("max\n", stat) === null && parseCgroupMemory("", stat) === null, "a memory.current that is not a byte count is refused");
+  assert(parseLoadAvg("3.61 2.80 2.15 4/912 48213\n") === 3.61 && parseLoadAvg("") === null && parseLoadAvg("busy") === null, "/proc/loadavg's first field is the one-minute load; anything else is null");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
