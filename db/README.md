@@ -169,10 +169,97 @@ evidence backfill runs as written, the acceptances out of its sight (above);
 back and corrects the own-key labels an earlier paste of the body left
 (SMD-1193, SMD-1421).
 
+### 6. Plugin migrations (SMD-2310)
+
+A plugin (`plugins/<name>/`) keeps its tables in `plugins/<name>/migrations/`,
+named `NNN_name.sql` under the core's rule. The plugins the brain runs are
+named in `OB1_PLUGINS`, which the compose migrator reads from `deploy/.env` as
+the servers do. A plain run applies their migrations **after the core's**, and
+only when the core's are clean:
+
+- **The login role.** Every plugin's SQL runs on a connection logged in as
+  `ob1_plugins`: LOGIN, NOINHERIT, no superuser, holding `SET` on each plugin's
+  role and nothing on the core. A run makes it with `OB1_PLUGIN_DB_PASSWORD`
+  when it is missing, and never changes an existing role's password: the
+  servers log in with the one it was made with. A run that would apply a
+  plugin's file, or make the role, without the password is refused before
+  anything runs (exit 2); one with nothing of the plugins' to do asks for it
+  not at all.
+- **The role and the schema.** Each plugin gets its own Postgres role,
+  `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
+  hyphen in the name reads as `_`).
+  - **When they are made.** Any run that names the plugin and finds the role,
+    the schema or the login role's `SET` on it missing makes them, even with
+    nothing pending. A run with all three in place and nothing pending asks
+    the migrator no privilege. None is ever dropped.
+  - **A migrator that is no superuser** takes `SET` on a role it made
+    (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand the role its
+    schema.
+  - **A restored brain.** A dump restored without its owners brings the
+    schema back owned by the restoring role: with `--no-owner`, as a tier's
+    refresh restores (`tier.ts`), or into a cluster without the plugin's role
+    (roles are the cluster's, not the dump's), where the dump's
+    `ALTER … OWNER` fails. A run that names the plugin makes the role and
+    hands it back the schema and every table, view, sequence, routine and
+    type in it that another role owns (`db/config.mjs`'s
+    `pluginForeignOwned`). An `ALTER … OWNER` needs the migrator to own the
+    object, or be a superuser.
+- **How a file runs.** Each file runs in its own transaction on the login
+  connection, under `SET LOCAL ROLE ob1_plugin_<name>` with the plugin's
+  schema first on the path. A table the plugin creates is its own, named bare.
+  Neither role holds anything on the core's tables, so a migration that reads
+  or writes one is refused by Postgres (`permission denied`). That holds even
+  for SQL that undoes the plugin's role (`END;`, `RESET ROLE`): it lands on
+  `ob1_plugins`, not on the migrator. From there it could `SET ROLE` to
+  another plugin's role, but not reach the core. After each file the login
+  connection's temp tables are discarded.
+- **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
+  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`,
+  by the migrator's own connection once the file has committed. Nothing that
+  reads the core's ledger sees it. If that write fails after the file
+  committed, the file runs again on the next run, which is why a plugin's
+  migration says `IF NOT EXISTS`. An edited file is a drift and exits 1, as a
+  core file does.
+- **A plugin not named** is not read. Its schema, tables and ledger rows stay
+  as they are.
+
+`--dry-run` lists each plugin's pending files under its own heading: the sha,
+and the role and schema each would run as. It makes nothing. `--baseline` and
+`--reapply` leave plugins to a plain run, and say so. A name that is no plugin,
+or one given twice, is refused before anything runs (exit 2).
+
+```bash
+OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_URL" --dry-run
+```
+
+The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
+grant a plugin's role to `ob1_plugins`; the compose stack's `postgres` can.
+
+**Preflight.** The servers' plugin pools log in as `ob1_plugins` too, one small
+pool per plugin, so what a plugin's SQL leaves on a session never meets a core
+query. A temp table, for one, is searched before any schema. Preflight's
+`plugin tables` row checks:
+
+- that `ob1_plugins` exists, can log in with the server's
+  `OB1_PLUGIN_DB_PASSWORD` (and is who the connection is: a database URL with
+  no host cannot have its user replaced, and is refused), is no superuser and
+  NOINHERIT, is a member of no role but the plugins' and inherits none by a
+  grant's own option, and holds no `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+  or `TRUNCATE` on a core table or view;
+- that it holds `SET` on each plugin's role;
+- the plugin's role and schema, and that the schema and every object in it
+  are the plugin role's, by the migrator's own list;
+- every file recorded at its sha.
+
+The server's own role needs no membership. What holds hostile plugin code is
+curation: a plugin's TypeScript runs in the server's process. The database's
+roles hold its SQL whatever that SQL does. Check 31 of the consistency checker
+guards against the accident (`plugins/README.md`).
+
 ## Expected outcome
 
-`bun test-schema.ts` prints `2507 assertions: 2507 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-three (83) migrations applied, and
+`bun test-schema.ts` prints `2627 assertions: 2627 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-five (85) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -213,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -556,7 +643,7 @@ SMD-2117's.
 Migration 061 gives every derived artifact its lineage (SMD-1731, Phase 1b of
 SMD-1729; the projections table in `../docs/event-log-as-truth.md`). One
 table, `derivations`: a row per artifact per producing pass — `artifact_kind`
-in chunks / entities / proposal / vector / metadata (and section since 064), `artifact_id` (the
+in chunks / entities / proposal / vector / metadata (and section since 064, relation since 084), `artifact_id` (the
 thought's id, or the proposal's), `input_ids` and `input_fingerprints`
 (parallel, no NULL element), `produced_by` (the pass), `recipe` (a JSON object
 with a boolean `deterministic`, what 063's rebuild reads, and the
@@ -955,7 +1042,8 @@ text, the trust the row already carries is an echo of a read (a client
 writing back the metadata it fetched) and declares nothing, while a new text
 weighs every word — a lowering and an echo of a lower trust cannot be told
 apart there, and the lower label is the safe error. The trust follows the content
-as the mark does: a re-capture or a metadata-only edit keeps it, and a
+as the mark does: a re-capture (except, since 085, one a capture-only key's
+stamp yields to — below) or a metadata-only edit keeps it, and a
 text-changing edit takes the editor's. The stamp has to be in the write
 functions' bodies, because since 060 the projector writes the row from the
 event, so 073 redefines both inserting `upsert_thought` forms and
@@ -967,7 +1055,7 @@ from, so after `set_agent_kind` the same call fills both — and never raises
 one: the lowest of what that write recorded (or the claim it filed while its
 key was unclassified), the key's kind now, and the row's own word, so a key
 reclassified down takes its rows down, one reclassified up leaves their trust
-where it was (a text-changing edit restamps a row), a lowering a writer set
+where it was (a text-changing edit stamps a row afresh), a lowering a writer set
 before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. The read tools print it on
 the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
@@ -1153,6 +1241,68 @@ before then is never noted. Apply it before running the server that reads it: wi
 to retry. It refuses to apply without 060 or 061. test-schema [72],
 test-upgrade [20ae], test-e2e-sql [13b] and [13e].
 
+Migration 085 has a capture-only key's stamp yield to the first classified
+key that can read to re-capture the text, at a higher trust (SMD-2664). A
+capture-only key may declare a trust below its kind — the Chrome extension
+labels every capture `ingested` — and when a write key later captured the
+same text, the capture landed on that row and 050's same-text rule kept the
+capture key's `actor_kind`, `actor_name` and `trust`: the writer's thought
+dropped out of every `min_trust` read above `ingested` and carried the
+outside-text notice. The stores now call `ob1_restamp_recapture` after
+`ob1_note_recapture`, when a capture without `recapture: 'keep'` lands on an
+existing row. It moves nothing unless the row's stamp is still a
+capture-only key's: its capture row carries 082's `"scope": "capture"` mark,
+and no update since has changed the text (by 003's fingerprint) or
+restamped it. A lowering by a key that can read — the operator's own
+`ingested` — stands under 050's rule. An unclassified writer, or a call with
+no actor, moves and records nothing. A classified writer is weighed: the
+stamp the write would have put on a new text — the key's kind, and the
+trust the write declared when that is lower — against the row's (operator >
+agent > ingested > none). Higher, it appends one update event moving the
+whole stamp to the writer, `"restamped": true` in its diff; not higher, it
+records the decline, `{"restamp_declined": true}`, once per agent. Either
+event moves `updated_at`, as the note does. A decline by another agent
+settles the row against every other agent: the operator's equal
+`ingested` re-capture of a capture key's outside text is not undone by an
+agent key's re-send after it. The same agent's own later landing may still
+move it; "the same" is by agent id, so a decline naming none — a name-only
+writer: board-sync, or any key while its registry lookup fails, through an
+outage or a misconfiguration, or is refused — settles the row for every
+caller. The record
+is the restamp's own, not 082's note, which is also written for landings
+that can move nothing and skipped on rows 082 counts as taken. The first
+classified writer settles the row whatever it declared: an agent key
+declaring `ingested`, or an `ingested`-kind key, landing first leaves the
+capture key's stamp and refuses the operator after it — trust kept low, the
+direction a label may err in. So when a capture-only key captured a text first, the first
+classified key that can read to capture it after leaves the higher of
+their two trusts, and once moved, no later re-capture moves it. A
+capture-only actor restamps nothing, and nor does a call whose fingerprint
+is no longer the row's (the text moved since the capture). A metadata edit
+still keeps the stamp, board-sync's metadata patch adopting a row in place
+included. `backfill_thought_actors` now reads a restamp with no
+text-writing row after it, by `seq`, as the row's writer, so a pass after a
+restamp — run after `set_agent_kind`, as above — keeps the stamp rather than
+putting the lower one back; a key reclassified down still takes its rows
+down.
+
+For an operator upgrading to 085: a stamp kept by a re-capture before 085
+moves at the next re-capture by a classified key that can read at a higher
+trust, whichever key 082 noted; a capture-only key's row from before the scope mark — every capture a
+server before 082 wrote, the Chrome extension's pages included — stays as it
+is. Only a classified key is weighed, and a re-capture made while a key was
+unclassified is not replayed when it is classified: classify write keys
+(`set_agent_kind`) before relying on this. A label settled by another key's
+decline, or a name-only one, has no reset: a text edit by a key that can
+read, or deleting the thought and capturing the text again, stamps it
+afresh. The settled rows are those with a decline in the log —
+`SELECT DISTINCT thought_id FROM thought_audit WHERE diff ? 'restamp_declined'`,
+`AND canonical_agent_id IS NULL` for the name-only ones. `thought_changes`
+reads a restamp as "re-captured … the label moved to this key" and a decline
+as "re-captured … the label kept". It refuses to apply
+without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
+test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -1241,7 +1391,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
-| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
@@ -1250,7 +1400,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
-| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
@@ -2323,10 +2473,41 @@ again) — and when one outdates the other, which is current, decided from what
 the texts say and not from the dates, with the words that show it quoted. A
 supersession whose texts do not say is recorded `conflict_undirected` for the
 reviewer to direct. Only `outdates` becomes a row; `related`, `evolves` and
-`duplicate` relate two thoughts that both stand (a relation edge, SMD-1873's
-next PR) — a proposed duplicate would hand one writer's near-copy the
-standing of another's thought, which three review passes each found a way to
-do. The verdict rides
+`duplicate` relate two thoughts that both stand — a proposed duplicate would
+hand one writer's near-copy the standing of another's thought, which three
+review passes each found a way to do. Since 084 each is a **relation**: a
+`relation` facet on the newer thought naming the older (`thought_facets`, kind
+`relation`, origin `judged` — the kind's mark, not proof of the writer), stored
+at the token probability of its word (else the written number) and written
+only when the mass of related, evolves and duplicate together reaches the
+floor (else the written number does), its lineage row (`derivations`, kind
+`relation`) at the fingerprints judged, one standing per pair. A relation is
+written once and only closed, and since 084 no facet changes its kind.
+`record_thought_relation` keeps it when the pair is judged the same again,
+replaces it when judged another word, key or score, and closes it
+(`valid_until`) when a well-formed judgement sees none — unrelated, outdates,
+or under the floor (a malformed or timed-out pair leaves it standing); the other
+thought's delete closes it too, and the newer thought's takes it and its
+lineage. `--status` counts the relations standing and `--list relations`
+lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
+(until SMD-2726's `rebuild_derived` arm closes such an edge, clearing the
+newer thought's claim — `DELETE FROM thought_work_claims WHERE work_type =
+'<key>' AND thought_id = '<newer id>'` — has the next run judge the pair
+again), one whose side is superseded or that another judge key wrote marked so
+— the pass judges such a pair no more. On a brain without 084, or under a role
+that cannot write them, the verdicts are counted only, and the run says so at
+its start, in `--status` and in its summary; a follower re-checks on every poll,
+and a write refused mid-pass stops relations there rather than failing the
+thought. A pair judged then gets no relation until its claim is cleared. A role
+granted before 084 that consolidates needs the structure group added (`bun
+migrate.ts --url <owner's url> --grant <role> --groups
+capture,server,worker,extraction,structure`; 084 adds no grant of its own). For a
+brain that ran prompt 4 before 084, `--status` counts the thoughts judged
+before 084 was applied and prints the `DELETE FROM thought_work_claims …`
+that puts exactly those back in the pool, with the key (`--status`'s `job:`
+line) filled in; check first that `--status` does not say a run under this
+role would store none, since the re-judge costs the model calls of those
+thoughts again whether or not it stores. The verdict rides
 with its confidence, the judge's one-sentence reason (what a reviewer reads
 first), the cosine, and the pass key `consolidate:<model>@p<prompt version>` —
 the judge model on the row as 021 puts the embedding model beside the vector.
@@ -2362,6 +2543,7 @@ bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
+bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -2710,6 +2892,7 @@ the function a deployment actually has.
 ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
+OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts   # section F: under load at one and ten connections
 
 # At scale (SMD-1018): one scale per container, and give the container the
 # shared memory the parallel HNSW build keeps its graph in — at least the
@@ -2777,6 +2960,32 @@ cover it — the table 014's header's decision about the bounds rests on. The
 headline table is in the header of `migrations/014_filtered_match_thoughts.sql`;
 the scale tables are in FORK.md change 28; the real-corpus version is
 `evals/eval-filtered.ts`.
+
+Section F runs only when `OB1_BENCH_LOAD` names connection counts (SMD-1500).
+`1,10` is one connection and the server's default pool of ten. It runs last for
+its scale, so the sections above are measured as before. N connections, each its
+own backend, call `match_thoughts` closed-loop for `OB1_BENCH_LOAD_S` seconds
+(60) a run. There are three mixes:
+- the unfiltered default path alone;
+- the broad filter alone;
+- a broad, a band and a thin filter in turn, one call each (50%, 1% and 900
+  rows; at a million rows and up, the HNSW walk, the tier whose plan flips
+  between GIN and the walk, and the exact branch).
+
+It prints QPS per run, and per slot its calls, p50 and p99 beside sections A
+and B's single-call medians, and how many of the exact top 10 its answers
+hold. It also counts the answers that differed from a reference pass's (each
+query asked once, on one connection, before the runs); the one-connection run
+is that count's control. The database container's anonymous memory is sampled
+from its cgroup through `pg_read_file` (a superuser on Linux; otherwise the
+table says why not), against what 014's header prices the walks at. Its CPU
+time and the rest of the machine's are read across each run, so a table says
+how busy everything else on the machine was meanwhile: other containers, the
+kernel and the machine's side of the network path (and, on a Linux host with no
+VM between, the bench's own client). A failure under load is reported without
+discarding the other sections, and the bench then exits 1. `bench-load.ts`
+holds the loop; test-schema [73] holds its pure parts, test-live [39] the loop.
+Six runs at 60 s add about seven minutes a scale.
 
 The before arm runs only up to 100,000 rows: its defect is established there,
 and above that every question is about the shipped function. The rows are
@@ -3610,8 +3819,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2507 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1158 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2627 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1189 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

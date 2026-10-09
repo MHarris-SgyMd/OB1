@@ -8,9 +8,10 @@
 // body, so it never sits in a URL a log or a proxy may keep.
 
 import type { ToolName } from "../tools.ts";
-import type { Principal } from "../auth.ts";
-import type { Core, Input, Outcome } from "../core/index.ts";
-import { ok, type RefusalCode } from "../core/refusal.ts";
+import { CALLS, type Call, type CallOptions } from "../core/index.ts";
+import type { RefusalCode } from "../core/refusal.ts";
+
+export type { CallOptions } from "../core/index.ts";
 
 /**
  * The HTTP status each refusal answers with — one per code, so a new refusal
@@ -46,9 +47,6 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
 
 export type Method = "GET" | "POST" | "PATCH" | "DELETE";
 
-/** What a call needs beyond the principal and the input: the stop's tracker, for an operation that starts detached work. */
-export type CallOptions = { track?: <T>(run: () => Promise<T>) => Promise<T> };
-
 export type Route<K extends ToolName> = {
   method: Method;
   /** OpenAPI's path form: `{field}` names an input field filled from the path. */
@@ -61,36 +59,36 @@ export type Route<K extends ToolName> = {
    * (SMD-1978), as the MCP tool says it.
    */
   fault?: "STORE_UNAVAILABLE";
-  /** The operation the route calls — the MCP tool's own, from createCore. */
-  call: (core: Core, principal: Principal, input: Input<K>, opts: CallOptions) => Promise<Outcome<object>>;
+  /** The operation the route calls — the MCP tool's own, from core/calls.ts. */
+  call: Call<K>;
 };
 
 export const ROUTES: { [K in ToolName]: Route<K> } = {
   // ChatGPT's compatibility shapes, beside the brain's own search and fetch.
-  search: { method: "POST", path: "/v1/search/compat", ok: 200, call: (c, p, i) => c.search(p, i) },
-  fetch: { method: "GET", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.fetch(p, i) },
-  search_thoughts: { method: "POST", path: "/v1/search", ok: 200, call: (c, p, i) => c.searchThoughts(p, i) },
-  search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword", ok: 200, call: (c, p, i) => c.searchThoughtsKeyword(p, i) },
-  list_thoughts: { method: "GET", path: "/v1/thoughts", ok: 200, call: (c, p, i) => c.listThoughts(p, i) },
-  list_thought_ids: { method: "GET", path: "/v1/thought-ids", ok: 200, call: (c, p, i) => c.listThoughtIds(p, i) },
-  list_logged_searches: { method: "GET", path: "/v1/logged-searches", ok: 200, call: (c, p, i) => c.listLoggedSearches(p, i) },
-  list_supersession_proposals: { method: "GET", path: "/v1/proposals", ok: 200, call: (c, p, i) => c.listSupersessionProposals(p, i) },
-  thought_stats: { method: "GET", path: "/v1/stats", ok: 200, call: (c, p, i) => c.thoughtStats(p, i) },
-  thought_changes: { method: "GET", path: "/v1/changes", ok: 200, call: (c, p, i) => c.thoughtChanges(p, i) },
-  worker_status: { method: "GET", path: "/v1/workers", ok: 200, call: (c, p, i) => c.workerStatus(p, i) },
-  brain_info: { method: "GET", path: "/v1/brain", ok: 200, call: async (c) => ok(await c.brainInfo("tool")) },
-  job_status: { method: "GET", path: "/v1/jobs/{job_id}", ok: 200, call: (c, p, i) => c.jobStatus(p, i) },
-  scan_thoughts: { method: "POST", path: "/v1/scans", ok: 202, call: (c, p, i, o) => c.scanThoughts(p, i, { track: o.track }) },
-  capture_thought: { method: "POST", path: "/v1/thoughts", ok: 201, fault: "STORE_UNAVAILABLE", call: (c, p, i) => c.capture(p, i) },
-  update_thought: { method: "PATCH", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.updateThought(p, i) },
-  delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}", ok: 200, call: (c, p, i) => c.deleteThought(p, i) },
-  retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: (c, p, i) => c.retryFailed(p, i) },
-  release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: (c, p, i) => c.releaseStaleLeases(p, i) },
-  run_worker: { method: "POST", path: "/v1/workers/run", ok: 200, call: (c, p, i) => c.runWorker(p, i) },
+  search: { method: "POST", path: "/v1/search/compat", ok: 200, call: CALLS.search },
+  fetch: { method: "GET", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.fetch },
+  search_thoughts: { method: "POST", path: "/v1/search", ok: 200, call: CALLS.search_thoughts },
+  search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword", ok: 200, call: CALLS.search_thoughts_keyword },
+  list_thoughts: { method: "GET", path: "/v1/thoughts", ok: 200, call: CALLS.list_thoughts },
+  list_thought_ids: { method: "GET", path: "/v1/thought-ids", ok: 200, call: CALLS.list_thought_ids },
+  list_logged_searches: { method: "GET", path: "/v1/logged-searches", ok: 200, call: CALLS.list_logged_searches },
+  list_supersession_proposals: { method: "GET", path: "/v1/proposals", ok: 200, call: CALLS.list_supersession_proposals },
+  thought_stats: { method: "GET", path: "/v1/stats", ok: 200, call: CALLS.thought_stats },
+  thought_changes: { method: "GET", path: "/v1/changes", ok: 200, call: CALLS.thought_changes },
+  worker_status: { method: "GET", path: "/v1/workers", ok: 200, call: CALLS.worker_status },
+  brain_info: { method: "GET", path: "/v1/brain", ok: 200, call: CALLS.brain_info },
+  job_status: { method: "GET", path: "/v1/jobs/{job_id}", ok: 200, call: CALLS.job_status },
+  scan_thoughts: { method: "POST", path: "/v1/scans", ok: 202, call: CALLS.scan_thoughts },
+  capture_thought: { method: "POST", path: "/v1/thoughts", ok: 201, fault: "STORE_UNAVAILABLE", call: CALLS.capture_thought },
+  update_thought: { method: "PATCH", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.update_thought },
+  delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.delete_thought },
+  retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: CALLS.retry_failed },
+  release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: CALLS.release_stale_leases },
+  run_worker: { method: "POST", path: "/v1/workers/run", ok: 200, call: CALLS.run_worker },
 };
 
-/** The `{field}` names a route's path fills, in order. */
-export const pathFields = (path: string): string[] => [...path.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]);
+/** The `{field}` names a route's path fills, in order — core/calls.ts's, which a plugin's manifest is checked by too. */
+export { pathFields } from "../core/index.ts";
 
 /** The path in Hono's form, `:field` for `{field}`. */
 export const honoPath = (path: string): string => path.replace(/\{([a-z_]+)\}/g, ":$1");

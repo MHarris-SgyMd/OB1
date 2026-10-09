@@ -123,7 +123,7 @@ EOF
 chmod 600 ~/.config/open-brain/session-capture.json
 ```
 
-The key lives here and nowhere else — not in the hook's command line, which sits in a settings file every tool on the machine can read. (`"key_file": "/path"` is accepted in place of `"key"`.)
+The key lives here and nowhere else — not in the hook's command line, which sits in a settings file every tool on the machine can read. (`"key_file": "/path"` is accepted in place of `"key"`.) Nor in the url: a connector URL pasted whole, with its `?key=`, is refused when the config loads, and the refusal says where the key goes without printing it. The hook names its url, in `--check` and in its log, with every query value masked (SMD-2743).
 
 To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
 
@@ -142,7 +142,7 @@ To have a local model write the summary instead of the derived one, add the mode
 bun recipes/session-capture-hook/session-capture.mjs --check
 ```
 
-`ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
+`ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture. A url at the origin's root, the one given before the proxy, warns too: it answers through the proxy's deprecated legacy route, which v2.0.0 closes, and the warning names the `/mcp` url to set (SMD-2686).
 
 Then see what a session of yours would send, without sending it:
 

@@ -27,6 +27,7 @@ import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refu
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
+import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
 export type Reply = { content: { type: "text"; text: string }[]; isError?: true; structuredContent: Record<string, unknown> };
@@ -90,6 +91,21 @@ export function failed(err: unknown, { hint, lead = "Error: ", verdict }: { hint
   const { message, ...own } = failure(err);
   const text = `${lead}${message}${hint ? hint(message) : ""}`;
   return { content: [{ type: "text", text }], isError: true, structuredContent: { ...(verdict ?? own), text } };
+}
+
+/**
+ * A plugin operation's reply (SMD-2310): a tool whose text is its value's JSON,
+ * the value itself beside it — the structured content its output schema
+ * describes, which the SDK holds it to. A refusal is its code and facts, as
+ * the REST core answers them, with its message in the text.
+ */
+export function renderPlugin(o: PluginOutcome<Record<string, unknown>>): Reply {
+  if (!o.ok) {
+    const { status: _status, ...facts } = o.refusal;
+    const text = `Refused: ${o.refusal.code}${o.refusal.message ? ` — ${o.refusal.message}` : ""}`;
+    return { content: [{ type: "text", text }], isError: true, structuredContent: { ...facts, text } };
+  }
+  return { content: [{ type: "text", text: JSON.stringify(o.value) }], structuredContent: { ...o.value } };
 }
 
 /**
@@ -696,7 +712,11 @@ function renderChange(c: AuditChange, n: number): string {
   // only change is the marks — 050's two, 073's trust — is "marked", the
   // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
-  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
+  // 085's two events (SMD-2664): a key that can read re-captured a capture-only
+  // key's text and was weighed against its label — moved to it, or kept.
+  const restamped = c.action === "update" && c.changed.includes("restamped");
+  const declined = c.action === "update" && c.changed.includes("restamp_declined");
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (restamped || declined ? "re-captured" : marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
   const text = c.head === null ? null : snipText(c.head, 200);
@@ -706,7 +726,12 @@ function renderChange(c: AuditChange, n: number): string {
   // is in its delete row, not gone (both caught: cold-read, pass 1).
   if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
   if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
-  if (c.action === "update") {
+  if (restamped) {
+    const keys = c.metadataKeys.filter((k) => ACTOR_MARKS.has(k));
+    lines.push(`   the capture-only key's label moved to this key${keys.length ? ` (metadata: ${keys.join(", ")})` : ""}`);
+  } else if (declined) {
+    lines.push("   the capture-only key's label kept: this key's trust is not higher, and no other key's re-capture will move it");
+  } else if (c.action === "update") {
     const parts: string[] = [];
     if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
     // 050 stamps the two marks into metadata whenever the content moves under

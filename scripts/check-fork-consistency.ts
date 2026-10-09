@@ -47,7 +47,7 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under db/ or any of the seven category directories runs
+ *  12. a .sql file under db/ or any of the eight category directories runs
  *      nothing that needs Supabase — no `service_role`, `authenticated` or
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
@@ -59,14 +59,18 @@
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
- *      deploy/.env.example — no service reaches outside the file (`extends`,
+ *      deploy/.env.example, and no two mappings in compose.yaml and its
+ *      overlays on one knob or default host port (SMD-2685) — no service
+ *      reaches outside the file (`extends`,
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the server, and n8n under its opt-in profile
- *      (SMD-2210); the database and Ollama
- *      publish through compose.host-ports.yaml, a second -f. The files are
- *      parsed with Bun.YAML (SMD-1844); no exceptions
+ *      compose.yaml publishes the proxy, and n8n under its opt-in profile
+ *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
+ *      publish through compose.host-ports.yaml, a second -f; and
+ *      deploy/.env.example's live lines are exactly the keys an operator fills
+ *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685).
+ *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
  *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
@@ -293,21 +297,28 @@
  *      separator character but space and line feed, no `!` or `%` directive
  *      outside a comment, no YAML 1.1 number; each rule is the only catch of
  *      one of its probes
- *  28. the proxy's other route tables are held byte for byte (SMD-2658):
- *      compose.yaml's and compose.api-public.yaml's, as mounted config and as
- *      proxy label, each equal to the table built here, with no comment in it
- *      (Traefik renders a route file as a Go template); in every compose file
- *      directly in deploy/ (any case, and any name outside printable ASCII)
- *      but compose.tiers.yaml (check 27's), no control, format or separator
+ *  28. the proxy's other route tables are held byte for byte, and only its
+ *      backends answer it (SMD-2658, SMD-2685): compose.yaml's,
+ *      compose.api-public.yaml's and compose.hooks-public.yaml's (SMD-2310)
+ *      tables, as mounted config and as proxy label,
+ *      each equal to the table built here, with no comment in it (Traefik
+ *      renders a route file as a Go template); in every compose file directly
+ *      in deploy/ (any case, and any name outside printable ASCII) but
+ *      compose.tiers.yaml (check 27's), no control, format or separator
  *      character but space and line feed, no `!!`, named-handle, verbatim or
- *      percent-escaped YAML tag and no directive, nothing an overlay sets on the
- *      proxy but its own table's mount, label and depends_on, no network the
- *      proxy joins redefined and no project name in an overlay, no config but
- *      the file's own table's, no top-level secrets or include, no variable
- *      in the proxy but in its ports, no name compose takes with no -f, and
- *      no name outside printable ASCII; each rule is the only
- *      catch of one of its probes (what the files make together, CI's "The
- *      proxy loads only the held route tables")
+ *      percent-escaped YAML tag, no !reset or !override and no directive;
+ *      compose.yaml's proxy as held, an overlay's only its own table's mount,
+ *      no config but the file's own table's, no name compose takes with no -f
+ *      and none outside printable ASCII; every overlay declared with the keys
+ *      it sets, compose.yaml's services setting only keys that act inside
+ *      their own container (no shared namespace, privilege or hook), each
+ *      service's capabilities, confinement, mounts and build as held, the
+ *      named volumes as held, a service name of lower-case letters, digits
+ *      and hyphens, and compose.yaml's
+ *      project name; and
+ *      each file's networks, and who joins them under which names, exactly as
+ *      held; each rule is the only catch of one of its probes (what the files
+ *      make together, CI's "The proxy loads only the held route tables")
  *  29. every service deploy/compose.yaml defines has its x-logging bound —
  *      the json-file driver with a max-size and a max-file — as its
  *      `logging:`, value for value (the file writes `logging: *logging`), so
@@ -319,9 +330,30 @@
  *      (SMD-2677); the address is read from the binding's JSON, whose key
  *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
  *      or would track, a `{{ … }}` action at a time; no exceptions
+ *  31. a plugin stays inside its schema and its role (SMD-2310) — an
+ *      accident guard in front of the database's boundary, not a sandbox: its
+ *      SQL — a migration file, a tagged template literal in its TypeScript
+ *      (an untagged one is text) — names no core table (db/migrations/'
+ *      CREATE TABLEs and the two ledgers) and no schema but its own, and runs
+ *      no role, session or transaction change (RESET or SET ROLE, a
+ *      search_path or set_config, COMMIT, ROLLBACK or BEGIN as a statement, a
+ *      temp object, a session advisory lock, a cursor WITH HOLD, PREPARE,
+ *      LISTEN, DISCARD); its TypeScript imports the SDK and its own files
+ *      alone, no test file from code the server runs, and calls no fetch,
+ *      Bun, process, Deno, eval or import(); its directory holds TypeScript,
+ *      migrations/*.sql, a README and metadata.json alone;
+ *      plugins/registry.ts imports and lists exactly the plugin directories,
+ *      a manifest's name is its directory's, and its migration files are
+ *      named by the core's rule; each held by in-memory probes
+ *  32. every service deploy/compose.yaml defines has the restart policy
+ *      RESTART_POLICIES holds for it, value for value — what serves
+ *      `unless-stopped`, so it comes back after a reboot with what it reads;
+ *      what runs once "no" — and no service but those held (SMD-2760: Postgres
+ *      had none, so on Docker a reboot would bring the servers back without
+ *      their database; the tiers file is check 27's)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28 and 29 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29 and 32 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -331,8 +363,9 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
-import { FORK_VERSION, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
+import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
+import { ASSETS, renderNotes } from "./release-artifacts.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
 import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
 import type { Family, Problem, Registry, Tree } from "./connector-registry.ts";
@@ -2104,10 +2137,10 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
-const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "plugins"];
 
 function checkSupabaseIsms() {
   for (const dir of SQL_RULE_DIRS) {
@@ -2155,11 +2188,13 @@ function checkSupabaseIsms() {
 // value `host` puts a service on the host's interfaces with no `ports:` at
 // all (the third pass's one hole in the definition). Under node, which has no
 // Bun.YAML, the rule fails in words rather than passing. The fourth pass added
-// the file operators copy: a live `X_BIND=` line in deploy/.env.example may
-// say only 127.0.0.1, since that file, not compose.yaml's fallback, is the
-// default of every stack brought up from it.
+// the file operators copy, since that file, not compose.yaml's fallback, is the
+// default of every stack brought up from it: a live `X_BIND=` line there could
+// say only 127.0.0.1. SMD-2685 replaced that with a hold of every live line,
+// each exactly `KEY=` for one of ENV_EXAMPLE_LIVE's keys, and refuses a tracked
+// .env and two mappings in one stack on a knob or a default host port.
 //
-// Two rules. The first, per service: `ports` is a list whose every item is the
+// Two rules on the ports. The first, per service: `ports` is a list whose every item is the
 // short form — no host address (fewer than three fields), an address but not
 // the form (a literal address or port, a `/tcp` suffix, a knob not named
 // `_BIND`), a default other than the literal `127.0.0.1` (smoke.sh and the CI
@@ -2173,8 +2208,8 @@ function checkSupabaseIsms() {
 // named as compose names them (`compose*.yaml`, `docker-compose*.yml`) are
 // read: SMD-1849's collector configuration under deploy/ is not a stack.
 
-/** One knob line of deploy/.env.example: the name, the value after `=`, whether the line is live (not commented out), and its line. */
-type EnvKnob = { name: string; value: string; live: boolean; line: number };
+/** One knob line of deploy/.env.example: the name and its line. */
+type EnvKnob = { name: string; line: number };
 /**
  * The knobs deploy/.env.example documents whose names match `pattern`: one
  * entry per knob line, live or commented out (most ship commented out
@@ -2189,8 +2224,8 @@ function envKnobsIn(text: string, pattern: RegExp) {
   const knobs: EnvKnob[] = [];
   // Same-line whitespace only: a `\s*` here once ate the newline and the next
   // knob line as this one's trailing comment, and POSTGRES_BIND went undocumented.
-  for (const m of text.matchAll(/^(#?)[ \t]*([A-Z0-9_]+)=(\S*)[ \t]*(?:#.*)?$/gm)) {
-    if (pattern.test(m[2])) knobs.push({ name: m[2], value: m[3], live: m[1] === "", line: text.slice(0, m.index).split("\n").length });
+  for (const m of text.matchAll(/^#?[ \t]*([A-Z0-9_]+)=\S*[ \t]*(?:#.*)?$/gm)) {
+    if (pattern.test(m[1])) knobs.push({ name: m[1], line: text.slice(0, m.index).split("\n").length });
   }
   return knobs;
 }
@@ -2230,7 +2265,8 @@ const PUBLISHES: Record<string, string[]> = {
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
-const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{[A-Z0-9_]+_PORT:-\d+\}:\d+$/;
+/** The house form: the host port is the bind knob's own `_PORT` knob, so no mapping publishes on another's (SMD-2685: jev on `${SERVER_PORT}` would bind the proxy's port first and take its clients' keys). */
+const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{\1_PORT:-([1-9]\d*)\}:\d+$/;
 /** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
 function portFields(v: string) {
   let depth = 0, n = 1;
@@ -2252,14 +2288,14 @@ type PortGap = [kind: string, service: string | null, line: number, detail: stri
  * published: [service, …] }` — `published` lists a service once per house-form
  * mapping, for the inventory.
  */
-function publishedPortGapsIn(text: string, { documented }: { documented: Set<string> | null }): { gaps: PortGap[]; published: string[] } {
-  const gaps: PortGap[] = [], published: string[] = [];
-  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return { gaps: [["no-parser", null, 0, ""]], published };
+function publishedPortGapsIn(text: string, { documented }: { documented: Set<string> | null }): { gaps: PortGap[]; published: string[]; knobs: [service: string, prefix: string, port: string][] } {
+  const gaps: PortGap[] = [], published: string[] = [], knobs: [string, string, string][] = [];
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return { gaps: [["no-parser", null, 0, ""]], published, knobs };
   let doc: YamlValue;
-  try { doc = Bun.YAML.parse(text) as YamlValue; } catch (e) { return { gaps: [["unparseable", null, 0, String((e as Error).message ?? e)]], published }; }
-  if (Array.isArray(doc)) return { gaps: [["not-a-mapping", null, 0, `a list of ${doc.length}`]], published };
+  try { doc = Bun.YAML.parse(text) as YamlValue; } catch (e) { return { gaps: [["unparseable", null, 0, String((e as Error).message ?? e)]], published, knobs }; }
+  if (Array.isArray(doc)) return { gaps: [["not-a-mapping", null, 0, `a list of ${doc.length}`]], published, knobs };
   if (!doc || typeof doc !== "object" || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
-    return { gaps: [["no-services", null, 0, ""]], published };
+    return { gaps: [["no-services", null, 0, ""]], published, knobs };
   }
   if ("include" in doc) gaps.push(["include", null, lineOf(text, "include"), ""]);
   for (const [service, def] of Object.entries(doc.services)) {
@@ -2280,10 +2316,10 @@ function publishedPortGapsIn(text: string, { documented }: { documented: Set<str
       if (!m) { gaps.push(["not-house-form", service, line, v]); continue; }
       if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, line, `${m[1]}_BIND defaults to "${m[2]}"`]);
       else if (documented && !documented.has(`${m[1]}_BIND`)) gaps.push(["undocumented-knob", service, line, `${m[1]}_BIND`]);
-      else published.push(service);
+      else { published.push(service); knobs.push([service, m[1], m[3]]); }
     }
   }
-  return { gaps, published };
+  return { gaps, published, knobs };
 }
 
 const GOOD = `"\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"`;
@@ -2316,7 +2352,9 @@ const PORT_PROBES: [string, string[], string[]][] = [
   [`services:\n  server:\n    ports:\n      - target: 8000\n        published: 8000\n        host_ip: 127.0.0.1\n`, ["long-form"], []],
   [`services:\n  server:\n    ports: 8000\n`, ["ports-not-list"], []],
   [`services:\n  server:\n    ports: []\n`, ["empty-ports"], []],
-  [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
+  [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${OTHER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
+  [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8020"\n`, ["not-house-form"], []],
+  [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${JEV_PORT:-08000}:8020"\n`, ["not-house-form"], []],
   // What reaches outside the file, or the host, without a ports: item.
   [`services:\n  postgres:\n    extends:\n      file: base/pg.yaml\n      service: pg\n`, ["extends"], []],
   [`include:\n  - other.yaml\nservices:\n  server:\n    ports:\n      - ${GOOD}\n`, ["include"], ["server"]],
@@ -2335,19 +2373,38 @@ const PORT_PROBES: [string, string[], string[]][] = [
   [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, [], []],
 ];
 
+/** The keys deploy/.env.example sets on a live line, each written `KEY=` with nothing after it: the ones an operator fills in. Any other setting there is commented. */
+const ENV_EXAMPLE_LIVE = ["POSTGRES_PASSWORD", "MCP_ACCESS_KEYS", "OPENROUTER_API_KEY"];
+/** Each line of an env file that is neither blank, a comment (`#` after spaces or tabs alone), nor exactly `KEY=` for one of ENV_EXAMPLE_LIVE's keys, as [line, text]. Exactly, because compose's dotenv reader goes on after a closing quote (`MCP_ACCESS_KEYS="" COMPOSE_FILE=…` sets both, and a quoted value runs on over a line that reads as a comment: SMD-2685 review pass 4), and reads `export KEY=` and `KEY: value` too; with no value on a live line, no quote opens. */
+function envExampleLive(text: string): [number, string][] {
+  return text.split("\n").flatMap((l, i): [number, string][] => /^([ \t]*#.*|)$/.test(l) || ENV_EXAMPLE_LIVE.some((k) => l === `${k}=`) ? [] : [[i + 1, l]]);
+}
+const ENV_EXAMPLE_PROBES: [string, string, number][] = [
+  ["the keys an operator fills in, and comments", "POSTGRES_PASSWORD=\n# SERVER_PORT=8000\n\t# indented\n\nMCP_ACCESS_KEYS=\n", 0],
+  ["the project renamed", "POSTGRES_PASSWORD=\nCOMPOSE_PROJECT_NAME=open-brain-tiers\n", 1],
+  ["a compose file added by export", "export COMPOSE_FILE=compose.yaml:ob1-local.yaml\n", 1],
+  ["jev on the proxy's port, spaced", "JEV_PORT = 8000\n", 1],
+  ["a second key after a quoted held one (SMD-2685 review pass 4, measured)", "MCP_ACCESS_KEYS=\"\" COMPOSE_PROJECT_NAME=open-brain-tiers\n", 1],
+  ["a second key after a single-quoted held one, unspaced", "POSTGRES_PASSWORD='x'JEV_PORT=8000\n", 1],
+  ["a quoted held value running on over a line that reads as a comment (SMD-2685 review pass 4, measured)", "POSTGRES_PASSWORD=\"\n# put the password between the quotes\" JEV_PORT=8000\n", 1],
+  ["a held key exported", "export POSTGRES_PASSWORD=\n", 1],
+  ["a held key with a value", "OPENROUTER_API_KEY=sk-placeholder\n", 1],
+  ["a held key ending in a carriage return", "POSTGRES_PASSWORD=\r\n", 1],
+  ["a comment led by a no-break space", "\u00a0# COMPOSE_PROJECT_NAME=x\n", 1],
+];
+
 function checkPublishedPorts() {
   const knobs = documentedEnvKnobs(/_BIND$/);
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
-  // The file every operator copies to deploy/.env: a LIVE knob line there is the
-  // stack's default in practice, whatever compose.yaml's fallback says, and
-  // neither the compose rule nor the CI step (which writes its own .env) reads
-  // it — so a live line may only say the loopback address.
-  for (const k of knobs) {
-    if (k.live && k.value !== "127.0.0.1") {
-      fail(`deploy/.env.example:${k.line}`, `\`${k.name}=${k.value}\` is a live line in the file operators copy to deploy/.env, so every stack brought up from it publishes on ${k.value || "an empty address"} — comment it out or set 127.0.0.1; the network is the operator's choice in deploy/.env, not the example's (SMD-1844)`);
-    }
-  }
+  // The file every operator copies to deploy/.env: a live line there is a setting every stack brought up from it runs with, whatever compose.yaml's fallback says, and no check renders it (CI writes its own .env). A live _BIND line put the stack on the network (SMD-1844); a COMPOSE_PROJECT_NAME there renames the project, a COMPOSE_FILE adds a file no check reads, a _PORT moves a mapping onto another's port (SMD-2685 review pass 3). So the live lines are exactly the keys an operator must fill in.
+  for (const [what, text, n] of ENV_EXAMPLE_PROBES) if (envExampleLive(text).length !== n) fail(SELF, `check 13's .env.example rule no longer finds ${n} stray line${n === 1 ? "" : "s"} in its probe: ${what}`);
+  for (const [line, text] of envExampleLive(readFileSync(join(ROOT, "deploy", ".env.example"), "utf8"))) fail(`deploy/.env.example:${line}`, `a live line reads ${JSON.stringify(text.slice(0, 80))}, where the live lines are exactly ${ENV_EXAMPLE_LIVE.map((k) => `\`${k}=\``).join(", ")} — every stack brought up from a copy of this file runs with what it sets and no check renders it: a COMPOSE_* setting renames the project or adds a compose file, a _PORT moves a mapping onto another's port, and compose reads a second setting after a quoted value; leave it commented, or, for a key every operator must fill in, add it to check 13's ENV_EXAMPLE_LIVE (SMD-2685)`);
+  // …and the file compose reads itself is never tracked: a committed deploy/.env reaches every stack run with no --env-file (a COMPOSE_FILE in it names a file no check reads), and `git pull` writes it over an operator's own, which git ignores (SMD-2685 review pass 5, measured). Any case, since macOS opens .ENV as .env.
+  let tracked: string[] | null = null;
+  try { tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0"); } catch (e) { console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 13 cannot tell a committed .env from an operator's own, and skips that rule)`); }
+  for (const f of tracked ?? []) if (/^\.env$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env — compose reads it with no --env-file, so what it sets (a COMPOSE_FILE naming a file no check reads, a port) reaches every stack run from here unrendered, and `git pull` writes it over an operator's own; untrack it (`git rm --cached`) and keep settings in .env.example (SMD-2685)");
+    else if (/^\.env\.canary([.-].*)?$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env.canary.local (or the temporary file deploy/canary.sh makes it in) — the canary runs on it, its database password and stable's keys included, and `git pull` writes it over the canary's own; untrack it (`git rm --cached`) (SMD-2583)");
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
@@ -2364,9 +2421,12 @@ function checkPublishedPorts() {
     if (!files.includes(name)) fail(`deploy/${name}`, `missing — PUBLISHES in ${SELF} says ${PUBLISHES[name].map((s) => `\`${s}\``).join(" and ")} publish from it (SMD-1844)`);
   }
   const HOUSE = "`\"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n\"`";
+  for (const [what, entries, n] of PORT_CLASH_PROBES) if (portClashes(entries).length !== n) fail(SELF, `check 13's port-clash rule no longer finds ${n} clash${n === 1 ? "" : "es"} in its probe: ${what}`);
+  const stack: [string, string, string, string][] = [];
   for (const name of files) {
     const rel = `deploy/${name}`;
-    const { gaps, published } = publishedPortGapsIn(readFileSync(join(dir, name), "utf8"), { documented });
+    const { gaps, published, knobs: fileKnobs } = publishedPortGapsIn(readFileSync(join(dir, name), "utf8"), { documented });
+    if (name !== "compose.tiers.yaml") for (const [service, prefix, port] of fileKnobs) stack.push([name, service, prefix, port]);
     for (const [kind, service, line, detail] of gaps) {
       const at = line ? `${rel}:${line}` : rel;
       const svc = service ? `service \`${service}\`` : "the file";
@@ -2384,7 +2444,7 @@ function checkPublishedPorts() {
         case "empty-ports": fail(at, `${svc} has an empty \`ports:\` list (SMD-1844)`); break;
         case "long-form": fail(at, `${svc} publishes ${detail} in the long form — use the short form ${HOUSE}, the one shape this rule and the README teach (SMD-1844)`); break;
         case "no-address": fail(at, `${svc} publishes \`${detail}\` with no host address — compose binds that to 0.0.0.0, every interface; write ${HOUSE} with \`${knob}\` and document the knob in deploy/.env.example (SMD-1844)`); break;
-        case "not-house-form": fail(at, `${svc} publishes \`${detail}\`, which names an address but is not the house form ${HOUSE} — the knob must end in _BIND, the host port must be a \`_PORT\` knob (smoke.sh and the CI step read SERVER_PORT), and no suffix (SMD-1844)`); break;
+        case "not-house-form": fail(at, `${svc} publishes \`${detail}\`, which names an address but is not the house form ${HOUSE} — the knob must end in _BIND, the host port must be the same knob's \`_PORT\` (smoke.sh and the CI step read SERVER_PORT; a mapping on another's knob publishes on its port, SMD-2685) with a default written plainly (compose reads 08000 as 8000), and no suffix (SMD-1844)`); break;
         case "default-not-loopback": fail(at, `${svc}: ${detail} — the default is the literal 127.0.0.1, which smoke.sh and the CI step dial; an operator who wants another address sets the knob (SMD-1844)`); break;
         case "undocumented-knob": fail(at, `${svc} reads \`${detail}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`); break;
         default: throw new Error(`check 13: no message for kind ${kind}`);
@@ -2399,7 +2459,28 @@ function checkPublishedPorts() {
       if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the proxy (a service behind it is a router in x-proxy-routes, not a port, SMD-1846), and n8n under the orchestration profile; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
     }
   }
+  for (const clash of portClashes(stack)) fail("deploy/", `${clash} (SMD-2685)`);
 }
+
+/** Where two mappings in compose.yaml and its overlays, which run as one stack (compose.tiers.yaml is a stack of its own), share a knob or a default host port: [file, service, knob prefix, default port] each. Whichever binds first takes the other's clients — the proxy's port taken by jev, which starts before it, would take every MCP client's key (SMD-2685). */
+function portClashes(entries: [string, string, string, string][]): string[] {
+  const out: string[] = [];
+  for (const [i, by] of [[2, "knob"], [3, "default host port"]] as const) {
+    const seen = new Map<string, string>();
+    for (const e of entries) {
+      const at = `${e[0]}'s ${e[1]}`;
+      const other = seen.get(e[i]);
+      if (other) out.push(`${at} publishes on the ${by} ${i === 2 ? `${e[i]}_BIND/${e[i]}_PORT` : e[i]} that ${other} does — each mapping has a knob and a default port of its own, or the first to bind takes the other's clients`);
+      else seen.set(e[i], at);
+    }
+  }
+  return out;
+}
+const PORT_CLASH_PROBES: [string, [string, string, string, string][], number][] = [
+  ["two services, two knobs, two ports", [["compose.yaml", "proxy", "SERVER", "8000"], ["compose.host-ports.yaml", "jev", "JEV", "8020"]], 0],
+  ["jev on the proxy's knob", [["compose.yaml", "proxy", "SERVER", "8000"], ["compose.host-ports.yaml", "jev", "SERVER", "8020"]], 1],
+  ["jev on its own knob, defaulting to the proxy's port", [["compose.yaml", "proxy", "SERVER", "8000"], ["compose.host-ports.yaml", "jev", "JEV", "8000"]], 1],
+];
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
@@ -2767,6 +2848,8 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
+  OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
@@ -5209,8 +5292,8 @@ type TransportRole = { imports: TransportImports; wiring: boolean; mustImport: s
 const INDEX_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["@modelcontextprotocol/server", "*"], ["hono", "*"],
-    // The process root's readers: the environment, the store's builder and closer, the agent registry.
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere", "Env"])],
+    // The process root's readers: the environment, the store's builder and closer, the agent registry, the enabled plugins.
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere", "Env"])],
     ["./auth.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"], ["./sse.ts", "*"],
     ["./core/index.ts", "*"], ["./render.ts", "*"],
     // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
@@ -5231,6 +5314,10 @@ const ROOT_ROLE: TransportRole = {
     ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
+    // The enabled plugins, read once from the environment (SMD-2310): manifests checked, nothing run.
+    ["./core/plugins.ts", new Set(["enabledHooks", "hookSecrets", "loadPlugins", "LoadedHook", "LoadedPlugin"])],
+    // Their tool names, for the request line (SMD-1849): a name list, no logic.
+    ["./telemetry.ts", new Set(["knowTools"])],
   ]),
   wiring: true,
   mustImport: "./store.ts",
@@ -5240,7 +5327,7 @@ const ROOT_ROLE: TransportRole = {
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere"])],
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
@@ -5690,7 +5777,8 @@ const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
-// compose.yaml's and compose.api-public.yaml's tables from them too.
+// compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
+// tables from them too.
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
   `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
@@ -5709,8 +5797,8 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
-/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES"];
+/** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -5741,7 +5829,8 @@ function tierStack(compose: Mapping): Mapping {
     const tierServer = (svc: Mapping | undefined, kind: "mcp" | "api") => {
       const networks = (svc?.networks ?? {}) as Mapping;
       return {
-        ...svc,
+        // An extension key (compose.yaml's server anchors its block under x-env) is compose.yaml's own, not the tier's.
+        ...omitKeys(svc, Object.keys(svc ?? {}).filter((k) => k.startsWith("x-"))),
         image,
         environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(svc?.environment), OB1_TIER: `\${OB1_TIER:-${t}}` },
         depends_on: renameKeys(svc?.depends_on, toTier),
@@ -5750,18 +5839,20 @@ function tierStack(compose: Mapping): Mapping {
     };
     services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...omitKeys(c.migrate?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
     services[`${t}-server`] = tierServer(c.server, "mcp");
     services[`${t}-api`] = tierServer(c.api, "api");
   }
   const volumes = (compose.volumes ?? {}) as Mapping;
   const networks = (compose.networks ?? {}) as Mapping;
   const configs = (compose.configs ?? {}) as Mapping;
+  // compose.yaml's networks that this stack's services join (SMD-2583), the authorization server's own among those left out.
+  const joined = new Set(Object.values(services).flatMap((s) => { const n = (s as Mapping | undefined)?.networks; return Array.isArray(n) ? n.map(String) : Object.keys(isMapping(n) ? n : {}); }));
   return {
     name: "open-brain-tiers",
     services,
     volumes: { ...Object.fromEntries(TIERS.map((t) => [`${t}-pgdata`, volumes.pgdata])), ollama: volumes.ollama },
-    networks: { mesh: networks.mesh },
+    networks: Object.fromEntries(Object.keys(networks).filter((n) => joined.has(n)).map((n) => [n, networks[n]])),
     configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE } },
   };
 }
@@ -5773,7 +5864,7 @@ function tierHazards(want: Mapping): string[] {
     const v = volumes[`${t}-pgdata`];
     if (isMapping(v) && ("name" in v || "external" in v)) out.push(`volumes.${t}-pgdata takes compose.yaml's pgdata ${"name" in v ? `name ${JSON.stringify(v.name)}` : "external flag"}, one volume for every tier`);
   }
-  if (isMapping(networks.mesh) && ("name" in networks.mesh || "external" in networks.mesh)) out.push("networks.mesh takes compose.yaml's mesh name, so the tiers would join another project's mesh");
+  for (const [net, def] of Object.entries(networks)) if (isMapping(def) && ("name" in def || "external" in def)) out.push(`networks.${net} takes compose.yaml's ${net} name, so the tiers would join another project's ${net}`);
   for (const t of TIERS) for (const kind of ["postgres", "migrate", "server", "api"]) {
     const name = `${t}-${kind}`, svc = services[name] ?? {};
     for (const k of ["container_name", "hostname", "ports"]) if (k in svc) out.push(`${name}.${k} would be one for every tier`);
@@ -5870,7 +5961,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
   ["every server on another port than the routes dial", ["  PORT: \"8000\"\n", "  PORT: \"8001\"\n"]],
   ["the migrators on another embedding size than the servers", ["x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}\n", "x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-768}\n"]],
-  ["every migrator told to do nothing", ["  restart: \"no\"\n\n# The host's", "  restart: \"no\"\n  command: [\"true\"]\n\n# The host's"]],
+  ["every migrator told to do nothing", ["  restart: \"no\"\n  networks: [data]\n\n# The host's", "  restart: \"no\"\n  networks: [data]\n  command: [\"true\"]\n\n# The host's"]],
   ["working's server on stable's database", ["@working-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-working}", "@stable-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-working}"]],
   ["working's Postgres on stable's volume", ["      - working-pgdata:/var/lib/postgresql/data", "      - stable-pgdata:/var/lib/postgresql/data"]],
   ["canary's REST core on stable's environment", ["    environment: *canary-env\n", "    environment: *stable-env\n"]],
@@ -5880,7 +5971,8 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
 /** [what the probe changes in compose.yaml, the text it replaces, its replacement] — each must turn check 27 false against compose.tiers.yaml as it is. */
 const TIER_COMPOSE_PROBES: [string, string, string][] = [
   ["compose.yaml's Postgres volume given a fixed name", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    name: open-brain-pgdata\n"],
-  ["compose.yaml's mesh given a fixed name", "  mesh:\n    internal: true\n  egress: {}\n", "  mesh:\n    internal: true\n    name: ob1-mesh\n  egress: {}\n"],
+  ["compose.yaml's mesh given a fixed name", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: true\n    name: ob1-mesh\n  data:\n"],
+  ["compose.yaml's data network given a fixed name, one database network for every tier (SMD-2583)", "  data:\n    internal: true\n  egress: {}\n", "  data:\n    internal: true\n    name: ob1-data\n  egress: {}\n"],
   ["compose.yaml's Postgres on a bind mount", "      - pgdata:/var/lib/postgresql/data\n", "      - ${PGDATA_DIR:-./pgdata}:/var/lib/postgresql/data\n"],
   ["compose.yaml's server dialling the REST core by stable's mesh name", "      PORT: \"8000\"\n", "      PORT: \"8000\"\n      OB1_REST_URL: ${OB1_REST_URL:-http://api.ob1.internal.:8000}\n"],
   ["compose.yaml's server under a second mesh alias", "        aliases: [mcp.ob1.internal]\n", "        aliases: [mcp.ob1.internal, brain.ob1.internal]\n"],
@@ -5915,15 +6007,16 @@ function checkTierStack() {
 }
 checkTierStack();
 
-// ── 28: the proxy's other route tables are held byte for byte (SMD-2658) ──
+// ── 28: the proxy's other route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
 // Traefik's file provider renders a route file as a Go template (sprig
 // included) before it reads the YAML, so a `{{ … }}` on a comment line in a
 // table can emit any router; and a line YAML reads as a key that a reviewer
 // reads as a comment, one led by a no-break space, is a router nobody
 // reviewed (SMD-2294's pass 7 ran it live). Check 27 holds the three-brain
-// stack's table. This holds the other two, compose.yaml's x-proxy-routes and
-// compose.api-public.yaml's x-api-route: as Bun.YAML parses each file, the
+// stack's table. This holds the others, compose.yaml's x-proxy-routes,
+// compose.api-public.yaml's x-api-route and compose.hooks-public.yaml's
+// x-hooks-route (SMD-2310): as Bun.YAML parses each file, the
 // config compose mounts and the proxy label that copies it are each the table
 // built here, byte for byte (the anchor itself compose ignores), and it
 // carries no comment (each file's notes on its routes are YAML comments above
@@ -5931,42 +6024,65 @@ checkTierStack();
 // 13's PUBLISHES is. It reads every compose file directly in deploy/, in any
 // case (compose finds compose.override.yaml as Compose.Override.yaml on
 // macOS), and any file there whose name is not printable ASCII (macOS folds
-// U+212A onto k), but compose.tiers.yaml, which is check 27's:
+// U+212A onto k), but compose.tiers.yaml, which is check 27's (a bare pass
+// number below is SMD-2658's review pass; SMD-2685's are named so):
 //   characters  none carries a control, format or separator character but
 //       the space and the line feed — compose breaks a line at U+0085, U+2028
 //       and U+2029 and Bun.YAML does not, so what this check reads as a
 //       comment could redefine the anchor for compose, or give an overlay a
 //       `configs:` key that replaces the table (pass 1, measured);
 //   tags  none carries a `!!` or named `!x!` tag handle, a verbatim `!<…>`
-//       or percent-escaped tag, or a `%` directive — compose decodes a
-//       `!!binary` key that
-//       Bun.YAML keeps as base64 text, so an overlay hid `proxy`, `name` and
-//       `mesh` from this check (pass 6, measured); a plain local tag Bun.YAML
-//       reads past as compose does, and what !reset and !override do, CI
-//       renders;
-//   proxy  compose.yaml defines the proxy and the networks it joins; an
-//       overlay that carries a table sets only that table's mount, its label
-//       and its depends_on on it, and any other overlay nothing, nor names
-//       the project (which renames the networks the proxy joins); each file
-//       defines only its own table's config; none has `secrets` or `include`;
-//       the proxy names no variable, its ports aside, since CI renders with
-//       its own settings; and no file is one compose reads with no -f
-//       (compose.override.yaml), which CI never renders. Pass 2 got route
-//       files and other backends past a list of forbidden keys, from overlays
-//       and from overlay pairs CI did not name. Another service taking the
-//       proxy's traffic (a mesh-name alias, a sidecar in its PID namespace) is
-//       SMD-2685's.
-// What compose makes of the files together — each -f combination's proxy is
-// compose.yaml's but for those mounts, labels and waits, and mounts exactly
-// these tables — CI holds ("The proxy loads only the held route tables"): no
-// Bun.YAML read can merge overlays as compose does (`!override`, a merge).
-// compose.yaml's own proxy beyond its table and mounts is its reviewers'.
+//       or percent-escaped tag, a `!reset` or `!override`, or a `%`
+//       directive — compose decodes a `!!binary` key that Bun.YAML keeps as
+//       base64 text, so an overlay hid `proxy`, `name` and `mesh` from this
+//       check (pass 6, measured), and it honours !reset and !override where
+//       Bun.YAML reads past them (SMD-2685); any other local tag Bun.YAML
+//       reads past as compose does, and CI renders each file against
+//       Bun.YAML's reading of it;
+//   proxy  compose.yaml's proxy is PROXY_SERVICE, its label (the table's)
+//       and its logging (check 29's) aside: image, user, capabilities, environment, mounts, networks,
+//       search domains, waits — so a hook, a hosts entry, a volume, another
+//       provider or a variable a deploy/.env could move is a change here too,
+//       made on purpose (SMD-2685); an overlay that carries a table mounts
+//       only that table; each file defines only its own table's config; and
+//       no file is one compose reads with no -f (compose.override.yaml),
+//       which CI never renders;
+//   keys  each file sets only what is held for it. An overlay is an OVERLAYS
+//       entry and sets only the services and keys it declares there (pass 2
+//       got route files and other backends past a list of forbidden keys);
+//       compose.yaml's services set only SERVICE_KEYS, which act inside the
+//       service's own container — not `pid`, `ipc`, `privileged` or a hook,
+//       so no sidecar reaches into the proxy's namespaces and writes a route
+//       file through /proc/<pid>/root (SMD-2685, measured live) — with each
+//       service's capabilities, `security_opt` and `read_only` exactly as
+//       CONFINEMENT holds them, its mounts as SERVICE_MOUNTS and its build as
+//       SERVICE_BUILDS (SMD-2685's review passes 1–3 each found a mount past
+//       the rule as it stood: an engine's socket, a writable .git), and the
+//       named volumes as
+//       COMPOSE_VOLUMES; no service name but lower-case
+//       letters, digits and hyphens (compose adds it on each network, so a
+//       dotted one answers as a backend); no top-level key but the file's
+//       (`name` in an overlay renames the networks the proxy joins, pass 4;
+//       `secrets` mounts a file wherever it says; `include` reads a file this
+//       check does not);
+//   networks  each file defines exactly FILE_NETWORKS, and each service joins
+//       exactly SERVICE_NETWORKS under the names held there (the proxy's are
+//       PROXY_SERVICE's): only a backend answers to its own mesh name, and no
+//       second key joins a network the first already names. Two containers
+//       aliased mcp.ob1.internal, measured on the pinned Traefik: the one
+//       registered first took 30 of 30 requests (SMD-2685).
+// What compose makes of the files together — each -f combination equal to
+// compose.yaml's alone but for what its overlays declare, its proxy loading
+// exactly these tables — CI holds ("The proxy loads only the held route
+// tables"), with every file there rendered against Bun.YAML's reading of it,
+// so that what this check reads is what compose runs.
 /** compose.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("auth", "Path(`/auth`) || PathPrefix(`/auth/`) || Path(`/.well-known/oauth-authorization-server/auth`) || Path(`/.well-known/openid-configuration/auth`) || Path(`/.well-known/oauth-authorization-server`)", 40, "auth-absent", "auth")
   + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
+  + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
   + ROUTE_TIER_PATHS + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
@@ -5980,32 +6096,134 @@ const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
   + "  middlewares:\n    api-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n    api-strip:\n      stripPrefix:\n        prefixes: [\"/api\"]\n"
   + "  services:\n" + routeService("api", `http://${tierMeshName("api", "stable")}.:8000`);
+/** compose.hooks-public.yaml's route table (SMD-2310), byte for byte, as Bun.YAML reads the block: /hooks/ to the REST core, path kept. */
+const HOOKS_ROUTE_TABLE = "http:\n  routers:\n"
+  + routeRouter("hooks-public", "PathPrefix(`/hooks/`)", 36, "hooks-no-forwarder", "hooks")
+  + "  middlewares:\n    hooks-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n"
+  + "  services:\n" + routeService("hooks", `http://${tierMeshName("api", "stable")}.:8000`);
 /** [the file under deploy/, the config compose mounts, where the proxy mounts it, the proxy label that copies it, the table's name here, the table]. */
 const ROUTE_FILES = [
   ["compose.yaml", "proxy-routes", "/etc/traefik/dynamic/routes.yaml", "ob1.proxy-routes", "PROXY_ROUTE_TABLE", PROXY_ROUTE_TABLE],
   ["compose.api-public.yaml", "proxy-api-route", "/etc/traefik/dynamic/api.yaml", "ob1.proxy-api-route", "API_ROUTE_TABLE", API_ROUTE_TABLE],
+  ["compose.hooks-public.yaml", "proxy-hooks-route", "/etc/traefik/dynamic/hooks.yaml", "ob1.proxy-hooks-route", "HOOKS_ROUTE_TABLE", HOOKS_ROUTE_TABLE],
 ] as const;
-/** What an overlay that carries a table may set on compose.yaml's proxy: its config's mount, its label and its wait. Any other overlay sets nothing on it. */
-const PROXY_OVERLAY_KEYS = ["configs", "labels", "depends_on"];
+/** compose.yaml's proxy as Bun.YAML reads it, its label (the table rule's) and its `logging` (check 29's, x-logging for every service) aside. */
+const PROXY_SERVICE = {
+  image: "docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0",
+  user: "65534:65534",
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  environment: {
+    TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000",
+    TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete",
+    TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
+    TRAEFIK_ACCESSLOG: "true",
+    TRAEFIK_ACCESSLOG_FORMAT: "json",
+    TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: "drop",
+    TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: "drop",
+    TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: "drop",
+    TRAEFIK_PING: "true",
+    TRAEFIK_PING_ENTRYPOINT: "ping",
+    TRAEFIK_ENTRYPOINTS_PING_ADDRESS: "127.0.0.1:8082",
+    TRAEFIK_GLOBAL_CHECKNEWVERSION: "false",
+    TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false",
+  },
+  configs: [{ source: "proxy-routes", target: "/etc/traefik/dynamic/routes.yaml" }],
+  ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
+  networks: ["edge", "mesh"],
+  dns_search: ["."],
+  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
+  depends_on: { server: { condition: "service_started" }, api: { condition: "service_started" } },
+  restart: "unless-stopped",
+};
+/** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
+const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
+  // The proxy: its table's mount, its label and its wait.
+  "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
+  "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
+  // Postgres's port, and the outward network it is published on (SMD-2583).
+  "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
+  "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
+};
+/** compose.yaml's top-level keys, x-* anchors aside. */
+const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
+/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build` and `volumes` SERVICE_BUILDS' and SERVICE_MOUNTS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
+const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "networks", "ports", "x-env"];
+/** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
+const CONFINEMENT: Record<string, Mapping> = {
+  "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
+  auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+};
+const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
+/** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. */
+const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null };
+const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
+const SERVICE_MOUNTS: Record<string, unknown[]> = {
+  postgres: ["pgdata:/var/lib/postgresql/data"],
+  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
+  ollama: ["ollama:/root/.ollama"],
+  jev: ["jev-models:/models"],
+  n8n: ["n8n-data:/home/node/.n8n"],
+  "orchestration-runner": [{ type: "bind", source: "${IMPORTS_DIR:-./imports}", target: "/imports", read_only: true, bind: { selinux: "z" } }, "./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z"],
+  auth: ["auth-data:/data"],
+};
+const SERVICE_BUILDS: Record<string, unknown> = {
+  migrate: { context: "..", dockerfile: "db/Dockerfile" },
+  server: { context: "..", dockerfile: "server-portable/Dockerfile", args: { OB1_GIT_SHA: "${OB1_GIT_SHA:-unknown}" } },
+  jev: { context: "..", dockerfile: "jev/Dockerfile" },
+  "orchestration-runner": { context: "..", dockerfile: "deploy/orchestration/runner.Dockerfile" },
+  auth: { context: "./auth" },
+};
+/** The networks each file defines, exactly; a file not named here defines none. */
+const FILE_NETWORKS: Record<string, Mapping> = {
+  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {} },
+  "compose.host-ports.yaml": { "postgres-port": {} },
+  "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
+};
+/** The networks each file's services join, and the names each answers to there, exactly; a service not named here sets no `networks` (compose.yaml's proxy aside, PROXY_SERVICE's). */
+const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
+  // Postgres on `data` alone, and only what connects to it beside it; the provider callers and the model services on `egress`; the authorization server's way out its own (SMD-2583).
+  "compose.yaml": {
+    postgres: ["data"],
+    migrate: ["data"],
+    server: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
+    "board-sync": ["data", "egress"],
+    extract: ["data", "egress"],
+    consolidate: ["data", "egress"],
+    ollama: ["egress"],
+    "ollama-pull": ["egress"],
+    jev: ["egress"],
+    n8n: ["egress"],
+    "orchestration-runner-role": ["data"],
+    "orchestration-runner": ["data", "egress"],
+    auth: { mesh: { aliases: ["auth.ob1.internal"] }, "auth-egress": {} },
+  },
+  "compose.host-ports.yaml": { postgres: ["postgres-port"] },
+  "compose.canary.yaml": {
+    server: { "stable-mesh": { aliases: [tierMeshName("mcp", "canary")] } },
+    api: { "stable-mesh": { aliases: [tierMeshName("api", "canary")] } },
+  },
+};
 /** A name compose takes for its own with no -f, in any case (compose finds it so on a case-insensitive disk, macOS, measured): an override it reads beside compose.yaml, or a default name — docker-compose.y*ml, compose.yml, a case variant of compose.yaml — that compose warns about and skips beside compose.yaml but a checkout on such a disk can put in its place. */
-const AUTOLOADED_COMPOSE = /^(compose\.override|docker-compose(\.override)?)\.ya?ml$|^compose\.yml$/i;
+const AUTOLOADED_COMPOSE = /^(compose\.override|(docker|podman|container)-compose(\.override)?)\.ya?ml$|^compose\.yml$/i;
 const autoloadedCompose = (file: string) => AUTOLOADED_COMPOSE.test(file) || (file.toLowerCase() === "compose.yaml" && file !== "compose.yaml");
 /** A name outside printable ASCII, which macOS folds as no ASCII test does: compose read `docKer-compose.override.yml`, with U+212A, as docker-compose.override.yml (pass 4, measured). */
 const nonAsciiName = (file: string) => /[^\x20-\x7e]/.test(file);
 /** The files check 28 reads under deploy/: every compose file, in any case, and any file whose name is not printable ASCII; the three-brain stack's is check 27's. */
-const sweptCompose = (file: string) => (nonAsciiName(file) || /^(docker-)?compose.*\.ya?ml$/i.test(file)) && file !== "compose.tiers.yaml";
+const sweptCompose = (file: string) => (nonAsciiName(file) || /^((docker|podman|container)-)?compose.*\.ya?ml$/i.test(file)) && file !== "compose.tiers.yaml";
 /** Check 28's rules, by id; each must be the only catch of at least one probe. */
-const ROUTE_RULES = ["parse", "characters", "tags", "table", "proxy"] as const;
+const ROUTE_RULES = ["parse", "characters", "tags", "table", "proxy", "keys", "networks"] as const;
 type RouteRule = (typeof ROUTE_RULES)[number];
 /** Every way a compose file under deploy/ strays from check 28's rules, each with its rule; none when it holds. */
-function routeTableProblems(file: string, text: string, proxyNetworks: string[]): { rule: RouteRule; message: string }[] {
+function routeTableProblems(file: string, text: string): { rule: RouteRule; message: string }[] {
   const out: { rule: RouteRule; message: string }[] = [];
   const flag = (rule: RouteRule, message: string) => { out.push({ rule, message }); };
   const odd = oddCharacters(text);
   if (odd.length) flag("characters", `line ${odd.join(", ")} carries a control, format or separator character other than the space and the line feed — compose breaks a line at U+0085, U+2028 and U+2029 and Bun.YAML does not, so what this check reads as a comment can be keys compose reads: an anchor the route table takes, or an overlay's config that replaces it`);
-  // A tag compose resolves and Bun.YAML does not: `!!binary` turns a key this check sees as base64 text into `proxy`, `name` or `mesh` for compose (pass 6, measured). Such a tag is written with a `!!` or named `!x!` handle, verbatim (`!<…>`), percent-escaped (`!%21binary`, pass 7), or through a handle a `%TAG` directive redefines; a plain local tag Bun.YAML reads past as compose does, and compose's !reset and !override are left to CI's renders. A shell `[!0-9]` in a block scalar is none of these.
-  const tagged = [...text.matchAll(/(^|[\s\[{,:?-])!(<|[A-Za-z0-9-]*[!%])|^%/gm)].map((m) => text.slice(0, m.index).split("\n").length);
-  if (tagged.length) flag("tags", `line ${[...new Set(tagged)].join(", ")} carries a \`!!\` or named \`!x!\` tag handle, a verbatim \`!<…>\` or percent-escaped tag, or a \`%\` directive, comments included — compose decodes a \`!!binary\` key and Bun.YAML keeps it as base64 text, so a key this check reads as nothing is \`proxy\`, \`name\`, \`configs\` or \`mesh\` to compose (pass 6, measured)`);
+  // A tag compose resolves and Bun.YAML does not: `!!binary` turns a key this check sees as base64 text into `proxy`, `name` or `mesh` for compose (pass 6, measured). Such a tag is written with a `!!` or named `!x!` handle, verbatim (`!<…>`), percent-escaped (`!%21binary`, pass 7), or through a handle a `%TAG` directive redefines; and compose honours !reset and !override, which Bun.YAML reads past. Any other local tag Bun.YAML reads past as compose does. A shell `[!0-9]` in a block scalar is none of these.
+  const tagged = [...text.matchAll(/(^|[\s\[{,:?-])!(<|[A-Za-z0-9-]*[!%]|reset\b|override\b)|^%/gm)].map((m) => text.slice(0, m.index).split("\n").length);
+  if (tagged.length) flag("tags", `line ${[...new Set(tagged)].join(", ")} carries a \`!!\` or named \`!x!\` tag handle, a verbatim \`!<…>\` or percent-escaped tag, a \`!reset\` or \`!override\`, or a \`%\` directive, comments included — compose decodes a \`!!binary\` key and Bun.YAML keeps it as base64 text, so a key this check reads as nothing is \`proxy\`, \`name\`, \`configs\` or \`mesh\` to compose (SMD-2658 review pass 6, measured), and it honours !reset and !override where Bun.YAML reads past them (a canary server's networks stripped, SMD-2685)`);
   if (nonAsciiName(file)) return [...out, { rule: "proxy", message: "has a name outside printable ASCII under deploy/ — macOS folds such a name onto an ASCII one (U+212A to k, U+017F to s) that no ASCII test sees, and compose read one as docker-compose.override.yml with no -f: name it in ASCII" }];
   if (autoloadedCompose(file)) return [...out, { rule: "proxy", message: "is a name compose takes for its own with no -f — an override it reads beside compose.yaml, or a default name a checkout on a case-insensitive disk can put in compose.yaml's place — and a deploy/README.md command runs compose that way, so what it sets reaches the stack while CI, which names each file with -f, never renders it: make it an overlay named with -f, and give it a combination in CI's \"The proxy loads only the held route tables\"" }];
   let doc: unknown;
@@ -6016,25 +6234,62 @@ function routeTableProblems(file: string, text: string, proxyNetworks: string[])
   }
   if (!isMapping(doc)) return [...out, { rule: "parse", message: `is not one YAML mapping (${Array.isArray(doc) ? "a sequence or several documents" : typeof doc})` }];
   const spec = ROUTE_FILES.find(([f]) => f === file);
-  const proxy = isMapping(doc.services) && isMapping(doc.services.proxy) ? doc.services.proxy : undefined;
-  // What a file may do to the proxy: compose.yaml defines it; an overlay with a table adds that table's mount, label and wait; any other overlay leaves it alone.
-  for (const k of ["secrets", "include"]) if (k in doc) flag("proxy", `has a top-level \`${k}\` — no stack here uses one, and ${k === "secrets" ? "a secret mounts a file wherever its target says, the proxy's route directory or a static traefik.yml included" : "an included file is a compose file this check does not read"}`);
+  const base = file === "compose.yaml";
+  const overlay = OVERLAYS[file];
+  const services = isMapping(doc.services) ? doc.services : {};
+  const proxy = isMapping(services.proxy) ? services.proxy : undefined;
+  // What a file may do to the proxy: compose.yaml defines it, as PROXY_SERVICE; an overlay with a table adds that table's mount.
+  if (base) {
+    const diffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(proxy, ["labels", "logging"]))), PROXY_SERVICE, "services.proxy", diffs);
+    if (diffs.length) flag("proxy", `${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — compose.yaml's proxy is check 28's PROXY_SERVICE, its label aside: a hook, a hosts entry, a volume, another provider or a variable a deploy/.env could move reaches the origin, so a change to the proxy is made there too, on purpose (SMD-2685)`);
+  }
   const configs = Object.keys(isMapping(doc.configs) ? doc.configs : {});
   const foreign = configs.filter((c) => c !== spec?.[1]);
   if (foreign.length) flag("proxy", `defines config${foreign.length > 1 ? "s" : ""} ${foreign.join(", ")} — each file defines only its own table's config (ROUTE_FILES: ${ROUTE_FILES.map(([f, c]) => `${f}: ${c}`).join("; ")}), so an overlay cannot replace another's table in a combination CI does not render`);
-  const redefined = file === "compose.yaml" ? [] : Object.keys(isMapping(doc.networks) ? doc.networks : {}).filter((n) => proxyNetworks.includes(n));
-  if (redefined.length) flag("proxy", `defines network${redefined.length > 1 ? "s" : ""} ${redefined.join(", ")}, which the proxy joins — an overlay that renamed one, or made it external, would put the proxy, and the backends it dials by name, on another network (pass 3); compose.yaml defines them`);
-  if (file !== "compose.yaml" && "name" in doc) flag("proxy", "names the project — an overlay's top-level `name:` renames every network the proxy joins to another project's, as a redefined network would (pass 4, measured); compose.yaml names it");
-  if (proxy && file !== "compose.yaml") {
-    const extra = Object.keys(proxy).filter((k) => !spec || !PROXY_OVERLAY_KEYS.includes(k));
-    if (extra.length) flag("proxy", `sets ${extra.map((k) => `services.proxy.${k}`).join(", ")} — an overlay ${spec ? `sets only ${PROXY_OVERLAY_KEYS.join(", ")} on the proxy, for its own table` : "that carries no route table leaves the proxy as compose.yaml defines it (one that adds a table is a ROUTE_FILES entry with its table built here, and a combination in CI's \"The proxy loads only the held route tables\")"}; anything else it set on the proxy would reach the origin in a review of this file alone`);
-  }
-  if (proxy && spec) {
+  if (proxy && spec && !base) {
     const [, config, target] = spec;
     if (canonJson(proxy.configs) !== canonJson([{ source: config, target }])) flag("proxy", `mounts ${JSON.stringify(proxy.configs ?? null)} on the proxy where it should mount only its table: [{"source":"${config}","target":"${target}"}]`);
   }
-  // CI renders each file with its own settings, so a variable in the proxy is a mount or a provider CI never saw.
-  if (proxy && canonJson(omitKeys(proxy, ["ports"])).includes("$")) flag("proxy", "the proxy's definition, its ports aside, carries a `$` — CI holds what the proxy loads as compose renders it with CI's settings, so a mount, a setting or a command a deploy/.env could change goes unheld there: write it plainly");
+  // What each file sets: compose.yaml its services' own containers; an overlay what OVERLAYS declares of it.
+  if (!base && !overlay) flag("keys", `is not an overlay check 28 knows — an overlay is an OVERLAYS entry naming the keys it sets on each service, and a combination in CI's "The proxy loads only the held route tables" declaring the same; one that carries a route table is a ROUTE_FILES entry too`);
+  const TOP_WHY: Record<string, string> = {
+    name: "an overlay's `name:` renames every network the proxy joins to another project's (SMD-2658 review pass 4, measured); compose.yaml names it",
+    secrets: "a secret mounts a file wherever its target says, the proxy's route directory or a static traefik.yml included",
+    include: "an included file is a compose file this check does not read",
+  };
+  const top = Object.keys(doc).filter((k) => !k.startsWith("x-") && !(base ? COMPOSE_TOP : ["services", ...(overlay?.top ?? [])]).includes(k));
+  for (const k of top) flag("keys", `has a top-level \`${k}\` — ${TOP_WHY[k] ?? (base ? `compose.yaml's are ${COMPOSE_TOP.join(", ")}` : "an overlay defines only what its OVERLAYS entry declares")}`);
+  if (base && canonJson(doc.volumes ?? null) !== canonJson(COMPOSE_VOLUMES)) flag("keys", `defines volumes ${JSON.stringify(doc.volumes ?? null)} where check 28's COMPOSE_VOLUMES holds ${JSON.stringify(COMPOSE_VOLUMES)} — each the engine's default, since driver options bind a host path, and a volume named like a path (\`..\`) is a bind of it`);
+  for (const [name, def] of Object.entries(services)) {
+    if (!/^[a-z][a-z0-9-]*$/.test(name)) flag("keys", `names a service ${JSON.stringify(name)} — compose adds a service's name on each network it joins, so a dotted one answers as that name, a backend's mesh name (mcp.ob1.internal) included, and takes the proxy's traffic for it (SMD-2685): a service name is lower-case letters, digits and hyphens`);
+    const svc = isMapping(def) ? def : {};
+    if (!base) {
+      const may = overlay?.services[name] ?? [];
+      const extra = Object.keys(svc).filter((k) => !may.includes(k));
+      if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
+      continue;
+    }
+    if (name === "proxy") continue;
+    const extra = Object.keys(svc).filter((k) => !SERVICE_KEYS.includes(k));
+    if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — a compose.yaml service sets only check 28's SERVICE_KEYS, which act inside its own container: \`pid: service:proxy\` with a capability wrote a route file through /proc/<pid>/root that Traefik loaded live (SMD-2685, measured), and a hook may run privileged; a key that is safe is added there on purpose`);
+    const confinement = Object.fromEntries(CONFINEMENT_KEYS.filter((k) => k in svc).map((k) => [k, svc[k]]));
+    if (canonJson(confinement) !== canonJson(CONFINEMENT[name] ?? {})) flag("keys", `services.${name}'s confinement is ${JSON.stringify(confinement)} where check 28's CONFINEMENT holds ${JSON.stringify(CONFINEMENT[name] ?? {})} — a capability added, or a drop or no-new-privileges removed, is a change there on purpose (a security_opt beyond no-new-privileges lifts seccomp, AppArmor or SELinux)`);
+    if (canonJson(svc.build ?? null) !== canonJson(SERVICE_BUILDS[name] ?? null)) flag("keys", `services.${name}.build is ${JSON.stringify(svc.build ?? null)} where check 28's SERVICE_BUILDS holds ${JSON.stringify(SERVICE_BUILDS[name] ?? null)} — a build's network, privileges, entitlements, secrets and contexts act on the host's builder, so one is changed there on purpose`);
+    if (canonJson(svc.volumes ?? null) !== canonJson(SERVICE_MOUNTS[name] ?? null)) flag("keys", `services.${name}.volumes is ${JSON.stringify(svc.volumes ?? null)} where check 28's SERVICE_MOUNTS holds ${JSON.stringify(SERVICE_MOUNTS[name] ?? null)} — a mount is changed there on purpose: an engine's socket hands the service every container, the proxy's included, and a writable checkout or .git runs code on the host`);
+  }
+  // Who joins which network, under which names.
+  if (base && doc.name !== "open-brain") flag("networks", `names the project ${JSON.stringify(doc.name ?? null)} where it is open-brain — the name prefixes every network, so another project's (open-brain-tiers) puts this stack's services on its mesh beside its own, two answering to one mesh name (SMD-2685 review pass 2)`);
+  const wantNets = FILE_NETWORKS[file] ?? null;
+  if (canonJson(doc.networks ?? null) !== canonJson(wantNets)) flag("networks", `defines networks ${JSON.stringify(doc.networks ?? null)} where check 28's FILE_NETWORKS holds ${JSON.stringify(wantNets)} — a network renamed, made external or defined twice under one name puts the proxy, or a service that answers as a backend, on another network (SMD-2658 review pass 3; SMD-2685's second key into stable's mesh)`);
+  for (const [name, def] of Object.entries(services)) {
+    if (base && name === "proxy") continue;
+    const got = isMapping(def) ? def.networks ?? null : null;
+    const want = SERVICE_NETWORKS[file]?.[name] ?? null;
+    // compose.yaml's every service is named there: one that names no network lands on compose's default, beside nothing else (SMD-2583 review pass 1: null held null).
+    if (base && !(name in (SERVICE_NETWORKS[file] ?? {}))) flag("networks", `services.${name} is not in check 28's SERVICE_NETWORKS — name its networks there and in its \`networks:\` (data only if it connects to Postgres, egress if it calls out), since a service that names none lands on compose's default network (SMD-2583)`);
+    else if (canonJson(got) !== canonJson(want)) flag("networks", `services.${name}.networks is ${JSON.stringify(got)} where check 28's SERVICE_NETWORKS holds ${JSON.stringify(want)} — only a backend answers to its own mesh name: two containers aliased mcp.ob1.internal, and the one registered first took 30 of 30 of the proxy's requests (SMD-2685, measured)`);
+  }
   if (!spec) return out;
   const [, config, , label, name, table] = spec;
   const configMap = isMapping(doc.configs) ? doc.configs : {};
@@ -6042,6 +6297,8 @@ function routeTableProblems(file: string, text: string, proxyNetworks: string[])
   pathDiffs(isMapping(configMap[config]) ? configMap[config].content : undefined, table, `configs.${config}.content`, diffs);
   if (isMapping(configMap[config]) && canonJson(Object.keys(configMap[config])) !== canonJson(["content"])) diffs.push(`configs.${config} carries ${Object.keys(configMap[config]).filter((k) => k !== "content").join(", ")} beside its content, where the table is its content alone`);
   pathDiffs(proxy && isMapping(proxy.labels) ? proxy.labels[label] : undefined, table, `services.proxy.labels.${label}`, diffs);
+  const otherLabels = Object.keys(proxy && isMapping(proxy.labels) ? proxy.labels : {}).filter((k) => k !== label);
+  if (otherLabels.length) diffs.push(`services.proxy.labels carries ${otherLabels.join(", ")} beside ${label}, where the file's one label on the proxy is its table`);
   if (diffs.length) flag("table", `${diffs.join("; ")} — the route table's config and its label are each check 28's ${name}, byte for byte, with no comment in it (Traefik renders a route file as a Go template, so a comment there can emit a router): a route changed on purpose is changed there too, and a note on it is a YAML comment above the block`);
   return out;
 }
@@ -6071,6 +6328,8 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Compose.Override.yaml, which compose on macOS reads with no -f as it does compose.override.yaml (measured, pass 3)", "Compose.Override.yaml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["a docker-compose.override.yml, which compose reads beside compose.yaml with no -f", "docker-compose.override.yml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["a Compose.yaml, which a checkout on a case-insensitive disk can put in compose.yaml's place", "Compose.yaml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
+  ["a podman-compose.yaml, which podman-compose reads with no -f (SMD-2685 review pass 6, measured on 1.6.0)", "podman-compose.yaml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
+  ["a container-compose.override.yaml, which podman-compose reads with no -f", "container-compose.override.yaml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["a docker-compose.override.yml spelt with U+212A, which compose on macOS reads with no -f (measured, pass 4)", "doc\u212ager-compose.override.yml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["compose.host-ports.yaml naming the project, which renames the proxy's networks (measured, pass 4)", "compose.host-ports.yaml", "\nservices:\n", "\nname: open-brain-canary\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a !!binary key, which compose decodes and Bun.YAML does not (measured, pass 6)", "compose.host-ports.yaml", "\nservices:\n", "\n!!binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
@@ -6079,31 +6338,85 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.canary.yaml with a !!binary key after a comma in a flow mapping (measured, pass 7)", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {a: 1,!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
   ["compose.canary.yaml with a !!binary key opening a flow mapping", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a percent-escaped !%21binary key (measured, pass 7)", "compose.host-ports.yaml", "\nservices:\n", "\n!%21binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
+  ["compose.api-public.yaml defining a second config, which a later overlay could mount", "compose.api-public.yaml", "\nconfigs:\n  proxy-api-route:\n", "\nconfigs:\n  extra-routes:\n    content: \"http: {}\"\n  proxy-api-route:\n"],
   ["compose.api-public.yaml's config made external beside its content", "compose.api-public.yaml", "    content: *api-route\n", "    content: *api-route\n    external: true\n"],
   ["compose.host-ports.yaml including a file this check does not read", "compose.host-ports.yaml", "\nservices:\n", "\ninclude: [debug/extra.yaml]\n\nservices:\n"],
-  ["compose.host-ports.yaml putting the mesh on another project's network (pass 3)", "compose.host-ports.yaml", "\nservices:\n", "\nnetworks:\n  mesh:\n    name: someone-elses_mesh\n    external: true\n\nservices:\n"],
+  ["compose.host-ports.yaml putting the mesh on another project's network (pass 3)", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port: {}\n  mesh:\n    name: someone-elses_mesh\n    external: true\n"],
+  // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
+  ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
+  ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
+  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.0-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
+  // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
+  ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
+  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
+  ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
+  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.0-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
+  ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
+  ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
+  ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
+  ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
+  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.0-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
+  ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
+  ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
+  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\nnetworks:\n  # The ADR's networks"],
+  ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
+  ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
+  ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
+  ["the import runner mounting the engine's socket past a variable's default (SMD-2685 review pass 1, which compose resolved to /var/run/docker.sock)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${OB1_X:-./}/../../../../../var/run/docker.sock:/var/run/docker.sock\n"],
+  ["the import runner mounting the engine's socket through a variable inside the path", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./a${OB1_X:-/../../../../..}/var/run/docker.sock:/s\n"],
+  ["a mount from a variable with no default", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./a/${OB1_X}/x:/x\n"],
+  ["the typed-decision tier built on the host's network", "compose.yaml", "      dockerfile: jev/Dockerfile\n", "      dockerfile: jev/Dockerfile\n      network: host\n"],
+  ["a second label on compose.yaml's proxy", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: *proxy-routes\n      ob1.note: \"1\"\n"],
+  ["the import runner mounting the directory a rootless engine keeps its socket in, by a variable the host sets (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${XDG_RUNTIME_DIR:-./run}:/run/host:ro\n"],
+  ["board-sync mounting the user's home in the long form, by a variable the host sets (SMD-2685 review pass 2)", "compose.yaml", "    profiles: [\"board-sync\"]\n    working_dir: /app\n    volumes:\n", "    profiles: [\"board-sync\"]\n    working_dir: /app\n    volumes:\n      - {type: bind, source: \"${HOME:-./home}\", target: /home/host, read_only: true}\n"],
+  ["the import runner mounting the checkout's .git (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ../.git:/g:ro\n"],
+  ["the import runner mounting deploy/ as ./ (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./:/d:ro\n"],
+  ["the import runner's pipeline list mounted writable", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:z\n"],
+  ["a tmpfs given the engine's socket as its source", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - {type: tmpfs, source: /var/run/docker.sock, target: /s}\n"],
+  ["the import runner keeping Docker's default capabilities", "compose.yaml", "    cap_drop: [ALL]\n    cap_add: [SETUID", "    cap_add: [SETUID"],
+  ["the typed-decision tier built from a Dockerfile outside its context", "compose.yaml", "      dockerfile: jev/Dockerfile\n", "      dockerfile: ../../x/Dockerfile\n"],
+  ["compose.yaml naming the three-brain stack's project, whose mesh its server would join (SMD-2685 review pass 2)", "compose.yaml", "name: open-brain\n", "name: open-brain-tiers\n"],
+  ["a volume named .., which compose mounts as the checkout's root, writable (SMD-2685 review pass 3)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ..:/up\n"],
+  ["a top-level volume named ..", "compose.yaml", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  \"..\":\n  pgdata:\n"],
+  ["the pipeline list mounted ro,rw, which compose reads as writable (SMD-2685 review pass 3)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z,rw\n"],
+  ["the import runner mounting deploy/, which holds deploy/.env, as ../deploy (SMD-2685 review pass 3)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ../deploy:/d:ro\n"],
+  ["n8n mounting the authorization server's store", "compose.yaml", "      - n8n-data:/home/node/.n8n\n", "      - n8n-data:/home/node/.n8n\n      - auth-data:/auth-data\n"],
+  ["the Postgres volume binding a host directory by its driver options", "compose.yaml", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    driver_opts: {type: none, o: bind, device: /var/run}\n"],
+  ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n"],
+  ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.0-alpine\n"],
 ];
 function checkRouteTables() {
   // Every compose file under deploy/, an overlay added later included.
   const texts = new Map(readdirSync(join(ROOT, "deploy")).filter((f) => sweptCompose(f) && statSync(join(ROOT, "deploy", f)).isFile()).sort().map((f) => [f, readFileSync(join(ROOT, "deploy", f), "utf8")]));
   for (const [file] of ROUTE_FILES) if (!texts.has(file)) { fail(`deploy/${file}`, "missing — check 28 holds the route table it carries (SMD-2658)"); return; }
-  // The networks compose.yaml's proxy joins, which no overlay may redefine.
-  let base: unknown;
-  try { base = Bun.YAML.parse(texts.get("compose.yaml")!); } catch { base = undefined; }
-  const joined = isMapping(base) && isMapping(base.services) && isMapping(base.services.proxy) ? base.services.proxy.networks : undefined;
-  const proxyNetworks = Array.isArray(joined) ? joined.map(String) : Object.keys(isMapping(joined) ? joined : {});
   let clean = true;
   for (const [file, text] of texts) {
-    for (const p of routeTableProblems(file, text, proxyNetworks)) { clean = false; fail(`deploy/${file}`, `${p.message} (SMD-2658)`); }
+    for (const p of routeTableProblems(file, text)) { clean = false; fail(`deploy/${file}`, /SMD-\d+/.test(p.message) ? p.message : `${p.message} (${p.rule === "keys" || p.rule === "networks" ? "SMD-2685" : p.rule === "proxy" || p.rule === "tags" ? "SMD-2658, SMD-2685" : "SMD-2658"})`); }
   }
   const soleCatch = new Set<RouteRule>();
   for (const [what, file, from, to] of ROUTE_TABLE_PROBES) {
     const text = texts.get(file);
     const misanchored = from === "" ? (text !== undefined ? `makes deploy/${file}, which exists` : !sweptCompose(file) ? `makes deploy/${file}, which the sweep does not read` : "") : text === undefined ? `edits deploy/${file}, which is missing` : text.split(from).length !== 2 ? `finds its anchor ${text.split(from).length - 1} times in deploy/${file}, not once` : "";
     if (misanchored) { fail(SELF, `check 28's probe "${what}" ${misanchored} — re-anchor it`); continue; }
-    const rules = new Set(routeTableProblems(file, from === "" ? to : text!.replace(from, to), proxyNetworks).map((p) => p.rule));
+    const rules = new Set(routeTableProblems(file, from === "" ? to : text!.replace(from, to)).map((p) => p.rule));
     if (rules.size === 0) fail(SELF, `check 28 no longer catches ${what} (its own probe)`);
     if (rules.size === 1) soleCatch.add([...rules][0]);
+  }
+  // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
+  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml and compose.hooks-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  // …and the commands its notes tell an operator to run: the downloads of those files and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
+  const run = (mode: "tag" | "rehearsal") => {
+    const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
+    return (/\n## Run it\n[^`]*```bash\n([^`]*)```/.exec(notes)?.[1] ?? "").split("\n").map((l) => l.replace(/(^|\s+)#.*$/, "")).filter(Boolean);
+  };
+  const compose = ["docker compose -f compose.yaml -f compose.release.yaml pull", "docker compose -f compose.yaml -f compose.release.yaml up -d --wait"];
+  const download = (name: string) => `curl -fsSL${name === "env.example" ? " -o .env" : "O"} ${REPO_URL}/releases/download/v9.9.9/${name}`;
+  for (const [mode, want] of [["tag", [...Object.keys(assets).map(download), ...compose]], ["rehearsal", compose]] as const) {
+    const got = run(mode);
+    if (canonJson(got) !== canonJson(want)) fail("scripts/release-artifacts.ts", `renderNotes' "Run it" block, for a ${mode}, runs ${JSON.stringify(got)} where check 28 holds ${JSON.stringify(want)} — an install runs exactly the held files, so another -f, env file or variable there loads what no check reads (SMD-2685)`);
   }
   // On a file that already strays, which rule alone catches each probe says nothing.
   if (clean) for (const rule of ROUTE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 28's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
@@ -6214,6 +6527,372 @@ function checkHostIpTemplates() {
   }
 }
 checkHostIpTemplates();
+
+// ── Check 31: a plugin's code stays in its schema, its role and the SDK (SMD-2310) ──
+//
+// A plugin runs in the brain's servers. Its SQL runs on a connection logged
+// in as ob1_plugins, then under SET LOCAL ROLE to its own role with its schema
+// first on the path (db/migrate.ts, store-sql.ts's pluginTx), and Postgres
+// refuses both roles the core's tables: that is the boundary. This check is
+// the accident guard in front of it — code that would read like an attempt
+// to leave it fails a push, so it is seen in review — not a sandbox: a
+// plugin's TypeScript runs in the server's process, and curation is what
+// holds hostile code (plugins/README.md). It reads:
+//  - its SQL, a migration file or a TAGGED template literal in its
+//    TypeScript (found by a lexer, `${…}` and nested templates included):
+//    no core table's name anywhere (db/migrations/' CREATE TABLEs and the two
+//    ledgers), no schema but its own (`public.`, another plugin's, pg_temp),
+//    no Unicode-escaped name; no role, session or transaction change — SET or
+//    RESET of role, session_authorization or search_path (quoted or not),
+//    RESET ALL, set_config, SET SESSION, a temp object, a session advisory
+//    lock, a cursor WITH HOLD, LISTEN, DISCARD, and outside a plpgsql body
+//    BEGIN, END, ABORT, COMMIT, ROLLBACK (but ROLLBACK TO), START
+//    TRANSACTION, PREPARE and EXECUTE as statements; inside one, EXECUTE
+//    (dynamic SQL this check cannot read), COMMIT and ROLLBACK;
+//  - its TypeScript: imports of the SDK and its own directory's files alone
+//    (static, re-exported or bare), none of a test file from code that is not
+//    one, and no global that reaches past ctx — fetch, eval, Function,
+//    Reflect, globalThis, self, Bun, process, Deno, require, Worker,
+//    WebSocket, XMLHttpRequest, EventSource, import() — by name, aliased or not;
+//  - its directory: TypeScript, its migrations, a README and metadata.json,
+//    nothing else; plugins/registry.ts imports and lists exactly the plugin
+//    directories; a manifest's name is its directory's; migration files are
+//    named by the core's rule.
+
+/** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
+function coreTables(): Set<string> {
+  const names = new Set(["schema_migrations", "plugin_migrations"]);
+  const dir = join(ROOT, "db", "migrations");
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".sql"))) {
+    for (const m of sqlUncommented(readFileSync(join(dir, f), "utf8")).matchAll(/\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?public"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?/gi)) names.add(m[1].toLowerCase());
+  }
+  return names;
+}
+
+/** A plugin SQL hit: its line and what it does. */
+type PluginHit = { line: number; what: string };
+
+/** SQL with its comments and single-quoted strings blanked (sqlUncommented), its quoted identifiers read bare, and each dollar-quoted body marked: [start, end) spans. */
+function pluginSqlCode(sqlText: string): { code: string; bodies: [number, number][] } {
+  // A quoted identifier is its name: "role" is role, and "public"."thoughts" public.thoughts. Same length, so lines keep.
+  const code = sqlUncommented(sqlText).replace(/"([^"]*)"/g, (_m, name: string) => ` ${name} `);
+  const bodies: [number, number][] = [];
+  const open = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/g;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(code))) {
+    const close = code.indexOf(m[0], m.index + m[0].length);
+    if (close < 0) break;
+    bodies.push([m.index + m[0].length, close]);
+    open.lastIndex = close + m[0].length;
+  }
+  return { code, bodies };
+}
+
+/** What a plugin's SQL reaches past its schema or its role for, one hit per finding. Pure over a text. */
+function pluginSqlProblems(sqlText: string, core: ReadonlySet<string>, firstLine = 1): PluginHit[] {
+  const { code, bodies } = pluginSqlCode(sqlText);
+  const hits: PluginHit[] = [];
+  const at = (index: number) => firstLine + code.slice(0, index).split("\n").length - 1;
+  const inBody = (index: number) => bodies.some(([a, b]) => index >= a && index < b);
+  const hit = (index: number, what: string) => hits.push({ line: at(index), what });
+  // A Unicode-escaped name or string spells anything; nothing a plugin needs.
+  // Read after the quotes are gone (pluginSqlCode), so the prefix alone: U& before a name or a string.
+  for (const x of code.matchAll(/\bU&/gi)) hit(x.index!, "spells a name or string with U& escapes, which this check cannot read");
+  for (const x of code.matchAll(/(?<![\w$.])([a-z_][a-z0-9_]*)(?![\w$])/gi)) {
+    if (core.has(x[1].toLowerCase())) hit(x.index!, `names the core table ${x[1]}`);
+  }
+  for (const x of code.matchAll(/(?<![\w$])(public|plugin_[a-z0-9_]+|pg_temp[a-z0-9_]*)\s*\.\s*[a-z_]/gi)) hit(x.index!, `qualifies a name with the schema ${x[1]}: a plugin names its own tables bare, and no other schema's`);
+  const SESSION: [RegExp, string][] = [
+    [/\b(?:SET|RESET)\s+(?:LOCAL\s+|SESSION\s+)?(?:ROLE|SESSION_AUTHORIZATION|SESSION\s+AUTHORIZATION|SEARCH_PATH)\b/gi, "changes the role or the search path"],
+    [/\bRESET\s+ALL\b/gi, "resets every setting, the role among them"],
+    [/\bset_config\b/gi, "calls set_config, which sets the role or the path by name"],
+    [/\bSET\s+SESSION\b/gi, "sets a setting for the session, past the transaction"],
+    [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:GLOBAL\s+|LOCAL\s+)?(?:TEMP|TEMPORARY)\b/gi, "makes a temp object, which outlives the transaction and is searched before any schema"],
+    [/\bpg_(?:try_)?advisory_(?:lock|unlock)(?:_shared|_all)?\b/gi, "takes or drops a session advisory lock, which outlives the transaction"],
+    [/\bWITH\s+HOLD\b/gi, "holds a cursor past the transaction"],
+    [/\bLISTEN\b/gi, "listens on the session, past the transaction"],
+    [/\bDISCARD\b/gi, "discards session state"],
+  ];
+  for (const [re, what] of SESSION) for (const x of code.matchAll(re)) hit(x.index!, what);
+  // Statements outside a plpgsql body; a body's BEGIN … END is its block.
+  for (const x of code.matchAll(/(?:^|;)\s*(BEGIN|END|ABORT|COMMIT|ROLLBACK(?!\s+TO\b)|START\s+TRANSACTION|PREPARE|EXECUTE)\b/gi)) {
+    const i = x.index! + x[0].indexOf(x[1]);
+    if (!inBody(i)) hit(i, `runs ${x[1].replace(/\s+/g, " ").toUpperCase()} as a statement, which ends or works around the transaction the plugin's role holds in`);
+  }
+  // Inside a body: dynamic SQL, which this check cannot read, and a procedure's transaction control.
+  for (const x of code.matchAll(/\b(EXECUTE|COMMIT|ROLLBACK(?!\s+TO\b))\b/gi)) {
+    if (inBody(x.index!)) hit(x.index!, `runs ${x[1].toUpperCase()} in a plpgsql body: dynamic SQL or a transaction change this check cannot read`);
+  }
+  return hits;
+}
+
+/** A tagged template literal in TypeScript: its text, `${…}` read as one placeholder, and where it starts. Untagged ones (UI and log text) are not SQL. */
+function taggedTemplates(text: string): { body: string; index: number }[] {
+  const found: { body: string; index: number }[] = [];
+  const NOT_TAGS = new Set(["return", "typeof", "case", "in", "of", "yield", "await", "new", "throw", "else", "do", "void", "delete", "instanceof"]);
+  let i = 0;
+  // Scans from i to the end of one template (i at its opening backtick); returns its body and the index after it.
+  const template = (start: number): { body: string; end: number } => {
+    let body = "";
+    let j = start + 1;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\\") { body += text.slice(j, j + 2); j += 2; continue; }
+      if (ch === "`") return { body, end: j + 1 };
+      if (ch === "$" && text[j + 1] === "{") { body += "$1"; j = expression(j + 2); continue; }
+      body += ch;
+      j++;
+    }
+    return { body, end: j };
+  };
+  // Scans a `${…}` expression from j to just past its closing brace, reading the templates inside it too.
+  const expression = (from: number): number => {
+    let depth = 1;
+    let j = from;
+    while (j < text.length && depth > 0) {
+      const ch = text[j];
+      if (ch === "'" || ch === '"') { j = quoted(j); continue; }
+      if (ch === "`") { const t = template(j); record(j, t.body); j = t.end; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    return j;
+  };
+  const quoted = (from: number): number => {
+    const q = text[from];
+    let j = from + 1;
+    while (j < text.length && text[j] !== q && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const record = (index: number, body: string) => {
+    const before = text.slice(0, index).replace(/\s+$/, "");
+    const word = before.match(/[A-Za-z_$][\w$]*$/)?.[0];
+    // A tag is a name, a call or index result, or a name with type arguments (sql<Row>`…`).
+    const tagged = word ? !NOT_TAGS.has(word) : /[)\]>]$/.test(before);
+    if (tagged) found.push({ body, index });
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "/" && text[i + 1] === "/") { while (i < text.length && text[i] !== "\n") i++; continue; }
+    if (ch === "/" && text[i + 1] === "*") { const e = text.indexOf("*/", i + 2); i = e < 0 ? text.length : e + 2; continue; }
+    if (ch === "'" || ch === '"') { i = quoted(i); continue; }
+    if (ch === "`") { const t = template(i); record(i, t.body); i = t.end; continue; }
+    i++;
+  }
+  return found;
+}
+
+/** The SDK, the one module outside its directory a plugin may import. */
+const PLUGIN_SDK = "../../server-portable/plugin-sdk.ts";
+/** A test file, by the tree's spelling. */
+const PLUGIN_TEST_FILE = /(^|\/)(test-[^/]+|[^/]+\.test)\.ts$/;
+/** The globals that reach past ctx — by name, so an alias of one is caught where it is taken. */
+const PLUGIN_GLOBALS = /(?<![\w$.])(fetch|eval|Function|Reflect|globalThis|self|Bun|process|Deno|require|Worker|SharedWorker|WebSocket|XMLHttpRequest|EventSource)(?![\w$])|(?<![\w$.])import\s*\(/g;
+
+/** What a plugin's TypeScript reaches for, one hit per finding. `registry`: plugins/registry.ts, which imports each plugin's index.ts. Pure over a text. */
+function pluginTsProblems(text: string, core: ReadonlySet<string>, opts: { registry?: boolean; testFile?: boolean } = {}): PluginHit[] {
+  const hits: PluginHit[] = [];
+  const lineAt = (index: number) => text.slice(0, index).split("\n").length;
+  const code = blanked(text, true);
+  const commentsGone = blanked(text, false);
+  const imports = [
+    ...[...commentsGone.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']/g)],
+    ...[...commentsGone.matchAll(/(?<![\w$.])import\s*["']([^"']+)["']/g)],
+  ];
+  for (const m of imports) {
+    const spec = m[1];
+    const allowed = opts.registry
+      ? spec === "../server-portable/plugin-sdk.ts" || /^\.\/[a-z0-9-]+\/index\.ts$/.test(spec)
+      : spec === PLUGIN_SDK || (spec.startsWith("./") && !spec.includes("..") && spec.endsWith(".ts"));
+    if (!allowed) hits.push({ line: lineAt(m.index!), what: `imports ${spec}: a plugin imports ${PLUGIN_SDK} and its own directory's .ts files alone` });
+    else if (!opts.testFile && PLUGIN_TEST_FILE.test(spec)) hits.push({ line: lineAt(m.index!), what: `imports the test file ${spec} from code that runs in the server` });
+  }
+  for (const m of code.matchAll(PLUGIN_GLOBALS)) {
+    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else (a local of that name is renamed)` });
+  }
+  for (const t of taggedTemplates(commentsGone)) {
+    for (const h of pluginSqlProblems(t.body, core, lineAt(t.index))) hits.push(h);
+  }
+  return hits;
+}
+
+const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
+  // Its SQL, in a handler's tagged template.
+  ["const r = await sql`SELECT count(*) FROM thoughts`;", "ts", true],
+  ["const r = await sql`SELECT * FROM notes WHERE id = ${id}`;", "ts", false],
+  ["const rows = await q<{ n: number }>`SELECT count(*) FROM thoughts`;", "ts", true],
+  ["const r = await sql`SELECT * FROM notes n, ${\"x\"} WHERE ${`a ${b}`} = 1 AND id IN (SELECT id FROM thought_audit)`;", "ts", true],
+  ["// SELECT * FROM thoughts\nconst x = 1;", "ts", false],
+  ["const tick = \"`\";\nawait sql`RESET ROLE`;", "ts", true],
+  ["await sql`INSERT INTO public.notes VALUES (1)`;", "ts", true],
+  ["await sql`RESET ROLE`;", "ts", true],
+  ["await sql`SET \"role\" = 'postgres'`;", "ts", true],
+  ["await sql`SELECT pg_catalog.set_config('role', 'none', true)`;", "ts", true],
+  ["await sql`SET session_authorization = DEFAULT`;", "ts", true],
+  ["await sql`END; SELECT 1`;", "ts", true],
+  ["await sql`ABORT`;", "ts", true],
+  ["await sql`SELECT * FROM notes, U&\"\\0074houghts\"`;", "ts", true],
+  ["await sql`DO $$ BEGIN EXECUTE 'RES' || 'ET ROLE'; END $$`;", "ts", true],
+  // Text that is not SQL: an untagged template is UI or log text.
+  ["log(`could not commit ${id}: prepare your notes, then listen`);", "ts", false],
+  ["throw new Error(`skipped ${n} rows from jobs`);", "ts", false],
+  ["return `FROM thoughts`;", "ts", false],
+  // Its imports and globals.
+  ["import { db } from \"../../server-portable/root.ts\";", "ts", true],
+  ["import \"../../server-portable/store-sql.ts\";", "ts", true],
+  ["export * from \"../../server-portable/root.ts\";", "ts", true],
+  ["import { definePlugin, z } from \"../../server-portable/plugin-sdk.ts\";\nimport { helper } from \"./helper.ts\";", "ts", false],
+  ["import { helper } from \"./helper.js\";", "ts", true],
+  ["import { reset } from \"./test-backdoor.ts\";", "ts", true],
+  ["import x from \"../other/index.ts\";", "ts", true],
+  ["const r = await fetch(\"https://example.com\");", "ts", true],
+  ["const f = fetch;", "ts", true],
+  ["const g = globalThis[\"fe\" + \"tch\"];", "ts", true],
+  ["const { env } = process;", "ts", true],
+  ["(0, eval)(\"1\");", "ts", true],
+  ["new Worker(\"./w.ts\");", "ts", true],
+  ["const m = await import(name);", "ts", true],
+  ["const s = \"fetch( is only text\";", "ts", false],
+  ["const n = ctx.caller.name; const r = await ctx.call(\"fetch\", { id });", "ts", false],
+  // Its migrations.
+  ["CREATE TABLE IF NOT EXISTS notes (id uuid PRIMARY KEY);", "sql", false],
+  ["-- FROM thoughts, in a comment\nCREATE TABLE IF NOT EXISTS notes (id int);", "sql", false],
+  ["CREATE TABLE IF NOT EXISTS peek AS SELECT id FROM thoughts;", "sql", true],
+  ["CREATE TABLE x (id uuid REFERENCES thought_audit (id));", "sql", true],
+  ["SELECT * FROM notes, thoughts;", "sql", true],
+  ["SELECT * FROM notes JOIN \"thoughts\" t ON true;", "sql", true],
+  ["DO $$ BEGIN RAISE NOTICE 'x'; END $$;", "sql", false],
+  ["CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $fn$\nBEGIN\n  NEW.updated_at := now();\n  RETURN NEW;\nEND;\n$fn$;", "sql", false],
+  ["DO $$ BEGIN EXECUTE 'RESET ROLE'; END $$;", "sql", true],
+  ["CREATE TABLE a (id int);\nCOMMIT;\nDROP TABLE thoughts;", "sql", true],
+  ["CREATE TABLE a (id int);\nEND;\nSELECT 1;", "sql", true],
+  ["BEGIN;\nCREATE TABLE a (id int);", "sql", true],
+  ["CREATE TEMP TABLE shadow (x int);", "sql", true],
+  ["SELECT pg_advisory_lock(1);", "sql", true],
+  ["SELECT pg_advisory_xact_lock(1);", "sql", false],
+  ["CREATE TABLE readings (temp numeric, prepared boolean);", "sql", false],
+  ["SAVEPOINT a; ROLLBACK TO SAVEPOINT a;", "sql", false],
+  ["CREATE TABLE b (id int); SELECT * FROM plugin_other.items;", "sql", true],
+  ["SELECT 'FROM thoughts' AS text;", "sql", false],
+  ["RESET \"role\";", "sql", true],
+];
+
+async function checkPlugins() {
+  const { migrationNameProblem } = await import("../db/config.mjs");
+  const core = coreTables();
+  if (!core.has("thoughts") || core.size < 10) fail(SELF, `check 31 reads ${core.size} core tables from db/migrations/ (thoughts ${core.has("thoughts") ? "among them" : "missing"}) — the reader is broken, not the plugins clean`);
+  for (const [probe, kind, hit] of PLUGIN_PROBES) {
+    const found = kind === "sql" ? pluginSqlProblems(probe, core) : pluginTsProblems(probe, core);
+    if (hit && found.length === 0) fail(SELF, `check 31 no longer catches its probe: ${JSON.stringify(probe)}`);
+    if (!hit && found.length > 0) fail(SELF, `check 31 catches a non-probe: ${JSON.stringify(probe)} — ${found.map((h) => h.what).join("; ")}`);
+  }
+  const base = join(ROOT, "plugins");
+  if (!existsSync(base)) return;
+  const dirs = readdirSync(base).filter((d) => statSync(join(base, d)).isDirectory() && !d.startsWith(".") && d !== "node_modules");
+  // The registry: exactly the directories, each by its index.ts, each in PLUGINS; held to the plugin rules itself.
+  const registryPath = join(base, "registry.ts");
+  const registry = existsSync(registryPath) ? readFileSync(registryPath, "utf8") : "";
+  if (!registry) fail("plugins/registry.ts", "no registry: the server imports every plugin from plugins/registry.ts");
+  for (const h of pluginTsProblems(registry, core, { registry: true })) fail(`plugins/registry.ts:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+  const registryCode = blanked(registry, false);
+  const imported = new Map<string, string>();
+  for (const m of registryCode.matchAll(/\bimport\s+(?!type\b)([A-Za-z_$][\w$]*)\s+from\s*["']\.\/([^/"']+)\/index\.ts["']/g)) imported.set(m[2], m[1]);
+  const listed = new Set([...(registryCode.match(/\bPLUGINS\b[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]));
+  for (const d of dirs) {
+    const where = `plugins/${d}`;
+    const index = join(base, d, "index.ts");
+    if (!existsSync(index)) { fail(where, "no index.ts: a plugin's manifest is its index.ts"); continue; }
+    const binding = imported.get(d);
+    if (!binding) fail("plugins/registry.ts", `does not import ./${d}/index.ts: a plugin the registry does not import is one no server runs`);
+    else if (!listed.has(binding)) fail("plugins/registry.ts", `imports ./${d}/index.ts as ${binding} but PLUGINS does not list it`);
+    const name = blanked(readFileSync(index, "utf8"), false).match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
+    if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
+    // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
+    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    const migrationFiles: string[] = [];
+    for (const f of files) {
+      const rel = relative(join(base, d), f).split(sep).join("/");
+      if (/^migrations\/[^/]+\.sql$/.test(rel)) { migrationFiles.push(rel.slice("migrations/".length)); continue; }
+      if (rel === "README.md" || rel === "metadata.json") continue;
+      if (!rel.endsWith(".ts") || rel.endsWith(".d.ts")) { fail(`${where}/${rel}`, "a plugin holds TypeScript, its migrations/*.sql, a README.md and a metadata.json, nothing else: a file of another kind is code or data this check does not read (check 31, SMD-2310)"); continue; }
+      for (const h of pluginTsProblems(readFileSync(f, "utf8"), core, { testFile: PLUGIN_TEST_FILE.test(rel) })) fail(`${where}/${rel}:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+    }
+    const problem = migrationNameProblem(migrationFiles);
+    if (problem) fail(`${where}/migrations`, problem);
+    for (const f of migrationFiles) {
+      for (const h of pluginSqlProblems(readFileSync(join(base, d, "migrations", f), "utf8"), core)) fail(`${where}/migrations/${f}:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+    }
+  }
+  for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
+}
+await checkPlugins();
+
+// ── 32. Every service's restart policy is held (SMD-2760) ────────────────────
+//
+// What comes back after a reboot is each container's restart policy: Docker
+// starts its `unless-stopped` containers when the daemon starts, and podman's
+// podman-restart.service, where enabled, starts those not stopped by hand.
+// deploy/compose.yaml's postgres had none, so on Docker the servers would come
+// back without their database; on podman, its unit disabled too, nothing came
+// back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
+// RESTART_POLICIES holds each service's policy by value: what serves is
+// `unless-stopped`, what runs once is "no", and a service that exits on
+// configuration a restart does not fix is `on-failure:3` (board-sync's
+// comment). A service added, or a policy changed, is a change there on
+// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// through check 27, and the overlays name no restart (check 28's OVERLAYS),
+// so this file is the one to read.
+/** Each compose.yaml service's `restart`, exactly. */
+const RESTART_POLICIES: Record<string, string> = {
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped",
+  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
+};
+/** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
+function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const restart = isMapping(def) ? def.restart : undefined;
+    const shown = restart === undefined ? "unset, which is \"no\"" : JSON.stringify(restart);
+    if (!(service in held)) gaps.push([service, `not in check 32's RESTART_POLICIES (its restart is ${shown})`]);
+    else if (restart !== held[service]) gaps.push([service, `restart ${shown} where check 32's RESTART_POLICIES holds ${JSON.stringify(held[service])}`]);
+  }
+  for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
+  return gaps;
+}
+const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
+const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
+/** [what, text, the services (null = the file) the rule reports]. */
+const RESTART_PROBES: [string, string, (string | null)[]][] = [
+  ["every policy as held", RESTART_GOOD, []],
+  ["postgres with none, as before SMD-2760", RESTART_GOOD.replace("    restart: unless-stopped\n", ""), ["postgres"]],
+  ["postgres told not to restart", RESTART_GOOD.replace("restart: unless-stopped", "restart: \"no\""), ["postgres"]],
+  ["postgres on always, which restarts a container stopped by hand", RESTART_GOOD.replace("restart: unless-stopped", "restart: always"), ["postgres"]],
+  ["the one-shot migrator restarting", RESTART_GOOD.replace("restart: \"no\"", "restart: unless-stopped"), ["migrate"]],
+  ["a service the map does not hold", `${RESTART_GOOD}  extra:\n    image: z\n    restart: unless-stopped\n`, ["extra"]],
+  ["a service the map does not hold, with no policy", `${RESTART_GOOD}  extra:\n    image: z\n`, ["extra"]],
+  ["a held service gone from the file", RESTART_GOOD.replace(/  migrate:[\s\S]*$/, ""), ["migrate"]],
+  ["no services at all", "name: x\n", [null]],
+];
+function checkRestartPolicies() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 32 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2760)`);
+    return;
+  }
+  for (const [what, text, expected] of RESTART_PROBES) {
+    const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
+  }
+}
+checkRestartPolicies();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

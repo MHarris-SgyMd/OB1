@@ -52,7 +52,7 @@ export type ImageKind = (typeof IMAGES)[number];
 /** Where each image builds from — the Dockerfile the job passes to buildx, context the repo root. */
 export const DOCKERFILES: Record<ImageKind, string> = { server: "server-portable/Dockerfile", migrate: "db/Dockerfile" };
 /** The release's file assets, published name → path in the tree (the overlay is written there by the job); the notes' download lines and the job's copy loop read this one list. */
-export const ASSETS: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml" };
+export const ASSETS: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
 /** The yield table's asset name; the job writes mechanism-yield.ts's output there. */
 export const YIELD_ASSET = "mechanism-yield.txt";
 /** The base compose file, whose Ollama pin the job resolves; every other deploy/compose*.yaml that names Ollama carries the same anchor. */
@@ -253,7 +253,8 @@ export function renderComposeOverlay(o: OverlayInput): string {
     "#   docker compose -f compose.yaml -f compose.release.yaml up -d --wait",
     "#",
     "# Add `--profile local-models` to both for the stack's own Ollama, and",
-    "# `-f compose.api-public.yaml` (a release file too) for the REST core at /api.",
+    "# `-f compose.api-public.yaml` (a release file too) for the REST core at /api,",
+    "# `-f compose.hooks-public.yaml` for the plugins' webhooks at /hooks (SMD-2310).",
     "# Secrets and knobs come from deploy/.env as ever (copy .env.example). deploy/README.md,",
     '# "Pinning a release", has the rest.',
     "",
@@ -324,7 +325,7 @@ export function renderNotes(n: NotesInput): string {
   lines.push("```bash");
   if (rehearsal) lines.push("# (a rehearsal publishes no assets — from a checkout at this commit, in deploy/)");
   else {
-    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : `curl -fsSLO ${download(name)}`);
+    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : `curl -fsSLO ${download(name)}`);
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
@@ -436,7 +437,7 @@ function selfCheck(): number {
   ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
   const past = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, migrationNumbers: Array.from({ length: 50 }, (_, i) => i + 1) });
   ok(past.problems.length === 0 && new RegExp(past.facts.preflight_row).test("  !  schema version            the brain reports 1.0.0+upstream.9543c29 but its ledger reaches migration 050, past that release's range (…048) — migrations applied beyond the version it names"), "a rehearsal on a tree two migrations past the last release expects preflight's WARN row, not the OK row (caught: cold read)");
-  ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example deploy/compose.api-public.yaml=compose.api-public.yaml" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");
+  ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example deploy/compose.api-public.yaml=compose.api-public.yaml deploy/compose.hooks-public.yaml=compose.hooks-public.yaml" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");
 
   const overlay = renderComposeOverlay({ version: release.version, tag: "v1.0.0", rendered: "2026-09-30", images: { server: { ref: "ghcr.io/x/ob1-server:1.0.0", digest: "sha256:aa" }, migrate: { ref: "ghcr.io/x/ob1-migrate:1.0.0", digest: "sha256:bb" } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: "sha256:cc" });
   const parsed = Bun.YAML.parse(overlay) as { services: Record<string, { image: string; pull_policy?: string }> };
@@ -447,8 +448,12 @@ function selfCheck(): number {
   ok(parsed.services.api?.image === parsed.services.server.image && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
   ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
+  // What the overlay sets beside the images and their pull policy, on any service but the proxy: nothing. The workflows hold the same of a render, each on its own terms (SMD-2685), so a list here cannot widen them.
+  const strays = (text: string) => { const d = Bun.YAML.parse(text) as Record<string, unknown> & { services: Record<string, Record<string, unknown>> }; return [...Object.keys(d).filter((k) => !k.startsWith("x-") && k !== "services"), ...Object.entries(d.services).flatMap(([s, v]) => Object.keys(v).filter((k) => s === "proxy" || !["image", "pull_policy"].includes(k)).map((k) => `${s}.${k}`))]; };
+
   const dry = renderComposeOverlay({ version: "0.0.0+upstream.x", tag: REHEARSAL_TAG, rendered: "d", images: { server: { ref: "s:rehearsal" }, migrate: { ref: "m:rehearsal" } }, ollamaImage: "ollama/ollama:1", ollamaDigest: "sha256:cc" });
   ok((Bun.YAML.parse(dry) as { services: Record<string, { image: string }> }).services.server.image === "s:rehearsal" && dry.includes("REHEARSAL"), "a rehearsal overlay names the images by tag alone and says so");
+  ok(strays(overlay).length === 0 && strays(dry).length === 0, `the overlay, a tag's and a rehearsal's, sets only images and their pull policy, and nothing on the proxy (SMD-2685): ${[...strays(overlay), ...strays(dry)].join(", ")}`);
 
   const cl = "# Changelog\n\n## [Unreleased]\n\n_x_\n\n## [1.0.0] - 2026-09-30\n\n### Added\n- a thing (SMD-1)\n\n## [0.9.0] - 2026-09-01\n\n### Fixed\n- b\n\n[Unreleased]: u\n";
   ok(changelogSectionFor(cl, "1.0.0") === "### Added\n- a thing (SMD-1)" && changelogSectionFor(cl, "0.9.0") === "### Fixed\n- b" && changelogSectionFor(cl, "1.1.0") === null, "the changelog section for a version, and null for none");

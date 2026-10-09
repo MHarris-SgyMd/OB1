@@ -100,6 +100,13 @@ const RPC_METHODS = new Set([
   "notifications/initialized", "notifications/cancelled", "notifications/progress", "notifications/roots/list_changed",
 ]);
 const TOOL_NAMES: ReadonlySet<string> = new Set(TOOLS.map((t) => t.name));
+/** The enabled plugins' tool names (SMD-2310), known beside the core's once a server loads them (knowTools). */
+const PLUGIN_TOOLS = new Set<string>();
+
+/** Adds the tools a server serves beyond the core's — its enabled plugins' operations — to the names a line may hold. */
+export function knowTools(names: Iterable<string>): void {
+  for (const name of names) PLUGIN_TOOLS.add(name);
+}
 const OUTCOMES: ReadonlySet<string> = new Set<RequestOutcome>(["ok", "refused", "error", "unrun", "abandoned", "cut", "stalled"]);
 /** A route template — the REST core's path pattern, or an MCP server mirror's — segments of letters, digits, `_`, `-`, `.` and `:name`. */
 const ROUTE = /^(?:\/[A-Za-z0-9_.:-]+)+$|^\/$/;
@@ -125,7 +132,7 @@ export function requestLine(r: RequestRecord, now: Date = new Date()): string {
     method: known(r.method, METHODS),
     route: spelled(r.route, ROUTE),
     rpc: known(r.rpc, RPC_METHODS, "other"),
-    tool: known(r.tool, TOOL_NAMES),
+    tool: r.tool !== undefined && PLUGIN_TOOLS.has(r.tool) ? r.tool : known(r.tool, TOOL_NAMES),
     agent: r.agent === undefined ? undefined : labelPart(r.agent),
     status: count(r.status) ?? 0,
     outcome: known(r.outcome, OUTCOMES),

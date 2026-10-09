@@ -8,6 +8,7 @@ import { SPECS } from "../core/index.ts";
 import { scopeOf, type ToolName } from "../tools.ts";
 import { FORK_VERSION } from "../version.ts";
 import { pathFields, readsQuery, REFUSAL_STATUS, ROUTES } from "./routes.ts";
+import type { LoadedOp } from "../core/index.ts";
 
 type Json = Record<string, unknown>;
 
@@ -45,8 +46,59 @@ const answersFor = (name: ToolName) => {
   return name === "run_worker" ? { ...rest, "501": notBuilt } : rest;
 };
 
-export function openApiDocument(): Json {
+/** A zod object as JSON Schema, as the document states it: `io` the side of the parse it describes. */
+function jsonSchemaOf(schema: z.ZodType, io: "input" | "output"): Json {
+  const js = z.toJSONSchema(schema, { io, unrepresentable: "any" }) as Json;
+  delete js.$schema;
+  return js;
+}
+
+/** The answers a plugin operation may give besides its success: as a core operation's, but a plugin's own refusal codes at 400–422 and no 501. */
+const PLUGIN_ANSWERS = {
+  "400": refusal("The input does not fit the schema (REFUSED_INPUT), or the plugin's own refusal."),
+  "401": KEYED_ANSWERS["401"],
+  "403": refusal("The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or the plugin's own refusal."),
+  "404": refusal("The plugin's own refusal: nothing there."),
+  "405": KEYED_ANSWERS["405"],
+  "409": refusal("The plugin's own refusal: the state conflicts."),
+  "422": refusal("The plugin's own refusal."),
+  "500": KEYED_ANSWERS["500"],
+  "503": KEYED_ANSWERS["503"],
+};
+
+/**
+ * The document: every core operation, then the enabled plugins' (SMD-2310) —
+ * each under its plugin's tag, its scope as a core operation's, and its
+ * success described by the output schema its manifest declares.
+ */
+export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
   const paths: Record<string, Record<string, Json>> = {};
+  for (const op of plugins) {
+    const fields = pathFields(op.path);
+    const input = jsonSchemaOf(z.object(Object.fromEntries(Object.entries(op.shape).filter(([k]) => !fields.includes(k)))).strict(), "input");
+    const props = (input.properties ?? {}) as Record<string, Json>;
+    const required = new Set((input.required ?? []) as string[]);
+    const parameters: Json[] = fields.map((f) => ({ name: f, in: "path", required: true, schema: { type: "string" } }));
+    if (readsQuery(op.method)) {
+      for (const [field, schema] of Object.entries(props)) parameters.push({ name: field, in: "query", required: required.has(field), schema });
+    }
+    paths[op.path] ??= {};
+    paths[op.path][op.method.toLowerCase()] = {
+      operationId: op.tool,
+      summary: op.title,
+      description: op.description,
+      tags: [`plugin:${op.plugin}`],
+      "x-ob1-scope": op.scope,
+      "x-ob1-plugin": op.plugin,
+      ...(parameters.length ? { parameters } : {}),
+      ...(readsQuery(op.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
+      responses: {
+        "200": { description: "The operation's value.", content: { "application/json": { schema: jsonSchemaOf(op.output, "output") } } },
+        ...PLUGIN_ANSWERS,
+      },
+      security: KEYED,
+    };
+  }
   for (const name of Object.keys(ROUTES) as ToolName[]) {
     const route = ROUTES[name];
     const spec = SPECS[name];
@@ -76,6 +128,10 @@ export function openApiDocument(): Json {
     };
   }
   paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": KEYED_ANSWERS["401"], "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  // The enabled plugins, for the operator GUI's nav (SMD-2310).
+  const page = { type: "object", required: ["path", "label"], properties: { path: { type: "string" }, label: { type: "string" } } };
+  const plugin = { type: "object", required: ["name", "title", "description", "pages", "operations"], properties: { name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, pages: { type: "array", items: page }, operations: { type: "array", items: { type: "string" } } } };
+  paths["/v1/plugins"] = { get: { operationId: "plugins", summary: "The enabled plugins", description: "Each enabled plugin: its name, title and description, its GUI pages (a path under the plugin's and a nav label) and the operations of it this key may call — what the operator GUI's nav reads.", responses: { "200": { description: "The enabled plugins.", content: { "application/json": { schema: { type: "object", required: ["plugins"], properties: { plugins: { type: "array", items: plugin } } } } } }, "401": KEYED_ANSWERS["401"], "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/health"] = { get: { operationId: "health", summary: "Liveness", description: "Internal only: the process is serving. No key, nothing about the brain.", responses: { "200": { description: "Serving." }, "405": KEYED_ANSWERS["405"] }, security: [] } };
   return {

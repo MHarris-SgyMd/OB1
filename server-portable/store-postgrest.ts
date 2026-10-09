@@ -396,7 +396,7 @@ export class PostgrestStore implements ThoughtStore {
     if (atomicError && !missing) throw new Error(atomicError.message);
 
     if (!missing) {
-      const r = atomic as { id?: string; existed?: unknown; supersedes?: unknown } | null;
+      const r = atomic as { id?: string; fingerprint?: unknown; existed?: unknown; supersedes?: unknown } | null;
       const id = r?.id;
       if (!id) throw new Error("upsert_thought returned no id.");
       // 082: a key that can read landed on a row that already held the text —
@@ -406,6 +406,18 @@ export class PostgrestStore implements ThoughtStore {
       if (r?.existed === true && opts.recapture !== "keep") {
         const { error: noteError } = await this.client.rpc("ob1_note_recapture", { p_id: id, p_actor: actorPayload(opts.actor) });
         if (noteError && !(noteError.code === "PGRST202" || noteError.code === "42883" || /Could not find the function/i.test(noteError.message ?? ""))) throw new Error(noteError.message);
+      }
+      // 085: and when the row's stamp is still a capture-only key's, at a trust
+      // above it, the stamp moves to this key (SMD-2664), after the note, as
+      // the SQL store moves it. A database before 085 has no such function.
+      if (r?.existed === true && opts.recapture !== "keep") {
+        const { error: restampError } = await this.client.rpc("ob1_restamp_recapture", {
+          p_id: id,
+          p_fingerprint: typeof r.fingerprint === "string" ? r.fingerprint : null,
+          p_actor: actorPayload(opts.actor),
+          p_declared: opts.event?.trust ?? null,
+        });
+        if (restampError && !(restampError.code === "PGRST202" || restampError.code === "42883" || /Could not find the function/i.test(restampError.message ?? ""))) throw new Error(restampError.message);
       }
       // 035: `existed` — the text was already there, the envelope's provenance
       // not written. Passed on only when the body said; the two-step fallback

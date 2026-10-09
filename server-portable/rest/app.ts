@@ -12,14 +12,15 @@ import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Pr
 import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
-import { mayCall, scopeOf, visibleToolNames, type ToolName } from "../tools.ts";
+import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
+import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
-import { beginRequest, endsWithStream, errorCode, logRequest, outcomeOf, requestLine, traceOf, type RequestRecord } from "../telemetry.ts";
+import { beginRequest, endsWithStream, errorCode, knowTools, logRequest, outcomeOf, requestLine, traceOf, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -36,6 +37,41 @@ export interface RestDeps {
   track: CallOptions["track"];
   /** Where the one line per request goes (telemetry.ts's requestLine); telemetry.ts's request log unless a suite listens. */
   log?: (line: string) => void;
+  /** The enabled plugins (root.ts's plugins), read at the first request that needs them; none when absent (SMD-2310). */
+  plugins?: () => readonly LoadedPlugin[];
+  /** The webhooks served and their secrets (root.ts's hooks), read at the first delivery; none when absent (SMD-2310). */
+  hooks?: () => { hooks: readonly LoadedHook[]; secrets: ReadonlyMap<string, string> };
+  /**
+   * Where a webhook fault's one line goes — the message its anonymous sender
+   * is not told — stderr unless a suite listens. Not the request line, which
+   * holds no free text (telemetry.ts); that line still says the 500 and FAILED.
+   */
+  faultLog?: (line: string) => void;
+}
+
+/** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
+export const HOOK_BODY_LIMIT = 1024 * 1024;
+
+/** A request's body as bytes, read until `limit` and no further: null, the stream cancelled, past it. */
+async function boundedBody(req: Request, limit: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
 }
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
@@ -65,9 +101,9 @@ export function headerKeys(req: Request): string[] {
 export const FORWARDER_HEADER = "x-brain-forwarder";
 
 /** Each field's JSON-schema type, for reading it from a query string: "number", "integer", "boolean", "array", or anything else as text. */
-function queryTypes(name: ToolName): Map<string, string> {
+function queryTypes(shape: Record<string, z.ZodType>): Map<string, string> {
   const out = new Map<string, string>();
-  for (const [field, schema] of Object.entries(SPECS[name].inputSchema)) {
+  for (const [field, schema] of Object.entries(shape)) {
     const js = z.toJSONSchema(schema as z.ZodType, { io: "input", unrepresentable: "any" }) as { type?: string };
     out.set(field, js.type ?? "string");
   }
@@ -81,7 +117,12 @@ function queryTypes(name: ToolName): Map<string, string> {
  * twice, it is refused. The schema then holds the result as it holds a body.
  */
 export function inputFromQuery(name: ToolName, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
-  const types = queryTypes(name);
+  return inputFromQueryShape(SPECS[name].inputSchema, params);
+}
+
+/** inputFromQuery over an input's shape: a core tool's, or a plugin operation's (SMD-2310). */
+function inputFromQueryShape(shape: Record<string, z.ZodType>, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
+  const types = queryTypes(shape);
   // No prototype: a `__proto__` key is a key like any other, which the strict
   // schema then refuses, rather than an assignment that drops it unseen.
   const input: Record<string, unknown> = Object.create(null);
@@ -108,18 +149,36 @@ const issuesOf = (error: z.ZodError) => error.issues.map((i) => ({ path: i.path.
  */
 const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
   ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
-  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
+  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/plugins$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
 ];
-const allowedOn = (path: string): string[] => {
-  const methods = new Set<string>(ROUTE_METHODS.filter(([re]) => re.test(path)).map(([, m]) => m));
+const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[] => {
+  const methods = new Set<string>([...ROUTE_METHODS, ...plugins].filter(([re]) => re.test(path)).map(([, m]) => m));
   if (methods.has("GET")) methods.add("HEAD");
   return [...methods].sort();
 };
 
-export function createRestApp(deps: RestDeps): Hono {
-  const app = new Hono();
+/** `template`: a plugin operation's route, for the request line — its Hono route is the one wildcard. */
+type RestEnv = { Variables: { template?: string } };
+
+export function createRestApp(deps: RestDeps): Hono<RestEnv> {
+  const app = new Hono<RestEnv>();
   const write = (r: RequestRecord) => (deps.log ? deps.log(requestLine(r)) : logRequest(r));
-  const doc = openApiDocument();
+  const faultLog = deps.faultLog ?? ((line: string) => console.error(line));
+
+  // The enabled plugins' operations (SMD-2310), read at the first request that
+  // needs them — the environment is seeded by then — and the document with
+  // them; their tool names join the core's in the request line.
+  type PluginRoute = { op: LoadedOp; method: Method; pattern: RegExp; fields: string[] };
+  let pluginRouteList: PluginRoute[] | null = null;
+  const pluginRoutes = (): PluginRoute[] =>
+    (pluginRouteList ??= (deps.plugins?.() ?? []).flatMap((pl) => pl.operations).map((op) => (knowTools([op.tool]), {
+      op,
+      method: op.method,
+      // A manifest's path is lower-case words, hyphens and {field} (plugins.ts), so nothing in it needs escaping.
+      pattern: new RegExp(`^${op.path.replace(/\{[a-z_]+\}/g, "([^/]+)")}$`),
+      fields: pathFields(op.path),
+    })));
+  let doc: Record<string, unknown> | null = null;
 
   // One JSON line per request (SMD-1849, telemetry.ts): the method, the
   // route's template — never the path it was given (an id), the query string,
@@ -155,7 +214,9 @@ export function createRestApp(deps: RestDeps): Hono {
       throw err;
     }
     if (trace.deferred || trace.ended) return;
-    trace.route ??= c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
+    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the wildcard's.
+    const template = c.get("template");
+    trace.route ??= template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
     // The time first, so `ms` is the request's, not the read of its answer's code.
     const at = performance.now();
     const gone = trace.clientGone;
@@ -171,7 +232,7 @@ export function createRestApp(deps: RestDeps): Hono {
   // through the proxy's opt-in route, the root on the mesh — so a client
   // generated from it calls this server, not the origin's root, which is the
   // MCP server's (review pass 1).
-  app.get("/openapi.json", (c) => c.json({ ...doc, servers: [{ url: linkBase(c) || "/" }] }));
+  app.get("/openapi.json", (c) => c.json({ ...(doc ??= openApiDocument(pluginRoutes().map((r) => r.op))), servers: [{ url: linkBase(c) || "/" }] }));
 
   const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
     c.json(body, status, headers);
@@ -228,6 +289,26 @@ export function createRestApp(deps: RestDeps): Hono {
     return principal;
   }
 
+  // The enabled plugins (SMD-2310), for the operator GUI's nav (SMD-2280):
+  // each plugin's name, title and description, its pages (a path under the
+  // plugin's and a label), and the operations of it this key may call. Any
+  // caller's key; a disabled plugin is not listed, nor one the key can call nothing of. Before the operations'
+  // route below, which takes every other path under /v1/plugins.
+  app.get("/v1/plugins", async (c) => {
+    const named = traceOf(c.req.raw);
+    if (named) named.route = c.req.routePath;
+    const p = await caller(c);
+    if (p instanceof Response) return p;
+    if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
+    // A plugin none of whose operations the key may call is not listed: its pages would be a nav entry to nothing the key can use.
+    return c.json({
+      plugins: (deps.plugins?.() ?? [])
+        .map((pl) => ({ pl, operations: pl.operations.filter((op) => unlocks(p, op.scope)).map((op) => op.tool) }))
+        .filter(({ operations }) => operations.length > 0)
+        .map(({ pl, operations }) => ({ name: pl.name, title: pl.title, description: pl.description, pages: pl.pages, operations })),
+    });
+  });
+
   // Who is calling: the key's name, its scope, its stable agent id, the
   // operations it may call, and — forwarded — who carried it (`act`): what the
   // MCP server's tools/list and the GUI's sign-in read once SMD-2287 and
@@ -237,7 +318,7 @@ export function createRestApp(deps: RestDeps): Hono {
     if (named) named.route = c.req.routePath;
     const p = await caller(c);
     if (p instanceof Response) return p;
-    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: visibleToolNames(p), ...(p.act ? { act: p.act } : {}) });
+    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: [...visibleToolNames(p), ...pluginRoutes().filter((r) => unlocks(p, r.op.scope)).map((r) => r.op.tool)].sort(), ...(p.act ? { act: p.act } : {}) });
   });
 
   // A job's event stream (SMD-2273): its progress and its end as SSE, kept
@@ -266,10 +347,49 @@ export function createRestApp(deps: RestDeps): Hono {
     return withSseKeepalive(response, { signal: c.req.raw.signal, label: `api jobs/${labelPart(id)}/stream`, ...ends });
   });
 
+  /**
+   * An operation's input, held to its schema, or the answer that refuses it:
+   * the path's fields, then the query string or the body — and only the one
+   * the route reads: input sent the other way is refused, not dropped (a
+   * DELETE's body `detach_citations` would otherwise be ignored).
+   */
+  async function inputFor(c: Context, method: Method, shape: Record<string, z.ZodType>, path: Record<string, string>): Promise<{ input: unknown } | Response> {
+    let rest: Record<string, unknown>;
+    const query = queryOf(c.req.url);
+    if (readsQuery(method)) {
+      // Bun hands a GET's handler no body, whatever was sent: the headers
+      // that announced one are what is left of it (review pass 2).
+      // Any length but zero counts: Bun joins a repeated Content-Length
+      // into "11, 11", which is no number (review pass 3).
+      const length = c.req.header("content-length");
+      const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
+      if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from the query string, not a body` }] });
+      const read = inputFromQueryShape(shape, query);
+      if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
+      rest = read.input;
+    } else {
+      if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from a JSON body, not the query string` }] });
+      const text = await c.req.text();
+      let body: unknown = {};
+      try {
+        body = text.trim() === "" ? {} : JSON.parse(text);
+      } catch {
+        return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not JSON" }] });
+      }
+      if (body === null || typeof body !== "object" || Array.isArray(body)) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not a JSON object" }] });
+      rest = body as Record<string, unknown>;
+    }
+    for (const f of Object.keys(path)) {
+      if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
+    }
+    const parsed = z.object(shape).strict().safeParse({ ...rest, ...path });
+    if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+    return { input: parsed.data };
+  }
+
   for (const name of Object.keys(ROUTES) as ToolName[]) {
     const route = ROUTES[name];
     const fields = pathFields(route.path);
-    const schema = z.object(SPECS[name].inputSchema).strict();
     app.on(route.method, honoPath(route.path), async (c) => {
       const trace = traceOf(c.req.raw);
       if (trace) {
@@ -279,46 +399,14 @@ export function createRestApp(deps: RestDeps): Hono {
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
-
-      // The input: the path's fields, then the query string or the body — and
-      // only the one the route reads: input sent the other way is refused, not
-      // dropped (a DELETE's body `detach_citations` would otherwise be ignored).
-      let rest: Record<string, unknown>;
-      const query = queryOf(c.req.url);
-      if (readsQuery(route.method)) {
-        // Bun hands a GET's handler no body, whatever was sent: the headers
-        // that announced one are what is left of it (review pass 2).
-        // Any length but zero counts: Bun joins a repeated Content-Length
-        // into "11, 11", which is no number (review pass 3).
-        const length = c.req.header("content-length");
-        const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
-        if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from the query string, not a body` }] });
-        const read = inputFromQuery(name, query);
-        if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
-        rest = read.input;
-      } else {
-        if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${route.method} reads its input from a JSON body, not the query string` }] });
-        const text = await c.req.text();
-        let body: unknown = {};
-        try {
-          body = text.trim() === "" ? {} : JSON.parse(text);
-        } catch {
-          return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not JSON" }] });
-        }
-        if (body === null || typeof body !== "object" || Array.isArray(body)) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not a JSON object" }] });
-        rest = body as Record<string, unknown>;
-      }
-      for (const f of fields) {
-        if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
-      }
-      const parsed = schema.safeParse({ ...rest, ...Object.fromEntries(fields.map((f) => [f, c.req.param(f)])) });
-      if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+      const read = await inputFor(c, route.method, SPECS[name].inputSchema, Object.fromEntries(fields.map((f) => [f, c.req.param(f)!])));
+      if (read instanceof Response) return read;
       const head = headOnly(c);
       if (head) return head;
 
       let outcome;
       try {
-        outcome = await route.call(deps.core, p, parsed.data as never, { track: deps.track });
+        outcome = await route.call(deps.core, p, read.input as never, { track: deps.track });
       } catch (err) {
         // A fault: FAILED with what was thrown, as the MCP tool's text says it
         // to the same key; no `retryable` until SMD-2461 classifies faults —
@@ -338,10 +426,118 @@ export function createRestApp(deps: RestDeps): Hono {
     });
   }
 
+  // The enabled plugins' operations (SMD-2310), under /v1/plugins/<name>: one
+  // route that finds the operation, since which plugins are enabled is read
+  // from the environment at the first request and Hono takes no route after
+  // its first match. Then as a core route: the caller, the gate (a plugin
+  // operation's group, by the rule mayCall applies — tools.ts's unlocks), the
+  // input held to its schema, and its answer — a value its output schema
+  // holds, a refusal at its status, a fault as FAILED.
+  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/*", async (c) => {
+    const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
+    const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
+    if (!found) {
+      // No operation's route: the request line says so as any unrouted one does, not the wildcard's template.
+      c.set("template", "-");
+      return c.notFound();
+    }
+    const { op } = found;
+    c.set("template", honoPath(op.path));
+    // Named as it starts, so a refusal or a stop's cut says which route and operation.
+    const named = traceOf(c.req.raw);
+    if (named) {
+      named.route = honoPath(op.path);
+      named.tool = op.tool;
+    }
+    const p = await caller(c);
+    if (p instanceof Response) return p;
+    if (!unlocks(p, op.scope)) return refuse(c, 403, { code: "FORBIDDEN", needs: op.scope });
+    const values = found.pattern.exec(c.req.path)!.slice(1);
+    const path: Record<string, string> = {};
+    for (const [i, field] of found.fields.entries()) {
+      try {
+        path[field] = decodeURIComponent(values[i]);
+      } catch {
+        return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: field, message: `${field} is not a well-formed path segment` }] });
+      }
+    }
+    const read = await inputFor(c, op.method, op.shape, path);
+    if (read instanceof Response) return read;
+    const head = headOnly(c);
+    if (head) return head;
+    let outcome;
+    try {
+      outcome = await runOperation(op, { core: deps.core, principal: p, track: deps.track }, read.input);
+    } catch (err) {
+      return c.json(failure(err), 500);
+    }
+    if (outcome.ok) return c.json(outcome.value, 200);
+    const { status, ...facts } = outcome.refusal;
+    return c.json(facts, status);
+  });
+
+  // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
+  // for a plugin OB1_HOOKS names, with no key — the sender holds none — so the
+  // handler verifies the delivery against its secret. Its body is counted as
+  // it arrives and cut at HOOK_BODY_LIMIT, and handed over as the bytes sent
+  // (a signature is over them) and as text; the handler runs as
+  // `hook:<plugin>`, a capture-only caller. Off, or a name it does not serve,
+  // the path is NO_ROUTE, as any unrouted one.
+  app.all("/hooks/:plugin/:hook", async (c) => {
+    // Reached through a prefix another route strips — compose.api-public.yaml's
+    // /api, whose router sends X-Forwarded-Prefix — not through
+    // compose.hooks-public.yaml, which keeps the path: the operator who named
+    // /api did not open /hooks, so it is no route here (final review).
+    if (c.req.header("x-forwarded-prefix") !== undefined) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
+    const served = deps.hooks?.();
+    const hook = served?.hooks.find((h) => h.plugin === c.req.param("plugin") && h.name === c.req.param("hook"));
+    if (!hook || !served) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
+    c.set("template", hook.path);
+    if (c.req.method !== "POST") return refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
+    // No secret, nothing to verify a delivery against: refused here, whatever the handler would do (PR 4 review pass 1).
+    const secret = served.secrets.get(hook.plugin);
+    if (!secret) return c.json({ code: "HOOK_NOT_CONFIGURED", retryable: false }, 503);
+    const tooLarge = () => c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    if (Number(c.req.header("content-length") ?? "0") > HOOK_BODY_LIMIT) return tooLarge();
+    // Read with a running count and cut at the limit: a chunked body declares
+    // no length, and reading it whole first let an anonymous sender fill the
+    // server's memory (PR 4 review pass 1). Kept as bytes — a signature is
+    // over what was sent, which decoding would change (a BOM, invalid UTF-8).
+    let body: Uint8Array | null;
+    try {
+      body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
+    } catch {
+      // The sender went away mid-body: nothing to answer it with, and nothing of why.
+      return c.json({ code: "REFUSED_INPUT", retryable: false }, 400);
+    }
+    if (body === null) return tooLarge();
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((value, name) => { headers[name.toLowerCase()] = value; });
+    const query: Record<string, string> = {};
+    for (const [k, v] of queryOf(c.req.url)) query[k] = v;
+    let answer;
+    try {
+      answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
+    } catch (err) {
+      // The sender is anonymous: it is told FAILED and nothing of why; the
+      // operator's stderr has the message, one line, bounded.
+      faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
+      return c.json({ code: "FAILED", retryable: false }, 500);
+    }
+    if (answer.status === 204) return c.body(null, 204);
+    return c.json(answer.body ?? {}, answer.status);
+  });
+
   // A path a route serves, sent with another method, is a 405 naming the
   // ones it takes; any other path is NO_ROUTE.
   app.notFound((c) => {
-    const allow = allowedOn(c.req.path);
+    const allow = allowedOn(c.req.path, pluginRoutes().map((r) => [r.pattern, r.method]));
     const answer = allow.length
       ? refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: allow.join(", ") })
       : refuse(c, 404, { code: "NO_ROUTE" });
