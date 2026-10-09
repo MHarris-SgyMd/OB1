@@ -742,15 +742,16 @@ else {
    * what a lowered work_mem's bitmap covers is still an ok row, saying the
    * routing count's bitmap goes lossy at little cost and pointing at SMD-1464,
    * with nothing recommending a larger work_mem. The heap here is under 037's
-   * gate (8,192 pages), so the broadest filter may touch every page.
+   * gate (8,192 pages), so the broadest filter may touch every page; the
+   * fixture's own heap is empty, so its row says no filter builds a bitmap.
    * shared_buffers cannot be lowered for one database (it is the
-   * postmaster's), so the index row's warning is held by test-schema's
-   * arithmetic on memorySizing, and here only as ok.
+   * postmaster's), so the index row's warning is held by test-schema on
+   * memoryRows' wording, and here only as ok.
    */
   const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) of its pages: its routing count's bitmap/;
   assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
-         && new RegExp(`(?:${ungatedRow.source} \\([^)]+\\) fits work_mem \\(4 MB\\)|✓\\s+filter bitmap memory\\s+the thoughts heap is empty, so no filter builds a bitmap)\\. Information only`).test(withKw.out),
-         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and the bitmap of every page fits work_mem, said as information");
+         && /✓\s+filter bitmap memory\s+the thoughts heap is empty, so no filter builds a bitmap\. Information only/.test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and an empty heap builds no bitmap, said as information");
   {
     // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
     // 6,000 of them fill ~1,500 heap pages: past the 1,024 that 64 kB of

@@ -171,7 +171,7 @@ setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
 page cache serves a walk too, but measured at ten million rows it gave ten
 connections about a third of the throughput. The second is information only:
 the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
-under 037's gate, about 1 − 1/e of them for a filter at its boundary above it)
+under 037's gate, at least 1 − 1/e of them for a filter at its boundary above it, more on a heap under ten times v_exact pages)
 against `work_mem`, and a generic-plan walk's over the whole heap. A lossy
 routing count costs little under its LIMIT, and whether `match_thoughts` takes
 a generic plan is SMD-1464's to settle, so it recommends nothing.

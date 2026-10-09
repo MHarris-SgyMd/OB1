@@ -12544,26 +12544,35 @@ console.log("\n[74] memorySizing and memoryRows: the valid HNSW indexes against 
   // which no live test reaches (a pool cannot be lowered for one database).
   const [okRes] = memoryRows(memorySizing(base));
   const [warnRes] = memoryRows(overPool);
-  assert(okRes.status === "ok" && okRes.fix === undefined && okRes.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB)"
+  assert(okRes.name === "vector index memory" && warnRes.name === "vector index memory"
+         && okRes.status === "ok" && okRes.fix === undefined && okRes.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB)"
          && warnRes.status === "warn" && /are 129 MB and shared_buffers is 128 MB: a vector search walks an index the buffer pool cannot hold\. The OS page cache serves the walk, but not as well — at ten million rows, .* about a third of the throughput/.test(warnRes.detail),
     `the resident row: ok with both sizes; a warning past the pool, with the page cache's measured third (${warnRes.detail.slice(0, 60)}…)`);
   assert(/^Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB'; then restart postgres/.test(warnRes.fix ?? "")
          && /`<tier>-postgres`/.test(warnRes.fix ?? "")
          && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
-         && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"`),
-    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf");
+         && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
+    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+  const [noIndex] = memoryRows(memorySizing({ ...base, hnswBytes: 0 }));
+  assert(noIndex.status === "ok" && noIndex.detail.startsWith("no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold"),
+    `no valid HNSW index: said as none, not as an index of 0 kB (${noIndex.detail.slice(0, 60)}…)`);
   const ungatedRows = memoryRows(memorySizing({ ...base, heapBytes: 8000 * 8192 }));
   const gatedFits = memoryRows(memorySizing({ ...base, heapBytes: 100000 * 8192 }));
+  const gatedWithin = memoryRows(memorySizing({ ...base, heapBytes: 10000 * 8192 }));
+  const onePage = memoryRows(memorySizing({ ...base, heapBytes: 8192 }));
   const gatedPast = memoryRows(memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 4980 * MB }));
   const emptyRows = memoryRows(memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 }));
-  assert([ungatedRows, gatedFits, gatedPast, emptyRows].every(([, b]) => b.name === "filter bitmap memory" && b.status === "ok" && b.fix === undefined && /\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle/.test(b.detail)),
+  assert([ungatedRows, gatedFits, gatedWithin, gatedPast, onePage, emptyRows].every(([, b]) => b.name === "filter bitmap memory" && b.status === "ok" && b.fix === undefined && /\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle/.test(b.detail)),
     "the bitmap row is ok with no remedy in every regime, and names SMD-1464");
   assert(ungatedRows[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all 8,000 of its pages: its routing count's bitmap (500 kB) fits work_mem (4 MB). Information only")
-         && !/generic-plan/.test(ungatedRows[1].detail),
-    "under the gate: every page, the routing count's bitmap, no separate generic-plan figure (it is the same heap)");
-  assert(gatedFits[1].detail.startsWith("a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least about 63,213 of the thoughts heap's 100,000 pages: its routing count's bitmap (4 MB) fits work_mem (4 MB); a generic-plan GIN walk's bitmap can cover the whole heap (7 MB, past work_mem)"),
+         && !/generic-plan/.test(ungatedRows[1].detail)
+         && onePage[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching its one page: its routing count's bitmap (1 kB) fits work_mem (4 MB). Information only"),
+    "under the gate: every page (a one-page heap said as one), the routing count's bitmap, no separate generic-plan figure (it is the same heap)");
+  assert(gatedFits[1].detail.startsWith("a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least 63,213 of the thoughts heap's 100,000 pages: its routing count's bitmap (4 MB) fits work_mem (4 MB); a generic-plan GIN walk's bitmap can cover the whole heap (7 MB, past work_mem)"),
     `above the gate: a floor of 1 - 1/e of the pages, and the whole heap for a generic-plan walk with its verdict (${gatedFits[1].detail.slice(0, 80)}…)`);
-  assert(/touches at least about 316,121 of the thoughts heap's 500,096 pages: its routing count's bitmap \(20 MB\) passes work_mem \(4 MB\) and goes lossy, which costs little: under LIMIT v_exact \+ 1 it rechecks pages only until it has its rows; a generic-plan GIN walk's bitmap can cover the whole heap \(31 MB, past work_mem\)/.test(gatedPast[1].detail)
+  assert(/touches at least 6,322 of the thoughts heap's 10,000 pages: its routing count's bitmap \(396 kB\) fits work_mem \(4 MB\); a generic-plan GIN walk's bitmap can cover the whole heap \(625 kB, within work_mem\)\. Information only/.test(gatedWithin[1].detail),
+    "above the gate on a heap whose whole bitmap fits: the generic-plan figure within work_mem");
+  assert(/touches at least 316,121 of the thoughts heap's 500,096 pages: its routing count's bitmap \(20 MB\) passes work_mem \(4 MB\) and goes lossy, which costs little: under LIMIT v_exact \+ 1 it rechecks pages only until it has its rows; a generic-plan GIN walk's bitmap can cover the whole heap \(31 MB, past work_mem\)/.test(gatedPast[1].detail)
          && emptyRows[1].detail.startsWith("the thoughts heap is empty, so no filter builds a bitmap. Information only"),
     "past work_mem the routing count's lossiness is said to cost little; an empty heap says it builds none");
   assert(bytesText(512) === "1 kB" && bytesText(MB - 1) === "1024 kB" && bytesText(MB) === "1 MB" && bytesText(1024 * MB - 1) === "1024 MB" && bytesText(1024 * MB) === "1.0 GB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",

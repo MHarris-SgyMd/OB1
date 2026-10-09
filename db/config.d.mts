@@ -315,7 +315,7 @@ export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Prom
 export const BOUNDS_IN_FORCE_SQL: string;
 /** Bytes one exact heap page costs a TID bitmap (PostgreSQL 16 tidbitmap.c); past work_mem / this, a bitmap goes lossy. */
 export const BITMAP_BYTES_PER_PAGE: number;
-/** The share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e; the boundary is a median, not a cutoff). */
+/** The least share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e, a floor: the boundary rises on heaps under 10 x v_exact pages and at larger match counts). */
 export const BITMAP_PAGE_SHARE_GATED: number;
 /** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
 export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {

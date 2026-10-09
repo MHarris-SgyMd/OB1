@@ -1783,21 +1783,23 @@ export function memoryRows(s) {
   const r = s.resident;
   const b = s.bitmap;
   const n = (x) => x.toLocaleString("en-US");
-  const resident = r.fits
+  const resident = r.needBytes === 0
+    ? { name: "vector index memory", status: "ok", detail: "no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold (the walk index check says whether one is missing)" }
+    : r.fits
     ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})` }
     : {
         name: "vector index memory",
         status: "warn",
         detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
-        fix: `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`, on compose.tiers.yaml the tier's \`<tier>-postgres\`, each set on its own: the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\` (the tier's service on compose.tiers.yaml).`,
+        fix: `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
       };
   let detail;
   if (b.heapPages === 0) {
     detail = "the thoughts heap is empty, so no filter builds a bitmap";
   } else {
     const route = b.gated
-      ? `a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least about ${n(b.bitmapPages)} of the thoughts heap's ${n(b.heapPages)} pages`
-      : `on a heap under ${n(ROUTE_ESTIMATE_MIN_PAGES)} pages every filter takes the GIN route, the broadest touching up to all ${n(b.heapPages)} of its pages`;
+      ? `a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least ${n(b.bitmapPages)} of the thoughts heap's ${n(b.heapPages)} pages`
+      : `on a heap under ${n(ROUTE_ESTIMATE_MIN_PAGES)} pages every filter takes the GIN route, the broadest touching ${b.heapPages === 1 ? "its one page" : `up to all ${n(b.heapPages)} of its pages`}`;
     const routeBitmap = b.fits
       ? `its routing count's bitmap (${bytesText(b.needBytes)}) fits work_mem (${bytesText(b.haveBytes)})`
       : `its routing count's bitmap (${bytesText(b.needBytes)}) passes work_mem (${bytesText(b.haveBytes)}) and goes lossy, which costs little: under LIMIT v_exact + 1 it rechecks pages only until it has its rows`;
