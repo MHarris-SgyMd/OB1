@@ -2057,7 +2057,7 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
 
   // [13f] SMD-2664's repro: the capture key, classified agent, labels a text
   // outside text; the operator's key captures the same text after it. The
-  // row's stamp moves to the operator (migration 084): it is found under
+  // row's stamp moves to the operator (migration 085): it is found under
   // min_trust agent and carries no outside-text notice.
   {
     await sql`SELECT set_agent_kind('session-hook', 'agent')`;

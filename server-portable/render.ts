@@ -712,7 +712,7 @@ function renderChange(c: AuditChange, n: number): string {
   // only change is the marks — 050's two, 073's trust — is "marked", the
   // backfill's row above all.
   const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
-  // 084's two events (SMD-2664): a key that can read re-captured a capture-only
+  // 085's two events (SMD-2664): a key that can read re-captured a capture-only
   // key's text and was weighed against its label — moved to it, or kept.
   const restamped = c.action === "update" && c.changed.includes("restamped");
   const declined = c.action === "update" && c.changed.includes("restamp_declined");

@@ -359,7 +359,7 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   assert(bare !== "" && !/restated/.test(bare), `a metadata side that is not an object still reads "metadata", not "restated" (${bare.split("\n").slice(1).join(" | ")})`);
   assert(cellEntries.some((e) => /content → "b"; metadata: topics$/m.test(e)), "beside a content change the marks go and a real key stays");
   assert(cellEntries.some((e) => /content → "c"; metadata$/m.test(e)), "a content change with a non-object metadata side keeps the bare metadata part");
-  // 084's two events (SMD-2664): a re-capture weighed against a capture-only
+  // 085's two events (SMD-2664): a re-capture weighed against a capture-only
   // key's label reads as a re-capture, moved or kept — not as an edit, nor as
   // 082's note's "restated" (review pass 5's walkthrough).
   await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name, actor_kind) VALUES (${B}::uuid, 'update', '{"restamped": true, "metadata": {"before": {"actor_name": "hook", "actor_kind": "agent", "trust": "ingested", "source": "mcp"}, "after": {"actor_name": "laptop", "actor_kind": "operator", "trust": "operator", "source": "mcp"}}}'::jsonb, 'laptop', 'operator')`;

@@ -6635,7 +6635,7 @@ console.log("\n[46] Migration 050: the actor on the row — who wrote the curren
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /050/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
   assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
-    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 084's restamp window orders by seq alone, against rows written after 050), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 085's restamp window orders by seq alone, against rows written after 050), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
   assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.action = 'update'\) OVER \(\)\)\) AS vouched/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text — not from sorting first (fourth review pass)");
   assert(/CROSS JOIN LATERAL \([\s\S]*?THEN content_fingerprint_of\(t\.content\) END AS fp\s+OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
@@ -7035,10 +7035,10 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("053") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("084") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, its last definer (053's body plus the relation kind, [74])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
-  assert(/link \(migration 053\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
+  assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_sources"])).c ?? "";
   assert(/SMD-1867/.test(tc) && /byte for byte/.test(tc) && /derived/.test(tc), "the table's comment states the round-trip rule: the canonical is the truth, the text and links derived");
 
@@ -7234,7 +7234,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const onC = (await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[{"relation":"references","target":"c"}]'::jsonb) AS r`, [tC])).r;
   const cLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link'`, [tC])).id;
   assert(onC.added === 1 && /does not link to itself/.test(await refused(`UPDATE thought_facets SET thought_id = $1::uuid WHERE id = $2::uuid`, [tB, cLink])), "moving a link row onto the thought whose identity it names is judged and refused");
-  assert(/needs a non-empty text|not a registered facet kind|stance/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is judged as the new kind, and a link payload is no citation");
+  assert(/a facet keeps its kind: a link is not turned into a citation/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is refused — since 084 no facet changes its kind ([74])");
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
@@ -7634,7 +7634,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("084") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("085") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -8669,8 +8669,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `fourteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
+    `fifteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -9214,7 +9214,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "073"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} — 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal — the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("064"), `064 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59] reads it) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("084"), `084 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
   assert(lastDefinerOf("delete_thought").startsWith("060") && lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("ob1_project_thought_event").startsWith("060") && lastDefinerOf("ob1_refresh_thought_vector").startsWith("060"),
     "060 stays the last definer of delete_thought, the audit trigger, the projector and the refresh — 061 touches none");
   const RECORDS = /ob1:derivation-recorded-with-its-artifact/;
@@ -9307,7 +9307,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   const badNull = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY[NULL::text], 'p', '{"deterministic": true}'::jsonb)`);
   const badKind = await refused(`SELECT ob1_record_derivation('facet', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"deterministic": true}'::jsonb)`);
   const badPass = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], '', '{"deterministic": true}'::jsonb)`);
-  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata or section, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
+  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata, section or relation, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
     `the writer refuses a recipe without a boolean deterministic, unequal arrays, a NULL fingerprint, an unknown kind and an empty pass (${[badRecipe, badLength, badNull, badKind, badPass].map((m) => m.slice(0, 60)).join(" | ")})`);
   const direct = await refused(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) VALUES ('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"model": "m"}'::jsonb)`);
   assert(/violates check constraint/.test(direct), "…and the table's CHECK refuses the same recipe written around the writer — a missing key answers NULL, and COALESCE makes it false");
@@ -9497,8 +9497,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
   assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
     `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
-  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("064") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
-    `one ob1_record_derivation, 064 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("084") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
+    `one ob1_record_derivation, 084 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
   // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
   assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
@@ -9826,8 +9826,8 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const kindCheck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)).d;
   assert(/'section'/.test(kindCheck) && /'chunks'/.test(kindCheck) && /'metadata'/.test(kindCheck), `061's kind CHECK admits the sixth kind, section, beside the five (${kindCheck})`);
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("064") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
-    "064 is the last definer of ob1_record_derivation — 061's body, one form, the section kind admitted, the upsert kept");
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("084") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
+    "ob1_record_derivation, last defined by 084 — 061's body, one form, the section kind admitted (and since 084 the relation kind), the upsert kept");
   for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("064"), `one ${fn}, 064's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
@@ -9838,7 +9838,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const trig = (await q<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('page_sections'::regclass, 'page_section_revisions'::regclass) ORDER BY 1`)).map((x) => x.t).join();
   assert(trig === "page_section_revisions_immutable,page_section_revisions_immutable_truncate,page_sections_drop_derivations", `the three triggers: the revisions' two refusals, the sections' lineage drop (${trig})`);
   const kindMsg = await refused(`SELECT ob1_record_derivation('bogus', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['f'], 'p', '{"deterministic": true}'::jsonb)`);
-  assert(/chunks, entities, proposal, vector, metadata or section, got 'bogus'/.test(kindMsg), `the writer's refusal names the six kinds (${kindMsg.slice(0, 100)})`);
+  assert(/chunks, entities, proposal, vector, metadata, section or relation, got 'bogus'/.test(kindMsg), `the writer's refusal names the seven kinds — 084 added relation (${kindMsg.slice(0, 100)})`);
   const chk = (await q<{ n: string; d: string }>(`SELECT conname AS n, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`));
   assert(chk.length === 1 && chk[0].n === "derivations_artifact_kind_check" && !/NOT VALID/.test(chk[0].d), `one CHECK on artifact_kind stands, validated (${chk.map((c) => c.n).join()})`);
 
@@ -11449,8 +11449,8 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   // The shape: the three writers stamp with the event's declaration after
   // folding the payload's into it; the raw path reads the handoff; the 1-arg
   // stamp is the 2-arg with none.
-  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("084"),
-    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 084 of the backfill (073's body, a restamp a writer)");
+  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("085"),
+    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 085 of the backfill (073's body, a restamp a writer)");
   const bodies = await Promise.all(["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"].map(src));
   assert(bodies.every((b) => /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', NULL\);\s+v_new_meta := ob1_actor_stamp\(COALESCE\(p_payload->'metadata', '\{\}'::jsonb\), v_decl->>'trust'\)/.test(b)
                        && /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', v_old_meta\);\s+v_new_meta := ob1_actor_stamp_kept/.test(b)
@@ -12507,7 +12507,172 @@ console.log("\n[73] bench-hnsw's section F under load: the schedule, the percent
   assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
 }
 
-console.log("\n[74] Migration 084: a capture-only key's stamp yields to the first classified key that can read to re-capture it, at a higher trust — the whole stamp, once; an equal or lower trust, an unclassified writer, a capture-only actor, a moved text, a key that can read's own stamp (its lowering included), a row settled by an earlier reader, a restamped or rewritten row and a row from before the scope mark move nothing; the backfill reads the restamp as the stamp's writer (SMD-2664)");
+console.log("\n[74] Migration 084: the consolidation judge's relations — a `relation` facet on the newer thought (related, evolves or duplicate, a target thought, the judge's key and confidence, origin judged), one active per pair, its lineage row written with it; record_thought_relation's set per pair (added, kept, replaced, closed, none); a deleted target closes the edge, a deleted newer thought takes its edges and their lineage (SMD-1873)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  await db.exec(`DELETE FROM thoughts`);
+  const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
+  const RTR = "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)";
+
+  // The shape: the function, the two triggers, the indexes, the sentinels, the comments.
+  const [shape] = await q<{ fn: boolean; close: string | null; drop: string | null; uniq: string | null; tgt: string | null }>(`SELECT
+      to_regprocedure('${RTR}') IS NOT NULL AS fn,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thoughts_close_relations' AND tgrelid = 'thoughts'::regclass) AS close,
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_drop_relation_derivation' AND tgrelid = 'thought_facets'::regclass) AS drop,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq') AS uniq,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_relation_target_idx') AS tgt`);
+  assert(shape.fn && /AFTER DELETE ON (public\.)?thoughts FOR EACH ROW EXECUTE FUNCTION ob1_close_relations_to_deleted\(\)/.test(shape.close ?? "")
+         && /AFTER DELETE ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(old\.kind = 'relation'::text\)\) EXECUTE FUNCTION ob1_drop_relation_derivation\(\)/.test(shape.drop ?? "")
+         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'relation'::text\) AND \(valid_until IS NULL\)\)/.test(shape.uniq ?? "") && /payload ->> 'target'/.test(shape.tgt ?? ""),
+    `084's write, the close after a target's delete, the lineage drop after a relation's, one active per pair, the target probe (${shape.close}; ${shape.drop}; ${shape.uniq})`);
+  const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  const writeSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
+  assert(/ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:relation-lineage-with-its-artifact/.test(writeSrc),
+    "the sentinels: the relation branch beside the link's in the validator, the lineage with its artifact in the write");
+  for (const sig of [RTR, "ob1_close_relations_to_deleted()", "ob1_drop_relation_derivation()"]) {
+    const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+    assert(/084/.test(c) && /SMD-1873/.test(c), `${sig}'s comment names 084 and the ticket`);
+  }
+  const sp = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? "";
+  assert(!/CONFLICT/.test(sp) && /outdates/.test(sp) && /relation/.test(sp) && /084/.test(sp), `supersession_proposals' comment says "outdates", not "judged to CONFLICT", and names the relation facet (${sp.slice(0, 90)})`);
+
+  // The validator.
+  const older = await thought("084: the older note on the rota"), newer = await thought("084: the newer note on the rota");
+  const insert = (p: unknown, on = newer) => refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb)`, [on, JSON.stringify(p)]);
+  const ok = { relation: "related", target: older.toUpperCase(), judge_key: "consolidate:t@p4", confidence: 0.61 };
+  assert((await insert(ok)) === "", "a well-formed relation is admitted, the target given upper-case");
+  const [row] = await q<{ id: string; payload: Record<string, unknown> }>(`SELECT id, payload FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid`, [newer]);
+  assert(row.payload.origin === "judged" && row.payload.target === older && row.payload.confidence === 0.61, `origin is the validator's word, judged, and the target is stored lower-case (${JSON.stringify(row.payload)})`);
+  const ghost = "00000000-0000-4000-8000-000000000084";
+  const cases: [string, unknown, RegExp][] = [
+    ["a word outside the three", { ...ok, target: older, relation: "supersedes" }, /relation must be related, evolves or duplicate, got 'supersedes'/],
+    ["a target that is no thought id", { ...ok, target: "SMD-12" }, /target must be a thought id/],
+    ["a target that is a number", { ...ok, target: 12 }, /target must be a thought id/],
+    ["the thought itself", { ...ok, target: newer }, /not related to itself/],
+    ["a target that does not exist", { ...ok, target: ghost }, /target 00000000-0000-4000-8000-000000000084 is not a thought/],
+    ["no judge key", { relation: "related", target: older }, /judge_key, a non-empty string/],
+    ["a blank judge key", { ...ok, target: older, judge_key: "  " }, /judge_key, a non-empty string/],
+    ["a confidence over 1", { ...ok, target: older, confidence: 2 }, /confidence is a number from 0 to 1, got 2/],
+    ["a confidence that is text", { ...ok, target: older, confidence: "high" }, /confidence is a number from 0 to 1/],
+  ];
+  for (const [what, p, re] of cases) {
+    const m = await insert(p);
+    assert(re.test(m), `the validator refuses ${what} (${m.slice(0, 90)})`);
+  }
+  assert(/thought_facets_relation_active_uniq/.test(await insert({ ...ok, target: older, relation: "evolves" })), "a second active relation on one pair is refused by the index, whatever its word");
+  assert((await insert({ relation: "duplicate", target: newer, judge_key: "k" }, older)) === "", "the other direction is another pair: the older thought may hold its own relation to the newer");
+  // Review pass 1: a relation is written once and only closed.
+  const ONCE = /a relation is written once and only closed/;
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET payload = payload || '{"relation": "evolves"}'::jsonb WHERE id = $1::uuid`, [row.id])), "a relation's word is not rewritten — a replace closes it and writes another");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET payload = payload || '{"confidence": 1}'::jsonb WHERE id = $1::uuid`, [row.id])), "…nor its confidence");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET thought_id = $2::uuid WHERE id = $1::uuid`, [row.id, older])), "…nor is it moved to another thought");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET valid_until = now(), created_at = now() - interval '1 day' WHERE id = $1::uuid`, [row.id])), "a close that changes anything else is refused");
+  assert((await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [row.id])) === "", "a pure close passes");
+  assert(ONCE.test(await refused(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1::uuid`, [row.id])), "a closed relation is not re-opened");
+  assert(/a relation is written standing/.test(await insert({ ...ok, target: older }).then(() => refused(`INSERT INTO thought_facets (thought_id, kind, payload, valid_until) VALUES ($1::uuid, 'relation', $2::jsonb, now() + interval '1 day')`, [older, JSON.stringify({ relation: "related", target: newer, judge_key: "k" })]))),
+    "a relation is written standing: a valid_until set at insert, even a future one past the index, is refused");
+  await db.query(`SELECT record_citation($1::uuid, $2::uuid, 'the newer note rests on the older', 'stated')`, [newer, older]);
+  const cit = (await q<{ id: string }>(`SELECT id FROM thought_facets WHERE kind = 'citation' AND thought_id = $1::uuid`, [newer]))[0];
+  const KIND = /a facet keeps its kind/;
+  if (cit) assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'relation', payload = $2::jsonb WHERE id = $1::uuid`, [cit.id, JSON.stringify({ relation: "duplicate", target: older, judge_key: "consolidate:x" })])), "a citation is not turned into a relation");
+  else assert(false, "a citation to test the kind change with (record_citation)");
+  if (cit) await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [cit.id]);  // a citation of the older would refuse its delete below (042's guard)
+  // Review pass 2: no facet changes its kind — a link turned into a citation
+  // was admitted, so the capture group's UPDATE could forge a citation of any
+  // thought and have its delete refused.
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::jsonb)`, [newer, JSON.stringify([{ relation: "relates_to", target: "SMD-9" }])]);
+  const link = (await q<{ id: string }>(`SELECT id FROM thought_facets WHERE kind = 'link' AND thought_id = $1::uuid`, [newer]))[0];
+  assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'citation', payload = $2::jsonb WHERE id = $1::uuid`, [link.id, JSON.stringify({ text: "forged", stance: "stated", source_id: older })])),
+    "a link is not turned into a citation — the capture group's UPDATE cannot forge a citation that refuses the source's delete");
+  const rel = (await one<{ r: { id: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.6, 'consolidate:t@p4', NULL, 'a', 'b', NULL) AS r`, [newer, older])).r;
+  assert(KIND.test(await refused(`UPDATE thought_facets SET kind = 'citation', payload = $2::jsonb WHERE id = $1::uuid`, [rel.id, JSON.stringify({ text: "forged", stance: "stated", source_id: older })])), "…nor a relation into a citation");
+  for (const [what, sql, params] of [
+    ["a rewrite riding a close", `UPDATE thought_facets SET valid_until = now(), payload = payload || '{"relation": "evolves"}'::jsonb WHERE id = $1::uuid`, [rel.id]],
+    ["a move riding a close", `UPDATE thought_facets SET valid_until = now(), thought_id = $2::uuid WHERE id = $1::uuid`, [rel.id, older]],
+    ["a close that sets superseded_by", `UPDATE thought_facets SET valid_until = now(), superseded_by = $2::uuid WHERE id = $1::uuid`, [rel.id, link.id]],
+    ["a close into the future", `UPDATE thought_facets SET valid_until = now() + interval '10 years' WHERE id = $1::uuid`, [rel.id]],
+    ["a close that changes the id", `UPDATE thought_facets SET valid_until = now(), id = gen_random_uuid() WHERE id = $1::uuid`, [rel.id]],
+  ] as [string, string, unknown[]][]) assert(ONCE.test(await refused(sql, params)), `${what} is refused`);
+  assert((await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [rel.id])) === "" && ONCE.test(await refused(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [rel.id])),
+    "a closed relation is not closed again");
+  assert(/a relation is written standing/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload, superseded_by) VALUES ($1::uuid, 'relation', $2::jsonb, $3::uuid)`, [newer, JSON.stringify({ relation: "related", target: older, judge_key: "k" }), link.id])),
+    "a relation inserted with superseded_by set is refused");
+  await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [link.id]);
+  await db.exec(`DELETE FROM thought_facets WHERE kind = 'relation'`);
+
+  // record_thought_relation: the set per pair.
+  const rec = async (rel: string | null, conf: number | null, fpOlder = "fo1", fpNewer = "fn1", key = "consolidate:t@p4") =>
+    (await one<{ r: { ok: boolean; action: string; id?: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, $3::text, $4::numeric, $5::text, NULL, $6, $7, '{"deterministic": false, "model": "t"}'::jsonb) AS r`,
+      [newer, older, rel, conf, key, fpOlder, fpNewer])).r;
+  const edges = async () => await q<{ id: string; relation: string; active: boolean; confidence: number | null }>(
+    `SELECT id::text AS id, payload->>'relation' AS relation, valid_until IS NULL AS active, (payload->>'confidence')::float AS confidence FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid ORDER BY created_at, id`, [newer]);
+  const lineage = async (id: string) => await q<{ inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown> }>(
+    `SELECT input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = $1::uuid`, [id]);
+  const added = await rec("evolves", 0.734);
+  const e1 = await edges();
+  const l1 = await lineage(added.id!);
+  assert(added.ok && added.action === "added" && e1.length === 1 && e1[0].relation === "evolves" && e1[0].confidence === 0.73 && l1.length === 1 && l1[0].inputs.join() === `${older},${newer}` && l1[0].fps.join() === "fo1,fn1" && l1[0].by === "consolidate:t@p4" && l1[0].recipe.model === "t",
+    `added: one active edge at the confidence rounded to two places, its lineage row naming the older then the newer at the fingerprints judged, the pass and the recipe (${JSON.stringify([added, e1, l1])})`);
+  const kept = await rec("evolves", 0.734, "fo2", "fn2");
+  const l2 = await lineage(added.id!);
+  assert(kept.action === "kept" && kept.id === added.id && (await edges()).length === 1 && l2.length === 1 && l2[0].fps.join() === "fo2,fn2",
+    `kept: the same word by the same pass at the same confidence keeps the edge, and its lineage moves to the texts judged now (${JSON.stringify([kept, l2])})`);
+  // Review pass 1: a relation is never edited, so another key or another
+  // confidence is a replace — the payload always says who judged it and how sure.
+  const otherKey = await rec("evolves", 0.734, "fo3", "fn3", "consolidate:other@p4");
+  const otherConf = await rec("evolves", 0.55, "fo3", "fn3", "consolidate:other@p4");
+  const ek = await edges();
+  assert(otherKey.action === "replaced" && otherConf.action === "replaced" && ek.filter((e) => e.active).length === 1 && ek.find((e) => e.active)?.confidence === 0.55 && (await lineage(otherConf.id!))[0]?.by === "consolidate:other@p4",
+    `the same word under another judge key, or at another confidence, replaces the edge; the standing one carries its own judge and score, its lineage that judge's (${JSON.stringify([otherKey.action, otherConf.action, ek])})`);
+  const replaced = await rec("duplicate", 0.81);
+  const e3 = await edges();
+  assert(replaced.action === "replaced" && replaced.id !== added.id && e3.length === 4 && e3.filter((e) => e.active).length === 1 && e3.find((e) => e.active)?.relation === "duplicate" && (await lineage(replaced.id!)).length === 1,
+    `replaced: another word closes the edge and writes a new one with its own lineage (${JSON.stringify(e3)})`);
+  const closed = await rec(null, null);
+  const none = await rec(null, null);
+  assert(closed.action === "closed" && closed.id === replaced.id && (await edges()).every((e) => !e.active) && none.action === "none" && none.id === undefined,
+    `closed: a NULL relation closes the pair's edge; with nothing active, none (${JSON.stringify([closed, none])})`);
+  for (const [what, sql, params, re] of [
+    ["one thought on both sides", `SELECT record_thought_relation($1::uuid, $1::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer], /two different thoughts/],
+    ["a word outside the three", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate or NULL/],
+    ["no pass", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, ' ', NULL, 'a', 'b', NULL)`, [newer, older], /judge_key must name the pass/],
+    ["a pass key past 200 characters, as a parameter error the pass does not mistake for a deleted side", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, repeat('k', 201), NULL, 'a', 'b', NULL)`, [newer, older], /in at most 200 characters/],
+  ] as [string, string, unknown[], RegExp][]) {
+    const m = await refused(sql, params);
+    assert(re.test(m), `record_thought_relation refuses ${what} (${m.slice(0, 80)})`);
+  }
+  const ghost2 = "00000000-0000-4000-8000-000000000085";
+  const gone = (await one<{ r: { action: string; gone?: boolean } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL) AS r`, [newer, ghost2])).r;
+  assert(gone.action === "none" && gone.gone === true, `a write against a thought already deleted answers none, not an error the pass would blame on the newer thought (${JSON.stringify(gone)})`);
+  const withoutRecipe = await rec("related", null);
+  assert(withoutRecipe.action === "added" && (await lineage(withoutRecipe.id!))[0]?.recipe.deterministic === false, "a relation written with no recipe records the undeclared one, as a proposal does");
+
+  // Deletes: the target's closes the edge; the newer's takes its edges and their lineage.
+  const keep = await thought("084: a third note, related to the older");
+  const kr = (await one<{ r: { id: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.7, 'k', NULL, 'a', 'b', NULL) AS r`, [keep, older])).r;
+  await db.query(`SELECT delete_thought($1::uuid)`, [older]);
+  const [after] = await q<{ active: number; total: number }>(`SELECT count(*) FILTER (WHERE valid_until IS NULL)::int AS active, count(*)::int AS total FROM thought_facets WHERE kind = 'relation' AND payload->>'target' = $1`, [older]);
+  assert(after.active === 0 && after.total > 0 && (await lineage(kr.id)).length === 1, `the older thought deleted: every edge naming it is closed and stays as history, its lineage with it (${JSON.stringify(after)})`);
+  await db.query(`SELECT delete_thought($1::uuid)`, [newer]);
+  await db.query(`SELECT delete_thought($1::uuid)`, [keep]);
+  const [left] = await q<{ f: number; d: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation') AS f, (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'relation') AS d`);
+  assert(left.f === 0 && left.d === 0, `the newer thoughts deleted: their relations go by the cascade, and each relation's lineage row with it (${JSON.stringify(left)})`);
+
+  // A re-apply moves nothing.
+  const a1 = await thought("084: re-apply older"), b1 = await thought("084: re-apply newer");
+  await db.query(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.6, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
+  await reapply("084");
+  const [ra] = await q<{ trg: number; edges: number; chk: number }>(`SELECT
+      (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('thoughts_close_relations', 'thought_facets_drop_relation_derivation')) AS trg,
+      (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL) AS edges,
+      (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%') AS chk`);
+  assert(ra.trg === 2 && ra.edges === 1 && ra.chk === 1, `084 re-applied: one of each trigger, the edge standing, one CHECK on artifact_kind (${JSON.stringify(ra)})`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[75] Migration 085: a capture-only key's stamp yields to the first classified key that can read to re-capture it, at a higher trust — the whole stamp, once; an equal or lower trust, an unclassified writer, a capture-only actor, a moved text, a key that can read's own stamp (its lowering included), a row settled by an earlier reader, a restamped or rewritten row and a row from before the scope mark move nothing; the backfill reads the restamp as the stamp's writer (SMD-2664)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12524,8 +12689,8 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`);
   const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
-  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /084/.test(c) && /SMD-2664/.test(c) && /084 \/ SMD-2664/.test(bc),
-    "084's one function, its sentinel in its body; it and the backfill's comment name 084 and the ticket");
+  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /085/.test(c) && /SMD-2664/.test(c) && /085 \/ SMD-2664/.test(bc),
+    "085's one function, its sentinel in its body; it and the backfill's comment name 085 and the ticket");
   const bfSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'backfill_thought_actors(integer)'::regprocedure`)).s);
   assert(/\(a\.action = 'update' AND a\.diff \? 'restamped'\) AS restamped/.test(bfSrc) && /\(\(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\)\s+OR/.test(bfSrc)
       && /ORDER BY \(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\) DESC,/.test(bfSrc),
@@ -12556,7 +12721,7 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
 
   // The ticket's repro: the capture key, classified agent, labels its capture
   // outside text; the operator's key captures the same text after it.
-  const T = "[74] a note the hook and the operator both send";
+  const T = "[75] a note the hook and the operator both send";
   const first = await capture(T, CAP, "ingested");
   assert((await marks(first.id)) === "agent/cap-key/ingested", `the capture key's capture is stamped at its declared lowering (${await marks(first.id)})`);
   const second = await capture(T, OP);
@@ -12567,14 +12732,14 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
       && (ev.diff.metadata as { before: Meta; after: Meta }).before.trust === "ingested" && (ev.diff.metadata as { before: Meta; after: Meta }).after.trust === "operator",
     `…as one update event in its name, "restamped" in the diff, the audit row's trust the row's (${JSON.stringify({ ...ev, diff: Object.keys(ev.diff) })})`);
   // The other order ends where this one did.
-  const T2 = "[74] the same pair, the operator first";
+  const T2 = "[75] the same pair, the operator first";
   const op2 = await capture(T2, OP);
   const cap2 = await capture(T2, CAP, "ingested");
   assert(cap2.existed && (await marks(op2.id)) === "operator/op-key/operator", `the other order — the operator first, the capture key's 'keep' after — ends at the same stamp (${await marks(op2.id)})`);
 
   // A capture-only actor restamps nothing, passed or already the session's;
   // the same row then yields to the operator, so the refusals are the actor's.
-  const TS = "[74] a capture key's outside text an operator-kind capture key re-sends";
+  const TS = "[75] a capture key's outside text an operator-kind capture key re-sends";
   const capS = await capture(TS, CAP, "ingested");
   const viaSession = async () => {
     await one(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(CAPOP)]);
@@ -12582,11 +12747,11 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   };
   assert((await restamp(capS.id, capS.fingerprint, CAPOP)) === false && (await viaSession()) === false && (await marks(capS.id)) === "agent/cap-key/ingested",
     "a capture-only actor restamps nothing — passed, or the session's when none is passed — whatever its kind");
-  const CAPHI = "[74] an operator-kind capture key's outside text";
+  const CAPHI = "[75] an operator-kind capture key's outside text";
   const capHi = await capture(CAPHI, CAPOP, "ingested");
   assert((await restamp(capHi.id, capHi.fingerprint, CAPOP)) === false && (await marks(capHi.id)) === "operator/capop-key/ingested", "…not even on its own lowered row");
   // The fingerprint: another text's refuses; the row's moves the stamp.
-  const otherFp = (await one<{ f: string }>(`SELECT content_fingerprint_of('[74] some other text') AS f`)).f;
+  const otherFp = (await one<{ f: string }>(`SELECT content_fingerprint_of('[75] some other text') AS f`)).f;
   assert((await restamp(capS.id, otherFp, OP)) === false && (await restamp(capS.id, null, OP)) === false && (await restamp("00000000-0000-4000-8000-000000000073", capS.fingerprint, OP)) === false
       && (await marks(capS.id)) === "agent/cap-key/ingested",
     "another text's fingerprint, no fingerprint, or no such row: nothing moves");
@@ -12598,8 +12763,8 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   // writer on a row of its own — a decline settles the row, so on a shared
   // row every writer after the first was refused unweighed (review pass 4).
   const atAgent = async (what: string, actor: Meta, trust: string | null = null) => {
-    const row = await capture(`[74] a capture key's own note, at its kind, ${what}`, CAP);
-    const r = await capture(`[74] a capture key's own note, at its kind, ${what}`, actor, trust);
+    const row = await capture(`[75] a capture key's own note, at its kind, ${what}`, CAP);
+    const r = await capture(`[75] a capture key's own note, at its kind, ${what}`, actor, trust);
     return { restamped: r.restamped, marks: await marks(row.id), declines: (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND diff ? 'restamp_declined'`, [row.id])).n };
   };
   const equal = await atAgent("another agent re-sends", BOT2);
@@ -12611,13 +12776,13 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   assert(equal.declines === 1 && lower.declines === 1 && opAgent.declines === 1 && unclassified.declines === 0,
     "…the three classified writers weighed and declined, the unclassified one weighed for nothing and recording nothing");
   // A declaration between the two: the writer's word stands, under its kind; a word above its kind is clamped and not filed again.
-  const T6 = "[74] a capture key's text an agent re-sends as agent";
+  const T6 = "[75] a capture key's text an agent re-sends as agent";
   const cap6 = await capture(T6, CAP, "ingested");
   const botHi = await capture(T6, BOT, "operator");
   const ev6 = await lastEvent(cap6.id);
   assert(botHi.restamped === true && (await marks(cap6.id)) === "agent/bot-key/agent" && ev6.diff.restamped === true && ev6.trust === "agent" && ev6.claimed === null,
     `an agent declaring operator restamps at agent, its kind, and the restamp files no second claim (${await marks(cap6.id)}; ${JSON.stringify(ev6.claimed)})`);
-  const T7 = "[74] a capture key's text the operator re-sends as agent";
+  const T7 = "[75] a capture key's text the operator re-sends as agent";
   const cap7 = await capture(T7, CAP, "ingested");
   assert((await capture(T7, OP, "agent")).restamped === true && (await marks(cap7.id)) === "operator/op-key/agent", "the operator declaring agent over an ingested row restamps at agent, the marks its own");
 
@@ -12625,29 +12790,29 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   // that can read, and moves no more.
   assert((await capture(T6, OP)).restamped === false && (await marks(cap6.id)) === "agent/bot-key/agent", "a restamped row does not yield again: the operator after the agent leaves the agent's stamp");
   // A key that can read keeps its own lowering (review pass 1: an agent re-sending the operator's outside text relabelled it).
-  const T4 = "[74] the operator's own outside text";
+  const T4 = "[75] the operator's own outside text";
   const op4 = await capture(T4, OP, "ingested");
   const botOver = await capture(T4, BOT);
   const opOver = await capture(T4, OP);
   assert(botOver.restamped === false && opOver.restamped === false && (await marks(op4.id)) === "operator/op-key/ingested",
     `the operator's own lowering stands — an agent re-sending the text, or the operator itself without the word, moves nothing (${await marks(op4.id)})`);
-  const T5 = "[74] an agent's note the operator re-sends";
+  const T5 = "[75] an agent's note the operator re-sends";
   const bot5 = await capture(T5, BOT);
   assert((await capture(T5, OP)).restamped === false && (await marks(bot5.id)) === "agent/bot-key/agent", "a write key's stamp at its kind does not yield to a higher key either: 050's rule");
   // A text a key that can read rewrote is that key's; an unchanged edit (018: whitespace) is not a rewrite.
-  const T8 = "[74] a capture key's text an agent rewrites";
+  const T8 = "[75] a capture key's text an agent rewrites";
   const cap8 = await capture(T8, CAP, "ingested");
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap8.id, "[74] the agent's rewrite of it", JSON.stringify(BOT2)]);
-  const after8 = await capture("[74] the agent's rewrite of it", OP);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap8.id, "[75] the agent's rewrite of it", JSON.stringify(BOT2)]);
+  const after8 = await capture("[75] the agent's rewrite of it", OP);
   assert(after8.id === cap8.id && after8.restamped === false && (await marks(cap8.id)) === "agent/bot2-key/agent", `a text another key rewrote is that key's: the operator's re-capture of the new text moves nothing (${await marks(cap8.id)})`);
-  const T9 = "[74] a capture key's text an agent re-spaces";
+  const T9 = "[75] a capture key's text an agent re-spaces";
   const cap9 = await capture(T9, CAP, "ingested");
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap9.id, "[74] a capture key's text  an agent re-spaces", JSON.stringify(BOT2)]);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap9.id, "[75] a capture key's text  an agent re-spaces", JSON.stringify(BOT2)]);
   const [ws9] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND diff ? 'content'`, [cap9.id]);
   assert((await marks(cap9.id)) === "agent/cap-key/ingested" && ws9.n === 1, `setup: a whitespace-only edit keeps the capture key's stamp (018), and its audit row carries the text, so the fingerprint comparison is what lets it through (${ws9.n})`);
   assert((await capture(T9, OP)).restamped === true && (await marks(cap9.id)) === "operator/op-key/operator", "…so the row still yields: an unchanged edit is not a rewrite");
   // A capture-only key's row from before the scope mark says nothing of whose it is.
-  const T10 = "[74] a capture key's text from before the scope mark";
+  const T10 = "[75] a capture key's text from before the scope mark";
   const cap10 = await capture(T10, { name: "cap-key", via: "test-door" }, "ingested");
   assert((await capture(T10, OP)).restamped === false && (await marks(cap10.id)) === "agent/cap-key/ingested", "a row whose capture row carries no scope mark keeps its stamp");
 
@@ -12663,7 +12828,7 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   const UNC73 = { name: "unc-73", agent_id: await agent("5", "unc-73", "write"), via: "test-door" };
   await db.exec(`SELECT set_agent_kind('hook-73', 'agent'); SELECT set_agent_kind('op-73', 'operator'); SELECT set_agent_kind('bot-73', 'agent')`);
   const declines = async (id: string) => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND diff ? 'restamp_declined'`, [id])).n;
-  const T11 = "[74] the hook's outside text the operator re-sends as outside text";
+  const T11 = "[75] the hook's outside text the operator re-sends as outside text";
   const hook11 = await capture(T11, HOOK73, "ingested");
   const opEq = await capture(T11, OP73, "ingested");
   const opEqAgain = await capture(T11, OP73, "ingested");
@@ -12679,12 +12844,12 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   assert(nameOnly.restamped === false && (await marks(hook11.id)) === "agent/hook-73/ingested",
     `…nor does a caller with no agent id — the operator's key by name only — after a decline that names one: no id is no one's own (review pass 5) (${await marks(hook11.id)})`);
   assert((await capture(T11, OP73)).restamped === true && (await marks(hook11.id)) === "operator/op-73/operator", "…while the operator's own later re-capture, undeclared, still may");
-  const T12 = "[74] the hook's outside text an agent key re-sends first";
+  const T12 = "[75] the hook's outside text an agent key re-sends first";
   const hook12 = await capture(T12, HOOK73, "ingested");
   assert((await capture(T12, BOT73)).restamped === true && (await marks(hook12.id)) === "agent/bot-73/agent", "the first classified key that can read, higher, moves the stamp");
   assert((await capture(T12, OP73)).restamped === false && (await marks(hook12.id)) === "agent/bot-73/agent", "…and the next one, higher still, does not: the row is moved once");
   // What can never move the stamp settles nothing: an unclassified key (082 notes it), a call with no actor.
-  const T13 = "[74] the hook's outside text an unclassified key re-sends first";
+  const T13 = "[75] the hook's outside text an unclassified key re-sends first";
   const hook13 = await capture(T13, HOOK73, "ingested");
   const unc = await capture(T13, UNC73);
   const [noted13] = await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND diff ? 'recaptured'`, [hook13.id]);
@@ -12692,14 +12857,14 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   assert(unc.restamped === false && noted13.n === 1 && anon === false && (await declines(hook13.id)) === 0,
     `an unclassified key with an agent id — which 082 notes — and a call with no actor move nothing and record no decline (${noted13.n} note)`);
   assert((await capture(T13, OP73)).restamped === true && (await marks(hook13.id)) === "operator/op-73/operator", "…so the operator after them is weighed, and moves it");
-  const T14 = "[74] an unclassified hook's text, no trust on it";
+  const T14 = "[75] an unclassified hook's text, no trust on it";
   const hook14 = await capture(T14, HOOKX73, "agent");
   assert((await marks(hook14.id)) === "-/hookx-73/-", `setup: an unclassified capture key's row carries no trust (${await marks(hook14.id)})`);
   assert((await capture(T14, UNC73, "ingested")).restamped === false && (await restamp(hook14.id, hook14.fingerprint, null, "ingested")) === false && (await marks(hook14.id)) === "-/hookx-73/-",
     "an unclassified key declaring ingested, or no actor at all, restamps nothing on a row without a trust");
   assert((await capture(T14, OP73)).restamped === true && (await marks(hook14.id)) === "operator/op-73/operator", "…and the operator after them still moves it");
   // A decline naming no agent (a name-only writer) is no one's own: it settles the row for every caller.
-  const T15 = "[74] the hook's outside text the operator re-sends by name only";
+  const T15 = "[75] the hook's outside text the operator re-sends by name only";
   const hook15 = await capture(T15, HOOK73, "ingested");
   assert((await capture(T15, OP, "ingested")).restamped === false && (await declines(hook15.id)) === 1, "setup: the operator, by name only, declines");
   assert((await capture(T15, BOT73)).restamped === false && (await capture(T15, OP)).restamped === false && (await marks(hook15.id)) === "agent/hook-73/ingested",
@@ -12725,15 +12890,15 @@ console.log("\n[74] Migration 084: a capture-only key's stamp yields to the firs
   assert((await marks(first.id)) === "agent/op-key/agent", `…and a reclassification down reaches a restamped row through its restamp's key (${await marks(first.id)})`);
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   // A text edit after the restamp makes the editor the writer again.
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap6.id, "[74] the agent's text, edited by another", JSON.stringify(BOT2)]);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [cap6.id, "[75] the agent's text, edited by another", JSON.stringify(BOT2)]);
   await one(`SELECT backfill_thought_actors() AS r`);
   assert((await marks(cap6.id)) === "agent/bot2-key/agent", `a text edit after a restamp is the writer the backfill reads (${await marks(cap6.id)})`);
 
   // A re-apply moves nothing.
   const rows = JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`));
-  await reapply("084");
+  await reapply("085");
   assert(JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`)).n === 1,
-    "084 re-applied: one function, and no row moved");
+    "085 re-applied: one function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
 }

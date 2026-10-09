@@ -675,7 +675,7 @@ export class SqlStore implements ThoughtStore {
         if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
       }
     }
-    // 084: and when the row's stamp is still a capture-only key's, at a trust
+    // 085: and when the row's stamp is still a capture-only key's, at a trust
     // above it, the stamp moves to this key (SMD-2664) — the trust this write
     // declares, checked against the text it captured. Made the way the note
     // is made, and after it, so a restamp that fails never holds up the note.
