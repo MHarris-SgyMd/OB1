@@ -458,7 +458,9 @@ sent to `/api/hooks/…` is the REST core's 404.
 
 - **Keys and secrets.** A webhook takes no brain key, because its sender holds
   none. Each handler verifies a delivery against the secret `OB1_HOOK_SECRETS`
-  gives its plugin, and refuses one it cannot verify. Preflight's
+  gives its plugin, and refuses one it cannot verify, or one signed more than
+  its tolerance ago (five minutes by default), so a recorded delivery cannot
+  be resent later (`plugins/README.md`, "Replays", SMD-2755). Preflight's
   `plugin webhooks` row says which plugins are served and warns of one with no
   secret.
 - **What a hook may do.** It runs as `hook:<plugin>`, a caller of capture

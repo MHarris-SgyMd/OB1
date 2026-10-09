@@ -4,7 +4,7 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 
 - **The core, as the caller.** `recent` lists the newest thoughts through the core's `list_thoughts`. `ctx.call` is the only way a plugin reaches the brain's thoughts.
 - **A table of its own.** `add_note` and `list_notes` keep notes pinned to thoughts in `plugin_example.notes`, made by `migrations/001_notes.sql`.
-- **A webhook.** `capture` takes a signed POST and captures its text as a thought, as a Slack or Telegram plugin's would.
+- **A webhook.** `capture` takes a signed POST and captures its text as a thought, as a Slack or Telegram plugin's would. It refuses a delivery signed more than five minutes from the server's clock, either way, and runs a delivery it has seen once (`plugin_example.deliveries`, made by `migrations/002_deliveries.sql`).
 
 ## What it does
 
@@ -14,13 +14,23 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 | Pin a note to a thought | `example_add_note` | `POST /v1/plugins/example/notes` | `write` | `thought_id`, `note` (1 to 2000 characters) | `{ note: { id, thought_id, note, written_by, created_at } }` |
 | A thought's notes | `example_list_notes` | `GET /v1/plugins/example/notes` | `read` | `thought_id` | `{ notes: [...] }`, oldest first |
 
-**The webhook**, `POST /hooks/example/capture`, takes `{"text": "…"}` with `x-example-signature`, the hex HMAC-SHA256 of the raw body under the secret `OB1_HOOK_SECRETS` gives the example. Signed, it captures the text through the core as `hook:example` (trust `ingested`, source `example-hook`) and answers 202 with the thought's id. Unsigned or mis-signed, it answers 401; with no secret configured, 503. It is served only while `OB1_HOOKS` names the example, and reachable from outside only with `deploy/compose.hooks-public.yaml`:
+**The webhook**, `POST /hooks/example/capture`, takes `{"text": "…"}`, and an `"id"` (1 to 200 printable ASCII characters, no spaces) if the sender names its deliveries. It is signed over the time and the body. `x-example-timestamp` is the Unix time in seconds, and `x-example-signature` is the hex HMAC-SHA256 of `<timestamp>.<body>` (the raw body) under the secret `OB1_HOOK_SECRETS` gives the example.
+
+- **Signed within five minutes** of the server's clock, it captures the text through the core as `hook:example` (trust `ingested`, source `example-hook`) and answers 202 with the thought's id.
+- **Unsigned, mis-signed or with no timestamp**, it answers 401 (`BAD_SIGNATURE`, `NO_TIMESTAMP`). Signed but more than five minutes off, it answers 401 `STALE_DELIVERY`, so a recorded delivery cannot be resent later (SMD-2755).
+- **An id it has captured** is answered 200 with that thought's id and `"duplicate": true`, and runs nothing. One whose first delivery is still being captured is answered 409 `IN_FLIGHT`. A capture that fails gives the id back, so the sender's retry runs, and the claim of one that never finished (the server stopped mid-capture) lapses after three minutes for the same reason. Ids are kept eleven minutes, twice the tolerance and a minute. By then a resend of the same bytes is stale, but a retry the sender signs afresh with the same id is captured again.
+- **A capture the core refuses** is answered 422 `CORE_REFUSED`, with the core's code as `refused`. It is 503 when the core says the refusal is worth retrying (`retryable: true`), and the id is given back either way.
+- **Text with a NUL character**, which Postgres will not store, is answered 400 `BAD_TEXT` before any model call; a malformed id, 400 `BAD_ID`.
+- **With no secret configured**, it answers 503 `HOOK_NOT_CONFIGURED`.
+
+It is served only while `OB1_HOOKS` names the example, and reachable from outside only with `deploy/compose.hooks-public.yaml`:
 
 ```bash
 SECRET=<the example's secret in OB1_HOOK_SECRETS>
-BODY='{"text":"from a webhook"}'
-SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
-curl -X POST -H 'content-type: application/json' -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
+TS=$(date +%s)
+BODY='{"id":"delivery-'"$TS"'","text":"from a webhook"}'   # a new id each run: a resent id within eleven minutes runs nothing
+SIG=$(printf %s "$TS.$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+curl -X POST -H 'content-type: application/json' -H "x-example-timestamp: $TS" -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
 ```
 
 It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
@@ -39,7 +49,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    OB1_PLUGIN_DB_PASSWORD=<the generated password>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql`. The servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
@@ -61,3 +71,4 @@ Copy this directory to `plugins/<name>/` and set `name` in `index.ts` to the dir
 - **`403 FORBIDDEN` with `needs: "write"` or `"read"`.** The key's scope does not reach the operation: a read key cannot pin a note, and a capture-only key cannot read.
 - **`404 NO_SUCH_THOUGHT`.** The thought is not there, or the key cannot read it.
 - **`422 CORE_REFUSED`.** The core refused the `list_thoughts` call `recent` made; the message names the core's code.
+- **The webhook answers `401 STALE_DELIVERY`.** The delivery was signed more than five minutes from the server's clock: a resend of an old delivery, or a clock that is off on the sender or the server. A curl run of the recipe above signs the time it runs.
