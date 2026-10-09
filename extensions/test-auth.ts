@@ -602,9 +602,29 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
 {
   const handler = handlers[SERVERS.indexOf(K8S)];
   assert(handler !== undefined, "the module imported above");
-  const own = /const DEFAULT_LLM_TIMEOUT_S = (\d+);/.exec(readFileSync(join(ROOT, K8S.file), "utf8"))?.[1];
-  const core = /export const DEFAULT_LLM_TIMEOUT_S = (\d+);/.exec(readFileSync(join(ROOT, "server-portable/embed.ts"), "utf8"))?.[1];
-  assert(own !== undefined && own === core, `its default deadline is the core server's (${own} s, embed.ts ${core} s)`);
+  const k8sSource = readFileSync(join(ROOT, K8S.file), "utf8");
+  const embedSource = readFileSync(join(ROOT, "server-portable/embed.ts"), "utf8");
+  for (const name of ["DEFAULT_LLM_TIMEOUT_S", "PROVIDER_ERROR_CHARS"]) {
+    const own = new RegExp(`\\nconst ${name} = (\\d+);`).exec(k8sSource)?.[1];
+    const core = new RegExp(`\\nexport const ${name} = (\\d+);`).exec(embedSource)?.[1];
+    assert(own !== undefined && own === core, `its ${name} is the core server's (${own}, embed.ts ${core})`);
+  }
+  // The startup warning (review pass 6), on a second import made under each value: one the
+  // deadline cannot use is said, one it can is not.
+  for (const [value, warns] of [["300s", true], ["Infinity", true], ["2.5", false]] as const) {
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    process.env.OB1_LLM_TIMEOUT = value;
+    try {
+      await import(`${join(ROOT, K8S.file)}?timeout=${encodeURIComponent(value)}`);
+    } finally {
+      delete process.env.OB1_LLM_TIMEOUT;
+      console.warn = realWarn;
+    }
+    const said = warned.filter((l) => l.startsWith(`OB1_LLM_TIMEOUT="${value}" is not a positive number of seconds`));
+    assert(said.length === (warns ? 1 : 0), `OB1_LLM_TIMEOUT=${value} at start is ${warns ? "said once" : "taken without a word"} (${said.length} lines)`);
+  }
   if (handler) {
     env(K8S, KEYS);
     const realFetch = globalThis.fetch;

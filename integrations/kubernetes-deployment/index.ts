@@ -111,6 +111,8 @@ function thoughtUrl(id: string): string {
 
 /** server-portable/embed.ts's, held equal by extensions/test-auth.ts. */
 const DEFAULT_LLM_TIMEOUT_S = 120;
+/** How much of a provider's error body a message carries: embed.ts's, held equal the same way (review pass 6). */
+const PROVIDER_ERROR_CHARS = 500;
 /** OB1_LLM_TIMEOUT's seconds if it is a finite positive number (embed.ts's rule), else undefined. */
 function llmTimeoutOf(text: string | undefined): number | undefined {
   const n = text ? Number(text) : NaN;
@@ -163,7 +165,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     });
     // Read as the chat call's below, and an error body capped (review pass 3).
     const body = await bodyOf(r);
-    if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, 500)}`);
+    if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, PROVIDER_ERROR_CHARS)}`);
     let d: { data?: [{ embedding?: unknown }] } | null;
     try {
       d = JSON.parse(body);
@@ -223,7 +225,7 @@ Only extract what's explicitly there.`,
     if (e instanceof ProviderTimeout) return fallback("provider_timeout", e.message);
     throw e;
   }
-  if (!answer.ok) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, 500)}`);
+  if (!answer.ok) return fallback(`provider_${answer.status}`, `Chat completion request to ${CHAT_API_BASE} failed: ${answer.status} ${answer.text.slice(0, PROVIDER_ERROR_CHARS)}`);
   let d: { choices?: [{ message?: { content?: unknown } }] } | null;
   try {
     d = JSON.parse(answer.text);
