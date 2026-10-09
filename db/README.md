@@ -2528,6 +2528,86 @@ extraction, and the server group's `SELECT` on `ob1_config`), so the role needs
 every group `migrate.ts --grant` issues — the worker group gained `DELETE`
 on the snapshot for it (the grants table). test-live [31] drives it.
 
+## Sleep: the passes while the brain is quiet (SMD-1794)
+
+`sleep.ts` runs extraction and consolidation while the brain is quiet, and
+stops them within `--poll` seconds of the first live call being recorded —
+"dolphin sleep": one half works while the other keeps answering. The header
+of `db/sleep.ts` holds the mechanics; this is what an operator needs.
+
+```bash
+bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
+bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
+bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
+#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
+```
+
+**Running it.** Until SMD-2678's compose service, on the compose stack (whose
+Postgres publishes no port) run it in a one-off container of the `extract`
+service, which mounts the checkout and carries the server's model settings,
+`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL`, and `OB1_WORKER_KEY` when
+`deploy/.env` sets it — the command replaces the service's, so its refusal
+without the key does not apply, and the passes then say they write with no
+agent id. In the foreground, stopped with Ctrl-C; nothing restarts it:
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow
+```
+
+Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
+`OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
+another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
+id on what they write, and a role a plain `migrate.ts --grant` provisions (the
+`capture`, `worker` and `extraction` groups, `server` for the worker key). It
+has no `--job`.
+
+**What wakes it.** A write the audit recorded through a key not classified
+`ingested`, and — only for the owner, and only under the server's
+`OB1_QUERY_LOG=on` (off by default) — a read the server logged. Under a
+`--grant` role, or with the log off, only writes wake it; the start says which.
+board-sync's key is classified `ingested` on the stable brain; an unclassified
+key's writes wake it (reembed, ingest-records, a migration's backfill) until
+`SELECT set_agent_kind('<key name>', 'ingested')` says they are background
+work. The passes it runs write no audit row, so they never wake it.
+
+**What it does asleep.** Extraction alone until its pool drains, then
+consolidation beside it — the order "Start `extract` alone on a backlog" asks
+of an operator. A wake hard-stops both: every lease returned, the model call in
+hand aborted, the thoughts in hand moved to the back of the queue. A thought
+longer than every sleep is never finished while the brain keeps waking, and
+consolidation does not join while it is pending (SMD-2694). A failed row stays
+failed: `--retry-failed` is the operator's. A pass refusing at its start (the
+model not served, the key refused) after it got past its start earlier in this
+process is retried on SMD-2599's schedule (5 s, doubling, at most 5 min): that
+mends a model re-pulled, a 402 cleared by topping up credit, a gateway's
+passing 401/403/404 — not a revoked worker key or another process's
+`--switch-key`, which are retried until you restart it with the right key. A
+refusal at a pass's first start, or mid-pass (the provider refusing the
+request itself), ends the scheduler with 2, as it ends a follower — so the
+same 402 ends it mid-pass and is retried when a sleep's start meets it first.
+
+**Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute:
+preflight's `workers` row reads "running a pass" while asleep, "alive" while
+awake, "its last pass failed" while a pass's last word was a failure (into the
+next sleep, until one of its passes stamps), and stopped once it ends. A pass
+waiting at its start for a provider that does not answer stamps nothing, so the
+row keeps its last word then. Its `consolidate pass` row reads a fresh one as the
+scheduler working the current judge's key, rather than asking for a second
+worker. Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
+
+**From the `workers` profile.** Its followers do not yield. Stop them
+(`podman compose -f deploy/compose.yaml --profile workers stop extract
+consolidate`), stop starting them (take `workers` out of `COMPOSE_PROFILES` in
+`deploy/.env`, and out of any `--profile workers up`), and delete their
+`heartbeat:extract:…` and `heartbeat:consolidate:…` rows, or preflight's
+`workers` row asks for them back. The start and `--dry-run` name any with a
+fresh heartbeat.
+
+Not yet here: a budget per pass and per sleep and the re-derive pass
+(SMD-2679), a compose service with preflight's own `sleep` row (SMD-2678).
+test-live [38] drives it against a stub model.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
@@ -3263,7 +3343,9 @@ its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts` and `consolidate.ts`. A one-shot run
+and the `--follow` of `extract-entities.ts` and `consolidate.ts` — and
+`sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
+asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
 an audit.
 
@@ -3529,7 +3611,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2507 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1136 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1158 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

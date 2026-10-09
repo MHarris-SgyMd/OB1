@@ -857,8 +857,12 @@ A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 This is the baseline for the sleep scheduler (SMD-1794): always on, at low
-concurrency. The scheduler will run these passes when the logs go quiet, under
-a budget, and yield to live traffic.
+concurrency. `db/sleep.ts` runs these passes only while the logs are quiet
+and stops them on a live call; until its compose service (SMD-2678) it runs
+in a one-off container of this profile's `extract` service, with the
+profile's own followers stopped — `db/README.md`, "Sleep", gives the command
+and how to move off this profile, whose followers do not yield. It has no
+budget yet (SMD-2679).
 
 ## Refreshing a tier
 
