@@ -5219,7 +5219,8 @@ DATABASE_URL=… bun eval-projection-replay.ts --sample 21 --edit 10 --json out.
 ```
 
 The dogfood brain publishes no port (SMD-1844), so the run below went through
-`podman run --network open-brain_default --env-file deploy/.env` with the
+`podman run --network open-brain_default --env-file deploy/.env` (since
+SMD-2583, `--network open-brain_data --network open-brain_egress`) with the
 worktree mounted read-only, the URL built inside the container, host Ollama at
 `host.containers.internal` as the server dials it.
 

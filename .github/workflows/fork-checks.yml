@@ -1274,18 +1274,19 @@ jobs:
       # (an internal network) — and one on `data` can, both ways, so a probe
       # that could not connect at all would fail here rather than pass. Each
       # dial gives up after 4 s. The probe is the server's image, which has
-      # Bun; nothing is pulled.
+      # Bun, read from compose as the later steps read it; nothing is pulled.
       - name: Postgres answers on the data network alone
         working-directory: deploy
         run: |
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
           ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_data").IPAddress}}' "$(docker compose -f compose.yaml ps -q postgres)")
           [ -n "$ip" ] || { echo "Postgres has no address on open-brain_data" >&2; exit 1; }
           # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
           dial='const [host, port] = process.argv.slice(-2); const s = (await import("node:net")).connect({ host, port: Number(port) }); setTimeout(() => { console.log(`${host}: no answer in 4 s`); process.exit(1); }, 4000); s.on("connect", () => { console.log(`${host}: connected`); process.exit(0); }); s.on("error", (e) => { console.log(`${host}: ${e.code}`); process.exit(1); });'
           for target in postgres "$ip"; do
-            docker run --rm --network open-brain_data --entrypoint bun open-brain-server -e "$dial" "$target" 5432 \
+            docker run --rm --network open-brain_data --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432 \
               || { echo "a container on open-brain_data could not reach Postgres as $target, so the refusal below proves nothing" >&2; exit 1; }
-            rc=0; out=$(docker run --rm --network open-brain_egress --entrypoint bun open-brain-server -e "$dial" "$target" 5432) || rc=$?
+            rc=0; out=$(docker run --rm --network open-brain_egress --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432) || rc=$?
             [ "$rc" != 0 ] || { echo "a container on open-brain_egress alone opened a connection to Postgres as $target" >&2; exit 1; }
             # docker's own failure (125: no such network) is not a refusal.
             if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then

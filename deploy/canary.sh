@@ -66,10 +66,11 @@
 #        compose reads stable's (a value built from the shell, a byte that is
 #        not UTF-8, stable's database password inside a value).
 #      Stable with no tier stamp is stamped tier=stable;
-#   2. makes the canary's env file if there is none, and starts the canary's
-#      Postgres; once its standing servers are stopped (4), sets its database's
-#      password to that file's, which a canary from before SMD-2583 had as
-#      stable's;
+#   2. makes the canary's env file if there is none (before stable's stamp,
+#      so a file that cannot be made is a refusal like those above), and
+#      starts the canary's Postgres; once its standing servers are stopped
+#      (4), sets its database's password to that file's, which a canary from
+#      before SMD-2583 had as stable's;
 #   3. refreshes it from stable through deploy/tier.sh (stable's password from
 #      stable's env file, the canary's from its own), on each project's
 #      database network — `data` (SMD-2583), or `default` for a stable from
@@ -276,7 +277,7 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY
 # value is rendered through a service's environment and read back as JSON,
 # with compose run on a bare environment — the container runtime's own
 # variables (DOCKER_*, PODMAN_*, CONTAINER(S)_*, the ssh agent, PATH, HOME,
-# XDG_*) and nothing else — so the files are compared as files and the
+# USER, LOGNAME, TMPDIR, XDG_*) and nothing else — so the files are compared as files and the
 # shell's variables, which compose would otherwise print and let win, play no
 # part. The names are those `config --environment` prints for the file and
 # not for an empty one: a superset, since a quoted value's second line can
