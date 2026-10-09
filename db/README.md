@@ -169,6 +169,68 @@ evidence backfill runs as written, the acceptances out of its sight (above);
 back and corrects the own-key labels an earlier paste of the body left
 (SMD-1193, SMD-1421).
 
+### 6. Plugin migrations (SMD-2310)
+
+A plugin (`plugins/<name>/`) keeps its tables in `plugins/<name>/migrations/`,
+named `NNN_name.sql` under the core's rule. The plugins the brain runs are
+named in `OB1_PLUGINS`, which the compose migrator reads from `deploy/.env` as
+the servers do. A plain run applies their migrations **after the core's**, and
+only when the core's are clean:
+
+- **The role and the schema.** Each plugin gets its own Postgres role,
+  `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
+  hyphen in the name reads as `_`). Both are made by any run that names the
+  plugin and finds one missing, even with nothing pending, and are never
+  dropped. A migrator that is no superuser takes membership in the role it
+  made (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand it the schema
+  and run as it.
+- **A restored brain.** A dump restored without its owners brings the schema
+  back owned by the restoring role: with `--no-owner`, as a tier's refresh
+  restores (`tier.ts`), or into a cluster without the plugin's role (roles
+  are the cluster's, not the dump's), where the dump's `ALTER … OWNER` fails. A run
+  that names the plugin makes the role and hands it back the schema and every
+  table, view, sequence, routine and type in it that another role owns
+  (`db/config.mjs`'s `pluginForeignOwned`). An `ALTER … OWNER` needs the
+  migrator to own the object, or be a superuser.
+- **Between files.** After each file the migrator discards the session's temp
+  tables and restores its search path, so one plugin's leftovers never meet
+  the next plugin's SQL.
+- **How a file runs.** Each file runs in its own transaction under
+  `SET LOCAL ROLE ob1_plugin_<name>`, with the plugin's schema first on the
+  path. A table the plugin creates is its own, named bare. The role holds
+  nothing on the core's tables, so a migration that reads or writes one is
+  refused by Postgres (`permission denied`) and records nothing.
+- **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
+  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`.
+  Nothing that reads the core's ledger sees it. An edited file is a drift and
+  exits 1, as a core file does.
+- **A plugin not named** is not read. Its schema, tables and ledger rows stay
+  as they are.
+
+`--dry-run` lists each plugin's pending files under its own heading: the sha,
+and the role and schema each would run as. It makes nothing. `--baseline` and
+`--reapply` leave plugins to a plain run, and say so. A name that is no plugin,
+or one given twice, is refused before anything runs (exit 2).
+
+```bash
+OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL" --dry-run
+```
+
+The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
+`SET ROLE` to what it creates; the compose stack's `postgres` can. The server
+reaches a plugin's tables as the same role (`ctx.db`), so its own role must be
+able to `SET ROLE` to it (the `SET` option on PG 16). Preflight's `plugin
+tables` row checks that, the role, the schema, that both the schema and every
+object in it are the plugin role's, by the migrator's own list, and every
+file recorded at its sha. `--grant` does not yet give a
+non-superuser server role that membership: SMD-2728. The server runs each
+plugin's transactions on a small pool of their own, so what a plugin's SQL
+leaves on a session, such as a temp table (which Postgres searches before any
+schema) or a session setting, never meets a core query. `SET ROLE` holds a
+plugin's SQL to its own tables only while that SQL does not undo the role, so
+role changes, transaction control and session settings in a plugin's code are
+the consistency checker's to refuse, and a plugin is curated.
+
 ## Expected outcome
 
 `bun test-schema.ts` prints `2551 assertions: 2551 passed, 0 failed` and `PASS`.

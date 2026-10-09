@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
-import { visibleToolNames } from "./tools.ts";
+import { unlocks, visibleToolNames } from "./tools.ts";
 import { loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
 import type { Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
@@ -38,6 +38,9 @@ process.env.OPENROUTER_API_KEY = "stub-openrouter";
 process.env.OB1_PLUGINS = "example";
 const sha = (raw: string) => createHash("sha256").update(raw).digest("hex");
 process.env.MCP_ACCESS_KEYS = `r:read:${sha("read-raw")},w:write:${sha("write-raw")},c:capture:${sha("cap-raw")}`;
+
+/** The example's tools a key of `scope` reaches: its manifest through the gate — what whoami and tools/list add to the core's. */
+const exampleTools = (scope: "read" | "write" | "capture") => loadPlugins("example")[0].operations.filter((o) => unlocks({ scope }, o.scope)).map((o) => o.tool).sort();
 
 /** A manifest with one operation, `fields` over a sound one. */
 const withOp = (name: string, key: string, fields: Record<string, unknown> = {}): PluginManifest =>
@@ -111,6 +114,9 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   const op = ex.operations[0];
   assert(ex.name === "example" && op.tool === "example_recent" && op.path === "/v1/plugins/example/recent" && op.scope === "read" && op.method === "GET", `the example's operation: ${op.tool} at ${op.method} ${op.path}, scope ${op.scope}`);
   assert(op.annotations.readOnlyHint === true, "a read operation is annotated read-only");
+  assert(exampleTools("read").join() === "example_list_notes,example_recent" && exampleTools("write").join() === "example_add_note,example_list_notes,example_recent" && exampleTools("capture").length === 0,
+    `the example's tools by scope: a read key its two reads, a write key all three, a capture key none (${exampleTools("read")} / ${exampleTools("write")} / ${exampleTools("capture")})`);
+  assert(ex.operations.find((o) => o.key === "add_note")?.annotations.readOnlyHint === undefined, "a write operation carries no read-only hint");
   let thrown = "";
   try { loadPlugins("example,crm"); } catch (e) { thrown = (e as Error).message; }
   assert(/OB1_PLUGINS names "crm", which is no plugin in this build \(known: example\)/.test(thrown), `a name that is no plugin throws, naming it and the known ones (${thrown})`);
@@ -156,7 +162,7 @@ console.log("\n[3] Enabled, the operation is in whoami for the scopes that reach
     const on = await json(await hit(enabled, "/v1/whoami", { key }));
     const ops = on.body.operations as string[];
     assert(ops.includes("example_recent") === sees, `a ${scope} key's whoami ${sees ? "lists" : "does not list"} example_recent`);
-    const want = [...visibleToolNames({ scope }), ...(sees ? ["example_recent"] : [])].sort();
+    const want = [...visibleToolNames({ scope }), ...exampleTools(scope)].sort();
     assert(JSON.stringify(ops) === JSON.stringify(want), `a ${scope} key's whoami is the core's operations and the plugin's it may call, sorted`);
     const off = await json(await hit(disabled, "/v1/whoami", { key }));
     assert(!(off.body.operations as string[]).includes("example_recent"), `disabled, a ${scope} key's whoami does not list it`);
@@ -346,7 +352,7 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   for (const [key, scope, sees] of [["read-raw", "read", true], ["write-raw", "write", true], ["cap-raw", "capture", false]] as const) {
     const tools = ((await rpc(key, "tools/list", {})).result?.tools ?? []) as Tool[];
     const names = tools.map((t) => t.name).sort();
-    const want = [...visibleToolNames({ scope }), ...(sees ? ["example_recent"] : [])].sort();
+    const want = [...visibleToolNames({ scope }), ...exampleTools(scope)].sort();
     assert(JSON.stringify(names) === JSON.stringify(want), `a ${scope} key's tools/list is the core's and ${sees ? "example_recent" : "no plugin tool"} (${names.filter((n) => n.startsWith("example")).join() || "none"})`);
     if (sees) {
       const tool = tools.find((t) => t.name === "example_recent")!;
@@ -409,6 +415,11 @@ console.log("\n[8] Preflight: a name in OB1_PLUGINS that is no plugin fails the 
   assert(bad.exit !== 0 && bad.row?.status === "fail" && /"nope", which is no plugin/.test(bad.row.detail), `an unknown name fails the plugins row (${JSON.stringify(bad.row)})`);
   const good = run("example");
   assert(good.row?.status === "ok" && /example — enabled/.test(good.row.detail), `a sound name is reported enabled (${JSON.stringify(good.row)})`);
+  // A plugin with tables on the PostgREST store: its operations would fail at their first call.
+  const p = Bun.spawnSync(["bun", "--no-env-file", "preflight.ts", "--json"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_PLUGINS: "example", OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "stub" }, stdout: "pipe", stderr: "pipe" });
+  const parsed = JSON.parse(p.stdout.toString() || "{}") as { checks?: { name: string; status: string; detail: string }[] } | { name: string; status: string; detail: string }[];
+  const postgrest = (Array.isArray(parsed) ? parsed : parsed.checks ?? []).find((c) => c.name === "plugins");
+  assert(postgrest?.status === "fail" && /example keeps tables, which need the SQL store/.test(postgrest.detail), `a plugin with tables on the PostgREST store fails the plugins row (${JSON.stringify(postgrest)})`);
 }
 
 report();

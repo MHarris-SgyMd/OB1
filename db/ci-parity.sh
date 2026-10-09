@@ -83,6 +83,7 @@ main() {
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
+  run server-portable    test-plugins-sql.ts
   run server-portable    test-local-provider.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts

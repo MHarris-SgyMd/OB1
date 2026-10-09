@@ -481,6 +481,13 @@ export async function dropSchema(url: string): Promise<void> {
     }
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
+    // The plugins' (SMD-2310): each plugin_<name> schema the migrator made,
+    // with its tables, and their ledger. Their roles are the cluster's and
+    // stay: a later run finds one and makes no second.
+    for (const { nspname } of (await admin`SELECT nspname FROM pg_namespace WHERE starts_with(nspname, 'plugin_')`) as { nspname: string }[]) {
+      await admin.unsafe(`DROP SCHEMA ${quoteIdent(nspname)} CASCADE`);
+    }
+    await admin.unsafe("DROP TABLE IF EXISTS public.plugin_migrations");
     // 014 seeds two database-level settings. They are not schema, so a fresh
     // start must clear them too, or every later run inherits whatever the
     // previous one left. Best effort: only the owner may, and a throwaway

@@ -35,6 +35,10 @@ import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { pluginNames, pluginProblem } from "./core/plugins.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { pluginForeignOwned, pluginIdents } from "../db/config.mjs";
+import { migrationSha } from "../db/version.mjs";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -48,6 +52,59 @@ const asJson = args.includes("--json");
 const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
+
+/** A plugin's migrations directory, in the image's plugins/ as in a checkout (SMD-2310). */
+const pluginMigrationsDir = (name: string) => join(import.meta.dir, "..", "plugins", name, "migrations");
+/** A plugin's migration files, in order; none for a plugin with no tables. */
+const pluginMigrationFiles = (name: string): string[] => {
+  const dir = pluginMigrationsDir(name);
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sql")).sort() : [];
+};
+
+/**
+ * What an enabled plugin's tables lack (SMD-2310), one phrase each: its role,
+ * its schema, this connection's right to SET ROLE to the role, a migration
+ * file plugin_migrations does not record, or one recorded at another sha.
+ * A plugin with no migrations has no tables to lack. The files are the
+ * image's plugins/, as the migrator reads them.
+ */
+async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>, names: string[]): Promise<string[]> {
+  const problems: string[] = [];
+  const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
+  const recorded = new Map<string, string>(
+    ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
+  );
+  for (const name of names) {
+    const dir = pluginMigrationsDir(name);
+    const files = pluginMigrationFiles(name);
+    if (files.length === 0) continue;
+    const { schema, role } = pluginIdents(name);
+    // SET ROLE needs the SET option from PG 16, which MEMBER does not read: a
+    // `GRANT … WITH SET FALSE` is membership a SET ROLE refuses (review pass 1).
+    const [r] = (await sql`
+      SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) AS role_present,
+             EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS schema_present,
+             CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
+                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(current_user, ${role}, 'SET')
+                  ELSE pg_has_role(current_user, ${role}, 'MEMBER') END AS can_set,
+             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null }[];
+    if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
+    if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
+    if (!r.can_set) problems.push(`${name}: this server's role cannot SET ROLE ${role} (GRANT ${role} TO the server's role, WITH SET TRUE on PG 16 and later)`);
+    // Owned by another role — a brain restored without the plugin's role, say
+    // — the plugin's role reaches none of it, and every ctx.db call is
+    // refused. What the migrator hands back, read by its own query
+    // (db/config.mjs's pluginForeignOwned).
+    const foreign = await pluginForeignOwned(sql, schema, role);
+    if (r.schema_owner !== role || foreign.length > 0)
+      problems.push(`${name}: not owned by ${role}: ${[...(r.schema_owner !== role ? [`schema ${schema} (${r.schema_owner})`] : []), ...foreign.map((f) => `${f.ident} (${f.owner})`)].join(", ")} — a migrator run that names the plugin hands them back`);
+    const pending = files.filter((f) => !recorded.has(`${name}/${f}`));
+    const drifted = files.filter((f) => recorded.has(`${name}/${f}`) && recorded.get(`${name}/${f}`) !== migrationSha(readFileSync(join(dir, f), "utf8")));
+    if (pending.length) problems.push(`${name}: ${pending.length} migration(s) not applied (${pending.join(", ")})`);
+    if (drifted.length) problems.push(`${name}: ${drifted.join(", ")} changed after it was applied`);
+  }
+  return problems;
+}
 
 // Trimmed once, as root.ts's initEnv trims the server's — the gate judges the
 // values the server will read (SMD-1843).
@@ -170,7 +227,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -778,7 +835,14 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
 {
   const problem = pluginProblem(env.OB1_PLUGINS);
   const names = pluginNames(env.OB1_PLUGINS);
+  // A plugin with tables reaches them through the SQL store alone: on the
+  // PostgREST store its operations would fail at their first call, and the
+  // plugin tables row below runs only on the SQL path (review pass 1).
+  const tabled = names.filter((n) => pluginMigrationFiles(n).length > 0);
   if (problem) add("plugins", "fail", problem, "Name plugins from plugins/registry.ts in OB1_PLUGINS, comma-separated, or unset it");
+  else if (store === "postgrest" && tabled.length)
+    add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
+        "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
 }
 
@@ -4076,6 +4140,24 @@ if (configFailed) {
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)}, past this server's tree (${tree}) — a newer tree migrated this brain`,
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
+
+        // An enabled plugin's tables (SMD-2310): its role, its schema, this
+        // role's right to SET ROLE to it, and each of its migration files
+        // recorded in plugin_migrations at the file's sha. Failed, not warned:
+        // the server would list operations that fail at their first call.
+        // Silent with no plugin enabled, or one with no migrations; an
+        // unknown name is the plugins row's.
+        if (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null) {
+          try {
+            const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS));
+            if (problems.length)
+              add("plugin tables", "fail", problems.join("; "),
+                  "Apply them: the compose migrator reads OB1_PLUGINS from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+            else add("plugin tables", "ok", `${pluginNames(env.OB1_PLUGINS).join(", ")} — each plugin's role, schema and migrations in place`);
+          } catch (e) {
+            add("plugin tables", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_roles, pg_namespace and plugin_migrations.");
+          }
+        }
 
         // The version the brain was migrated under (044, SMD-1804): schema_version
         // in ob1_config, reported beside the highest migration the ledger records.
