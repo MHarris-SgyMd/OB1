@@ -271,9 +271,14 @@ hands the proxy as an inline config (`routes.yaml` in the directory Traefik's
 file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
 `compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
-table built in `scripts/check-fork-consistency.ts` (check 28) and a
-combination in CI's "The proxy loads only the held route tables"; no compose
-file defines a config that is not a route table (SMD-2658). The same text is a label on the proxy, so
+table built in `scripts/check-fork-consistency.ts` (check 28); no compose
+file defines a config that is not a route table (SMD-2658). Every overlay is
+an `OVERLAYS` entry there, naming the keys it sets on each service, and a
+combination in CI's "The proxy loads only the held route tables", whose
+`declared()` names the paths it may change in a render: that step holds each
+combination equal to `compose.yaml` alone but for those paths, the proxy and
+the configs, so an overlay cannot add an alias, a service or a namespace beside
+what it says it does (SMD-2685). The same text is a label on the proxy, so
 an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
@@ -302,7 +307,15 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 holds the table byte for byte. A note on a route goes in the YAML comments
 above the block, never in it: Traefik renders a route file as a Go template
 before it reads the YAML, so a comment line in the table is not inert
-(SMD-2658). Not container labels: Traefik's label-driven registry reads them
+(SMD-2658). The service's place on the mesh, and the one name it answers to
+there, go in the same check's `SERVICE_NETWORKS`: only a backend answers to its
+own mesh name, since two containers under one alias leave the proxy sending
+every request to whichever registered first (SMD-2685, measured). Its keys are
+`SERVICE_KEYS`, which act inside its own container; a capability is a
+`CONFINEMENT` entry, its mounts and build are `SERVICE_MOUNTS` and
+`SERVICE_BUILDS` entries, a named volume it adds is in `COMPOSE_VOLUMES`, and
+nothing joins another service's namespaces. Not container labels: Traefik's
+label-driven registry reads them
 through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
