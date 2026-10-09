@@ -6401,7 +6401,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     try {
       const without = await rejudge("duplicate");
       const noList = await consolidate("--list", "relations");
-      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <url>\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
+      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
         `without 084 the pass counts the verdict and says relations are not stored, and --list relations names the migration (${without.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     } finally {
       await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
@@ -6416,6 +6416,108 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
       `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+    // Review pass 4: a side superseded on the NEWER thought is marked too.
+    const newerSuperseder = await seed("The on-call rota, newer still.", 15, 0, ["rota-next"]);
+    await sql`UPDATE thoughts SET supersedes = ${rotaNew}::uuid WHERE id = ${newerSuperseder}::uuid`;
+    const markedNewer = await consolidate("--list", "relations");
+    assert(/\] related  .*OLDER SUPERSEDED  NEWER SUPERSEDED/.test(markedNewer.out),
+      `--list relations marks a relation whose newer side is superseded (${markedNewer.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+    await sql`UPDATE thoughts SET supersedes = NULL WHERE id IN (${superseder}::uuid, ${newerSuperseder}::uuid)`;
+
+    // Review pass 4 (run-it: pass 3's role paths had no test). Under a role
+    // granted without the structure group: --status warns, naming the group
+    // and this role; a follower says at its start that it stores none, takes
+    // the grant up on its next poll, and a grant revoked while the judge holds
+    // the call stops relations there without failing the thought; the
+    // summary reports the relation stored and the verdicts counted only.
+    const RROLE = "ob1_live_relations";
+    const rUrl = URL_.replace(/\/\/[^@]*@/, `//${RROLE}:ob1relations@`);
+    const [{ mayCreate: mayCreateR }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (rUrl === URL_ || !mayCreateR) {
+      skip("a consolidation role without the structure group stores no relations and says so, and a follower takes a grant up", rUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropR = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RROLE}') THEN EXECUTE 'DROP OWNED BY ${RROLE}'; EXECUTE 'DROP ROLE ${RROLE}'; END IF; END $$`);
+      await dropR();
+      const rEnv = { ...env, DATABASE_URL: rUrl };
+      const asRole = async (opts: Omit<ConsolidateOptions, "writer">) => {
+        const lines: string[] = [];
+        const code = await runConsolidate({ url: rUrl, env: rEnv, ...opts, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        return { code, out: lines.join("\n") };
+      };
+      const claimOf = async () => ((await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`)[0]?.status as string | undefined);
+      const standing = async () => (await sql`SELECT payload->>'relation' AS relation, payload->>'judge_key' AS key FROM thought_facets
+                                               WHERE kind = 'relation' AND thought_id = ${rotaNew}::uuid AND valid_until IS NULL`) as { relation: string; key: string }[];
+      const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 500) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+      try {
+        await sql.unsafe(`CREATE ROLE ${RROLE} LOGIN PASSWORD 'ob1relations'`);
+        const granted = await migrateInProcess({ grant: RROLE, groups: "capture,server,worker,extraction" });
+        assert(granted.code === 0, `the role is granted capture, server, worker and extraction (exit ${granted.code}: ${granted.stderr.trim().slice(0, 200)})`);
+        const roleStatus = await asRole({ status: true });
+        assert(roleStatus.code === 0 && roleStatus.out.includes(`relations: a run under this role would store none — this role lacks INSERT on thought_facets (the structure group) — cd db && bun migrate.ts --url <owner's url> --grant ${RROLE} --groups structure (`),
+          `--status under a role without the structure group says a run would store none, naming the group and the role (${roleStatus.out.split("\n").find((l) => /would store none/.test(l))?.trim().slice(0, 220)})`);
+
+        rotaAnswer = "related";
+        rotaConfidence = 0.85;
+        await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+        const ac = new AbortController();
+        const lines: string[] = [];
+        const following = runConsolidate({ url: rUrl, env: rEnv, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        try {
+          await waitFor(async () => (await claimOf()) === "succeeded");
+          const offFirst = await claimOf();
+          const startSaid = lines.some((l) => l.startsWith("  relations: not stored this run — this role lacks INSERT on thought_facets (the structure group)"));
+          assert(offFirst === "succeeded" && startSaid && (await standing()).every((r) => r.key !== KEY),
+            `a follower under that role says at its start that it stores none, and judges the pair without storing it (${offFirst}; ${JSON.stringify(await standing())})`);
+
+          const more = await migrateInProcess({ grant: RROLE, groups: "structure" });
+          await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+          await waitFor(async () => (await standing()).some((r) => r.key === KEY));
+          assert(more.code === 0 && lines.includes("  relations: stored from this poll on") && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
+            `granted the structure group, the follower stores relations from its next poll (${JSON.stringify(await standing())})`);
+
+          // The revoke lands while the judge holds the call: the write is refused.
+          rotaAnswer = "duplicate";
+          onJudge = async () => { onJudge = null; await sql.unsafe(`REVOKE INSERT ON thought_facets FROM ${RROLE}`); };
+          await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+          await waitFor(async () => (await claimOf()) !== undefined && (await claimOf()) !== "pending" && (await claimOf()) !== "claimed");
+          const afterRevoke = await claimOf();
+          assert(afterRevoke === "succeeded" && lines.some((l) => l.startsWith("  relations: not stored from this pair on — this role lacks INSERT on thought_facets")) &&
+                 JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
+            `a grant revoked mid-pass stops relations at that pair, which succeeds with its standing relation untouched, rather than failing the thought (${afterRevoke}; ${lines.find((l) => /from this pair on/.test(l))?.trim().slice(0, 120)})`);
+        } finally {
+          onJudge = null;
+          ac.abort();
+          await Promise.race([following, Bun.sleep(10_000)]);
+        }
+        const summary = lines.find((l) => /^ {2}relations: \d+ added/.test(l)) ?? "";
+        assert(/^ {2}relations: 0 added, 0 kept, 1 replaced, 0 closed; 2 related, evolves or duplicate verdict\(s\) counted only, judged while relations were not stored — this role lacks INSERT on thought_facets/.test(summary),
+          `the summary of a run that stored relations for part of it gives what it stored and what it counted only (${summary.trim().slice(0, 200)})`);
+
+        // The remedy names only what the role lacks; an UPDATE granted on a column is enough.
+        await sql.unsafe(`GRANT INSERT ON thought_facets TO ${RROLE}; REVOKE UPDATE ON thought_facets FROM ${RROLE}; GRANT UPDATE (valid_until) ON thought_facets TO ${RROLE}; REVOKE UPDATE ON derivations FROM ${RROLE}`);
+        const partial = await asRole({ status: true });
+        assert(partial.out.includes(`this role lacks UPDATE on derivations (the capture group) — cd db && bun migrate.ts --url <owner's url> --grant ${RROLE} --groups capture`) && !/lacks[^—]*thought_facets/.test(partial.out),
+          `the remedy names the one privilege the role lacks, and an UPDATE on thought_facets' column counts (${partial.out.split("\n").find((l) => /would store none/.test(l))?.trim().slice(0, 200)})`);
+      } finally {
+        await dropR();
+      }
+    }
+
+    // Review pass 4 (walkthrough): a thought this key judged before 084 was
+    // applied is counted, with the statement that re-pools exactly those; an
+    // edge on a text edited since is counted beside the standing ones.
+    await sql`UPDATE thought_work_claims SET finished_at = (SELECT applied_at FROM schema_migrations WHERE name LIKE '084%') - interval '1 day'
+               WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+    await sql`UPDATE thoughts SET content = content || ' — and weekends' WHERE id = ${rotaOld}::uuid`;
+    const before084 = await consolidate("--status");
+    const hint = before084.out.split("\n").find((l) => /judged under this key before 084/.test(l)) ?? "";
+    const stmt = /: (DELETE FROM thought_work_claims .*)$/.exec(hint)?.[1];
+    assert(/relations: 1 thought\(s\) judged under this key before 084 was applied have none/.test(hint) && stmt?.includes(`work_type = '${KEY}'`) === true && /1 on a text edited since judged/.test(before084.out),
+      `--status counts the thoughts judged before 084 with the statement to re-pool them, and the edges on an edited text (${hint.trim().slice(0, 160)})`);
+    if (stmt) await sql.unsafe(stmt);
+    const repooled = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`) as { id: string }[];
+    const [{ others }] = (await sql`SELECT count(*)::int AS others FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'succeeded'`) as { others: number }[];
+    assert(stmt !== undefined && repooled.length === 0 && others > 0, `…and that statement clears exactly those claims (${others} other succeeded claim(s) kept)`);
   }
 
   judge.stop(true);
