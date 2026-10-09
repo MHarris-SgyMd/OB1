@@ -124,6 +124,8 @@ export class SqlStore implements ThoughtStore {
    * other plugin uses (review pass 1).
    */
   private readonly pluginPools = new Map<string, SQL>();
+  /** The plugins whose pool has been seen logged in as PLUGIN_LOGIN_ROLE: checked once, at its first transaction. */
+  private readonly pluginLogins = new Set<string>();
   /** Where plugins' SQL connects: as the plugin login role (PLUGIN_LOGIN_ROLE), never as this store's role; null with no password set. */
   private readonly pluginUrl: string | null;
 
@@ -966,6 +968,12 @@ export class SqlStore implements ThoughtStore {
       this.pluginPools.set(plugin, pool);
     }
     return pool.begin(async (tx: SQL) => {
+      // The pool's own login, once: plugin SQL never runs on the server's role (PR 3 review pass 2).
+      if (!this.pluginLogins.has(plugin)) {
+        const [{ who }] = (await tx`SELECT session_user AS who`) as { who: string }[];
+        if (who !== PLUGIN_LOGIN_ROLE) throw new Error(`a plugin's pool logged in as ${who}, not ${PLUGIN_LOGIN_ROLE}`);
+        this.pluginLogins.add(plugin);
+      }
       await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`);
       await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
       // A template's own strings array alone: frozen, with its frozen raw

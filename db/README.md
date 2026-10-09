@@ -182,7 +182,9 @@ only when the core's are clean:
   role and nothing on the core. A run makes it with `OB1_PLUGIN_DB_PASSWORD`
   when it is missing, and never changes an existing role's password: the
   servers log in with the one it was made with. A run that would apply a
-  plugin's file without the password is refused before anything runs (exit 2).
+  plugin's file, or make the role, without the password is refused before
+  anything runs (exit 2); one with nothing of the plugins' to do asks for it
+  not at all.
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
   hyphen in the name reads as `_`).
@@ -200,8 +202,9 @@ only when the core's are clean:
   Neither role holds anything on the core's tables, so a migration that reads
   or writes one is refused by Postgres (`permission denied`). That holds even
   for SQL that undoes the plugin's role (`END;`, `RESET ROLE`): it lands on
-  `ob1_plugins`, not on the migrator. After each file the login connection's
-  temp tables are discarded.
+  `ob1_plugins`, not on the migrator — which could `SET ROLE` to another
+  plugin's role from there, but not reach the core. After each file the login
+  connection's temp tables are discarded.
 - **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
   name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`,
   by the migrator's own connection once the file has committed. Nothing that
@@ -230,8 +233,10 @@ query. A temp table, for one, is searched before any schema. Preflight's
 `plugin tables` row checks:
 
 - that `ob1_plugins` exists, can log in with the server's
-  `OB1_PLUGIN_DB_PASSWORD`, is no superuser and NOINHERIT, and holds no
-  privilege on a core relation;
+  `OB1_PLUGIN_DB_PASSWORD` (and is who the connection is: a database URL with
+  no host cannot have its user replaced, and is refused), is no superuser and
+  NOINHERIT, is a member of no role but the plugins' and inherits none by a
+  grant's own option, and holds no privilege on a core relation;
 - that it holds `SET` on each plugin's role;
 - the plugin's role and schema, and that both the schema and every table in it
   are the plugin role's (a restore with `--no-owner` leaves them another's);

@@ -23,6 +23,7 @@ import { createRestApp } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
+import { pluginLoginUrl } from "../db/config.mjs";
 
 const { assert, report } = createAssert();
 
@@ -132,6 +133,13 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   try { loadPlugins("", [withOp("Bad", "x")]); } catch (e) { thrown = (e as Error).message; }
   assert(/a plugin manifest is malformed/.test(thrown), "a malformed manifest in the tree throws even when no plugin is enabled");
   assert(pluginProblem("nope") !== null && pluginProblem("example") === null && pluginProblem(undefined) === null, "pluginProblem: the throw as a sentence, null when sound");
+  // The plugin login role's URL: its user replaced, its password encoded, and a URL with no host refused —
+  // the parser ignores a user set on one, and the connection would be the server's own role.
+  const login = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain?sslmode=disable", "a%41b@c:d/e#f?g&h=i"));
+  assert(login.username === "ob1_plugins" && decodeURIComponent(login.password) === "a%41b@c:d/e#f?g&h=i" && login.host === "db:5432" && login.search === "?sslmode=disable", "the login URL: the user replaced, the password encoded (a % kept), the rest kept");
+  let noHost = "";
+  try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p"); } catch (e) { noHost = (e as Error).message; }
+  assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);
 }
 
 // ── A stub core: each operation answers what the case below asks of it ──────

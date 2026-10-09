@@ -50,7 +50,8 @@ async function runMigrate(opts: { plugins?: string; dryRun?: boolean; reapply?: 
 }
 const sql = new SQL({ url: URL_, max: 2 });
 /** The plugin login role's password (OB1_PLUGIN_DB_PASSWORD): the migrator makes ob1_plugins with it, the servers log in with it. */
-const PLUGIN_PW = "smd2310-plugins-pw";
+// URL-special characters, `%` among them, so the login URL's encoding is in every run (PR 3 review pass 2).
+const PLUGIN_PW = "smd2310 %41@:/#?&=pw";
 /** A connection as the plugin login role, as the servers' plugin pools and the migrator's plugin phase log in. */
 const asLogin = new SQL({ url: pluginLoginUrl(URL_, PLUGIN_PW), max: 1 });
 /** This run's suffix for the roles and plugins [8]–[10] make: a role is the cluster's and outlives dropSchema, so a rerun against a kept cluster finds none of them (review pass 2). */
@@ -152,8 +153,19 @@ console.log("\n[4] A plugin migration that reaches for a core table fails, and r
     const r = await runMigrate({ plugins });
     assert(r.code === 2 && /OB1_PLUGINS names/.test(r.err), `${label} is refused, exit 2 (${r.code}: ${r.err.slice(0, 120)})`);
   }
-  const noPassword = await runMigrate({ plugins: "example", pluginPassword: "" });
-  assert(noPassword.code === 2 && /OB1_PLUGIN_DB_PASSWORD is not set/.test(noPassword.err), `a plugin with migrations and no login role password is refused, exit 2 (${noPassword.code})`);
+  // No password: refused where a file would run, not where the plugins have nothing to do (a by-hand core run).
+  const idleNoPassword = await runMigrate({ plugins: "example", pluginPassword: "" });
+  assert(idleNoPassword.code === 0, `nothing of the plugins' pending and the login role made: no password asked (${idleNoPassword.code}: ${idleNoPassword.err.slice(0, 120)})`);
+  const pendingDir = mkdtempSync(join(tmpdir(), "smd2310-plugins-"));
+  try {
+    mkdirSync(join(pendingDir, "pendingone", "migrations"), { recursive: true });
+    writeFileSync(join(pendingDir, "pendingone", "index.ts"), "export default {};\n");
+    writeFileSync(join(pendingDir, "pendingone", "migrations", "001_x.sql"), "CREATE TABLE IF NOT EXISTS x (id int);\n");
+    const noPassword = await runMigrate({ plugins: "pendingone", pluginsDir: pendingDir, pluginPassword: "" });
+    assert(noPassword.code === 2 && /OB1_PLUGIN_DB_PASSWORD is not set/.test(noPassword.err), `a pending plugin file and no login role password: refused before anything runs, exit 2 (${noPassword.code})`);
+  } finally {
+    rmSync(pendingDir, { recursive: true, force: true });
+  }
   const after = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM schema_migrations`);
   assert(before.n === after.n, "and refused before anything ran");
 }
@@ -317,6 +329,11 @@ console.log("\n[8] Preflight: the enabled plugin's tables in place; a migration 
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
   assert(/✗\s+plugin tables\s+.*ob1_plugins inherits its plugin roles' rights/.test(row(r.out)), `an inheriting login role: fail, named (${row(r.out)})`);
   await sql.unsafe("ALTER ROLE ob1_plugins NOINHERIT");
+  // A membership has_table_privilege cannot see: SQL that undoes the plugin's role could SET ROLE to it.
+  await sql.unsafe("GRANT pg_read_all_data TO ob1_plugins WITH INHERIT FALSE");
+  r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
+  assert(/✗\s+plugin tables\s+.*ob1_plugins is a member of pg_read_all_data/.test(row(r.out)), `a membership past the plugin roles: fail, named (${row(r.out)})`);
+  await sql.unsafe("REVOKE pg_read_all_data FROM ob1_plugins");
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: { ...env("example"), OB1_PLUGIN_DB_PASSWORD: "not-the-password" }, cwd: HERE });
   assert(/✗\s+plugin tables\s+.*cannot log in as ob1_plugins with OB1_PLUGIN_DB_PASSWORD/.test(row(r.out)), `a password the role was not made with: fail, named (${row(r.out)})`);
   localStub.stop(true);

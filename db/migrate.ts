@@ -620,14 +620,24 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found;
   }
 
+  /** Whether a plugin phase would log in: a file the plugin ledger lacks, or no login role yet. Read-only. */
+  async function pluginsNeedLogin(found: PluginMigrations[]): Promise<boolean> {
+    const [{ ledger, login }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger, EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS login`) as { ledger: boolean; login: boolean }[];
+    if (!login) return true;
+    const recorded = new Set<string>(ledger ? ((await sql`SELECT plugin, name FROM public.plugin_migrations`) as { plugin: string; name: string }[]).map((r) => `${r.plugin}/${r.name}`) : []);
+    return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
+  }
+
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
   if (plugins === null) return 2;
-  // A plain run that would apply a plugin's files needs the login role's
-  // password, and the URL its connection is built from: refused before
-  // anything runs, so a run never applies the core and stops at the plugins.
-  if (!dryRun && !baseline && !reapply && plugins.some((p) => p.files.length > 0)) {
+  // A plain run that would apply a plugin's file, or make the login role, needs
+  // the login role's password and the URL its connection is built from:
+  // refused before anything runs, so a run never applies the core and stops
+  // at the plugins. One with nothing of the plugins' to do asks neither (PR 3
+  // review pass 2: it blocked a by-hand core-only run).
+  if (!dryRun && !baseline && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
     if (!opts.pluginPassword?.trim()) {
       err(`OB1_PLUGINS names a plugin with migrations, and OB1_PLUGIN_DB_PASSWORD is not set: a plugin's SQL runs as ${PLUGIN_LOGIN_ROLE}, a login role the migrator makes with that password. Set it in deploy/.env (openssl rand -hex 32) and run again.`);
       return 2;
@@ -1343,6 +1353,14 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // first. Preflight logs in as it, so a password that does not match is
     // said there.
     let pluginSql: SQL | null = null;
+    /** The login connection, opened at the first file that runs, its login checked: plugin SQL never runs as the migrator (PR 3 review pass 2). */
+    const loginSql = async (): Promise<SQL> => {
+      if (pluginSql) return pluginSql;
+      pluginSql = openSql(pluginLoginUrl(opts.url as string, opts.pluginPassword as string));
+      const [{ who }] = (await pluginSql`SELECT session_user AS who`) as { who: string }[];
+      if (who !== PLUGIN_LOGIN_ROLE) throw new Error(`the plugins' connection logged in as ${who}, not ${PLUGIN_LOGIN_ROLE}`);
+      return pluginSql;
+    };
     if (!dryRun && hasFiles) {
       try {
         const [{ present }] = (await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS present`) as { present: boolean }[];
@@ -1356,7 +1374,6 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         err("  The migrating role must be able to CREATE ROLE; the compose stack's postgres can.");
         return 1;
       }
-      pluginSql = openSql(pluginLoginUrl(opts.url as string, opts.pluginPassword as string));
     }
     try {
       let pluginRan = 0;
@@ -1419,7 +1436,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
             continue;
           }
           try {
-            await (pluginSql as SQL).begin(async (tx: SQL) => {
+            await (await loginSql()).begin(async (tx: SQL) => {
               await tx.unsafe(`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
               await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
               await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(p.role)}`);
@@ -1442,7 +1459,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
             // A temp table the file left past its transaction goes: Postgres
             // searches temp before any schema, so it would stand in for the
             // next plugin's table of that name (review pass 1).
-            await (pluginSql as SQL).unsafe("DISCARD TEMP").catch(() => {});
+            if (pluginSql) await (pluginSql as SQL).unsafe("DISCARD TEMP").catch(() => {});
           }
           out(`  ✓  ${m.name}  applied`);
           pluginRan++;
@@ -1452,7 +1469,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       if (pluginDrifted > 0) err("\nA plugin's migration file changed after it was applied: add a new file rather than editing an old one, as with the core's.");
       return pluginDrifted > 0 ? 1 : 0;
     } finally {
-      if (pluginSql) await pluginSql.close().catch(() => {});
+      // Widened: assigned inside loginSql, which the checker's flow analysis does not follow.
+      const opened = pluginSql as SQL | null;
+      if (opened) await opened.close().catch(() => {});
     }
   }
 }

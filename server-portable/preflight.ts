@@ -89,13 +89,25 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
   if (!l.can_login) problems.push(`${login} cannot log in`);
   if (l.superuser) problems.push(`${login} is a superuser: a plugin's SQL that undoes its role would hold the database (ALTER ROLE ${login} NOSUPERUSER)`);
   if (l.inherit) problems.push(`${login} inherits its plugin roles' rights: every plugin's SQL would reach every plugin's tables (ALTER ROLE ${login} NOINHERIT)`);
+  // Any membership but SET on a plugin's role: a role it could SET ROLE to, or
+  // one whose rights it inherits by the grant's own option (PG 16), would be
+  // reached by SQL that undoes the plugin's role; has_table_privilege alone
+  // cannot see the first (PR 3 review pass 2).
+  const [mem] = (await sql`
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE NOT starts_with(r.rolname, 'ob1_plugin_')) AS other,
+           string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE (to_jsonb(m) ->> 'inherit_option')::boolean) AS inherited
+      FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
+  if (mem?.other) problems.push(`${login} is a member of ${mem.other}: a plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
+  if (mem?.inherited) problems.push(`${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
   if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login})`);
   if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
   else {
     const { SQL } = await import("bun");
     const probe = new SQL({ url: pluginLoginUrl(url, password), max: 1 });
     try {
-      await probe`SELECT 1`;
+      const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
+      if (who !== login) problems.push(`the plugins' connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
     } catch (e) {
       problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
     } finally {
@@ -4157,7 +4169,7 @@ if (configFailed) {
             const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS), conn.url, env.OB1_PLUGIN_DB_PASSWORD);
             if (problems.length)
               add("plugin tables", "fail", problems.join("; "),
-                  "Apply them: the compose migrator reads OB1_PLUGINS from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same password> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
             else add("plugin tables", "ok", `${pluginNames(env.OB1_PLUGINS).join(", ")} — each plugin's role, schema and migrations in place`);
           } catch (e) {
             add("plugin tables", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_roles, pg_namespace and plugin_migrations.");
