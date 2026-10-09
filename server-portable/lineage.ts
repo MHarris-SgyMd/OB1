@@ -140,9 +140,11 @@ export function structuredRecipe(system: string): Recipe {
  * The proposal's recipe: the judge's model, the prompt's version and hash,
  * and the candidate parameters the pair was found under — the similarity the
  * walk measured, the neighbourhood size and floor, the text bound the judge
- * read within.
+ * read within. Since p4 (SMD-1873), what the judge said beside the verdict
+ * 029 records — its own verdict word, where the confidence came from, and
+ * whether its quote was found — when the caller has a judgement.
  */
-export function proposalRecipe(cfg: Pick<EmbedConfig, "judgeModel">, found: { similarity: number; candidates: number; minSimilarity: number }): Recipe {
+export function proposalRecipe(cfg: Pick<EmbedConfig, "judgeModel">, found: { similarity: number; candidates: number; minSimilarity: number }, judged?: Record<string, unknown>): Recipe {
   return {
     deterministic: false,
     model: cfg.judgeModel,
@@ -153,5 +155,6 @@ export function proposalRecipe(cfg: Pick<EmbedConfig, "judgeModel">, found: { si
     candidates: found.candidates,
     min_similarity: found.minSimilarity,
     content_limit_chars: CONTENT_LIMIT_CHARS,
+    ...(judged ? { judged } : {}),
   };
 }

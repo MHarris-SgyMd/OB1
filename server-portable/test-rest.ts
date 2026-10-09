@@ -486,7 +486,10 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
     local: area({ ob_capture_api_key: "cap-raw", ob_capture_api_endpoint: "https://brain.example.com" }),
   };
   const sandbox: Record<string, unknown> = {
-    fetch: (url: string, init: RequestInit) => app.fetch(new Request(url, init)),
+    fetch: (url: string, init: RequestInit) => new URL(url).host === "mcp"
+      // The MCP endpoint answers a non-JSON-RPC POST with a JSON-RPC error — no REST refusal code.
+      ? Promise.resolve(Response.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, { status: 400 }))
+      : app.fetch(new Request(url, init)),
     setTimeout, clearTimeout, AbortController, console,
     chrome: { storage },
   };
@@ -497,6 +500,10 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   for (const f of ["config.js", "api-client.js"]) runInContext(await Bun.file(new URL(f, dir)).text(), ctx, { filename: f });
   type Client = {
     apiFetch: (path: string, o: { apiKey: string; endpoint: string; method?: string; body?: unknown }) => Promise<unknown>;
+    failureKind: (e: unknown) => string;
+    retryPlan: (attempts: number, kind: string, max: number) => { attempts: number; delayMinutes: number; deadLetter: boolean };
+    describeFailure: (e: unknown, atSave?: boolean) => string;
+    verifyForSave: (current: Record<string, string>, next: Record<string, string>) => Promise<{ warning?: string }>;
     healthCheck: (o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
     ingestDocument: (payload: unknown, o: { apiKey: string; endpoint: string }) => Promise<Record<string, unknown>>;
     toCapture: (payload: unknown) => { content: string; source: string; trust: string; metadata: Record<string, unknown> };
@@ -534,9 +541,13 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   const meta = input?.metadata ?? {};
   assert(Object.keys(meta).length <= META_KEYS_MAX && Object.values(meta).every((v) => typeof v !== "object") && !("page_url" in meta) && !("nested" in meta) && String(meta.conversation_title).length === 200 && meta.source_type === "claude_import" && meta.extension_platform === "claude",
     `metadata within capture_thought's bounds: a long URL left out, not cut; a long title cut; nothing nested (${JSON.stringify(Object.keys(meta))})`);
-  answer = async () => ok({ id: "11111111-1111-4111-8111-111111111111", existed: true, embeddings: { allowed: false }, chunks: 0, contextFailures: 0 });
-  const again = await client.ingestDocument(queued, { apiKey: "cap-raw", ...at });
-  assert(again.status === "existing", `a re-capture answers existing, as the extension counts a skip (${again.status})`);
+  // The core tells only a key that can read whether the text existed
+  // (core/writes.ts: `existed` is the reader's), so the stub answers as it does.
+  answer = async () => ok({ id: "11111111-1111-4111-8111-111111111111", ...(calls.at(-1)?.principal.scope === "write" ? { existed: true } : {}), embeddings: { allowed: false }, chunks: 0, contextFailures: 0 });
+  const againCap = await client.ingestDocument(queued, { apiKey: "cap-raw", ...at });
+  assert(againCap.status === "captured" && !("existed" in againCap), `a capture key's re-capture is reported captured — the brain does not tell it the text existed (${againCap.status})`);
+  const againWrite = await client.ingestDocument(queued, { apiKey: "write-raw", ...at });
+  assert(againWrite.status === "existing", `a write key's re-capture answers existing, as the extension counts a skip (${againWrite.status})`);
   // A platform the label alone names, and none at all.
   assert(client.toCapture({ text: "x", source_label: "gemini:manual" }).source === "chrome-gemini", "a payload without a platform takes it from its label");
   assert(client.toCapture({ text: "x" }).source === "chrome-extension", "…and with neither, the extension's own label");
@@ -549,9 +560,42 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   assert(upgraded.apiEndpoint === "" && upgraded.apiKey === "cap-raw" && !config.isConfigured(upgraded), `an upgraded install keeps its key and reads no endpoint, so it is unconfigured (${JSON.stringify(upgraded)})`);
   assert((storage.sync.data.ob_capture_settings as { apiEndpoint?: string }).apiEndpoint === "" && !("ob_capture_rest_core_endpoint" in storage.local.data), "…the legacy sync endpoint is cleared, never carried into the new key");
   assert(!("ob_capture_api_endpoint" in storage.local.data), "…and the old local key is removed");
-  const permanent = (sandbox.OBApiClient as { isPermanentError: (e: unknown) => boolean }).isPermanentError;
-  assert(!permanent({ status: 404 }) && !permanent({ status: 429 }) && !permanent({ status: 503 }) && permanent({ status: 400 }) && permanent({ status: 403 }) && permanent({ status: 413 }),
-    "a 404 (a wrong URL, or /api off) is retried like a 429 or a 503; a refusal of the capture itself is not");
+  const kind = (e: unknown) => client.failureKind(e);
+  assert(kind({ status: 400, code: "REFUSED_METADATA_SHAPE" }) === "refused" && kind({ status: 409, code: "REFUSED_STALE_READ" }) === "refused" && kind({ status: 413 }) === "refused",
+    "the REST core's refusal of the capture, or its size, is refused: rejected, not retried");
+  assert(["", "NO_ROUTE", "METHOD_NOT_ALLOWED"].every((code) => kind({ status: 404, code }) === "setup") && kind({ status: 406 }) === "setup" && kind({ status: 401, code: "UNAUTHORIZED" }) === "setup" && kind({ status: 403, code: "FORBIDDEN" }) === "setup",
+    "an answer that is not the REST core's, a path it does not serve, or a refused key is setup: the capture waits");
+  assert(kind({ status: 429 }) === "transient" && kind({ status: 503, code: "BUSY" }) === "transient" && kind({ message: "Request timed out" }) === "transient", "a 429, a 5xx or a timeout is transient");
+  assert(kind({ status: 403, code: "REFUSED_EGRESS" }) === "refused" && kind({ status: 404, code: "NOT_FOUND" }) === "setup" && kind({ status: 405, code: "SOMETHING" }) === "setup",
+    "the egress gate's 403 refuses the capture; a 404 or 405 is the path's fault whatever code another server puts on it");
+  let noKey: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "", ...at }); } catch (e) { noKey = e; }
+  let noUrl: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "cap-raw", endpoint: "" }); } catch (e) { noUrl = e; }
+  assert(kind(noKey) === "setup" && kind(noUrl) === "setup", "a missing key or URL is setup: the capture waits for it");
+  // A bare origin reaches the MCP server's root: its JSON-RPC 400 is setup, not a refusal of the capture.
+  let bare: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "cap-raw", endpoint: "http://mcp/" }); } catch (e) { bare = e; }
+  assert(bare !== null && kind(bare) === "setup" && /did not answer as the brain's REST core \(HTTP 400\)/.test(client.describeFailure(bare)),
+    `a capture sent to the MCP endpoint's origin is a setup failure, told so (${bare ? client.describeFailure(bare) : "no error"})`);
+  const setup = client.retryPlan(4, "setup", 5), transient = client.retryPlan(3, "transient", 5), last = client.retryPlan(4, "transient", 5);
+  assert(setup.attempts === 4 && !setup.deadLetter && transient.attempts === 4 && transient.delayMinutes === 8 && !transient.deadLetter && last.deadLetter,
+    `a setup failure waits without spending an attempt; a transient one backs off and is dead-lettered at the limit (${JSON.stringify({ setup, transient, last })})`);
+  // A new URL or key is checked before it is saved; a toggle-only save is not.
+  const good = { apiEndpoint: "http://api/", apiKey: "cap-raw" };
+  const notSaved = async (next: Record<string, string>, current: Record<string, string> = { apiEndpoint: "", apiKey: "" }) => { try { await client.verifyForSave(current, next); return ""; } catch (e) { return (e as Error).message; } };
+  assert(await notSaved(good) === "", "a URL and key that reach the REST core and can capture are saved");
+  const atSave = client.describeFailure(bare, true);
+  assert(!/captures wait/.test(atSave) && /captures wait/.test(client.describeFailure(bare)) && /HTTP 400: Invalid Request/.test(atSave), `at save the words promise no wait, and the server's answer is kept (${atSave})`);
+  answer = async () => { throw new Error("unused"); };
+  identity = { status: "busy" } as unknown as AgentOutcome;
+  const busy = await client.verifyForSave({ apiEndpoint: "", apiKey: "" }, good);
+  assert(/^Saved, but the brain did not answer/.test(busy.warning ?? ""), `a brain that is busy at the check lets the setting save, with a warning (${JSON.stringify(busy)})`);
+  identity = { status: "ok", agentId: "agent-1" };
+  assert(/^Not saved: This URL did not answer as the brain's REST core \(HTTP 400\)/.test(await notSaved({ apiEndpoint: "http://mcp/", apiKey: "cap-raw" })), "a bare origin (the MCP endpoint's) is not saved, and the user is told why");
+  assert(/^Not saved: .*cannot capture/.test(await notSaved({ apiEndpoint: "http://api/", apiKey: "read-raw" })), "a key that cannot capture is not saved");
+  calls.length = 0;
+  assert(await notSaved({ apiEndpoint: "http://mcp/", apiKey: "cap-raw" }, { apiEndpoint: "http://mcp/", apiKey: "cap-raw" }) === "", "a save that changes neither URL nor key (a platform toggle) is not checked");
 
   // Metadata: the brain's own keys are dropped, every one the server refuses
   // (RESERVED_META, and a capture key's ticket keys); a manual capture's mode
@@ -573,6 +617,9 @@ console.log("\n[10] The Chrome capture extension's client speaks this server: th
   answer = async () => refuse({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "type" });
   const shape = await told(() => client.ingestDocument(queued, { apiKey: "cap-raw", ...at }));
   assert(/HTTP 400: REFUSED_METADATA_SHAPE — reserved_key \(type\)/.test(shape), `a metadata refusal names its problem and key (${shape})`);
+  let refusedErr: unknown = null;
+  try { await client.ingestDocument(queued, { apiKey: "cap-raw", ...at }); } catch (e) { refusedErr = e; }
+  assert(refusedErr !== null && client.failureKind(refusedErr) === "refused", "…and, read from the REST core's answer, it is a refusal of the capture: rejected, not queued");
   const scope = await told(() => client.apiFetch("/v1/stats", { apiKey: "cap-raw", ...at }));
   assert(/HTTP 403: FORBIDDEN — needs a read key/.test(scope), `a scope refusal names the scope it needs (${scope})`);
   const inputTold = await told(() => client.apiFetch("/v1/thoughts", { apiKey: "cap-raw", ...at, method: "POST", body: {} }));

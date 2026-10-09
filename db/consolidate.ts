@@ -8,7 +8,8 @@
  * extracted entities, `consolidation_candidates()` names the older thoughts
  * that share a subject with it and sit nearest in vector space; each pair goes
  * to the metadata model once (server-portable/consolidate.ts holds the prompt
- * and the parsing rules), and a CONFLICT verdict becomes a pending row in
+ * and the parsing rules), and an OUTDATES verdict (prompt 4, SMD-1873; p3's
+ * CONFLICT) becomes a pending row in
  * `supersession_proposals`. Nothing here writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
@@ -99,16 +100,16 @@
  * both sides of which have a vector, with no live or failed claim here — a
  * failed claim is --retry-failed's, 015's rule), then judges the thought's
  * pairs again — up to --k model calls per re-pooled thought, since its
- * agree/unrelated pairs left no record, plus one per stale pair the top-k
- * left out that still meets the candidate rule, judged anyway. A conflict at the
- * floor REPLACES the row in place (063:
- * record_supersession_proposal, back to pending under this key); agree,
- * unrelated or a conflict under the floor SETTLES it — the row is rejected
+ * unrelated, related and evolves pairs left no record, plus one per stale
+ * pair the top-k left out that still meets the candidate rule, judged anyway.
+ * An outdates at the floor REPLACES the row in place (063:
+ * record_supersession_proposal, back to pending under this key); unrelated,
+ * related, evolves, duplicate, or an outdates under the floor SETTLES it — the row is rejected
  * with a note beginning `settled by the pass:` (the marker rebuild_derived
  * reads: a later text move under a pass-settled row sets it stale again,
  * where a person's rejection stands for ever) and its lineage row rewritten
  * at the texts judged, through settle_supersession_proposal. A stale pair the
- * rule no longer admits for a reason that means "no conflict" — no shared
+ * rule no longer admits for a reason that means "nothing to propose" — no shared
  * entity, under the similarity floor, a side superseded — is settled with a
  * note saying so; one a side of which has no vector yet waits for the reembed
  * pool and the run after its write. A stale pair whose call timed out, was
@@ -149,7 +150,7 @@ import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv 
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, consolidateKey, judgePair, passSettledNote, proposalVerdict, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -157,7 +158,7 @@ import { actorPayload, isoDay } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { PROPOSAL_TEXT_MAX, snipText } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { passStamper, stampKey } from "./pass-stamp.ts";
+import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -253,6 +254,12 @@ export interface ConsolidateOptions {
   writer?: Writer;
   signal?: AbortSignal;
   onPass?: (stop: PassStop) => void;
+  /**
+   * A follower's heartbeat in place of its own `heartbeat:consolidate:<job>`
+   * row (db/pass-stamp.ts): sleep.ts's, so a wake does not end a row
+   * (SMD-1794). Null stamps nothing. Unused by a one-shot run.
+   */
+  stamper?: PassStamper | null;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -439,7 +446,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
 async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numbers, writes: boolean, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
   const { workers: WORKERS, batch: BATCH, ttl: TTL, heartbeat: HEARTBEAT, timeout: TIMEOUT_S, k: K, minSim: MIN_SIM, minConfidence: MIN_CONFIDENCE, limit: LIMIT, follow: FOLLOW, stale: STALE_DAYS } = settled;
   const env = opts.env ?? process.env;
-  /** Append every verdict here as JSONL — {newer, older, similarity, shared, verdict, supersedes, confidence, reason, key, proposal} — for evals/eval-consolidate.ts. */
+  /** Append every verdict here as JSONL — {newer, older, similarity, shared, verdict, supersedes, confidence, reason, evidence, evidence_found, key, proposal} — for evals/eval-consolidate.ts. */
   const DUMP = opts.dump ?? undefined;
   const STATUS_ONLY = opts.status === true;
   const DRY_RUN = opts.dryRun === true;
@@ -473,7 +480,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // Which knob named it is read off the resolved pair, not the raw variable: a
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
-  if (!REVIEW_ONLY) out(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+  if (!REVIEW_ONLY) out(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -604,7 +611,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const lineageClause = (n: number, has070: boolean): string =>
     `${n} unreviewed standing on a lineage pair (${has070 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
   const staleClause = (st: ReturnType<typeof staleStandings>): string =>
-    `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it finds in conflict again and settles one it does not)`;
+    `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it proposes again and settles one it does not)`;
 
   // ── Review: --list, --accept, --reject, --stale ─────────────────────────────
 
@@ -640,7 +647,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const verdictPhrase = (v: string) =>
     v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
     : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-    : "conflict, direction not stated";
+    : "one is out of date, which not stated";
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 070's three-argument form, always: 029 re-applied by hand lands its
@@ -804,7 +811,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function printQueue(): Promise<void> {
     // 063 (SMD-1732): a stale row is a pending verdict whose texts moved under
     // it; 067 (SMD-2297): the next pass judges the pair again and REPLACES the
-    // row when it finds the conflict again, and SETTLES it — a rejection with
+    // row when it proposes the pair again, and SETTLES it — a rejection with
     // the pass's note — when it does not. The rejected count says how many are
     // the pass's; each stale row is placed against the pools (see the header).
     const [q] = await sql`
@@ -986,11 +993,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
-    // 067: the stale rows this run met — replaced in place (a conflict found
-    // again), settled after a judgement of no conflict, settled because the
+    // 067: the stale rows this run met — replaced in place (proposed again),
+    // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
     // decided by a reviewer or another pass between the read and the write.
   };
@@ -1131,7 +1138,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) },
                             { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) },
-                            cfg, AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]), keyName);
+                            cfg, AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]), keyName, { logprobs: JUDGE_LOGPROBS });
       } catch (e) {
         llmMs += Date.now() - t0;
         // The hard stop aborted the call: the thought is abandoned, not failed.
@@ -1160,24 +1167,28 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       totals.pairs++;
       if (j.malformed) {
         totals.malformed++;
-        problems.push(`pair with ${c.older_id}: the model's answer was not JSON of the expected shape${staleRow ? " (its stale proposal stands)" : ""}`);
+        problems.push(`pair with ${c.older_id}: ${j.unknownVerdict !== undefined ? `the model answered the verdict "${j.unknownVerdict}", not one of prompt ${CONSOLIDATE_PROMPT_VERSION}'s five (${VERDICTS.join(", ")}) — a model keeping to an older prompt's words` : "the model's answer was not JSON of the expected shape"}${staleRow ? " (its stale proposal stands)" : ""}`);
         continue;
       }
       totals[j.verdict]++;
       const verdict = proposalVerdict(j);
+      // SMD-1873: the token probability of a proposing verdict when the
+      // endpoint returned one, else the number the model wrote.
+      const scored = proposalConfidence(j);
+      if (verdict !== null) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
       let proposalId: string | null = null;
       let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
-      if (verdict === null || j.confidence < MIN_CONFIDENCE) {
+      if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
         if (verdict !== null) {
           totals.underConfidence++;
           recorded = "under-confidence";
         }
-        // 067: no conflict at the floor on a pair whose proposal is stale — the
+        // 067: nothing proposed at the floor on a pair whose proposal is stale — the
         // pass settles it, at the fingerprints the judge was sent.
         // (The older's fingerprint from the read the judge was sent, not the
         // stale read before the candidates — a move between the two would
         // record a text the judge did not see; first review pass, cold read.)
-        if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — a conflict at confidence ${j.confidence.toFixed(2)}, under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
+        if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
           staleMet.settled.add(staleRow.id);
           recorded = "settled";
         }
@@ -1190,9 +1201,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // `derivations` with the proposal, beside both fingerprints (SMD-1731).
         const [{ id }] = await sql`
           SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
-                                              ${j.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
+                                              ${scored.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
                                               ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
-                                              ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM })}::jsonb) AS id`;
+                                              ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, scored.source))}::jsonb) AS id`;
         proposalId = (id as string | null) ?? null;
         // 067: the same id back on a stale pair is 063's replacement in place.
         if (proposalId && staleRow && proposalId === staleRow.id) { staleMet.replaced.add(staleRow.id); recorded = "replaced"; if (verdict === "conflict_undirected") totals.undirected++; }
@@ -1202,7 +1213,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (DUMP) {
         appendFileSync(DUMP, JSON.stringify({
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
-          verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, reason: j.reason,
+          verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, score: scored.confidence, score_source: scored.source, reason: j.reason, evidence: j.evidence, evidence_found: j.evidenceFound ?? null,
           proposal: proposalId, recorded,
         }) + "\n");
       }
@@ -1210,8 +1221,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // 067: the stale rows no candidate reached — pairs the candidate rule no
     // longer admits. A side without a vector is "not yet" (the reembed pool
     // writes it; the run after that re-pools this thought); the rest — no
-    // shared entity, under the similarity floor, a side superseded — mean no
-    // conflict and are settled at the current texts. A pair whose call timed
+    // shared entity, under the similarity floor, a side superseded — mean
+    // nothing to propose and are settled at the current texts. A pair whose call timed
     // out, was refused by the egress gate or drew a malformed answer is in
     // `problems` above and was reached: its row stays stale, the thought is
     // recorded failed, and --retry-failed revisits it.
@@ -1564,8 +1575,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const unreturned = new Set<string>();
 
   // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
-  // pass and re-stamped while one runs. A one-shot run stamps nothing.
-  const stamper = FOLLOW
+  // pass and re-stamped while one runs. A one-shot run stamps nothing. A
+  // caller's stamper stands in for the row (sleep.ts's, SMD-1794).
+  const stamper = opts.stamper !== undefined ? (FOLLOW ? opts.stamper : null) : FOLLOW
     ? passStamper({
         sql, worker: "consolidate", job: JOB, intervalS: FOLLOW,
         onError: (e) => err(`  heartbeat ${stampKey("consolidate", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
@@ -1693,14 +1705,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   );
   out(
     `  ${totals.pairs} pair(s) judged${judged ? ` — ${(totals.pairs / judged).toFixed(2)} per thought judged, ${Math.round((totals.pairs / judged) * 1000)} calls per thousand thoughts` : ""}; ` +
-      `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.agree} agree, ${totals.unrelated} unrelated, ${totals.conflict} conflict` +
+      `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.unrelated} unrelated, ${totals.related} related, ${totals.evolves} evolves, ${totals.duplicate} duplicate, ${totals.outdates} outdates` +
       (HAS_079 ? `; ${totals.ticketCalls} judge call(s) fewer — pairs of two tickets Linear links left out at --k ${K} (079${totals.ticketCallsUnread ? `; ${totals.ticketCallsUnread} thought(s) not counted, the read failed` : ""})` : "")
   );
   out(
     `  ${totals.proposed} proposal(s) recorded (${totals.undirected} without a direction)` +
-      `${totals.underConfidence ? `, ${totals.underConfidence} conflict(s) under confidence ${MIN_CONFIDENCE} not recorded` : ""}` +
+      `${totals.underConfidence ? `, ${totals.underConfidence} under confidence ${MIN_CONFIDENCE} not recorded` : ""}` +
       `${totals.alreadyProposed ? `, ${totals.alreadyProposed} pair(s) already had a proposal` : ""}` +
-      `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}`
+      `${totals.malformed ? `, ${totals.malformed} answer(s) not JSON of the expected shape` : ""}` +
+      // SMD-1873: which scale the floor cut on — the model's token probability or the number it wrote.
+      `${totals.tokenScored + totals.statedScored ? `; of ${totals.tokenScored + totals.statedScored} proposing verdict(s), confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
   );
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).
@@ -1711,8 +1725,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (m.replaced + m.settled + m.settledOut + m.wait + m.raced + m.gone > 0) {
       out(
         `  stale proposals: ` + [
-          m.settled + m.settledOut ? `${m.settled + m.settledOut} settled by the pass (${[m.settled ? `${m.settled} judged again with no conflict at the floor` : "", m.settledOut ? `${m.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
-          m.replaced ? `${m.replaced} replaced in place — the conflict found again` : "",
+          m.settled + m.settledOut ? `${m.settled + m.settledOut} settled by the pass (${[m.settled ? `${m.settled} judged again with no proposal at the floor` : "", m.settledOut ? `${m.settledOut} no longer a candidate pair` : ""].filter(Boolean).join(", ")})` : "",
+          m.replaced ? `${m.replaced} replaced in place — proposed again` : "",
           m.wait ? `${m.wait} wait on a vector the reembed pool writes (re-pooled by the run after it lands)` : "",
           m.raced ? `${m.raced} decided by a reviewer or another pass meanwhile` : "",
           m.gone ? `${m.gone} gone with a deleted thought` : "",

@@ -528,6 +528,5 @@ This integration **does not register any new MCP tools**. It is a capture-only i
 ## Related
 
 - [Slack Capture](../slack-capture/) — same pattern for Slack
-- [Discord Capture](../discord-capture/) — same pattern for Discord
 - [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) — recommended reading for any integration contributor
 - [Contributing guide](../../CONTRIBUTING.md) — required reading before submitting changes

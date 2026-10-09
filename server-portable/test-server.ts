@@ -1040,6 +1040,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
   const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
   assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  // The sleep scheduler's row (SMD-1794): read as board-sync's is, with no job.
+  const slept = parseHeartbeats([
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true }), at, age_s: 30 },
+    { key: "heartbeat:sleep:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, job: "x" }), at, age_s: 1 },
+  ]);
+  assert(slept.heartbeats.length === 1 && slept.ignored === 2 && slept.heartbeats[0].worker === "sleep" && slept.heartbeats[0].job === null && slept.heartbeats[0].running === true,
+    `heartbeat:sleep is read with no job, and one carrying a job, in its key or its value, is not (${slept.heartbeats.length}, ${slept.ignored})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
@@ -2202,7 +2210,7 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const lines = warned.filter((w) => /request abandoned/.test(w));
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
-  assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is index.ts's own, naming the method and the tool");
+  assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
   assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(

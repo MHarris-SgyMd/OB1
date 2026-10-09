@@ -75,9 +75,10 @@ persistent-connection weight (reconnects, subscriptions, backpressure) is what
 the SMD-1863 sidecar absorbs. Today the tree speaks HTTP only — webhooks and
 polling on the way in, MCP over Streamable HTTP, SSE only as MCP's streaming
 response shape (SMD-1259) — and no WebSocket, AMQP, MQTT, SNS, Kafka or gRPC
-client exists in it. `discord-capture` needs Discord's message-content gateway
-intent on its bot; whatever session that bot holds is the bot's business, not
-the brain's.
+client exists in it. A chat source that needs a persistent gateway session
+(Discord's message-content intent, say — `discord-capture`, a README with no
+code, retired with SMD-1931) holds it in its own bot; that session is the
+bot's business, not the brain's.
 
 ## The unit is a capability; a connector is a vendor
 
@@ -316,7 +317,7 @@ must-pass probes on every run:
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
 
 <!-- connector-tables:start — generated from docs/connector-registry.json by scripts/connector-registry.ts; do not edit by hand -->
-21 artifacts, 31 capability rows, 15 connectors (4 bidirectional: `discord`, `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
+20 artifacts, 30 capability rows, 15 connectors (3 bidirectional: `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
 
 Coverage net — the connector-shaped tags that mark an undeclared contribution: `import`, `digest`, `webhook`, `messaging`, `email`, `bot`; a declared connector's name as a tag marks it too.
 
@@ -436,7 +437,7 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 | `blogger` | source | `recipes/journals-blogger-import` (document/page · batch · native-driver) | — |
 | `chatgpt` | source | `integrations/chrome-capture-extension` (conversation-export · push · browser-extension); `integrations/chrome-capture-extension` (conversation-export · pull · browser-extension); `recipes/chatgpt-conversation-import` (conversation-export · batch · native-driver) | — |
 | `claude-ai` | source | `integrations/chrome-capture-extension` (conversation-export · push · browser-extension); `integrations/chrome-capture-extension` (conversation-export · pull · browser-extension) | — |
-| `discord` | bidirectional | `integrations/discord-capture` (message-stream/chat · push · native-driver) | `recipes/life-engine` (message-stream/chat · push · mcp-server) |
+| `discord` | sink | — | `recipes/life-engine` (message-stream/chat · push · mcp-server) |
 | `gemini` | source | `integrations/chrome-capture-extension` (conversation-export · push · browser-extension); `integrations/chrome-capture-extension` (conversation-export · pull · browser-extension) | — |
 | `gmail` | bidirectional | `recipes/email-history-import` (mailbox/email · pull · native-driver); `recipes/gmail-smart-pull` (mailbox/email · pull · native-driver) | `recipes/daily-digest` (mailbox/email · push · mcp-server) |
 | `google-calendar` | source | `recipes/life-engine` (calendar/event · pull · mcp-server) | — |
@@ -454,7 +455,6 @@ What a fetcher of any kind hands the seam (the **canonical**), and how the brain
 | Artifact | Vendor | Family | Transport | Direction | Cardinality | Round-trip | Fetcher |
 |---|---|---|---|---|---|---|---|
 | `integrations/slack-capture` | `slack` | message-stream/chat | push | source | 1:1 | read-only | native-driver |
-| `integrations/discord-capture` | `discord` | message-stream/chat | push | source | 1:1 | read-only | native-driver |
 | `integrations/telegram-capture` | `telegram` | message-stream/chat | push | source | 1:1 | read-only | native-driver |
 | `integrations/readwise-capture` | `readwise` | annotation/highlight | push | source | 1:1 | read-only | native-driver |
 | `recipes/readwise-import` | `readwise` | annotation/highlight | pull | source | 1:1 | read-only | native-driver |

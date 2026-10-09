@@ -32,6 +32,10 @@
  * the tree's three installs (this directory's, server-portable's, the Kubernetes
  * image's) — and the pinned `@hono/mcp` lets go of each request once it has
  * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
+ * Every MCP server's reply leaves through `_shared/sse.ts`'s mcpReply, a
+ * byte copy of server-portable/sse.ts like auth.ts's, and kubernetes-deployment
+ * answers a search whose embedding takes 13 s, past Bun's idle timeout, with
+ * a client that leaves logged (SMD-2001).
  *
  * The files are imported as modules: each exports Bun's entry shape,
  * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
@@ -63,6 +67,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
+import { abandonedRequestLine, mcpReply, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
 import { askRaw, createAssert, leaveMidUpload, PACKAGES, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -181,8 +186,6 @@ const SERVERS: Server[] = [
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
     ["start_operating_model_session", "save_operating_model_layer", "generate_operating_model_exports"], { health: "/health" }),
-  vendored("integrations/delete-thought-mcp/index.ts", "mcp", [], ["delete_thought"]),
-  vendored("integrations/update-thought-mcp/index.ts", "mcp", [], ["update_thought"]),
   vendored("integrations/kubernetes-deployment/index.ts", "mcp", ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"], ["capture_thought"]),
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
@@ -200,22 +203,26 @@ const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "RE
 // Every function deploys one level under supabase/functions/, so every server
 // imports `../_shared/auth.ts` and a copy sits in each directory that holds a
 // function directory. The list here, the tree, and package.json's sync-auth
-// (the one command that rewrites them all) must agree.
+// (the one command that rewrites them all) must agree. The same for sse.ts, the
+// keepalive every MCP server's reply leaves through (SMD-2001): a copy beside
+// each directory of MCP servers — no worker or webhook directory holds one — and
+// sync-sse.
 const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
   "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
-const CORE = readFileSync(join(ROOT, "server-portable", "auth.ts"), "utf8");
-for (const copy of COPIES) {
-  assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === CORE,
-    `${copy} is byte-for-byte server-portable/auth.ts — \`bun run sync-auth\` here rewrites every copy`);
-}
-{
-  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/_shared/auth.ts").scanSync({ cwd: ROOT })]
+const SSE_COPIES = ["extensions/_shared/sse.ts", "recipes/_shared/sse.ts", "integrations/_shared/sse.ts"];
+for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.ts", SSE_COPIES, "sync-sse"]] as const) {
+  const core = readFileSync(join(ROOT, "server-portable", module), "utf8");
+  for (const copy of copies) {
+    assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === core,
+      `${copy} is byte-for-byte server-portable/${module} — \`bun run ${script}\` here rewrites every copy`);
+  }
+  const inTree = [...new Bun.Glob(`{extensions,recipes,integrations}/**/_shared/${module}`).scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules")).sort();
-  assert(inTree.join() === [...COPIES].sort().join(), `every _shared/auth.ts in the tree is in COPIES and vice versa (${inTree.join(", ")})`);
-  const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)["sync-auth"] ?? "";
-  for (const copy of COPIES) {
+  assert(inTree.join() === [...copies].sort().join(), `every _shared/${module} in the tree is listed here and vice versa (${inTree.join(", ")})`);
+  const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)[script] ?? "";
+  for (const copy of copies) {
     const dir = relative(HERE, join(ROOT, dirname(copy))).replace(/\\/g, "/");
-    assert(sync.split(/[\s;]+/).includes(dir), `package.json's sync-auth names ${dir}`);
+    assert(sync.split(/[\s;]+/).includes(dir), `package.json's ${script} names ${dir}`);
   }
 }
 
@@ -223,11 +230,17 @@ for (const copy of COPIES) {
 // configured — the clean "past the gate" signal this test wants; the shell's
 // keys must not reach them. The servers read their access keys per request, so
 // they can be set and unset from here; the rest is read once, at import.
-for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own
+for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "EMBEDDING_API_BASE", "CHAT_API_BASE", "OB1_LLM_TIMEOUT"]) delete process.env[name]; // the two URL knobs (SMD-2110): a shell's non-http value would fail a server's start here for reasons of its own; the last three, kubernetes-deployment's provider (below)
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.DB_PASSWORD = "stub";
+// kubernetes-deployment's provider and database, read at import (SMD-2692 review pass 3): the
+// provider at its defaults (unset above), which the cases below name, its deadline left to the
+// cases; and its database on a port nothing listens on, so no case writes to a Postgres the
+// shell happens to have on 5432.
+process.env.DB_HOST = "127.0.0.1";
+process.env.DB_PORT = "1";
 process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
@@ -391,18 +404,13 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
 
   // A call, not only a listing: the tool is not registered for this principal,
   // so the server answers "not found" before any handler — or any query — runs.
-  // A server with no tool at all for this principal (delete-thought-mcp,
-  // update-thought-mcp) lists an empty set but has no tools/call handler, so a
-  // call is told the method does not exist: nothing to call, either way.
   if (s.writes.length > 0) {
     const attempt = await call(s, READ_KEY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: s.writes[0], arguments: {} } });
     const err = attempt.json?.error ?? attempt.json?.result;
     const code = attempt.json?.error?.code;
-    assert(attempt.status === 200 && (code === -32602 || attempt.json?.result?.isError === true || (s.reads.length === 0 && code === -32601))
+    assert(attempt.status === 200 && (code === -32602 || attempt.json?.result?.isError === true)
       && /not found|unknown tool/i.test(JSON.stringify(err)),
       `a read-scoped key calling ${s.writes[0]} is told the tool does not exist (${JSON.stringify(err).slice(0, 80)})`);
-    if (s.reads.length === 0) assert(Array.isArray(read.json?.result?.tools) && read.json.result.tools.length === 0,
-      "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
   // Three overlapping requests under one key (see `overlapping` above), each
@@ -443,41 +451,309 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, KEYS);
 }
 
-// ── The MCP server outside the shared auth path ──────────────────────────────
+// ── A tool call that outlives the runtime's idle timeout ─────────────────────
 //
-// enhanced-mcp keeps its own single-key compare (change 67 left it there, and
-// check 8 passes it), so it is not in SERVERS and none of the claims above are
-// made for it. It was, though, the fourth module-level McpServer connect()ed
-// to a fresh transport on every request — SMD-1497 named three — so the
-// concurrency probe runs against it too, imported the same way, under the one
-// key it reads.
+// SMD-2001: the core server's SMD-1864 fix, on a vendored server.
+// kubernetes-deployment's search_thoughts embeds the query through its provider
+// before it queries, and @hono/mcp answers the POST on an event stream it writes
+// nothing to until the tool returns. Served here as `bun <file>` serves it —
+// Bun.serve on the runtime's defaults, idle timeout 10 s — with the provider's
+// embedding held SLOW_EMBED_MS: past the last sweep that can reset a silent
+// stream (8 to 12 s by phase; test-server.ts [17] measures that premise), so a
+// reply that skipped mcpReply is reset on every run. The query that follows
+// fails (no database here), and the tool answers with its error: the point is
+// that it arrived. Beside it, a client that gives up at 1.5 s is logged once, by
+// method and tool and never by its query. (enhanced-mcp, the first host of this
+// probe, retired with SMD-1931.)
+const K8S = SERVERS.find((s) => s.file === "integrations/kubernetes-deployment/index.ts")!;
+console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, and a client that leaves is logged (SMD-2001)]`);
 {
-  const file = "integrations/enhanced-mcp/index.ts";
-  console.log(`\n[${file}]`);
-  process.env.SUPABASE_URL = PG;
-  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
-  const before = handlers.length;
+  const SLOW_EMBED_MS = 13_000;
+  const handler = handlers[SERVERS.indexOf(K8S)];
+  assert(handler !== undefined, "the module imported above");
+  if (handler) {
+    env(K8S, KEYS);
+    const realFetch = globalThis.fetch;
+    let embeddings = 0;
+    // The provider, stubbed wherever EMBEDDING_API_BASE points: the embedding answers after SLOW_EMBED_MS.
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.endsWith("/embeddings")) return realFetch(input, init);
+      await Bun.sleep(SLOW_EMBED_MS);
+      embeddings++;
+      return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    }) as typeof fetch;
+    const server = Bun.serve({ port: 0, fetch: handler });
+    type Read = { ok: boolean; status: number; text: string; error: string; ms: number };
+    const search = async (id: number, query: string, signal?: AbortSignal): Promise<Read> => {
+      const t0 = performance.now();
+      try {
+        const r = await realFetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: { ...RPC, "x-access-key": READ_KEY }, signal,
+          body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }) });
+        const text = await r.text();
+        return { ok: true, status: r.status, text, error: "", ms: performance.now() - t0 };
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        return { ok: false, status: 0, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0 };
+      }
+    };
+    const warned: string[] = [];
+    const errored: string[] = [];
+    const quiet = { error: console.error, warn: console.warn };
+    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+    console.error = (...args: unknown[]) => { errored.push(args.map(String).join(" ")); };
+    let slow: Read, gone: Read;
+    try {
+      [slow, gone] = await Promise.all([
+        search(50, "a query whose embedding outlives the idle timeout"),
+        search(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
+      ]);
+      // The abandoned call's tool runs on behind it: held until its embedding has answered too, and its query has failed.
+      for (let i = 0; i < 40 && embeddings < 2; i++) await Bun.sleep(50);
+      await Bun.sleep(300);
+    } finally {
+      Object.assign(console, quiet);
+      globalThis.fetch = realFetch;
+      server.stop(true);
+    }
+    const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+    assert(slow.ok && slow.status === 200 && slow.ms >= SLOW_EMBED_MS,
+      `search_thoughts is answered after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${slow.status} in ${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+    const reply = await parse(new Response(slow.text));
+    assert(reply.json?.jsonrpc === "2.0" && reply.json?.id === 50, `…with the call's JSON-RPC envelope (${slow.text.slice(0, 80).replace(/\n/g, "\\n")})`);
+    assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+    assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+    const lines = warned.filter((w) => /request abandoned/.test(w));
+    const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
+    assert(lines.length === 1 && m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000),
+      `…and the server logs it once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
+    assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+    // The positive control first (review pass 3): both calls reached the provider while this probe listened.
+    assert(embeddings === 2, `both searches ran on to their embedding, the abandoned one too (${embeddings})`);
+    assert(![...warned, ...errored].some((w) => /needle-the-line-must-not-carry/.test(w)), `…and never the query, in a warning or an error (${warned.length + errored.length} lines)`);
+  }
+}
+{
+  // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
+  const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   try {
-    handlers.push(await importServer(file));
-  } catch (e) {
-    assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
+    // Only a POST carries a call (review pass 1): ob-graph hands a GET to the
+    // transport, whose stream only the client ends, so its reply passes as it
+    // is and its close is no abandoned call.
+    const leaving = new AbortController();
+    const stream = new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } });
+    const get = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "GET", signal: leaving.signal })), () => stream);
+    leaving.abort();
+    await Bun.sleep(10);
+    assert(get === stream && warned.length === 0,
+      `a GET's event stream is neither kept alive nor watched: mcpReply hands it back as the transport made it, and the client's leaving logs nothing (${warned.length} lines)`);
+    // A client gone before the call starts (review pass 2): the line, a 408, and no call. Its body is
+    // not read for the label — a gone client's may never arrive — so the line names `?`, as at the core route.
+    let calls = 0;
+    const gone = AbortSignal.abort();
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_capture_thought", arguments: { content: "x" } } });
+    const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
+    assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
+      `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
+    // A client that leaves mid-upload (review passes 3 and 4), at kubernetes-deployment's real route and
+    // transport: logged once. On Bun 1.4.0 the signal aborts before the body read rejects (20 of 20
+    // measured), so the listener registered before the read is what logs it; a read that failed first
+    // would reach the transport's 400, which settles the request, and the abort after it would log nothing.
+    warned.length = 0;
+    const k8s = handlers[SERVERS.indexOf(K8S)];
+    const upload = Bun.serve({ port: 0, fetch: (req) => k8s(req) });
+    try {
+      await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream", `x-access-key: ${READ_KEY}`], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
+      const pending = await pendingSettled(upload);
+      for (let i = 0; i < 20 && warned.length === 0; i++) await Bun.sleep(50);
+      assert(warned.length === 1 && warned[0].startsWith("request abandoned by the client after ") && pending === 0,
+        `a client that leaves mid-upload is logged once, and the request settles (${warned.length} lines, ${pending} pending)`);
+    } finally {
+      upload.stop(true);
+    }
+    // At the ceiling a vendored stream says so in its own line, which names no OB1_LLM_TIMEOUT: only kubernetes-deployment reads it (SMD-2692; review pass 3).
+    warned.length = 0;
+    const silent = new Response(new ReadableStream({ async start(ctl) { await Bun.sleep(300); ctl.close(); } }), { headers: { "content-type": "text/event-stream" } });
+    await withSseKeepalive(silent, { intervalMs: 20, maxMs: 100, label: "tools/call slow_one", stalledLine: vendoredStalledLine }).text();
+    assert(warned.length === 1 && warned[0].startsWith("request still running after 0 s: tools/call slow_one — ") && !/OB1_LLM_TIMEOUT|look at the database/.test(warned[0]),
+      `a stall is logged in the line given, which names no core-only bound (${warned[0]?.slice(0, 120)})`);
+  } finally {
+    console.warn = realWarn;
   }
-  assert(handlers.length === before + 1, `${file} imports as a module and exports default { fetch }`);
-  const handler = handlers[before];
-  const ids = [11, 12, 13];
-  // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
-  const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
-    // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-    // The late request carries no Accept, as in the table probe: the transport takes none as */* (change 84).
-    { method: "POST", headers: late ? { "Content-Type": RPC["Content-Type"], "x-brain-key": LEGACY_KEY } : { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
-  // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
-  const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
-  assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
-  for (const [i, r] of answers.entries()) {
-    assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === tools.join(),
-      `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and the same tools (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
+}
+
+// ── A provider that fails or never answers ───────────────────────────────────
+//
+// SMD-2692: kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, as
+// the core server's do. The provider is a real server, and the server's fetch
+// reaches it with its init as given, so the deadline under test is the real
+// fetch's signal. search_thoughts' embedding stalls or fails each way, and the
+// tool fails naming the knob or the fault. capture_thought's chat call fails
+// each way the core's extractMetadata names: each is logged, and the capture
+// goes on to its write without tags. Here the write is refused, the database
+// being on a closed port (set above), and a control capture whose tags arrive
+// shows which answer the refusal gives. Until then Bun's 300 s fetch cut was
+// the only bound, and SMD-2001's keepalive let a client sit through it.
+console.log(`\n[${K8S.file}: provider calls end at OB1_LLM_TIMEOUT, and each failure is named or falls back (SMD-2692)]`);
+{
+  const handler = handlers[SERVERS.indexOf(K8S)];
+  assert(handler !== undefined, "the module imported above");
+  const k8sSource = readFileSync(join(ROOT, K8S.file), "utf8");
+  const embedSource = readFileSync(join(ROOT, "server-portable/embed.ts"), "utf8");
+  for (const name of ["DEFAULT_LLM_TIMEOUT_S", "PROVIDER_ERROR_CHARS"]) {
+    const own = new RegExp(`\\nconst ${name} = (\\d+);`).exec(k8sSource)?.[1];
+    const core = new RegExp(`\\nexport const ${name} = (\\d+);`).exec(embedSource)?.[1];
+    assert(own !== undefined && own === core, `its ${name} is the core server's (${own}, embed.ts ${core})`);
   }
-  delete process.env.MCP_ACCESS_KEY;
+  // The startup warning (review pass 6), on a second import made under each value: one the
+  // deadline cannot use is said, one it can is not.
+  for (const [value, warns] of [["300s", true], ["Infinity", true], ["2.5", false]] as const) {
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    process.env.OB1_LLM_TIMEOUT = value;
+    try {
+      await import(`${join(ROOT, K8S.file)}?timeout=${encodeURIComponent(value)}`);
+    } finally {
+      delete process.env.OB1_LLM_TIMEOUT;
+      console.warn = realWarn;
+    }
+    const said = warned.filter((l) => l.startsWith(`OB1_LLM_TIMEOUT="${value}" is not a positive number of seconds`));
+    assert(said.length === (warns ? 1 : 0), `OB1_LLM_TIMEOUT=${value} at start is ${warns ? "said once" : "taken without a word"} (${said.length} lines)`);
+  }
+  if (handler) {
+    env(K8S, KEYS);
+    const realFetch = globalThis.fetch;
+    const enc = new TextEncoder();
+    const choice = (content: unknown) => Response.json({ choices: [{ message: { content } }] });
+    /** The chat endpoint's answers, by case, each a capture's; `tags` is the control. */
+    const CHAT: Record<string, () => Response | Promise<Response>> = {
+      tags: () => choice(JSON.stringify({ topics: ["x"], type: "idea", metadata_extraction_failed: "provider_timeout" })),
+      stall: () => new Promise<Response>(() => {}),
+      "502": () => new Response("model not found", { status: 502 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      reset: () => new Response("served by `cut` below"),
+      empty: () => Response.json({ error: { message: "rate limited" } }),
+      prose: () => choice("here are your tags: none"),
+      array: () => choice("[1, 2]"),
+    };
+    const stalled = (status: number, start: string) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(enc.encode(start)); } }), { status, headers: { "content-type": "application/json" } });
+    /** The embedding endpoint's answers, by case: each but `ok` is a search's; every capture's embedding is `ok`. */
+    const EMBED: Record<string, () => Response> = {
+      stall: () => stalled(200, '{"data":'),
+      "503 stalled": () => stalled(503, '{"error":'),
+      "503": () => new Response("x".repeat(2_000), { status: 503 }),
+      html: () => new Response("<html>a proxy's page</html>", { headers: { "content-type": "text/html" } }),
+      empty: () => Response.json({ data: [] }),
+      "a vector of nothing": () => Response.json({ data: [{ embedding: [] }] }),
+      "a vector of strings": () => Response.json({ data: [{ embedding: ["0.1"] }] }),
+      ok: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+    };
+    let embed = "stall";
+    let chat = "stall";
+    const provider = Bun.serve({
+      port: 0,
+      fetch(req) {
+        return new URL(req.url).pathname === "/embeddings" ? EMBED[embed]() : CHAT[chat]();
+      },
+    });
+    // A body cut off: 200 and a length of 100, six bytes, and the socket closed, so the body read rejects (review pass 2).
+    const cut = Bun.listen<{ answered: boolean }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(s) { s.data = { answered: false }; },
+        data(s) {
+          if (s.data.answered) return;
+          s.data.answered = true;
+          s.write('HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"choi');
+          s.end();
+        },
+      },
+    });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const to = /\/(embeddings|chat\/completions)$/.exec(url);
+      const port = to?.[1] === "chat/completions" && chat === "reset" ? cut.port : provider.port;
+      return realFetch(to ? `http://127.0.0.1:${port}/${to[1]}` : input, init);
+    }) as typeof fetch;
+    type Outcome = { ms: number; lines: string[]; error: string };
+    /** One tool call: its error text, the extractor's log lines, and how long it took; given up on at 8 s, so a call with no deadline fails here rather than hanging the suite. */
+    const tool = async (key: string, id: number, name: string, args: Record<string, string>): Promise<Outcome> => {
+      const t0 = performance.now();
+      const req = new Request("http://extension.test/mcp", { method: "POST", headers: { ...RPC, "x-access-key": key },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) });
+      const logged: string[] = [];
+      const realError = console.error;
+      console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const reply = await Promise.race([Promise.resolve(handler(req)).then(parse), new Promise<null>((res) => { timer = setTimeout(() => res(null), 8_000); })]);
+        return { ms: performance.now() - t0, lines: logged.filter((l) => l.startsWith("extractMetadata: ")),
+          error: reply?.json?.result?.isError === true ? String(reply.json.result.content?.[0]?.text) : `no error reply (${reply ? reply.text.slice(0, 80) : "none in 8 s"})` };
+      } finally {
+        clearTimeout(timer);
+        console.error = realError;
+      }
+    };
+    process.env.OB1_LLM_TIMEOUT = "2";
+    const searches: Record<string, Outcome> = {};
+    const captures: Record<string, Outcome> = {};
+    try {
+      let id = 60;
+      for (const name of Object.keys(EMBED).filter((n) => n !== "ok")) {
+        embed = name;
+        searches[name] = await tool(READ_KEY, id++, "search_thoughts", { query: `a query whose embedding is ${name}` });
+      }
+      embed = "ok";
+      for (const name of Object.keys(CHAT)) {
+        chat = name;
+        captures[name] = await tool(WRITE_KEY, id++, "capture_thought", { content: `a thought whose chat answer is ${name}` });
+      }
+    } finally {
+      delete process.env.OB1_LLM_TIMEOUT;
+      globalThis.fetch = realFetch;
+      provider.stop(true);
+      cut.stop(true);
+    }
+    const BASE = "https://openrouter.ai/api/v1";
+    const embedWhy: Record<string, string> = {
+      stall: `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "503 stalled": `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "503": `Error: Embeddings request to ${BASE} failed: 503 ${"x".repeat(500)}`,
+      html: `Error: Embeddings request to ${BASE} answered a body that is not JSON`,
+      empty: `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of nothing": `Error: Embeddings request to ${BASE} answered no embedding`,
+      "a vector of strings": `Error: Embeddings request to ${BASE} answered no embedding`,
+    };
+    for (const [name, error] of Object.entries(embedWhy)) {
+      assert(searches[name].error === error, `an embedding answered ${name} fails search_thoughts saying so (${searches[name].error.slice(0, 100)})`);
+    }
+    const stalls = [searches.stall.ms, searches["503 stalled"].ms];
+    assert(stalls.every((ms) => ms >= 1_900 && ms < 6_000), `…the two whose bodies stall at the deadline (${stalls.map(Math.round).join(", ")} ms)`);
+    const control = captures.tags;
+    // Its answer is the database's refusal, not a provider's, so a capture that matches it reached the write (review pass 4).
+    assert(control.lines.length === 0 && /Failed to connect|ECONNREFUSED|connection refused/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),
+      `the control: a capture whose tags arrive logs nothing from the extractor, and its write is refused by the closed database port ("${control.error.slice(0, 60)}")`);
+    const why: Record<string, string> = {
+      stall: `Chat completion request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "502": `Chat completion request to ${BASE} failed: 502 model not found`,
+      html: `Chat completion request to ${BASE} answered a body that is not JSON`,
+      reset: `Chat completion request to ${BASE} answered a body that is not JSON`, // empty, the read having failed
+      empty: "provider response had no message content",
+      prose: "model content was not valid JSON",
+      array: "model returned JSON that is not an object",
+    };
+    for (const [name, line] of Object.entries(why)) {
+      const c = captures[name];
+      assert(c.lines.join() === `extractMetadata: ${line}` && c.error === control.error,
+        `a chat answer that is ${name} is logged ("${c.lines.join(" / ")}"), and the capture goes on to the control's write (${c.error === control.error ? "the same answer" : c.error.slice(0, 80)})`);
+    }
+    assert(captures.stall.ms >= 1_900 && captures.stall.ms < 6_000, `…the stalled one at the deadline (${Math.round(captures.stall.ms)} ms)`);
+  }
 }
 
 // ── The HTTP APIs ────────────────────────────────────────────────────────────
@@ -630,12 +906,6 @@ const LIVE: Live[] = [
       assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
     },
   })),
-  // The MCP server on its own single-key compare (the section above): on the shim since SMD-1798, so started here too.
-  { file: "integrations/enhanced-mcp/index.ts", env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG }, probe: async (base) => {
-    const r = await parse(await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify(LIST) }));
-    assert(r.status === 200 && toolsOf(r).length === 13, `integrations/enhanced-mcp/index.ts: under bun, the configured key's tools/list is its 13 tools (${r.status}: ${toolsOf(r).length})`);
-    assert((await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": "not-a-key" }, body: JSON.stringify(LIST) })).status === 401, "…and a wrong key is refused with 401");
-  } },
 ];
 /** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
 const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
@@ -879,6 +1149,17 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
+/**
+ * SMD-2001: the transport's reply leaves through _shared/sse.ts's mcpReply,
+ * and by no other way. @hono/mcp answers a POST on an event stream it writes
+ * nothing to until the tool returns, and Bun closes a stream silent for 8–12 s
+ * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. The
+ * kubernetes-deployment probe above is the proof; this holds every server to the shape.
+ */
+const KEPT_ALIVE = /mcpReply\(c, \(\) => transport\.handleRequest\(c\)\)/;
+const repliesKeptAlive = (text: string) =>
+  text.includes('import { mcpReply } from "../_shared/sse.ts";') && KEPT_ALIVE.test(text) && text.split("transport.handleRequest(").length === 2;
+const KEPT_ALIVE_SAYS = "…its reply leaves through ../_shared/sse.ts's mcpReply and no other way: kept alive while the tool runs, a client that leaves logged (SMD-2001)";
 /** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
 const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
 /** A published CORS allow-list, the one shape these servers use (none takes hono's cors() middleware). */
@@ -928,6 +1209,7 @@ for (const s of SERVERS) {
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
     assert(!ACCEPT_PATCH.test(text),
       "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
+    assert(repliesKeptAlive(text), KEPT_ALIVE_SAYS);
     holdsBrowserHeaders(s.file, text);
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
@@ -969,17 +1251,20 @@ for (const s of SERVERS) {
     `${WEBHOOK.file}: the echoed secret is compared through the module's secretMatches(), digest to digest, and with no operator`);
 }
 {
-  const file = "integrations/enhanced-mcp/index.ts";
-  const text = readFileSync(join(ROOT, file), "utf8");
-  assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
-    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
-  assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
-  holdsBrowserHeaders(file, text);
+  // Every file that builds @hono/mcp's transport is one held above — a server
+  // added without an entry would otherwise answer on a stream nothing keeps
+  // alive. (The Next.js route on Vercel builds the SDK's own transport, on
+  // Node, where nothing reaps a silent stream; it is not a Bun server.)
+  const held = SERVERS.filter((s) => s.kind === "mcp").map((s) => s.file).sort();
+  const building = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules") && !/(^|\/)test-[^/]*$/.test(f) && readFileSync(join(ROOT, f), "utf8").includes("new StreamableHTTPTransport("))
+    .sort();
+  assert(building.join() === held.join(), `every file that builds a StreamableHTTPTransport is an MCP server held above (${building.length}; unheld: ${building.filter((f) => !held.includes(f)).join(", ") || "none"}; held but building none: ${held.filter((f) => !building.includes(f)).join(", ") || "none"})`);
 }
-// The rule reached the four lists the tree publishes — a list respelled (a template literal, hono's cors())
-// would drop out of the regex's reach silently otherwise (first review pass).
-assert(HELD_ALLOW_LISTS.length === 4,
-  `the allow-list rule read four lists — delete-thought, update-thought, kubernetes-deployment, enhanced-mcp (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
+// The rule reached the one list an MCP server in the tree publishes — a list respelled (a template literal,
+// hono's cors()) would drop out of the regex's reach silently otherwise (first review pass).
+assert(HELD_ALLOW_LISTS.join() === "integrations/kubernetes-deployment/index.ts",
+  `the allow-list rule read one list — kubernetes-deployment's (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
 
 // The files this test cannot import — a Next.js route, a README's code block, a
 // Node stub — say the same thing in their text. (The cost recipe's per-session

@@ -10,7 +10,7 @@ import { createCore, SPECS, type Input, type Outcome, type RefusalCode } from ".
 import { mayCall, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
-import { labelPart, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
+import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
 import { logRequest, outcomeOf, type RequestOutcome } from "./telemetry.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
@@ -19,7 +19,7 @@ import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDoc
 export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
-export { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
+export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
@@ -868,17 +868,11 @@ app.get("*", async (c, next) => {
 });
 
 
-/**
- * What a log line may say about a request: the JSON-RPC method and, for a
- * tool call, the tool's name — never the arguments, which are the thought —
- * each as `labelPart` admits it, since both are the caller's strings. A batch
- * is named by its first message; anything unreadable is `?`.
- */
-export function requestLabel(bodyText: string | null): string {
-  return labelOf(parsedBody(bodyText));
-}
+// requestLabel and abandonedRequestLine live in sse.ts, beside the keepalive,
+// so the vendored MCP servers' copies of it log a client that leaves the same
+// way (SMD-2001).
 
-/** A request body read as JSON once, for its label and its line's parts; null when it is not JSON. */
+/** A request body read as JSON, for its line's parts; null when it is not JSON. */
 type ParsedBody = { value: unknown } | null;
 function parsedBody(bodyText: string | null): ParsedBody {
   try {
@@ -886,14 +880,6 @@ function parsedBody(bodyText: string | null): ParsedBody {
   } catch {
     return null;
   }
-}
-
-function labelOf(body: ParsedBody): string {
-  if (!body) return "?";
-  const first = Array.isArray(body.value) ? body.value[0] : body.value;
-  const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
-  const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
-  return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
 }
 
 /** What the request's JSON line (telemetry.ts) reads from its body. */
@@ -919,15 +905,6 @@ function partsOf(body: ParsedBody): RequestParts {
   return isCall(msg) && typeof msg.params?.name === "string" ? { rpc: msg.method, tool: msg.params.name, toolCalls } : { rpc: msg.method, toolCalls };
 }
 
-/**
- * The line the server logs when a client closes the connection before the
- * response is complete — the trace SMD-1864's captures never left. The tool
- * runs to its end regardless (a capture may still land), which the line says,
- * so an operator reading a duplicate row later knows where it came from.
- */
-export function abandonedRequestLine(label: string, elapsedMs: number): string {
-  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
-}
 
 /**
  * The same close when the server's own stop made it: the request was still
@@ -1094,9 +1071,8 @@ app.on(MCP_METHODS, "*", async (c) => {
     // returns -32700 (SMD-2278). A body that cannot be read (the client gone
     // mid-upload) is `?` here and the transport's 400 there, as before.
     const rawBody = await c.req.text().catch(() => null);
-    const body = parsedBody(rawBody);
-    label = labelOf(body);
-    parts = partsOf(body);
+    label = requestLabel(rawBody);
+    parts = partsOf(parsedBody(rawBody));
 
     // Repeated slashes collapsed: a path that came as `//mcp` (a proxy that
     // does not clean paths, or none) made the link `//mcp/jobs/<id>`, which a

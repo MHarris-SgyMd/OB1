@@ -74,7 +74,7 @@ After running the migration:
 | Build mode | Manual via MCP calls | Automatic extraction from thought content |
 | Tables | 2 (`graph_nodes`, `graph_edges`) | 5 (`entities`, `edges`, `thought_entities`, `entity_extraction_queue`, `consolidation_log`) |
 | Primary use | Sketch entities by hand, query graph paths | Turn accumulated thoughts into a queryable entity index |
-| Paired with | 10 MCP tools for building/querying | `integrations/entity-extraction-worker/` + `graph_search` in enhanced-mcp |
+| Paired with | 10 MCP tools for building/querying | `integrations/entity-extraction-worker/` (enhanced-mcp's `graph_search` retired with SMD-1931; the entity-graph read is SMD-2280) |
 
 Install whichever matches your workflow. They don't conflict.
 

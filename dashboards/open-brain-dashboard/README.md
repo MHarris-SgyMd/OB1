@@ -32,8 +32,8 @@ server, seals it into an httpOnly cookie, and forwards it on every call, so:
 
 No Supabase project, no user table, no key in the dashboard's environment. (On
 this fork — SMD-1801 — the Supabase email/password sign-in this dashboard used
-to require is gone; the two Next dashboards beside it work the same way, against
-the REST gateway.)
+to require is gone; the two Next dashboards beside it did the same, against the REST
+gateway SMD-1931 retired.)
 
 ## Prerequisites
 

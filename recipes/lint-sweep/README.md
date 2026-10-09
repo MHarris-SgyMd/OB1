@@ -210,7 +210,7 @@ On brains larger than these caps, Tier 1/2 counts represent a **slice**, not the
 
 ---
 
-**Safety:** `lint-sweep.js` is read-only. Every finding above is a suggestion for a human to review. Before acting on any item, verify the thought with `get_thought` or the web UI. Never delete or edit a thought based solely on this report.
+**Safety:** `lint-sweep.js` is read-only. Every finding above is a suggestion for a human to review. Before acting on any item, verify the thought with the `fetch` tool or the web UI. Never delete or edit a thought based solely on this report.
 ```
 
 ## Expected Outcome

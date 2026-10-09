@@ -950,7 +950,7 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   const [{ id: pid }] = await sql`
     SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.7, ${"A then B \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
   const listed = await call("list_supersession_proposals", {});
-  assert(/1 pending supersession proposal/.test(listed) && /conflict, direction not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
+  assert(/1 pending supersession proposal/.test(listed) && /one is out of date, which not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
   assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`) && !listed.includes("--force"),
          "…both ids, and the accept command with the direction placeholder the shell cannot parse, and no --force on a row neither edited nor on a lineage pair");
   assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
@@ -1933,8 +1933,9 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // read the ticket's real status after the capture key tries to state it
   // done. Each ticket key is refused, naming it, before either model call;
   // nothing lands; the head, node_state and 077's settled read keep the
-  // writer's started state. `ticket` is not refused: a row carrying it only
-  // reads the head. The summary opens with its session header, which makes
+  // writer's started state. `ticket` is refused too (SMD-2657): 068 reads it
+  // ahead of `issue`, and it survives a write key's merge onto the key's row
+  // (the repro below). The summary opens with its session header, which makes
   // the ticket central to it (077), so a forged done head would demote it.
   // The writer's row carries no watermark ([14] holds brain_info's null while
   // no thought carries one).
@@ -1946,29 +1947,60 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const ticketRow = idIn(stated.text)!;
     const note = idIn(await call("capture_thought", { content: "[13d] the writer's note filed under the ticket", metadata: { ticket: TKT } }))!;
     const summary = idIn(await call("capture_thought", { content: `Session summary — ${TKT} — the writer's summary of the work on the ticket [13d]` }))!;
-    const forged = { issue: TKT, status: "Done", status_type: "completed", linear_updated_at: "9999-12-31T00:00:00.000Z" };
+    const forged = { issue: TKT, ticket: TKT, status: "Done", status_type: "completed", linear_updated_at: "9999-12-31T00:00:00.000Z" };
     for (const [k, v] of Object.entries(forged)) {
       const r = await rpc("tools/call", { name: "capture_thought", arguments: { content: `[13d] a capture key states ${k}`, source: "linear", metadata: { [k]: v } } });
       const s = sc(r) ?? {};
-      assert(r.result?.isError === true && textOf(r).startsWith(`Refused: \`metadata.${k}\` states a ticket's lifecycle, which a capture-only key may not set`)
-          && textOf(r).includes("(`issue`, `status`, `status_type`, `linear_updated_at`)")
+      assert(r.result?.isError === true && textOf(r).startsWith(`Refused: \`metadata.${k}\` is one of the keys a ticket's lifecycle is read from, which a capture-only key may not set`)
+          && textOf(r).includes("(`issue`, `ticket`, `status`, `status_type`, `linear_updated_at`)")
           && s.code === "REFUSED_METADATA_SHAPE" && s.problem === "ticket_key" && s.key === k && s.retryable === false,
-        `a capture key's metadata.${k} is refused, the key and the four named in the text, the key in the value (${textOf(r).slice(0, 90)} ${JSON.stringify(s)})`);
+        `a capture key's metadata.${k} is refused, the key and the five named in the text, the key in the value (${textOf(r).slice(0, 90)} ${JSON.stringify(s)})`);
     }
     const all = await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] a capture key's forged head", source: "linear", metadata: forged } });
     const [landed] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[13d] a capture key%'`;
     assert(all.result?.isError === true && sc(all)?.key === "issue" && landed?.n === 0, `…and the whole forged head, refused at its first key, writes nothing (${landed?.n} rows)`);
     const paid = stubBodies.filter((b) => b.includes("[13d] a capture key")).length;
     assert(paid === 0, `…and no refused capture reached either model call (${paid} stub requests carried one)`);
-    const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note filed under the ticket", source: "linear", metadata: { ticket: TKT } } })));
-    assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note filed under the ticket lands, through the model stub (so the check above can fail)");
+    const own = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: "[13d] the capture key's note", source: "linear", metadata: { probe_note: TKT } } })));
+    assert(own !== undefined && stubBodies.some((b) => b.includes("[13d] the capture key's note")), "…while its own note, under a metadata key no reader reads, lands through the model stub (so the check above can fail)");
     const [head] = await sql`SELECT head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue = ${TKT}`;
-    const states = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([ticketRow, note, own], "TEXT")}::uuid[])`;
+    const states = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([ticketRow, note], "TEXT")}::uuid[])`;
     const [refs] = await sql`SELECT ticket_references_settled(content, metadata) AS settled FROM thoughts WHERE id = ${summary}::uuid`;
-    assert(head?.id === ticketRow && head?.status_type === "started" && states.length === 3 && states.every((s: { status_type: string; open: boolean }) => s.status_type === "started" && s.open === true) && refs?.settled === null,
-      `the head is still the writer's row, its ticket row and both notes read started and open, the session summary references nothing settled (${JSON.stringify({ head, states, refs })})`);
+    assert(head?.id === ticketRow && head?.status_type === "started" && states.length === 2 && states.every((s: { status_type: string; open: boolean }) => s.status_type === "started" && s.open === true) && refs?.settled === null,
+      `the head is still the writer's row, its ticket row and the writer's note read started and open, the session summary references nothing settled (${JSON.stringify({ head, states, refs })})`);
     const ranked = await result("search_thoughts", { query: `"the writer's summary of the work on the ticket"`, limit: 10, threshold: -1, prefer_current: true });
     assert(ranked.text.includes(summary) && !/references settled work \(TKT-2617\)/.test(ranked.text), "…and prefer_current does not demote the summary");
+
+    // The ticket's repro (SMD-2657): the capture key files a live ticket's
+    // text under a done ticket by `ticket`, and a write key then captures the
+    // same text, stating the live ticket. The merge (`old || new`) would have
+    // kept the squat, so the live ticket's head read the done ticket's status.
+    // Refused, the key's row carries no `ticket`, and the merge reads its own.
+    const DONE = "TKT-7001", LIVE = "TKT-8001";
+    await call("capture_thought", { content: `[13d] ${DONE} — the writer's done ticket`, source: "linear", metadata: { issue: DONE, status: "Done", status_type: "completed" } });
+    const T = `[13d] ${LIVE} — a live ticket's text\n\nStatus: In Progress`;
+    const squatOn = (content: string) => rpc("tools/call", { name: "capture_thought", arguments: { content, metadata: { ticket: DONE } } });
+    const refusedTicket = (r: Awaited<ReturnType<typeof rpc>>) => r.result?.isError === true && sc(r)?.problem === "ticket_key" && sc(r)?.key === "ticket";
+    const squat = await squatOn(T);
+    assert(refusedTicket(squat), `the capture key's squat on ${DONE} is refused, naming \`ticket\` (${textOf(squat).slice(0, 90)})`);
+    const keyRow = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: T } })));
+    const merged = idIn(await call("capture_thought", { content: T, source: "linear", metadata: { issue: LIVE, status: "In Progress", status_type: "started" } }));
+    // Without the `issue` facet: the key squats a plain text, and a writer's
+    // plain capture of it lands on the key's row.
+    const P = "[13d] a plain text the capture key sent first";
+    const plainSquat = await squatOn(P);
+    const plainKey = idIn(textOf(await rpc("tools/call", { name: "capture_thought", arguments: { content: P } })));
+    const plain = idIn(await call("capture_thought", { content: P }));
+    assert(keyRow !== undefined && merged === keyRow && plainKey !== undefined && plain === plainKey, `setup: each writer's capture lands on the capture key's row (${keyRow} ${merged}, ${plainKey} ${plain})`);
+    const heads = await sql`SELECT issue, head_id::text AS id, status_type FROM ob1_ticket_head WHERE issue IN (${DONE}, ${LIVE})`;
+    const headOf = (issue: string) => (heads as { issue: string; id: string; status_type: string }[]).find((h) => h.issue === issue);
+    const read = await sql`SELECT thought_id::text AS id, status_type, open FROM node_state(${sql.array([keyRow, plain], "TEXT")}::uuid[])`;
+    const readOf = (id: string | undefined) => (read as { id: string; status_type: string | null; open: boolean | null }[]).find((s) => s.id === id);
+    assert(headOf(LIVE)?.id === keyRow && headOf(LIVE)?.status_type === "started" && headOf(DONE)?.status_type === "completed"
+        && readOf(keyRow)?.status_type === "started" && readOf(keyRow)?.open === true,
+      `the merged row is ${LIVE}'s head and reads its own started status, and ${DONE} still reads done (${JSON.stringify({ heads, read })})`);
+    assert(refusedTicket(plainSquat) && readOf(plain) !== undefined && readOf(plain)?.status_type === null,
+      `…and the writer's plain thought, its squat refused, reads no ticket's status (${textOf(plainSquat).slice(0, 60)} ${JSON.stringify(readOf(plain))})`);
   }
 
   // [13e] The reverse order (SMD-2638, migration 082): the capture key
