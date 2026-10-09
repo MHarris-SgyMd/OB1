@@ -5267,8 +5267,8 @@ type TransportRole = { imports: TransportImports; wiring: boolean; mustImport: s
 const INDEX_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["@modelcontextprotocol/server", "*"], ["hono", "*"],
-    // The process root's readers: the environment, the store's builder and closer, the agent registry.
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere", "Env"])],
+    // The process root's readers: the environment, the store's builder and closer, the agent registry, the enabled plugins.
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere", "Env"])],
     ["./auth.ts", "*"], ["./version.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./tools.ts", "*"], ["./sse.ts", "*"],
     ["./core/index.ts", "*"], ["./render.ts", "*"],
     // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
@@ -5289,6 +5289,10 @@ const ROOT_ROLE: TransportRole = {
     ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
+    // The enabled plugins, read once from the environment (SMD-2310): manifests checked, nothing run.
+    ["./core/plugins.ts", new Set(["loadPlugins", "LoadedPlugin"])],
+    // Their tool names, for the request line (SMD-1849): a name list, no logic.
+    ["./telemetry.ts", new Set(["knowTools"])],
   ]),
   wiring: true,
   mustImport: "./store.ts",
@@ -5298,7 +5302,7 @@ const ROOT_ROLE: TransportRole = {
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "serveHere"])],
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere"])],
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
@@ -5765,8 +5769,8 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
-/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier or authorization server, and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES"];
+/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
