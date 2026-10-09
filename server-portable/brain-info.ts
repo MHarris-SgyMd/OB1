@@ -337,7 +337,7 @@ export interface ProposalQueue {
   pending: number;
   stale: number;
   oldestPendingS: number | null;
-  /** Null where 079's rule is not there to apply. */
+  /** Board pairs (the comment above PROPOSALS_SQL): 0 when there is nothing to count; null before 079, when its own read did not answer (`unread` names it), or when this field was not read. */
   boardPairs: number | null;
 }
 
@@ -346,23 +346,24 @@ export interface StandingRelations {
   related: number;
   evolves: number;
   duplicate: number;
-  /** Null where 079's rule is not there to apply. */
+  /** Board pairs (the comment above PROPOSALS_SQL): 0 when there is nothing to count; null before 079, when its own read did not answer (`unread` names it), or when this field was not read. */
   boardPairs: number | null;
 }
 
-// A board pair, in both reads below: the two thoughts are filed under two
-// different tickets — coalesce(metadata->>'ticket', metadata->>'issue'), the
-// identity node_state and 079 read, so a Linear section row (`ticket`) counts
-// as its ticket's — and the board relates them in no way, now: 079's
-// consolidation_tickets_linked (child_of, blocks, blocked_by, relates_to)
-// says no, and no active Linear duplicate_of joins them either way. 079 leaves
+// A board pair, in the two board-count reads below: the two thoughts are
+// filed under two different tickets — coalesce(metadata->>'ticket',
+// metadata->>'issue'), the identity node_state and 079 read, so a Linear
+// section row (`ticket`) counts as its ticket's — and the board relates them
+// in no way, now: 079's consolidation_tickets_linked (child_of, blocks,
+// blocked_by, relates_to) says no, and no active Linear duplicate_of joins
+// them either way. 079 leaves
 // duplicate_of out on purpose, for the judge — a duplicate pair stays a
 // candidate — but a pair Linear marks duplicate is linked as far as a reader
 // of this count is concerned (review pass 2). A link made after a verdict does
 // not move its row (only a text move makes one stale, 063), so the link is
 // read here, not assumed. Before 079 the count is not taken (null): the rule
 // it applies is not there.
-
+//
 // The board pairs are reads of their own, after the rest (review pass 2):
 // 079's predicate is 0.1–0.2 ms a call where it looks a link up (079's note)
 // and more on a ticket many links point at; measured, one statement passed the

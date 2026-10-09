@@ -4210,7 +4210,7 @@ if (configFailed) {
             // predicate reads — warns with its grant.
             const bu = facts.unread["proposals.boardPairs"];
             const denied = bu?.reason === "refused" ? deniedObject(bu.message) : null;
-            const boardFix = bu?.reason !== "refused" || p.pending === 0 ? null
+            const boardFix = bu?.reason !== "refused" ? null
               : denied?.kind === "function"
                 ? `GRANT EXECUTE ON FUNCTION ${denied.name}(jsonb, jsonb) TO <the server's role>; — PUBLIC holds it unless a REVOKE took it (079).`
                 : `Grant the server's role SELECT on ${denied?.name ?? "thoughts and thought_facets"} — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).`;
