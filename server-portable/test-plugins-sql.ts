@@ -39,6 +39,7 @@ const { assert, report } = createAssert();
 const HERE = import.meta.dir;
 const PLUGINS = join(HERE, "..", "plugins");
 const NOTES_SHA = migrationSha(readFileSync(join(PLUGINS, "example", "migrations", "001_notes.sql"), "utf8"));
+const DELIVERIES_SHA = migrationSha(readFileSync(join(PLUGINS, "example", "migrations", "002_deliveries.sql"), "utf8"));
 
 const { run: migrate } = await import("../db/migrate.ts");
 /** One migrator run, its lines kept: out and err, and the exit code. */
@@ -68,8 +69,8 @@ console.log("\n[1] A dry run lists the plugin's migrations under their own ledge
   assert(r.code === 0, `exit 0 (${r.code}: ${r.err.slice(0, 200)})`);
   assert(/\nplugins: example — ledger plugin_migrations/.test(r.out), "the plugins' section names its ledger");
   assert(/ {2}plugin example {2}\(schema plugin_example, role ob1_plugin_example\)/.test(r.out), "the plugin, with its schema and its role");
-  assert(r.out.includes(`  →  001_notes.sql  would apply (${NOTES_SHA}) as ob1_plugin_example in plugin_example`), "its migration, its sha, and the role and schema it would run as");
-  assert(/\nplugins: would apply 1, skipped 0$/m.test(r.out), "the plugins' own summary");
+  assert(r.out.includes(`  →  001_notes.sql  would apply (${NOTES_SHA}) as ob1_plugin_example in plugin_example`) && r.out.includes(`  →  002_deliveries.sql  would apply (${DELIVERIES_SHA}) as ob1_plugin_example in plugin_example`), "its migrations, their shas, and the role and schema they would run as");
+  assert(/\nplugins: would apply 2, skipped 0$/m.test(r.out), "the plugins' own summary");
   assert(/\nwould apply \d+, skipped 0\n/.test(`${r.out}\n`), "the core's summary line, as it always reads, before the plugins'");
   const made = await one<{ schema: boolean; ledger: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'plugin_example') AS schema, to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`);
   assert(!made.schema && !made.ledger, "nothing made: no schema, no ledger");
@@ -78,21 +79,21 @@ console.log("\n[1] A dry run lists the plugin's migrations under their own ledge
 console.log("\n[2] A run makes the role and the schema, runs the file as the role, and records it in the plugin ledger alone");
 {
   const r = await runMigrate({ plugins: "example" });
-  assert(r.code === 0 && r.out.includes("  ✓  001_notes.sql  applied") && /plugins: applied 1, skipped 0/.test(r.out), `applied (${r.code}: ${r.err.slice(0, 300)})`);
+  assert(r.code === 0 && r.out.includes("  ✓  001_notes.sql  applied") && r.out.includes("  ✓  002_deliveries.sql  applied") && /plugins: applied 2, skipped 0/.test(r.out), `applied (${r.code}: ${r.err.slice(0, 300)})`);
   const owner = await one<{ schema_owner: string; table_owner: string; role_login: boolean }>(sql`
     SELECT (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'plugin_example') AS schema_owner,
            (SELECT tableowner FROM pg_tables WHERE schemaname = 'plugin_example' AND tablename = 'notes') AS table_owner,
            (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'ob1_plugin_example') AS role_login`);
   assert(owner.schema_owner === "ob1_plugin_example" && owner.table_owner === "ob1_plugin_example", `the schema and its table are the plugin role's (${JSON.stringify(owner)})`);
   assert(owner.role_login === false, "the role cannot log in");
-  const ledger = (await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[];
-  assert(ledger.length === 1 && ledger[0].plugin === "example" && ledger[0].name === "001_notes.sql" && ledger[0].sha256 === NOTES_SHA, `one ledger row, at the file's sha (${JSON.stringify(ledger)})`);
+  const ledger = (await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations ORDER BY name`) as { plugin: string; name: string; sha256: string }[];
+  assert(JSON.stringify(ledger) === JSON.stringify([{ plugin: "example", name: "001_notes.sql", sha256: NOTES_SHA }, { plugin: "example", name: "002_deliveries.sql", sha256: DELIVERIES_SHA }]), `a ledger row a file, at its sha (${JSON.stringify(ledger)})`);
   const core = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM schema_migrations WHERE name = '001_notes.sql'`);
   assert(core.n === 0, "the core's ledger records no plugin file");
   const again = await runMigrate({ plugins: "example" });
-  assert(again.code === 0 && again.out.includes("  ·  001_notes.sql  already applied") && /plugins: applied 0, skipped 1/.test(again.out), "a second run skips it");
+  assert(again.code === 0 && again.out.includes("  ·  001_notes.sql  already applied") && again.out.includes("  ·  002_deliveries.sql  already applied") && /plugins: applied 0, skipped 2/.test(again.out), "a second run skips them");
   const dry = await runMigrate({ plugins: "example", dryRun: true });
-  assert(dry.code === 0 && /plugins: would apply 0, skipped 1/.test(dry.out), "and a dry run says so");
+  assert(dry.code === 0 && /plugins: would apply 0, skipped 2/.test(dry.out), "and a dry run says so");
   const reapply = await runMigrate({ plugins: "example", reapply: true });
   assert(/plugins: example — not run under --reapply/.test(reapply.out), `--reapply leaves the plugins to a plain run, and says so (${reapply.code})`);
 }
@@ -177,7 +178,7 @@ console.log("\n[5] A plugin not named is left as it is: no line, its schema and 
   assert(r.code === 0 && !/plugins:/.test(r.out), "a run with no plugin named says nothing of plugins");
   const kept = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.notes WHERE note = 'kept while off'`);
   const ledger = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM public.plugin_migrations WHERE plugin = 'example'`);
-  assert(kept.n === 1 && ledger.n === 1, "its row, its table and its ledger row are still there");
+  assert(kept.n === 1 && ledger.n === 2, "its row, its table and its ledger rows are still there");
   await sql`DELETE FROM plugin_example.notes WHERE note = 'kept while off'`;
 }
 
@@ -250,11 +251,14 @@ console.log("\n[6] The example's operations through both servers: a note pinned 
   assert(viaMcp.result?.isError !== true && (viaMcp.result?.structuredContent?.note as Record<string, unknown>)?.written_by === "writer", "a write key pins one over MCP too");
 }
 
-console.log("\n[6b] The example's webhook through the REST core: a signed delivery captured as the hook's own caller");
+console.log("\n[6b] The example's webhook through the REST core: a signed delivery captured as the hook's own caller; a stale one refused, and a resent id run once");
 {
   const { hmacSha256Hex } = await import("./plugin-sdk.ts");
+  /** A delivery as the example's sender signs it: the HMAC of "<timestamp>.<body>", the timestamp beside it (SMD-2755). */
+  const deliver = (body: string, ts = Math.floor(Date.now() / 1000)) =>
+    fetch(`${API}/hooks/example/capture`, { method: "POST", headers: { "content-type": "application/json", "x-example-timestamp": String(ts), "x-example-signature": hmacSha256Hex(HOOK_SECRET, `${ts}.${body}`) }, body });
   const body = JSON.stringify({ text: "smd2310: a capture through the example webhook" });
-  const r = await fetch(`${API}/hooks/example/capture`, { method: "POST", headers: { "content-type": "application/json", "x-example-signature": hmacSha256Hex(HOOK_SECRET, body) }, body });
+  const r = await deliver(body);
   const got = (await r.json()) as { id?: string };
   assert(r.status === 202 && typeof got.id === "string", `a signed delivery: 202 and the thought's id (${r.status} ${JSON.stringify(got)})`);
   const audit = await one<{ actor_name: string; trust: string; source: string }>(sql`
@@ -263,6 +267,27 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   assert(audit?.actor_name === "hook:example" && audit.trust === "ingested" && audit.source === "example-hook", `its audit row names the hook as the writer, its trust ingested (${JSON.stringify(audit)})`);
   const unsigned = await fetch(`${API}/hooks/example/capture`, { method: "POST", headers: { "content-type": "application/json" }, body });
   assert(unsigned.status === 401, "an unsigned delivery: 401");
+  const captures = async (text: string) => (await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE t.content = ${text} AND a.actor_name = 'hook:example'`)).n;
+  const staleText = `smd2755: stale ${RUN}`;
+  const stale = await deliver(JSON.stringify({ text: staleText }), Math.floor(Date.now() / 1000) - 301);
+  assert(stale.status === 401 && ((await stale.json()) as { code?: string }).code === "STALE_DELIVERY" && (await captures(staleText)) === 0, "a delivery signed 301 s ago: 401 STALE_DELIVERY, nothing captured");
+  // The same delivery, its id and all, sent twice inside the tolerance.
+  const onceText = `smd2755: once ${RUN}`;
+  const once = JSON.stringify({ id: `evt-${RUN}`, text: onceText });
+  const first = await deliver(once);
+  const firstBody = (await first.json()) as { id?: string };
+  const again = await deliver(once);
+  const againBody = (await again.json()) as { id?: string; duplicate?: boolean };
+  assert(first.status === 202 && typeof firstBody.id === "string", `the first: 202 and its thought (${first.status} ${JSON.stringify(firstBody)})`);
+  assert(again.status === 200 && againBody.duplicate === true && againBody.id === firstBody.id, `the resend: 200, the same thought, marked a duplicate (${again.status} ${JSON.stringify(againBody)})`);
+  assert((await captures(onceText)) === 1, "and capture ran once: one audit row from the hook");
+  const kept = await one<{ thought_id: string }>(sql`SELECT thought_id::text FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}`}`);
+  assert(kept?.thought_id === firstBody.id, "the delivery's id is kept in the plugin's own table, with its thought");
+  // A claim older than twice the tolerance is pruned by the next delivery: a resend then is stale whatever its id, so the table keeps no more.
+  await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '11 minutes' WHERE id = ${`evt-${RUN}`}`;
+  const afterPrune = await deliver(JSON.stringify({ id: `evt-${RUN}-2`, text: `smd2755: later ${RUN}` }));
+  const left = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}`}`);
+  assert(afterPrune.status === 202 && left.n === 0, `the next delivery prunes the old claim (${afterPrune.status}, ${left.n} left)`);
 }
 
 console.log("\n[7] The plugin's handle: its own table, named bare; a core table refused by Postgres");
@@ -322,8 +347,8 @@ console.log("\n[8] Preflight: the enabled plugin's tables in place; a migration 
   assert(/✓\s+plugin tables\s+example — each plugin's role, schema and migrations in place/.test(row(r.out)), `in place: ok (${row(r.out) || (r.out).slice(-300)})`);
   await sql`DELETE FROM public.plugin_migrations WHERE plugin = 'example'`;
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
-  assert(/✗\s+plugin tables\s+example: 1 migration\(s\) not applied \(001_notes.sql\)/.test(row(r.out)), `a migration the ledger lacks: fail, named (${row(r.out)})`);
-  await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES ('example', '001_notes.sql', ${NOTES_SHA})`;
+  assert(/✗\s+plugin tables\s+example: 2 migration\(s\) not applied \(001_notes.sql, 002_deliveries.sql\)/.test(row(r.out)), `migrations the ledger lacks: fail, named (${row(r.out)})`);
+  await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES ('example', '001_notes.sql', ${NOTES_SHA}), ('example', '002_deliveries.sql', ${DELIVERIES_SHA})`;
   // A table owned by another role (a restore with --no-owner, say) is one the plugin's role cannot reach.
   await sql`ALTER TABLE plugin_example.notes OWNER TO postgres`;
   r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });

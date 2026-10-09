@@ -1,14 +1,16 @@
 // The example plugin (SMD-2310): the template a plugin starts from. It reaches
 // the brain's thoughts the only way a plugin may — through a core operation,
-// as the caller (ctx.call) — and keeps one table of its own (ctx.db), made by
-// its migration in migrations/.
+// as the caller (ctx.call) — and keeps tables of its own (ctx.db), made by
+// its migrations in migrations/.
 
-import { definePlugin, hmacSha256Hex, ok, operation, refuse, safeEqual, z } from "../../server-portable/plugin-sdk.ts";
+import { definePlugin, ok, operation, refuse, verifyTimestamped, z } from "../../server-portable/plugin-sdk.ts";
 
 /** A note as both operations answer it. */
 const Note = z.object({ id: z.string(), thought_id: z.string(), note: z.string(), written_by: z.string(), created_at: z.string() });
 type NoteRow = { id: string; thought_id: string; note: string; written_by: string; created_at: Date | string };
 const asNote = (r: NoteRow) => ({ ...r, created_at: new Date(r.created_at).toISOString() });
+/** How far a delivery's timestamp may be from now, in seconds — and so how long its id is kept: twice it, after which a resend is refused as stale whatever its id. */
+const TOLERANCE_S = 300;
 
 export default definePlugin({
   name: "example",
@@ -17,25 +19,68 @@ export default definePlugin({
   // The operator GUI's nav entry (SMD-2280 renders the page): a thought's notes.
   gui: { pages: [{ path: "/notes", label: "Notes" }] },
   // A capture source's inbound webhook, as a Slack or Telegram plugin's would
-  // be: POST /hooks/example/capture with {"text": "…"}, signed with the
-  // operator's secret (x-example-signature: hex HMAC-SHA256 of the raw body).
+  // be: POST /hooks/example/capture with {"text": "…"}, and an "id" if the
+  // sender names its deliveries. It is signed with the operator's secret over
+  // the time and the body — x-example-timestamp, Unix seconds, and
+  // x-example-signature, the hex HMAC-SHA256 of "<timestamp>.<body>" — so a
+  // recorded delivery verifies for five minutes, not forever, and inside them
+  // its id runs it once (SMD-2755).
   hooks: {
     capture: {
-      description: "Captures the delivery's text as a thought of trust ingested, when its signature matches the secret OB1_HOOK_SECRETS gives the example.",
+      description: "Captures the delivery's text as a thought of trust ingested, when it is signed with the secret OB1_HOOK_SECRETS gives the example within five minutes; a delivery whose id it has seen is answered with that thought and runs nothing.",
       async handler(ctx, request) {
-        // The signature is over the bytes sent; the REST core has refused already if no secret is set.
-        const signature = request.headers["x-example-signature"] ?? "";
-        if (!safeEqual(signature, hmacSha256Hex(ctx.secret, request.body))) return { status: 401, body: { code: "BAD_SIGNATURE", retryable: false } };
+        // Over the bytes sent; the REST core has refused already if no secret is set.
+        const verdict = verifyTimestamped(request, ctx.secret, { signatureHeader: "x-example-signature", timestampHeader: "x-example-timestamp", toleranceSeconds: TOLERANCE_S });
+        if (!verdict.ok) return { status: 401, body: { code: verdict.code, retryable: false } };
         let text: unknown;
+        let id: unknown;
         try {
-          text = (JSON.parse(request.text) as { text?: unknown }).text;
+          ({ text, id } = JSON.parse(request.text) as { text?: unknown; id?: unknown });
         } catch {
           return { status: 400, body: { code: "NOT_JSON", retryable: false } };
         }
         if (typeof text !== "string" || !text.trim()) return { status: 400, body: { code: "NO_TEXT", retryable: false } };
-        const captured = await ctx.call("capture_thought", { content: text, source: "example-hook", trust: "ingested" });
-        if (!captured.ok) return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
-        return { status: 202, body: { id: captured.value.id } };
+        if (id !== undefined && (typeof id !== "string" || id.length < 1 || id.length > 200)) return { status: 400, body: { code: "BAD_ID", retryable: false } };
+        const content = text;
+        const capture = () => ctx.call("capture_thought", { content, source: "example-hook", trust: "ingested" });
+        if (id === undefined) {
+          const captured = await capture();
+          if (!captured.ok) return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
+          return { status: 202, body: { id: captured.value.id } };
+        }
+        // Claimed before the capture, in a transaction of its own: the claim
+        // is not held across the model calls, which would hold one of the
+        // plugin's two connections for as long. A resend waits for the first
+        // claim to commit, then finds it — done, or still running.
+        const claim = await ctx.db.tx(async (sql) => {
+          await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${2 * TOLERANCE_S} * interval '1 second'`;
+          const [mine] = await sql<{ id: string }>`INSERT INTO deliveries (id) VALUES (${id}) ON CONFLICT (id) DO NOTHING RETURNING id`;
+          if (mine) return { claimed: true as const };
+          const [held] = await sql<{ thought_id: string | null }>`SELECT thought_id FROM deliveries WHERE id = ${id}`;
+          return { claimed: false as const, thoughtId: held?.thought_id ?? null };
+        });
+        if (!claim.claimed) {
+          return claim.thoughtId
+            ? { status: 200, body: { id: claim.thoughtId, duplicate: true } }
+            : { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
+        }
+        // A capture that fails gives the claim back, so the sender's retry
+        // runs; one that cannot be given back lapses with the prune.
+        const release = () => ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${id} AND thought_id IS NULL`).catch(() => undefined);
+        let captured;
+        try {
+          captured = await capture();
+        } catch (err) {
+          await release();
+          throw err;
+        }
+        if (!captured.ok) {
+          await release();
+          return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
+        }
+        const thoughtId = captured.value.id;
+        await ctx.db.tx((sql) => sql`UPDATE deliveries SET thought_id = ${thoughtId} WHERE id = ${id}`);
+        return { status: 202, body: { id: thoughtId } };
       },
     },
   },

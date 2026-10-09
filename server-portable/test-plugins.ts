@@ -16,7 +16,7 @@ import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { unlocks, visibleToolNames } from "./tools.ts";
 import { enabledHooks, hookSecrets, loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
-import { hmacSha256Hex } from "./plugin-sdk.ts";
+import { hmacSha256Hex, verifyTimestamped, type HookRequest } from "./plugin-sdk.ts";
 import type { Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
@@ -496,8 +496,8 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // Over REST.
   const SECRET = "hook-secret-0123";
   const faults: string[] = [];
-  const hookApp = (hooksRaw: string | undefined, secretsRaw: string | undefined) => createRestApp({
-    core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")}` }), resolve: async () => identity, track: (run) => run(), log: (l) => lines.push(l), faultLog: (l) => faults.push(l),
+  const hookApp = (hooksRaw: string | undefined, secretsRaw: string | undefined, withCore: Core = core) => createRestApp({
+    core: withCore, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")}` }), resolve: async () => identity, track: (run) => run(), log: (l) => lines.push(l), faultLog: (l) => faults.push(l),
     plugins: () => loadPlugins("example"),
     hooks: () => ({ hooks: enabledHooks(loadPlugins("example"), hooksRaw), secrets: hookSecrets(secretsRaw).secrets }),
   });
@@ -505,7 +505,12 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const deliver = (app: ReturnType<typeof hookApp>, body: string, headers: Record<string, string> = {}, path = "/hooks/example/capture", method = "POST") =>
     app.fetch(new Request(`http://api${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: method === "GET" ? undefined : body }));
   const body = JSON.stringify({ text: "a thought from a webhook" });
-  const signed = { "x-example-signature": hmacSha256Hex(SECRET, body) };
+  /** The example's signature: over "<timestamp>.<body>", the timestamp beside it (SMD-2755). */
+  const sign = (data: string | Uint8Array, ts = Math.floor(Date.now() / 1000), key = SECRET) => ({
+    "x-example-timestamp": String(ts),
+    "x-example-signature": hmacSha256Hex(key, new Uint8Array([...new TextEncoder().encode(`${ts}.`), ...(typeof data === "string" ? new TextEncoder().encode(data) : data)])),
+  });
+  const signed = sign(body);
   calls.length = 0;
   answer = async () => coreOk({ id: "t-hook" });
   let r = await deliver(on, body, signed);
@@ -520,12 +525,28 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await deliver(on, body, { ...signed, "x-forwarded-prefix": "/api" });
   assert(r.status === 404 && calls.length === 0, "a delivery that came through /api (X-Forwarded-Prefix): 404, the handler never ran — /api does not open /hooks");
   calls.length = 0;
-  r = await deliver(on, body, { "x-example-signature": hmacSha256Hex("another", body) });
-  assert(r.status === 401 && calls.length === 0, "a delivery signed with another secret: 401, and the core never ran");
+  const code = async (res: Response) => ((await res.json()) as { code?: string }).code;
+  r = await deliver(on, body, sign(body, undefined, "another"));
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a delivery signed with another secret: 401 BAD_SIGNATURE, and the core never ran");
   r = await deliver(on, body);
-  assert(r.status === 401, "an unsigned delivery: 401");
-  r = await deliver(on, "{not json", { "x-example-signature": hmacSha256Hex(SECRET, "{not json") });
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP", "an unsigned delivery: 401");
+  // Replays (SMD-2755): a recorded delivery verifies for the tolerance alone.
+  const now = Math.floor(Date.now() / 1000);
+  r = await deliver(on, body, sign(body, now - 301));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "a delivery signed 301 s ago: 401 STALE_DELIVERY, and the core never ran");
+  r = await deliver(on, body, sign(body, now + 301));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "one dated 301 s ahead: 401 STALE_DELIVERY too");
+  r = await deliver(on, body, { ...sign(body, now - 301), "x-example-timestamp": String(now) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a stale delivery with its timestamp made fresh: 401 BAD_SIGNATURE — the time is signed");
+  r = await deliver(on, body, { "x-example-timestamp": String(now), "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a signature over the body alone, as before SMD-2755: 401 BAD_SIGNATURE");
+  r = await deliver(on, "{not json", sign("{not json"));
   assert(r.status === 400, "a signed body that is not JSON: 400");
+  for (const id of [7, "", "x".repeat(201)]) {
+    const withId = JSON.stringify({ text: "t", id });
+    r = await deliver(on, withId, sign(withId));
+    assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is no string of 1 to 200 characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
+  }
   calls.length = 0;
   r = await deliver(hookApp("example", undefined), body, signed);
   assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED" && calls.length === 0, "no secret for the plugin: the REST core refuses, 503, and the handler never runs");
@@ -536,7 +557,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await deliver(on, body, {}, "/hooks/example/capture", "GET");
   assert(r.status === 405 && r.headers.get("allow") === "POST", "a GET of a webhook: 405, Allow POST");
   const big = JSON.stringify({ text: "x".repeat(1024 * 1024) });
-  r = await deliver(on, big, { "x-example-signature": hmacSha256Hex(SECRET, big) });
+  r = await deliver(on, big, sign(big));
   assert(r.status === 413 && calls.length === 0, "a body over 1 MiB: 413, before the handler reads it");
   answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
   r = await deliver(on, body, signed);
@@ -559,8 +580,51 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // The bytes as sent: a BOM-prefixed body the sender signed verifies.
   const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(body)]);
   answer = async () => coreOk({ id: "t-bom" });
-  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", "x-example-signature": hmacSha256Hex(SECRET, bom) } }));
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", ...sign(bom) } }));
   assert(r.status === 202, `a body signed over its bytes, BOM and all, verifies (${r.status})`);
+  // A delivery's id (SMD-2755), over a stand-in for the example's deliveries
+  // table (test-plugins-sql runs the real one): claimed before the capture,
+  // given back when the capture fails so the sender's retry runs; a resend of
+  // a captured one runs nothing, and of one still running is told to retry.
+  const claims = new Map<string, string | null>();
+  const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const q = strings.join("?").replace(/\s+/g, " ").trim();
+    const id = values.at(-1) as string;
+    if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve([]);
+    if (q.startsWith("INSERT INTO deliveries (id)")) return Promise.resolve(claims.has(id) ? [] : (claims.set(id, null), [{ id }]));
+    if (q.startsWith("SELECT thought_id FROM deliveries WHERE id =")) return Promise.resolve(claims.has(id) ? [{ thought_id: claims.get(id) }] : []);
+    if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL")) return Promise.resolve((claims.get(id) === null && claims.delete(id), []));
+    if (q.startsWith("UPDATE deliveries SET thought_id = ? WHERE id =")) return Promise.resolve((claims.set(id, values[0] as string), []));
+    throw new Error(`the stand-in table has no answer for: ${q}`);
+  };
+  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
+  const withIds = hookApp("example", `example=${SECRET}`, tableCore);
+  const send = (id: string) => { const b = JSON.stringify({ id, text: `delivery ${id}` }); return deliver(withIds, b, sign(b)); };
+  const captures = () => calls.filter((c) => c.name === "capture").length;
+  calls.length = 0;
+  answer = async () => coreOk({ id: "t-once" });
+  r = await send("evt-1");
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-once" && claims.get("evt-1") === "t-once", "a delivery with an id: 202, its id kept with its thought");
+  r = await send("evt-1");
+  const dup = (await r.json()) as { id?: string; duplicate?: boolean };
+  assert(r.status === 200 && dup.id === "t-once" && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
+  answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
+  r = await send("evt-2");
+  assert(r.status === 422 && !claims.has("evt-2"), "a capture the core refuses gives its claim back");
+  answer = async () => { throw new Error("embedder down"); };
+  r = await send("evt-3");
+  assert(r.status === 500 && !claims.has("evt-3"), "a capture that throws gives its claim back too");
+  answer = async () => coreOk({ id: "t-retry" });
+  calls.length = 0;
+  r = await send("evt-2");
+  const retried = r.status;
+  r = await send("evt-3");
+  assert(retried === 202 && r.status === 202 && captures() === 2, `so the sender's retries run, and capture (${retried}, ${r.status}, ${captures()} captures)`);
+  claims.set("evt-4", null);
+  calls.length = 0;
+  r = await send("evt-4");
+  const busy = (await r.json()) as { code?: string; retryable?: boolean };
+  assert(r.status === 409 && busy.code === "IN_FLIGHT" && busy.retryable === true && captures() === 0, `a delivery whose first is still running: 409 IN_FLIGHT, retryable, nothing run (${r.status} ${JSON.stringify(busy)})`);
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
@@ -571,6 +635,44 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(r.status === 500, "a hook answering a status no sender reads is the plugin's fault: 500");
   r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/list", { method: "POST", body: "{}" }));
   assert(r.status === 500, "a hook answering a body that is no JSON object: 500");
+}
+
+console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separator and body; a time outside the tolerance refused, and only once signed (SMD-2755)");
+{
+  const KEY = "8f42a73054b1749f8f58848be5e6502c";
+  const at = 1_700_000_000;
+  const req = (headers: Record<string, string>, text = '{"token":"x"}'): HookRequest => ({ headers, query: {}, body: new TextEncoder().encode(text), text });
+  // Slack's documented example: v0=HMAC(secret, "v0:<ts>:<body>").
+  const slack = { signatureHeader: "X-Slack-Signature", timestampHeader: "X-Slack-Request-Timestamp", prefix: "v0:", separator: ":", signaturePrefix: "v0=" };
+  const slackBody = "token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554%2F96rGlfmibIGlgcZRskXaIFfN&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c";
+  const slackSent = req({ "x-slack-request-timestamp": "1531420618", "x-slack-signature": "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503" }, slackBody);
+  const slackAt = 1531420618 * 1000;
+  const SLACK_DOC_SECRET = "8f742231b10e8888abcd99yyyzzz85a5"; // Slack's "Verifying requests from Slack" example, public
+  assert(JSON.stringify(verifyTimestamped(slackSent, SLACK_DOC_SECRET, slack, slackAt)) === '{"ok":true,"timestamp":1531420618}', "Slack's documented signed request verifies in Slack's form, the header names in any case");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, separator: "." }, slackAt).ok === false, "and not with another separator");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, prefix: "" }, slackAt).ok === false, "nor without the v0: prefix");
+  const v = (headers: Record<string, string>, now = at * 1000, tolerance?: number) => verifyTimestamped(req(headers), KEY, { signatureHeader: "x-sig", timestampHeader: "x-ts", ...(tolerance ? { toleranceSeconds: tolerance } : {}) }, now);
+  const sig = (ts: string, text = '{"token":"x"}') => hmacSha256Hex(KEY, `${ts}.${text}`);
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)) }).ok, "the plain form: HMAC of <ts>.<body>, hex");
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)).toUpperCase() }).ok, "upper-case hex is the same signature");
+  const reason = (x: ReturnType<typeof v>) => (x.ok ? "ok" : x.code);
+  assert(reason(v({ "x-sig": sig(String(at)) })) === "NO_TIMESTAMP", "no timestamp: NO_TIMESTAMP");
+  for (const ts of ["", "17e8", "-1", " 1700000000", "1700000000.5", "1".repeat(13)]) assert(reason(v({ "x-ts": ts, "x-sig": sig(ts) })) === "NO_TIMESTAMP", `a timestamp that is not Unix seconds, ${JSON.stringify(ts)}: NO_TIMESTAMP, though signed`);
+  assert(reason(v({ "x-ts": String(at) })) === "BAD_SIGNATURE", "no signature: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at + 1)) })) === "BAD_SIGNATURE", "a signature over another time: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at), '{"token":"y"}') })) === "BAD_SIGNATURE", "a signature over another body: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": `v0=${sig(String(at))}` })) === "BAD_SIGNATURE", "a prefix the scheme does not name: BAD_SIGNATURE");
+  const old = String(at - 300);
+  assert(v({ "x-ts": old, "x-sig": sig(old) }).ok, "300 s old, the default tolerance: verified");
+  const older = String(at - 301);
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older) })) === "STALE_DELIVERY", "301 s old: STALE_DELIVERY");
+  const ahead = String(at + 301);
+  assert(reason(v({ "x-ts": ahead, "x-sig": sig(ahead) })) === "STALE_DELIVERY", "301 s ahead of the clock: STALE_DELIVERY");
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older, "other") })) === "BAD_SIGNATURE", "a stale time on a delivery the secret did not sign: BAD_SIGNATURE, never STALE — the sender learns nothing of the clock");
+  assert(v({ "x-ts": older, "x-sig": sig(older) }, at * 1000, 400).ok && reason(v({ "x-ts": String(at - 61), "x-sig": sig(String(at - 61)) }, at * 1000, 60)) === "STALE_DELIVERY", "the tolerance is the scheme's to set");
+  let thrown = "";
+  try { v({ "x-ts": String(at), "x-sig": sig(String(at)) }, at * 1000, -5); } catch (e) { thrown = (e as Error).message; }
+  assert(/toleranceSeconds -5 is not a positive number/.test(thrown), "a tolerance that is no positive number is the plugin's fault: thrown");
 }
 
 report();
