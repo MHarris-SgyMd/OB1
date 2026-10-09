@@ -51,6 +51,7 @@ Every contribution lives in its own subfolder under the right category (e.g., `r
 - **`README.md`** — What it does, prerequisites, step-by-step setup, expected outcome, troubleshooting
 - **`metadata.json`** — Structured metadata (see template below)
 - **Your actual code** — SQL files, server code, frontend code, config files, whatever it takes
+- **Dependencies** — a server in `recipes/` or `integrations/` that imports only `hono`, `zod`, `@hono/mcp` and the MCP SDK needs no install of its own: it resolves `extensions/`' pinned install through the committed `recipes/node_modules` and `integrations/node_modules` links. Anything else goes in a `package.json` in your own folder, created before you install (`bun add` creates one in the current directory). CI installs only `extensions/`: a server added to `extensions/test-auth.ts`'s `SERVERS` that needs more than the stack also needs a `bun install --frozen-lockfile` step for its folder in each `fork-checks.yml` job that runs the suites, or its import fails with `Cannot find package`. Once `extensions/` is installed, npm run in a folder with no `package.json` installs into `recipes/` itself: it replaces the link with a real `node_modules` and writes a stray `recipes/package.json` and `recipes/package-lock.json`, which breaks every recipe server. To recover, delete those three and run `git restore recipes/node_modules`.
 - **NO credentials, API keys, or secrets.** The automated review will reject them. Use environment variables and document what the user needs to set.
 
 ## README Standards
@@ -112,7 +113,7 @@ psql "$DATABASE_URL" -f recipes/my-recipe/schema.sql
 
 **2. Run the server:**
 \```bash
-PORT=8787 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' bun recipes/my-recipe/index.ts
+PORT=8787 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' bun --no-install recipes/my-recipe/index.ts
 \```
 ```
 
