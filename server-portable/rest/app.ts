@@ -413,10 +413,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
 
   // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
   // for a plugin OB1_HOOKS names, with no key — the sender holds none — so the
-  // handler verifies the delivery against its secret. Its body is read whole
-  // up to HOOK_BODY_LIMIT, and handed over raw, as a signature is over the
-  // bytes; the handler runs as `hook:<plugin>`, a capture-only caller. Off,
-  // or a name it does not serve, the path is NO_ROUTE, as any unrouted one.
+  // handler verifies the delivery against its secret. Its body is counted as
+  // it arrives and cut at HOOK_BODY_LIMIT, and handed over as the bytes sent
+  // (a signature is over them) and as text; the handler runs as
+  // `hook:<plugin>`, a capture-only caller. Off, or a name it does not serve,
+  // the path is NO_ROUTE, as any unrouted one.
   app.all("/hooks/:plugin/:hook", async (c) => {
     const served = deps.hooks?.();
     const hook = served?.hooks.find((h) => h.plugin === c.req.param("plugin") && h.name === c.req.param("hook"));
@@ -435,7 +436,13 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // no length, and reading it whole first let an anonymous sender fill the
     // server's memory (PR 4 review pass 1). Kept as bytes — a signature is
     // over what was sent, which decoding would change (a BOM, invalid UTF-8).
-    const body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
+    let body: Uint8Array | null;
+    try {
+      body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
+    } catch {
+      // The sender went away mid-body: nothing to answer it with, and nothing of why.
+      return c.json({ code: "REFUSED_INPUT", retryable: false }, 400);
+    }
     if (body === null) return tooLarge();
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((value, name) => { headers[name.toLowerCase()] = value; });
@@ -446,7 +453,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
       // The sender is anonymous: it is told FAILED and nothing of why; the operator's log has the message.
-      log(`api hook ${hook.path} fault: ${failure(err).message}`);
+      // One line, bounded: the request log is one line per request.
+      log(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
       return c.json({ code: "FAILED", retryable: false }, 500);
     }
     if (answer.status === 204) return c.body(null, 204);
