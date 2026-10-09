@@ -2462,6 +2462,70 @@ jobs:
           MCP_URL: http://127.0.0.1:8010/mcp
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
+      # SMD-2760. What comes back after a reboot is each container's restart
+      # policy. Postgres had none, so on Docker a reboot would bring the
+      # servers back without their database (on podman, with its restart unit
+      # disabled, nothing came back: the dogfood stack stayed down 47
+      # minutes). This is the Docker half of the ticket's Verify, on every
+      # run: the daemon restarts, and with nothing started by hand Postgres,
+      # the server, the REST core and the proxy each come back on its policy,
+      # started after the restart (so a daemon that kept them running proves
+      # nothing) and healthy by its own healthcheck, not merely `Running`,
+      # which Docker also reports for a container in restart backoff (review
+      # pass 1); and a keyed call is answered from the database. The daemon's
+      # stop leaves the server's own `SIGTERM: stopped` line in its log, so
+      # the SIGTERM step below counts the line its own stop adds (review pass
+      # 2). The boot restart does not wait on depends_on, so the server may
+      # start first and loop in preflight until Postgres answers: the wait
+      # covers that.
+      # Before the SIGTERM step, which leaves the server stopped by hand, and
+      # a container stopped by hand is not restarted.
+      - name: The stack comes back after the Docker daemon restarts
+        working-directory: deploy
+        run: |
+          t0=$(date -u +%s)
+          sudo systemctl restart docker
+          # A service's status, health (none: no healthcheck declared), policy and start time.
+          state() {
+            local id
+            id=$(docker compose -f compose.yaml ps -aq "$1" 2> /dev/null || true)
+            if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
+            docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
+          }
+          # Running and healthy: each of the four declares a healthcheck (the
+          # server's is its image's, server-portable/Dockerfile).
+          back() {
+            local status health
+            read -r status health _ <<<"$(state "$1")"
+            [ "$status" = running ] && [ "$health" = healthy ]
+          }
+          while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
+            if back postgres && back server && back api && back proxy; then break; fi
+            sleep 2
+          done
+          for s in postgres server api proxy; do
+            read -r status health policy started <<<"$(state "$s")"
+            at=$(date -d "$started" +%s)
+            echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
+            why=""
+            if [ "$status" = absent ]; then why="compose finds no container for it"; else
+              back "$s" || why="not running and healthy within 2 minutes"
+              [ "$policy" = unless-stopped ] || why="${why:+$why; }its restart policy is $policy, not unless-stopped"
+              if [ "$status" = running ] && [ "$at" -lt "$t0" ]; then why="${why:+$why; }it started before the restart, so the daemon kept it running"; fi
+            fi
+            if [ -n "$why" ]; then
+              docker compose -f compose.yaml ps -a || true
+              docker compose -f compose.yaml logs --tail 20 "$s" || true
+              docker inspect -f '{{json .State.Health}}' "$(docker compose -f compose.yaml ps -aq "$s" 2> /dev/null || true)" 2> /dev/null || true
+              echo "$s did not come back on its own after the daemon restarted: $why" >&2; exit 1
+            fi
+          done
+          answer=$(curl -s --max-time 20 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp || true)
+          if ! grep -q '"result"' <<<"$answer" || grep -q '"isError":true' <<<"$answer"; then
+            echo "a keyed thought_stats after the restart did not answer from the database: ${answer:0:300}" >&2; exit 1
+          fi
+
       # SMD-2250. The server stops on SIGTERM once what is in flight is
       # answered (server-portable/shutdown.ts), and a stop during preflight
       # ends the container (the Dockerfile's traps): before, each waited out
@@ -2496,7 +2560,13 @@ jobs:
           # before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
+          # The daemon restart above (SMD-2760) left a line of its own: this
+          # stop must add one.
+          stops() { docker compose -f compose.yaml logs --no-log-prefix server | grep -c '^SIGTERM: stopped' || true; }
+          before=$(stops)
           stop serving 0
+          after=$(stops)
+          if [ "$after" -ne $((before + 1)) ]; then echo "the stop added $((after - before)) 'SIGTERM: stopped' lines to the server's log, not one" >&2; exit 1; fi
           # With the server stopped, the document's router turns Traefik's 502
           # into the proxy's bodiless 404 (auth-absent, SMD-2382): a connector
           # still reads "no OAuth here", never an error it could take for OAuth.

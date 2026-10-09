@@ -672,6 +672,100 @@ its own path kept and the schema added — or, where the connection string sets
 the path, the `options=` value to put there instead — see `FORK.md` change 43
 and SMD-2238.
 
+## After a reboot
+
+What comes back after the host, the Docker daemon or a podman machine
+restarts is each container's restart policy; compose is not involved. In
+`compose.yaml` what serves is `unless-stopped`: Postgres, the two servers,
+the proxy, Ollama, n8n, the orchestration runner and the authorization
+server. What runs once is `"no"`: the migrator, `ollama-pull` and the
+runner's role job. `board-sync`, the two workers and `jev` are
+`on-failure:3`, so that a configuration a restart does not fix stops them
+rather than loops; count on neither runtime to start those at boot. The
+servers can need one of them: with `OB1_JEV_BASE_URL` naming the `jev`
+service, their preflight fails ("The jev service is not running") until it
+runs, so after a reboot start it by hand, `compose --profile jev up -d jev`
+with the stack's `-f` files (SMD-2834). Check 32
+of `scripts/check-fork-consistency.ts` holds every service's policy. Postgres
+had none until SMD-2760, so on Docker a reboot would bring the servers back
+without their database. A canary (`canary.sh`) and the three-tier stack
+(`compose.tiers.yaml`) take the same policies.
+
+- **Docker** starts its `unless-stopped` containers when the daemon starts,
+  except one stopped by hand. That needs the daemon itself to start at boot:
+  Docker's packages enable it on Debian and Ubuntu, and elsewhere it is
+  `sudo systemctl enable docker.service containerd.service`. Rootless Docker
+  needs `systemctl --user enable docker` plus linger, and Docker Desktop
+  needs its start-at-sign-in setting.
+- **Podman** has no daemon. At boot only `podman-restart.service` applies
+  the policies, and only once it is enabled. It starts the containers that
+  `podman ps -a --filter should-start-on-boot=true` lists: those on `always`
+  or `unless-stopped`, less any stopped by hand (measured for
+  `unless-stopped`). On a podman machine on macOS (podman 6.0.2) it was
+  disabled at both scopes, and the stack stayed down after the machine
+  restarted until it was started by hand 47 minutes later (SMD-2760). Enable
+  it in the scope the containers run in:
+
+  ```bash
+  podman machine inspect --format '{{.Rootful}}'     # true: the containers are root's
+  podman machine ssh -- sudo systemctl enable podman-restart.service
+  # false: the machine user's unit, inside the machine (not measured here)
+  podman machine ssh -- systemctl --user enable podman-restart.service
+  ```
+
+  On a Linux host where podman runs as root, it is
+  `sudo systemctl enable podman-restart.service`. For rootless podman (not
+  measured here), run `systemctl --user enable podman-restart.service` and
+  `sudo loginctl enable-linger "$USER"`, so that the user's units start
+  without a login session.
+
+  Before enabling it, list what it will start: every such container, not
+  this stack's alone. On the Mac above that included a days-old scratch
+  stack's server and proxy. Remove what should stay down, or stop it, which
+  takes it off the list:
+
+  ```bash
+  podman ps -a --filter should-start-on-boot=true --format '{{.Names}} {{.Status}}'
+  ```
+
+**Order is not kept.** Compose is not running at boot, so nothing waits on
+`depends_on`'s conditions (Postgres healthy, the migrator done), and a server
+can start before Postgres answers. Its preflight then fails and the
+container exits (preflight does not wait), and `unless-stopped` starts it
+again until Postgres answers, which takes seconds. Under podman that loop
+has no backoff (SMD-2043). A database the server cannot use keeps it
+restarting; for example, after a lost volume Postgres comes back empty, and
+the migrator does not run at boot. `compose logs server` says why. With the
+schema in place the migrator is not needed at boot; the `up` after an
+upgrade runs it.
+
+**A stack from before SMD-2760**, a canary's included, keeps its Postgres
+(and its Ollama, where the profile is on) at `no` until each is recreated
+from this `compose.yaml`; a three-tier stack's three Postgres likewise, from
+`compose.tiers.yaml`. Its servers are already `unless-stopped`, so an
+enabled unit would bring them back without their database. An `up -d`
+recreates them, with a short outage. Or set the policy on each running
+container in place: under podman that kept the same container running, and
+it joined the boot list at once (measured). `podman update` takes one
+container at a time; `docker update --restart unless-stopped` takes several.
+
+```bash
+podman update --restart unless-stopped open-brain-postgres-1
+podman update --restart unless-stopped open-brain-canary-postgres-1   # a canary's (deploy/canary.sh)
+podman update --restart unless-stopped open-brain-ollama-1            # with --profile local-models
+podman update --restart unless-stopped open-brain-tiers-stable-postgres-1   # and canary-, working-: the tier stack
+```
+
+**To check after a reboot**, list the stack with the `-f` files and profiles
+it was brought up with: `postgres`, `server`, `api` and `proxy` should be
+`Up`, and `/health` should answer 200. Whatever is still down, the same
+`up -d` the stack was brought up with starts in order.
+
+```bash
+podman compose -f deploy/compose.yaml ps -a
+curl -fsS "http://127.0.0.1:${SERVER_PORT:-8000}/health"
+```
+
 ## Using smoke.sh against a real deployment
 
 It only needs a URL and a key, so the same check covers every target:
@@ -1466,9 +1560,9 @@ a connector at its port stays the canary's and a re-run with `--connect`
 moves it. Only a failure after the health wait (at the smoke, or the
 connector) leaves it answering meanwhile; a
 failed refresh or health wait stops the canary's servers.
-A canary proxy's port is read from its container, running or stopped (after
-a reboot podman leaves it stopped, and Docker restarts it but not its
-Postgres); once that is gone, pass the `--port` it was stood up with.
+A canary proxy's port is read from its container, running or stopped (a
+reboot can leave it stopped: "After a reboot" above); once that is gone, pass
+the `--port` it was stood up with.
 `claude mcp get` shows the
 entry that wins for the current directory, so a local entry by the name
 hides a user one behind it. One by that name anywhere else, or in local or

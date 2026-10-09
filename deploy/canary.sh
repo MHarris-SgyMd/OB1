@@ -571,8 +571,8 @@ published_id() {
   done
 }
 # The host port the canary's published container is bound to, running or
-# stopped (after a reboot podman leaves it stopped; Docker restarts it but not
-# its Postgres), or nothing.
+# stopped (a reboot can leave it stopped: deploy/README.md, "After a reboot"),
+# or nothing.
 published_port() {
   local id
   id="$(published_id)"

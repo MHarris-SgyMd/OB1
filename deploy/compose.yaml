@@ -393,6 +393,10 @@ services:
     # its own password (deploy/canary.sh's env file) between it and this
     # database.
     networks: [data]
+    # As the servers': with none, a reboot would bring the servers back
+    # (Docker, or podman with its restart unit) without the database they
+    # read (SMD-2760; deploy/README.md, "After a reboot").
+    restart: unless-stopped
     logging: *logging
 
   # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
@@ -1060,6 +1064,8 @@ services:
     # its callers, every one of which calls out too, meet it there. Never
     # `data`: it holds no credential and needs no database (SMD-2583).
     networks: [egress]
+    # The server embeds through it, so it comes back with the server (SMD-2760).
+    restart: unless-stopped
     logging: *logging
 
   # Pulls the two models — more when OB1_JUDGE_MODEL or
