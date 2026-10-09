@@ -135,8 +135,8 @@ export interface HookContext {
   /**
    * The longest one capture_thought's model calls may run under this brain's
    * settings, in seconds — OB1_LLM_TIMEOUT, twice over with OB1_CHUNK_CONTEXT
-   * on, or the genre tier's deadline if longer — which a plugin cannot read
-   * itself. onceById sizes its lease from it.
+   * on, or the genre tier's deadline (OB1_JEV_BASE_URL) if longer — which a
+   * plugin cannot read itself. onceById sizes its lease from it.
    */
   readonly captureSeconds: number;
 }
