@@ -40,9 +40,9 @@
  * The files are imported as modules: each exports Bun's entry shape,
  * `export default { port, fetch }` (SMD-1799), and its `fetch` is the handler
  * driven here — console.error/warn silenced for the length of a request, since
- * a refused port is the proof and not noise — and, for the recipes and
- * integrations, under a loader that resolves their bare package names from
- * this directory's install, since they have none of their own. Nothing stands
+ * a refused port is the proof and not noise. The recipes and integrations
+ * resolve their packages from this directory's install through the committed
+ * recipes/ and integrations/ node_modules links (SMD-1991). Nothing stands
  * in for `Deno`: a server that still reached it would throw at import or
  * answer 500, a counted failure either way.
  * No database: nothing here reaches a handler that queries with a key that
@@ -921,7 +921,7 @@ for (const live of LIVE) {
   const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), ...live.env };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
-  // A NODE_PATH from the shell goes too: the packages resolve through the committed links or not at all (SMD-1991).
+  // A NODE_PATH from the shell goes too: a recipe's or integration's packages resolve through the committed links or not at all (SMD-1991).
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
   // Bun's own start line (`Started development server:`, or `Started server:` in production) goes unread: the port is known, so stdout is dropped and the

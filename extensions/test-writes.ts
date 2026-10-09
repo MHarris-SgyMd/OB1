@@ -93,10 +93,9 @@
  * upstream's shape is driven before the sidecars are applied.
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
- * default export's `fetch` is the handler driven here (SMD-1799) — under the
- * loader extensions/test-auth.ts uses for Deno's specifiers; every server
- * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
- * supabase-js import to it for the two that did not, until then). The model provider is
+ * default export's `fetch` is the handler driven here (SMD-1799); every server
+ * imports compat/supabase-sql itself since SMD-1798, and resolves its packages
+ * through the committed node_modules links (SMD-1991). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
  * recognisable — as are Readwise's book lookup and the extraction worker
  * smart-ingest triggers (SMD-2110), and everything below the tool or

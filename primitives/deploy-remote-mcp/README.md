@@ -37,7 +37,7 @@ Once per checkout:
 (cd extensions && bun install)
 ```
 
-`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server resolves the same install through `integrations/node_modules` or `recipes/node_modules`, committed links to `../extensions/node_modules`, so its command needs nothing extra (SMD-1991).
+`extensions/package.json` pins `hono`, `zod`, `@hono/mcp` and the MCP SDK for every extension server. An integration or recipe server resolves the same install through `integrations/node_modules` or `recipes/node_modules`, committed links to `../extensions/node_modules`, so its command needs no `NODE_PATH` (SMD-1991). Its README's run line passes `--no-install`, so a skipped install fails the start instead of Bun downloading unpinned packages.
 
 ## Step 3: Mint an Access Key
 

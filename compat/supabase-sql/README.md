@@ -79,7 +79,7 @@ MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun --no-install extensions/home-maintenance/index.ts         # an extension
 
 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
-bun --no-install integrations/agent-memory-api/index.ts                 # a recipe or integration
+PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
 ```
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
