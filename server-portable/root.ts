@@ -108,6 +108,8 @@ export type Env = {
   OB1_QUERY_LOG?: string;
   /** Days query_log rows are kept by prune_query_log(); default 30. See db/config.mjs. */
   OB1_QUERY_LOG_RETENTION_DAYS?: string;
+  /** Whole days a pending supersession proposal may wait before preflight's proposals row warns; default 7 (SMD-2680). */
+  OB1_PROPOSALS_WARN_DAYS?: string;
   /**
    * Which pipeline tier this server runs as (SMD-1806): stable | canary |
    * working. Stamped onto every query_log row the server writes, so the canary

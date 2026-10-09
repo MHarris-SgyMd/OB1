@@ -11,8 +11,8 @@
 #   leaks. The gateway address on the subnet is the podman VM itself and
 #   answers on its own ports: a connection to it is a packet, and E fails it
 #   (measured). n8n is on this network and on nothing else. The brain's server
-#   joins it as well as the default network, which it needs for the model
-#   provider on the host.
+#   joins it beside compose.yaml's own networks, `data` for Postgres and
+#   `egress` for the model provider on the host (SMD-2583).
 # - `egress-watch` owns the network namespace and n8n joins it
 #   (`network_mode: service:…`). The watcher starts first, so tcpdump is
 #   running before n8n sends its first packet. It records:
@@ -34,14 +34,14 @@
 
 services:
   server:
-    networks: [default, sealed]
+    networks: [sealed]
 
   # The import runner (SMD-2212), which the import template dials as it
-  # dials the brain. It joins as the server does, since it too needs the
-  # default network: Postgres and the model provider. E admits a connection
-  # to its :8090 and nothing else of it.
+  # dials the brain. It joins as the server does, beside compose.yaml's
+  # `data` and `egress`, Postgres and the model provider. E admits a
+  # connection to its :8090 and nothing else of it.
   orchestration-runner:
-    networks: [default, sealed]
+    networks: [sealed]
 
   egress-watch:
     build:
@@ -57,6 +57,9 @@ services:
 
   n8n:
     network_mode: "service:egress-watch"
+    # compose.yaml's `egress` goes with its port: compose refuses a service
+    # with both a network_mode and networks (SMD-2583).
+    networks: !reset {}
     ports: !reset []
     depends_on:
       egress-watch:
@@ -65,7 +68,8 @@ services:
   n8n-front:
     image: docker.io/oven/bun:1.4.0-alpine
     profiles: ["orchestration"]
-    networks: [default, sealed]
+    # `egress`, outward, where its port is published (SMD-2583).
+    networks: [egress, sealed]
     ports:
       - "127.0.0.1:${N8N_PORT:-5678}:5678"
     volumes:

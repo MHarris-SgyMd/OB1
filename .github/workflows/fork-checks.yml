@@ -1234,10 +1234,40 @@ jobs:
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
-          # the internal mesh and the egress network, and is handed no
-          # Postgres credential, no plain password and not the POC's switch.
+          # the internal mesh and an outward network of its own (SMD-2583),
+          # and is handed no Postgres credential, no plain password and not
+          # the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-2583, the network move, as compose renders each stack with
+          # every profile: no service on compose's default network (a service
+          # that names none is put there); Postgres on the internal `data`
+          # alone, beside only what connects to it; the outward networks'
+          # members held, the authorization server's and the proxy's each
+          # alone; and the same of the three-brain stack and the canary.
+          # check-fork-consistency.ts 28 holds the files to the same networks;
+          # this holds what compose makes of them, and the full-stack job
+          # runs a container on `egress` against Postgres.
+          # Every profile each file defines, read from it, so a service under
+          # a new one is in the render (review pass 1: a list written here
+          # missed it).
+          profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
+          all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
+          tiers=(); while IFS= read -r p; do tiers+=("$p"); done < <(profiles_of compose.tiers.yaml)
+          [ "${#all[@]}" -ge 6 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the six it had" >&2; exit 1; }
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
+          docker compose -f compose.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
+              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server"])
+              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server"])
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["proxy"]) and (on("mesh") == ["api", "auth", "proxy", "server"])'
+          docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
+          docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["proxy"]) and .networks.data.internal == true'
+          CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and (on("stable-mesh") == ["api", "server"])'
           # SMD-2424: the workers profile's two followers publish nothing,
           # keep the key list the worker names itself by (board-sync blanks
           # it), are handed the worker key, mount the checkout read-only,
@@ -1254,6 +1284,32 @@ jobs:
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
+
+      # SMD-2583, the network move's Verify, on the running stack: a
+      # container on `egress` alone cannot open a connection to Postgres, by
+      # its name (which does not resolve there) or by its address on `data`
+      # (an internal network) — and one on `data` can, both ways, so a probe
+      # that could not connect at all would fail here rather than pass. Each
+      # dial gives up after 4 s. The probe is the server's image, which has
+      # Bun, read from compose as the later steps read it; nothing is pulled.
+      - name: Postgres answers on the data network alone
+        working-directory: deploy
+        run: |
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_data").IPAddress}}' "$(docker compose -f compose.yaml ps -q postgres)")
+          [ -n "$ip" ] || { echo "Postgres has no address on open-brain_data" >&2; exit 1; }
+          # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
+          dial='const [host, port] = process.argv.slice(-2); const s = (await import("node:net")).connect({ host, port: Number(port) }); setTimeout(() => { console.log(`${host}: no answer in 4 s`); process.exit(1); }, 4000); s.on("connect", () => { console.log(`${host}: connected`); process.exit(0); }); s.on("error", (e) => { console.log(`${host}: ${e.code}`); process.exit(1); });'
+          for target in postgres "$ip"; do
+            docker run --rm --network open-brain_data --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432 \
+              || { echo "a container on open-brain_data could not reach Postgres as $target, so the refusal below proves nothing" >&2; exit 1; }
+            rc=0; out=$(docker run --rm --network open-brain_egress --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432) || rc=$?
+            [ "$rc" != 0 ] || { echo "a container on open-brain_egress alone opened a connection to Postgres as $target" >&2; exit 1; }
+            # docker's own failure (125: no such network) is not a refusal.
+            if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then
+              echo "the probe on open-brain_egress did not answer for itself (exit $rc): $out" >&2; exit 1
+            fi
+          done
 
       # SMD-2658, SMD-2685. check-fork-consistency's checks 27 and 28 hold
       # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
@@ -1311,7 +1367,7 @@ jobs:
           declared() {
             case "$1" in
               compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
-              compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' ;;
+              compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy.
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
@@ -1857,11 +1913,19 @@ jobs:
       #   registers the connector at /canary/mcp, and reports tier canary with
       #   OAuth not configured. Its vector probe must pass on the thought whose
       #   text holds literals (SMD key, path), searched for without them.
+      #   It runs over a canary Postgres made the old way, on stable's env
+      #   file (SMD-2583): it makes .env.canary.local from .env, mode 600, with a
+      #   database password of its own and no other profile's secret, and
+      #   sets the old canary's database to it. Neither password then opens
+      #   the other stack's database, and the canary's server holds none of
+      #   stable's.
       # - The second `up` is the fallback, --port 8011 under
       #   SERVER_BIND=0.0.0.0. Its own proxy is on loopback, its servers have
       #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
       #   serves another model: the thought put on stable just before it
-      #   reaches the canary, and the smoke fails on the 50% floor.
+      #   reaches the canary, and the smoke fails on the 50% floor. A setting
+      #   added to stable's .env before it is named as one the canary's file
+      #   lacks, and neither run prints the canary's password.
       # - A third `up`, on the same port with a connector at its root: named
       #   as on the deprecated root, not as one the canary no longer answers,
       #   and the root answers 200 with a Deprecation header (SMD-2661).
@@ -1898,9 +1962,46 @@ jobs:
           BEFORE="$(docker compose -f compose.yaml ps -q postgres)"
           LITERAL_ID="$(seed 'canary literal probe SMD-4242 in deploy/probe_file.ts: the wombat register of burrows')"
           q "ALTER DATABASE openbrain SET ob1.refresh_target = 'stable'"
-          ./canary.sh up --connect | tee /tmp/canary-up.out
+          # A canary from before SMD-2583: its Postgres made on stable's env
+          # file, so on stable's password, and no env file of its own.
+          docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
+          # …and the default network compose made it then, empty, which the
+          # first `down` below removes.
+          docker network create --label com.docker.compose.project=open-brain-canary --label com.docker.compose.network=default open-brain-canary_default > /dev/null
+          [ ! -e .env.canary.local ] || { echo ".env.canary.local exists before the canary's first up" >&2; exit 1; }
+          ./canary.sh up --connect 2>&1 | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
+          # SMD-2583: the canary's own env file, made from stable's: mode 600,
+          # every setting of stable's but its database password, which is a
+          # new one, and the secrets of the profiles the canary never runs (the
+          # auth step left the authorization server's in .env). The old
+          # canary's database took that password: neither stack's password
+          # opens the other's database, and the canary's server holds no
+          # credential of stable's.
+          grep -F "made the canary's env file" /tmp/canary-up.out
+          [ "$(stat -c %a .env.canary.local)" = 600 ] || { echo ".env.canary.local is not mode 600: $(stat -c %a .env.canary.local)" >&2; exit 1; }
+          git check-ignore -q .env.canary.local || { echo ".env.canary.local is not gitignored" >&2; exit 1; }
+          PG_STABLE="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tr -d '"')" PG_CANARY="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env.canary.local | tr -d '"')"
+          export PG_STABLE PG_CANARY
+          if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
+          grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_API_KEY)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
+          # The password through docker's environment, and grep's pattern from a
+          # file, so neither is on a command line (review pass 3).
+          login() { PGPASSWORD="$3" docker run --rm --network "$1" -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h "$2" -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
+          login open-brain-canary_data postgres "$PG_CANARY" || { echo "the canary's password does not open the canary's database" >&2; exit 1; }
+          # Each refusal below beside a login that works on the same network, so
+          # a docker failure (no such network) is not read as one (review pass 4).
+          login open-brain_data postgres "$PG_STABLE" || { echo "stable's password does not open stable's database from open-brain_data" >&2; exit 1; }
+          if login open-brain-canary_data postgres "$PG_STABLE"; then echo "stable's password still opens the canary's database" >&2; exit 1; fi
+          if login open-brain_data postgres "$PG_CANARY"; then echo "the canary's password opens stable's database" >&2; exit 1; fi
+          # Read first, so a failed inspect fails here rather than reading as
+          # "holds no password" (review pass 5).
+          canary_server_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q server)")"
+          grep -q '^DATABASE_URL=' <<<"$canary_server_env" || { echo "could not read the canary server's environment" >&2; exit 1; }
+          if grep -qFf <(printf '%s\n' "$PG_STABLE") <<<"$canary_server_env"; then echo "the canary's server holds stable's database password" >&2; exit 1; fi
           # The auth step left OB1_PUBLIC_ORIGIN in .env: the canary on stable's
           # origin is reached wherever that origin is, and says so.
           grep -F 'note: stable has a public origin (https://brain.example.test)' /tmp/canary-up.out
@@ -1917,10 +2018,16 @@ jobs:
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
+          # A setting stable gains after the canary's file was made does not
+          # reach it, and `up` names it, by name alone.
+          echo 'OB1_QUERY_LOG_RETENTION_DAYS=31' >> .env
           touch /tmp/provider-stub-wrong
           rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up --port 8011 > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
+          sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
+          if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
+          grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
           grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
           grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
@@ -1963,6 +2070,8 @@ jobs:
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           FAKE_URL=http://127.0.0.1:9999/ ./canary.sh down --volumes | tee /tmp/canary-down.out
           grep -F 'left as it is' /tmp/canary-down.out
+          grep -F 'removed open-brain-canary_default' /tmp/canary-down.out
+          if docker network inspect open-brain-canary_default > /dev/null 2>&1; then echo "down left the canary's network from before SMD-2583" >&2; exit 1; fi
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed another connector" >&2; exit 1; }
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
@@ -2353,6 +2462,70 @@ jobs:
           MCP_URL: http://127.0.0.1:8010/mcp
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
+      # SMD-2760. What comes back after a reboot is each container's restart
+      # policy. Postgres had none, so on Docker a reboot would bring the
+      # servers back without their database (on podman, with its restart unit
+      # disabled, nothing came back: the dogfood stack stayed down 47
+      # minutes). This is the Docker half of the ticket's Verify, on every
+      # run: the daemon restarts, and with nothing started by hand Postgres,
+      # the server, the REST core and the proxy each come back on its policy,
+      # started after the restart (so a daemon that kept them running proves
+      # nothing) and healthy by its own healthcheck, not merely `Running`,
+      # which Docker also reports for a container in restart backoff (review
+      # pass 1); and a keyed call is answered from the database. The daemon's
+      # stop leaves the server's own `SIGTERM: stopped` line in its log, so
+      # the SIGTERM step below counts the line its own stop adds (review pass
+      # 2). The boot restart does not wait on depends_on, so the server may
+      # start first and loop in preflight until Postgres answers: the wait
+      # covers that.
+      # Before the SIGTERM step, which leaves the server stopped by hand, and
+      # a container stopped by hand is not restarted.
+      - name: The stack comes back after the Docker daemon restarts
+        working-directory: deploy
+        run: |
+          t0=$(date -u +%s)
+          sudo systemctl restart docker
+          # A service's status, health (none: no healthcheck declared), policy and start time.
+          state() {
+            local id
+            id=$(docker compose -f compose.yaml ps -aq "$1" 2> /dev/null || true)
+            if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
+            docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
+          }
+          # Running and healthy: each of the four declares a healthcheck (the
+          # server's is its image's, server-portable/Dockerfile).
+          back() {
+            local status health
+            read -r status health _ <<<"$(state "$1")"
+            [ "$status" = running ] && [ "$health" = healthy ]
+          }
+          while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
+            if back postgres && back server && back api && back proxy; then break; fi
+            sleep 2
+          done
+          for s in postgres server api proxy; do
+            read -r status health policy started <<<"$(state "$s")"
+            at=$(date -d "$started" +%s)
+            echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
+            why=""
+            if [ "$status" = absent ]; then why="compose finds no container for it"; else
+              back "$s" || why="not running and healthy within 2 minutes"
+              [ "$policy" = unless-stopped ] || why="${why:+$why; }its restart policy is $policy, not unless-stopped"
+              if [ "$status" = running ] && [ "$at" -lt "$t0" ]; then why="${why:+$why; }it started before the restart, so the daemon kept it running"; fi
+            fi
+            if [ -n "$why" ]; then
+              docker compose -f compose.yaml ps -a || true
+              docker compose -f compose.yaml logs --tail 20 "$s" || true
+              docker inspect -f '{{json .State.Health}}' "$(docker compose -f compose.yaml ps -aq "$s" 2> /dev/null || true)" 2> /dev/null || true
+              echo "$s did not come back on its own after the daemon restarted: $why" >&2; exit 1
+            fi
+          done
+          answer=$(curl -s --max-time 20 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp || true)
+          if ! grep -q '"result"' <<<"$answer" || grep -q '"isError":true' <<<"$answer"; then
+            echo "a keyed thought_stats after the restart did not answer from the database: ${answer:0:300}" >&2; exit 1
+          fi
+
       # SMD-2250. The server stops on SIGTERM once what is in flight is
       # answered (server-portable/shutdown.ts), and a stop during preflight
       # ends the container (the Dockerfile's traps): before, each waited out
@@ -2387,7 +2560,13 @@ jobs:
           # before it (review pass 2).
           curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
+          # The daemon restart above (SMD-2760) left a line of its own: this
+          # stop must add one.
+          stops() { docker compose -f compose.yaml logs --no-log-prefix server | grep -c '^SIGTERM: stopped' || true; }
+          before=$(stops)
           stop serving 0
+          after=$(stops)
+          if [ "$after" -ne $((before + 1)) ]; then echo "the stop added $((after - before)) 'SIGTERM: stopped' lines to the server's log, not one" >&2; exit 1; fi
           # With the server stopped, the document's router turns Traefik's 502
           # into the proxy's bodiless 404 (auth-absent, SMD-2382): a connector
           # still reads "no OAuth here", never an error it could take for OAuth.

@@ -1391,6 +1391,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
+| | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -2637,9 +2638,17 @@ says so and proceeds unattributed.
 **What preflight sees.** `consolidate pass` warns while a pass under any
 `consolidate:` key has rows pending, leased or failed — the counts over the
 thoughts with entities, and the command that finishes it under the key's own
-judge model — and otherwise says `none unfinished`, with the number of
-proposals pending review beside it and the `--list` that shows them: a queue
-is a reviewer's to work, not a defect. A key a worker holds a live lease under,
+judge model — and otherwise says `none unfinished`. The queue it leaves is the
+`proposals` row's (SMD-2680): how many are pending, how long ago the oldest was
+judged, how many pair two tickets the board does not link (079's links and a
+`duplicate_of`, read now: a link made after the verdict takes the pair out) and how many
+are stale, with `--list`
+and the `list_supersession_proposals` tool. A queue is a reviewer's to work, not
+a defect, so the row is ok while it is young and warns — never fails — once the
+oldest pending verdict is older than `OB1_PROPOSALS_WARN_DAYS` (whole days, 7
+unset; a pass that re-judges a stale proposal restarts its clock); `brain_info` and keyed `/health` carry the same counts, and the judged
+relations standing by word beside them, so an unattended sleep pass's findings
+show without a query. A key a worker holds a live lease under,
 or whose follower stamped a fresh heartbeat and has not ended (between polls it
 holds none), reads *running*, ok and with no remedy — a warning only for failed
 rows beside it, which a follower never retries, naming the `retry_failed` tool;

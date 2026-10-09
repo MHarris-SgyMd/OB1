@@ -26,8 +26,9 @@
 # interface — and this stack holds a brain (personal data at rest) behind one
 # password and one key over plain HTTP. Postgres, Ollama and the server publish
 # nothing; the proxy reaches the server by its name on the mesh network, the
-# server Postgres and Ollama over the compose network by service name, and a tool
-# run from a checkout gets them through compose.host-ports.yaml (a second -f),
+# server reaches Postgres on the internal `data` network and Ollama on `egress`
+# by service name (the networks at the end of this file), and a tool run from
+# a checkout gets them through compose.host-ports.yaml (a second -f),
 # loopback again unless told otherwise. scripts/check-fork-consistency.ts
 # check 13 refuses a mapping that drops the address (SMD-1844).
 
@@ -371,7 +372,7 @@ services:
     # No `ports:`. The superuser on the whole brain, guarded by POSTGRES_PASSWORD
     # alone, is not published to the host by default — the mapping this used to
     # carry bound 0.0.0.0, so a LAN peer reached it on the password. The server
-    # and the migrator reach it as `postgres:5432` on the compose network. For
+    # and the migrator reach it as `postgres:5432` on the `data` network. For
     # psql or pg_dump: `compose exec postgres psql -U postgres openbrain` (with
     # the -f files the stack runs with). For a tool run from a checkout
     # (reembed.ts, extract-entities.ts, consolidate.ts, the evals): add
@@ -384,6 +385,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    # `data` alone: internal, so no route out, and joined only by what
+    # connects to the database (SMD-2583). Not the mesh, which a tier of
+    # another project joins (compose.canary.yaml): compose names each
+    # container by its service name on every network it joins, and there
+    # `postgres` would answer that tier's server too, which then had only
+    # its own password (deploy/canary.sh's env file) between it and this
+    # database.
+    networks: [data]
+    # As the servers': with none, a reboot would bring the servers back
+    # (Docker, or podman with its restart unit) without the database they
+    # read (SMD-2760; deploy/README.md, "After a reboot").
+    restart: unless-stopped
     logging: *logging
 
   # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
@@ -442,6 +455,7 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    networks: [data]
     logging: *logging
 
   # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
@@ -547,7 +561,7 @@ services:
       OB1_CHAT_LOCAL: ${OB1_CHAT_LOCAL:-}
       # Where both model calls go. Unset in deploy/.env this is the stack's own
       # Ollama — the `ollama` service the local-models profile adds, by name on
-      # the compose network — so the profile needs nothing set. Not a copy of
+      # `egress` — so the profile needs nothing set. Not a copy of
       # db/config.mjs's default: that is 127.0.0.1:11434, right from a shell on
       # the host and, inside this container, the container's own loopback with
       # nothing on it. Measured before SMD-1843, when nothing here forwarded the
@@ -581,6 +595,7 @@ services:
       # a forward.
       OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
       OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+      OB1_PROPOSALS_WARN_DAYS: ${OB1_PROPOSALS_WARN_DAYS:-}
       # Which pipeline tier this server runs as (SMD-1806); stamped on every
       # query_log row. Unset is a plain brain. The three-tier compose
       # (compose.tiers.yaml) sets it per service; here it is a plain forward.
@@ -612,7 +627,7 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # No `ports:`. The proxy below is the stack's published port and reaches
     # this server as mcp.ob1.internal:8000 on the mesh (SMD-1846, SMD-2294);
-    # n8n and a container on the compose network reach it as `server:8000`.
+    # n8n reaches it as `server:8000` on `egress`.
     depends_on:
       postgres:
         condition: service_healthy
@@ -642,14 +657,19 @@ services:
     # (fourth review pass).
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
-    # The default network, where it reaches Postgres and the model providers
-    # and n8n reaches it, and `mesh`, where it reaches the authorization
-    # server's health check as auth.ob1.internal (SMD-2382) and answers the
-    # proxy as mcp.ob1.internal. No dns_search here, unlike the proxy: the probe's
-    # name is written rooted, which no search domain is tried under, and an
-    # operator's model endpoint may be a short name their resolver completes.
+    # `data`, where it reaches Postgres; `egress`, where it reaches the model
+    # providers (the stack's Ollama and Jev by name, a host or hosted one
+    # outward) and n8n reaches it; and `mesh`, where it reaches the
+    # authorization server's health check as auth.ob1.internal (SMD-2382) and
+    # answers the proxy as mcp.ob1.internal. The ADR has the MCP server on the
+    # mesh alone; it joins the other two while it embeds and writes itself,
+    # not through the REST core (SMD-2287). No dns_search here, unlike the
+    # proxy: the probe's name is written rooted, which no search domain is
+    # tried under, and an operator's model endpoint may be a short name their
+    # resolver completes.
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [mcp.ob1.internal]
     logging: *logging
@@ -657,10 +677,11 @@ services:
   # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
   # over the same core — the server's image run as `bun api.ts`, with the
   # server's environment and preflight. Internal by default: no port, reached
-  # on the mesh as api.ob1.internal (the GUI, n8n, a worker), and through the
-  # proxy at /api only where deploy/compose.api-public.yaml is named. Still on
-  # the default network too, where Postgres and the model providers are,
-  # until the stack's network move (SMD-1846's follow-up, SMD-2583). Its
+  # on the mesh as api.ob1.internal (the GUI, when it comes), and through the
+  # proxy at /api only where deploy/compose.api-public.yaml is named. On
+  # `data` and `egress` too, as the server is, for Postgres and the model
+  # providers (SMD-2583), so every container on `egress` reaches it as
+  # `api:8000`, and needs a key for anything but /health and /openapi.json. Its
   # writes record their door as open-brain-api (thought_audit.origin), and
   # the jobs it starts are its own (migration 078).
   api:
@@ -685,7 +706,8 @@ services:
     restart: unless-stopped
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [api.ob1.internal]
     # The image's own check, the same keyless GET of /health (SMD-1849), named
@@ -784,14 +806,15 @@ services:
       # every request: the header is as visible as `?key=` over plain HTTP
       # (SMD-1844).
       - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
-    # The default network, where the port is published (a container only on
-    # an internal network publishes none), and `mesh`, where it reaches every
-    # backend: the MCP server as mcp.ob1.internal (SMD-2382), the REST core as
-    # api.ob1.internal (SMD-2284), the authorization server as
-    # auth.ob1.internal, and another tier's MCP server, a compose project of
-    # its own that joins this mesh, as mcp.<tier>.ob1.internal (SMD-2294).
-    # The rest of the stack moves there with the network move (SMD-2583).
-    networks: [default, mesh]
+    # `edge`, where the port is published (a container only on internal
+    # networks publishes none, measured on podman 6) and which nothing else
+    # joins, and `mesh`, where it reaches every backend: the MCP server as
+    # mcp.ob1.internal (SMD-2382), the REST core as api.ob1.internal
+    # (SMD-2284), the authorization server as auth.ob1.internal, and another
+    # tier's MCP server, a compose project of its own that joins this mesh, as
+    # mcp.<tier>.ob1.internal (SMD-2294). It shares no network with Postgres,
+    # the model services, n8n or the workers (SMD-2583).
+    networks: [edge, mesh]
     # No search domains. With the authorization server absent, a name that
     # does not resolve on the networks would be tried again under each of the
     # host's (a tailnet's, an ISP's, measured on podman), and whatever answered
@@ -802,10 +825,11 @@ services:
     # An absent tier's name (mcp.canary.ob1.internal.) is written the same
     # way, for the same reason, as is this stack's own server's while it is
     # stopped or recreated. That one lookup still reaches the host's
-    # resolvers, since the default network forwards a name it does not hold:
-    # one that answers *.ob1.internal itself would get the route's requests,
-    # keys included, until the network move puts the proxy on internal
-    # networks alone (SMD-2583; deploy/README.md, "One origin").
+    # resolvers, since `edge` forwards a name it does not hold (an internal
+    # network does not, measured): one that answers *.ob1.internal itself
+    # would get the route's requests, keys included, until the proxy is on
+    # internal networks alone, behind a forwarder that holds the published
+    # port (SMD-2583's second part; deploy/README.md, "One origin").
     dns_search: ["."]
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
@@ -876,6 +900,8 @@ services:
     # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
+    # Postgres on `data`; the model provider and Linear's API on `egress`.
+    networks: [data, egress]
     # SIGTERM ends the loop after the issue in hand, not the pass — one embed
     # and one write, seconds — and the brain is the state, so a pass cut short
     # is finished by the next; this is the room for that one issue.
@@ -942,6 +968,8 @@ services:
         case "$$OB1_EXTRACT_FOLLOW$$OB1_EXTRACT_WORKERS" in *[!0-9]*) echo "extract: OB1_EXTRACT_FOLLOW ('$$OB1_EXTRACT_FOLLOW') and OB1_EXTRACT_WORKERS ('$$OB1_EXTRACT_WORKERS') take digits only" >&2; exit 2;; esac
         exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
     extra_hosts: *host-alias
+    # board-sync's: Postgres on `data`, the model provider on `egress`.
+    networks: [data, egress]
     # The first SIGTERM stops each worker after the thought in hand — every
     # window of it — and returns the rest of its claims. On the stable brain
     # a thought's extraction took 37 s at the median, 121 s at p90 and 629 s
@@ -1004,6 +1032,7 @@ services:
         case "$$OB1_CONSOLIDATE_FOLLOW$$OB1_CONSOLIDATE_WORKERS" in *[!0-9]*) echo "consolidate: OB1_CONSOLIDATE_FOLLOW ('$$OB1_CONSOLIDATE_FOLLOW') and OB1_CONSOLIDATE_WORKERS ('$$OB1_CONSOLIDATE_WORKERS') take digits only" >&2; exit 2;; esac
         exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
     extra_hosts: *host-alias
+    networks: [data, egress]
     # A thought is up to --k (3) judged pairs: 11 s at the median, 38 s at
     # the most on the stable brain (1,447 claims, 2026-10-05).
     stop_grace_period: 60s
@@ -1023,7 +1052,7 @@ services:
     volumes:
       - ollama:/root/.ollama
     # No `ports:`. An unauthenticated model API; the server and ollama-pull reach
-    # it as `ollama:11434` on the compose network, and nothing in the stack needs
+    # it as `ollama:11434` on `egress`, and nothing in the stack needs
     # it from the host. `compose exec ollama ollama pull <model>` (with the -f
     # files the stack runs with) for a third model; compose.host-ports.yaml
     # publishes it on loopback for an eval run from a checkout (SMD-1844).
@@ -1032,6 +1061,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    # `egress` alone: it fetches the models it pulls from the registry, and
+    # its callers, every one of which calls out too, meet it there. Never
+    # `data`: it holds no credential and needs no database (SMD-2583).
+    networks: [egress]
+    # The server embeds through it, so it comes back with the server (SMD-2760).
+    restart: unless-stopped
     logging: *logging
 
   # Pulls the two models — more when OB1_JUDGE_MODEL or
@@ -1057,6 +1092,7 @@ services:
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
         [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
+    networks: [egress]
     logging: *logging
 
   # The typed-decision tier (SMD-2050). Optional — `--profile jev`; a brain
@@ -1092,9 +1128,11 @@ services:
       JEV_THREADS: ${JEV_THREADS:-}
       JEV_HUB: ${JEV_HUB:-}
     # No `ports:`. An unauthenticated API, like Ollama's: the server's
-    # preflight and a spike in a container reach it as `jev:8020` on the
-    # compose network; compose.host-ports.yaml publishes it on loopback for a
-    # spike run from a checkout.
+    # preflight and a spike in a container reach it as `jev:8020` on
+    # `egress`, where it fetches its weights, as Ollama does;
+    # compose.host-ports.yaml publishes it on loopback for a spike run from a
+    # checkout.
+    networks: [egress]
     healthcheck:
       test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8020/health'); process.exit(r.ok ? 0 : 1)"]
       interval: 10s
@@ -1205,6 +1243,12 @@ services:
       # the webhooks and the MCP endpoint, behind the owner's password and the
       # keys provisioning stores. No TLS here (SMD-1846 is the one origin).
       - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
+    # `egress` alone: the vendors its workflows name, and the brain as
+    # `server:8000` and the import runner as `orchestration-runner:8090`. Not
+    # the mesh: a tier of another project joins this stack's mesh, where
+    # compose names its server `server` too, and n8n would reach either
+    # (SMD-2294). `egress` is this project's own.
+    networks: [egress]
     volumes:
       # The store: workflows, encrypted credentials, each workflow's cursor
       # (static data) and run history, in n8n's default SQLite. Back it up
@@ -1235,8 +1279,8 @@ services:
   #   3. `db/ingest-records.ts` under the actor `orchestration-runner`;
   #   4. `db/reembed.ts`.
   #
-  # No port. n8n reaches it as `orchestration-runner:8090` on the compose
-  # network, behind OB1_RUNNER_KEY, which `provision.ts --init` writes. The
+  # No port. n8n reaches it as `orchestration-runner:8090` on `egress`,
+  # behind OB1_RUNNER_KEY, which `provision.ts --init` writes. The
   # key is a write capability bounded by the allowlist, not a brain key. It
   # reaches Postgres as a role of its own, `ob1_orchestration_runner` (the
   # service below makes it), not the superuser, and its environment holds the
@@ -1278,6 +1322,7 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
+    networks: [data]
     logging: *logging
 
   orchestration-runner:
@@ -1375,6 +1420,11 @@ services:
         condition: service_completed_successfully
       orchestration-runner-role:
         condition: service_completed_successfully
+    # Postgres on `data`; on `egress` the model provider, a networked
+    # pipeline's hosts (through its proxy, SMD-2289) and n8n, which calls it.
+    # The rules that close emitters' network name no interface, so they hold
+    # on every network it joins.
+    networks: [data, egress]
     # As n8n's: a configuration refusal (a missing key) exits 2 and the policy
     # restarts it. The runner waits 30 s before that exit, so `ps` shows it up
     # for under 30 s at a time rather than a hot loop, and its log says why
@@ -1394,18 +1444,20 @@ services:
   #
   # It publishes no port. The proxy routes `/auth` and the three discovery
   # paths outside it here, as auth.ob1.internal on the mesh, while it answers
-  # (x-proxy-routes, the auth router; SMD-1846). It joins two networks of
-  # its own and not the default one, so it cannot reach Postgres, Ollama or
-  # n8n, which stay off the mesh until the network move (SMD-2583): `mesh`,
+  # (x-proxy-routes, the auth router; SMD-1846). It joins two networks and
+  # shares neither with Postgres, Ollama, Jev, n8n or the workers: `mesh`,
   # internal, where the proxy meets it, the MCP server probes it (SMD-2382)
-  # and the GUI will; and `egress`, for the
+  # and the GUI will; and `auth-egress`, which nothing else joins, for the
   # client metadata documents it fetches (each through its fetch guard, which
-  # refuses private and *.ob1.internal targets).
+  # refuses private and *.ob1.internal targets). Not `egress`: the stack's
+  # provider callers and model services meet there, and the one server here
+  # that fetches what an outsider names would reach every one of them
+  # (SMD-2583).
   #
   # Its state (sessions, grants, refresh tokens, registered clients) is one
   # SQLite file in the auth-data volume, and it holds no Postgres credential
-  # (so the mesh, later, gives it no way into the brain's database). Back the
-  # volume up with deploy/.env (deploy/README.md).
+  # and shares no network with Postgres. Back the volume up with deploy/.env
+  # (deploy/README.md).
   auth:
     build:
       context: ./auth
@@ -1447,7 +1499,7 @@ services:
     networks:
       mesh:
         aliases: [auth.ob1.internal]
-      egress: {}
+      auth-egress: {}
     volumes:
       - auth-data:/data
     # The image's own files are read-only and the server keeps no capability:
@@ -1469,14 +1521,33 @@ services:
     logging: *logging
 
 networks:
-  # The ADR's two networks (docs/operator-surface-tiers.md, "Two networks"):
-  # the mesh holds the authorization server, the REST core
-  # (api.ob1.internal), the MCP server (mcp.ob1.internal) and the proxy (the
-  # last three on the default network too); the rest of the stack stays on
-  # compose's default network until the network move (SMD-2583).
+  # The ADR's networks (docs/operator-surface-tiers.md, "Two networks"), as
+  # the network move built them (SMD-2583). Every service names its own, so
+  # compose makes no default network and nothing joins one.
+  #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
+  #          core (api.ob1.internal) and the authorization server
+  #          (auth.ob1.internal), each called by that name; a tier of another
+  #          project joins it under its own (compose.canary.yaml).
+  #   data   internal: Postgres, and only what connects to it — the migrator,
+  #          the two servers, board-sync, the workers, the import runner and
+  #          its role's one-shot. No other project joins it.
+  #   egress outward: whatever calls a model provider or a vendor (the two
+  #          servers, board-sync, the workers, the import runner, n8n), and
+  #          the stack's own Ollama and Jev, which fetch their weights there
+  #          and are called there by name.
+  #   auth-egress  outward, the authorization server's alone.
+  #   edge   outward, the proxy's alone: where its port is published.
+  # An internal network has no route out and does not forward a name it does
+  # not hold to the host's resolvers (measured on podman 6); it also
+  # publishes no port, so Postgres's, in compose.host-ports.yaml, comes with
+  # a network of its own.
   mesh:
     internal: true
+  data:
+    internal: true
   egress: {}
+  auth-egress: {}
+  edge: {}
 
 volumes:
   pgdata:

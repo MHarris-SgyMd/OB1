@@ -345,9 +345,15 @@
  *      plugins/registry.ts imports and lists exactly the plugin directories,
  *      a manifest's name is its directory's, and its migration files are
  *      named by the core's rule; each held by in-memory probes
+ *  32. every service deploy/compose.yaml defines has the restart policy
+ *      RESTART_POLICIES holds for it, value for value — what serves
+ *      `unless-stopped`, so it comes back after a reboot with what it reads;
+ *      what runs once "no" — and no service but those held (SMD-2760: Postgres
+ *      had none, so on Docker a reboot would bring the servers back without
+ *      their database; the tiers file is check 27's)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28 and 29 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29 and 32 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -2398,6 +2404,7 @@ function checkPublishedPorts() {
   let tracked: string[] | null = null;
   try { tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0"); } catch (e) { console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 13 cannot tell a committed .env from an operator's own, and skips that rule)`); }
   for (const f of tracked ?? []) if (/^\.env$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env — compose reads it with no --env-file, so what it sets (a COMPOSE_FILE naming a file no check reads, a port) reaches every stack run from here unrendered, and `git pull` writes it over an operator's own; untrack it (`git rm --cached`) and keep settings in .env.example (SMD-2685)");
+    else if (/^\.env\.canary([.-].*)?$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env.canary.local (or the temporary file deploy/canary.sh makes it in) — the canary runs on it, its database password and stable's keys included, and `git pull` writes it over the canary's own; untrack it (`git rm --cached`) (SMD-2583)");
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
@@ -5324,6 +5331,8 @@ const API_ROLE: TransportRole = {
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
+    // The stop's lines for what it cuts (SMD-1849): request records, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -5837,11 +5846,13 @@ function tierStack(compose: Mapping): Mapping {
   const volumes = (compose.volumes ?? {}) as Mapping;
   const networks = (compose.networks ?? {}) as Mapping;
   const configs = (compose.configs ?? {}) as Mapping;
+  // compose.yaml's networks that this stack's services join (SMD-2583), the authorization server's own among those left out.
+  const joined = new Set(Object.values(services).flatMap((s) => { const n = (s as Mapping | undefined)?.networks; return Array.isArray(n) ? n.map(String) : Object.keys(isMapping(n) ? n : {}); }));
   return {
     name: "open-brain-tiers",
     services,
     volumes: { ...Object.fromEntries(TIERS.map((t) => [`${t}-pgdata`, volumes.pgdata])), ollama: volumes.ollama },
-    networks: { mesh: networks.mesh },
+    networks: Object.fromEntries(Object.keys(networks).filter((n) => joined.has(n)).map((n) => [n, networks[n]])),
     configs: { "tier-routes": { ...(configs["proxy-routes"] as Mapping), content: TIER_ROUTE_TABLE } },
   };
 }
@@ -5853,7 +5864,7 @@ function tierHazards(want: Mapping): string[] {
     const v = volumes[`${t}-pgdata`];
     if (isMapping(v) && ("name" in v || "external" in v)) out.push(`volumes.${t}-pgdata takes compose.yaml's pgdata ${"name" in v ? `name ${JSON.stringify(v.name)}` : "external flag"}, one volume for every tier`);
   }
-  if (isMapping(networks.mesh) && ("name" in networks.mesh || "external" in networks.mesh)) out.push("networks.mesh takes compose.yaml's mesh name, so the tiers would join another project's mesh");
+  for (const [net, def] of Object.entries(networks)) if (isMapping(def) && ("name" in def || "external" in def)) out.push(`networks.${net} takes compose.yaml's ${net} name, so the tiers would join another project's ${net}`);
   for (const t of TIERS) for (const kind of ["postgres", "migrate", "server", "api"]) {
     const name = `${t}-${kind}`, svc = services[name] ?? {};
     for (const k of ["container_name", "hostname", "ports"]) if (k in svc) out.push(`${name}.${k} would be one for every tier`);
@@ -5950,7 +5961,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
   ["every server on another port than the routes dial", ["  PORT: \"8000\"\n", "  PORT: \"8001\"\n"]],
   ["the migrators on another embedding size than the servers", ["x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}\n", "x-migrate-env: &migrate-env\n  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-768}\n"]],
-  ["every migrator told to do nothing", ["  restart: \"no\"\n\n# The host's", "  restart: \"no\"\n  command: [\"true\"]\n\n# The host's"]],
+  ["every migrator told to do nothing", ["  restart: \"no\"\n  networks: [data]\n\n# The host's", "  restart: \"no\"\n  networks: [data]\n  command: [\"true\"]\n\n# The host's"]],
   ["working's server on stable's database", ["@working-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-working}", "@stable-postgres:5432/openbrain\n      OB1_TIER: ${OB1_TIER:-working}"]],
   ["working's Postgres on stable's volume", ["      - working-pgdata:/var/lib/postgresql/data", "      - stable-pgdata:/var/lib/postgresql/data"]],
   ["canary's REST core on stable's environment", ["    environment: *canary-env\n", "    environment: *stable-env\n"]],
@@ -5960,7 +5971,8 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
 /** [what the probe changes in compose.yaml, the text it replaces, its replacement] — each must turn check 27 false against compose.tiers.yaml as it is. */
 const TIER_COMPOSE_PROBES: [string, string, string][] = [
   ["compose.yaml's Postgres volume given a fixed name", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    name: open-brain-pgdata\n"],
-  ["compose.yaml's mesh given a fixed name", "  mesh:\n    internal: true\n  egress: {}\n", "  mesh:\n    internal: true\n    name: ob1-mesh\n  egress: {}\n"],
+  ["compose.yaml's mesh given a fixed name", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: true\n    name: ob1-mesh\n  data:\n"],
+  ["compose.yaml's data network given a fixed name, one database network for every tier (SMD-2583)", "  data:\n    internal: true\n  egress: {}\n", "  data:\n    internal: true\n    name: ob1-data\n  egress: {}\n"],
   ["compose.yaml's Postgres on a bind mount", "      - pgdata:/var/lib/postgresql/data\n", "      - ${PGDATA_DIR:-./pgdata}:/var/lib/postgresql/data\n"],
   ["compose.yaml's server dialling the REST core by stable's mesh name", "      PORT: \"8000\"\n", "      PORT: \"8000\"\n      OB1_REST_URL: ${OB1_REST_URL:-http://api.ob1.internal.:8000}\n"],
   ["compose.yaml's server under a second mesh alias", "        aliases: [mcp.ob1.internal]\n", "        aliases: [mcp.ob1.internal, brain.ob1.internal]\n"],
@@ -6118,7 +6130,7 @@ const PROXY_SERVICE = {
   },
   configs: [{ source: "proxy-routes", target: "/etc/traefik/dynamic/routes.yaml" }],
   ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
-  networks: ["default", "mesh"],
+  networks: ["edge", "mesh"],
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
   depends_on: { server: { condition: "service_started" }, api: { condition: "service_started" } },
@@ -6129,7 +6141,8 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
-  "compose.host-ports.yaml": { services: { postgres: ["ports"], ollama: ["ports"], jev: ["ports"] }, top: [] },
+  // Postgres's port, and the outward network it is published on (SMD-2583).
+  "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
@@ -6163,16 +6176,30 @@ const SERVICE_BUILDS: Record<string, unknown> = {
 };
 /** The networks each file defines, exactly; a file not named here defines none. */
 const FILE_NETWORKS: Record<string, Mapping> = {
-  "compose.yaml": { mesh: { internal: true }, egress: {} },
+  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {} },
+  "compose.host-ports.yaml": { "postgres-port": {} },
   "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
 };
 /** The networks each file's services join, and the names each answers to there, exactly; a service not named here sets no `networks` (compose.yaml's proxy aside, PROXY_SERVICE's). */
-const SERVICE_NETWORKS: Record<string, Record<string, Mapping>> = {
+const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
+  // Postgres on `data` alone, and only what connects to it beside it; the provider callers and the model services on `egress`; the authorization server's way out its own (SMD-2583).
   "compose.yaml": {
-    server: { default: {}, mesh: { aliases: [tierMeshName("mcp", "stable")] } },
-    api: { default: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
-    auth: { mesh: { aliases: ["auth.ob1.internal"] }, egress: {} },
+    postgres: ["data"],
+    migrate: ["data"],
+    server: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
+    "board-sync": ["data", "egress"],
+    extract: ["data", "egress"],
+    consolidate: ["data", "egress"],
+    ollama: ["egress"],
+    "ollama-pull": ["egress"],
+    jev: ["egress"],
+    n8n: ["egress"],
+    "orchestration-runner-role": ["data"],
+    "orchestration-runner": ["data", "egress"],
+    auth: { mesh: { aliases: ["auth.ob1.internal"] }, "auth-egress": {} },
   },
+  "compose.host-ports.yaml": { postgres: ["postgres-port"] },
   "compose.canary.yaml": {
     server: { "stable-mesh": { aliases: [tierMeshName("mcp", "canary")] } },
     api: { "stable-mesh": { aliases: [tierMeshName("api", "canary")] } },
@@ -6259,7 +6286,9 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     if (base && name === "proxy") continue;
     const got = isMapping(def) ? def.networks ?? null : null;
     const want = SERVICE_NETWORKS[file]?.[name] ?? null;
-    if (canonJson(got) !== canonJson(want)) flag("networks", `services.${name}.networks is ${JSON.stringify(got)} where check 28's SERVICE_NETWORKS holds ${JSON.stringify(want)} — only a backend answers to its own mesh name: two containers aliased mcp.ob1.internal, and the one registered first took 30 of 30 of the proxy's requests (SMD-2685, measured)`);
+    // compose.yaml's every service is named there: one that names no network lands on compose's default, beside nothing else (SMD-2583 review pass 1: null held null).
+    if (base && !(name in (SERVICE_NETWORKS[file] ?? {}))) flag("networks", `services.${name} is not in check 28's SERVICE_NETWORKS — name its networks there and in its \`networks:\` (data only if it connects to Postgres, egress if it calls out), since a service that names none lands on compose's default network (SMD-2583)`);
+    else if (canonJson(got) !== canonJson(want)) flag("networks", `services.${name}.networks is ${JSON.stringify(got)} where check 28's SERVICE_NETWORKS holds ${JSON.stringify(want)} — only a backend answers to its own mesh name: two containers aliased mcp.ob1.internal, and the one registered first took 30 of 30 of the proxy's requests (SMD-2685, measured)`);
   }
   if (!spec) return out;
   const [, config, , label, name, table] = spec;
@@ -6312,18 +6341,26 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.api-public.yaml defining a second config, which a later overlay could mount", "compose.api-public.yaml", "\nconfigs:\n  proxy-api-route:\n", "\nconfigs:\n  extra-routes:\n    content: \"http: {}\"\n  proxy-api-route:\n"],
   ["compose.api-public.yaml's config made external beside its content", "compose.api-public.yaml", "    content: *api-route\n", "    content: *api-route\n    external: true\n"],
   ["compose.host-ports.yaml including a file this check does not read", "compose.host-ports.yaml", "\nservices:\n", "\ninclude: [debug/extra.yaml]\n\nservices:\n"],
-  ["compose.host-ports.yaml putting the mesh on another project's network (pass 3)", "compose.host-ports.yaml", "\nservices:\n", "\nnetworks:\n  mesh:\n    name: someone-elses_mesh\n    external: true\n\nservices:\n"],
+  ["compose.host-ports.yaml putting the mesh on another project's network (pass 3)", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port: {}\n  mesh:\n    name: someone-elses_mesh\n    external: true\n"],
   // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
   ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
   ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
   ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.0-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
   ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
-  ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  egress: {}\n", "  mesh:\n    internal: false\n  egress: {}\n"],
+  ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
+  // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
+  ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
+  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
+  ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
+  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.0-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
+  ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
+  ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
+  ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
   ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
-  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's two networks", "  sidecar:\n    image: oven/bun:1.4.0-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's two networks"],
+  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.0-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
   ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
-  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's two networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\nnetworks:\n  # The ADR's two networks"],
+  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
   ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
@@ -6790,6 +6827,72 @@ async function checkPlugins() {
   for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
 }
 await checkPlugins();
+
+// ── 32. Every service's restart policy is held (SMD-2760) ────────────────────
+//
+// What comes back after a reboot is each container's restart policy: Docker
+// starts its `unless-stopped` containers when the daemon starts, and podman's
+// podman-restart.service, where enabled, starts those not stopped by hand.
+// deploy/compose.yaml's postgres had none, so on Docker the servers would come
+// back without their database; on podman, its unit disabled too, nothing came
+// back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
+// RESTART_POLICIES holds each service's policy by value: what serves is
+// `unless-stopped`, what runs once is "no", and a service that exits on
+// configuration a restart does not fix is `on-failure:3` (board-sync's
+// comment). A service added, or a policy changed, is a change there on
+// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// through check 27, and the overlays name no restart (check 28's OVERLAYS),
+// so this file is the one to read.
+/** Each compose.yaml service's `restart`, exactly. */
+const RESTART_POLICIES: Record<string, string> = {
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped",
+  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
+};
+/** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
+function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const restart = isMapping(def) ? def.restart : undefined;
+    const shown = restart === undefined ? "unset, which is \"no\"" : JSON.stringify(restart);
+    if (!(service in held)) gaps.push([service, `not in check 32's RESTART_POLICIES (its restart is ${shown})`]);
+    else if (restart !== held[service]) gaps.push([service, `restart ${shown} where check 32's RESTART_POLICIES holds ${JSON.stringify(held[service])}`]);
+  }
+  for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
+  return gaps;
+}
+const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
+const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
+/** [what, text, the services (null = the file) the rule reports]. */
+const RESTART_PROBES: [string, string, (string | null)[]][] = [
+  ["every policy as held", RESTART_GOOD, []],
+  ["postgres with none, as before SMD-2760", RESTART_GOOD.replace("    restart: unless-stopped\n", ""), ["postgres"]],
+  ["postgres told not to restart", RESTART_GOOD.replace("restart: unless-stopped", "restart: \"no\""), ["postgres"]],
+  ["postgres on always, which restarts a container stopped by hand", RESTART_GOOD.replace("restart: unless-stopped", "restart: always"), ["postgres"]],
+  ["the one-shot migrator restarting", RESTART_GOOD.replace("restart: \"no\"", "restart: unless-stopped"), ["migrate"]],
+  ["a service the map does not hold", `${RESTART_GOOD}  extra:\n    image: z\n    restart: unless-stopped\n`, ["extra"]],
+  ["a service the map does not hold, with no policy", `${RESTART_GOOD}  extra:\n    image: z\n`, ["extra"]],
+  ["a held service gone from the file", RESTART_GOOD.replace(/  migrate:[\s\S]*$/, ""), ["migrate"]],
+  ["no services at all", "name: x\n", [null]],
+];
+function checkRestartPolicies() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 32 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2760)`);
+    return;
+  }
+  for (const [what, text, expected] of RESTART_PROBES) {
+    const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
+  }
+}
+checkRestartPolicies();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

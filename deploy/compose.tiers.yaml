@@ -28,9 +28,10 @@
 # since this stack stands in for it: run the two side by side with SERVER_PORT
 # set in the shell for one of them, which wins over deploy/.env. The
 # servers, the REST cores, the three Postgres services and Ollama publish
-# nothing. Each server reaches its own database by service name on the compose
-# network, and db/tier.ts reaches them the same way through deploy/tier.sh
-# --network open-brain-tiers_default (SMD-2036). The proxy reaches the servers
+# nothing. Each server reaches its own database by service name on the
+# internal `data` network, and db/tier.ts reaches them the same way through
+# deploy/tier.sh --network open-brain-tiers_data (SMD-2036, SMD-2583). The
+# proxy reaches the servers
 # on the internal `mesh` network by name — mcp.ob1.internal, the stable tier's
 # as in compose.yaml, and mcp.canary.ob1.internal, mcp.working.ob1.internal —
 # never by service name. The REST cores answer there as api.ob1.internal,
@@ -166,6 +167,7 @@ x-server-env: &server-env
   OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
   OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
   OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+  OB1_PROPOSALS_WARN_DAYS: ${OB1_PROPOSALS_WARN_DAYS:-}
   OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
   OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
   OB1_PG_POOL: ${OB1_PG_POOL:-}
@@ -196,6 +198,10 @@ x-tier-postgres: &tier-postgres
     interval: 5s
     timeout: 5s
     retries: 12
+  # The internal `data` network alone, as compose.yaml's (SMD-2583).
+  networks: [data]
+  # Back after a reboot with the tier's servers (SMD-2760).
+  restart: unless-stopped
 
 # The migrator image compose.yaml builds (db/Dockerfile — the ob1-migrate image
 # the release job publishes, SMD-1860), one build shared by the three tiers.
@@ -204,6 +210,7 @@ x-tier-migrate: &tier-migrate
     context: ..
     dockerfile: db/Dockerfile
   restart: "no"
+  networks: [data]
 
 # The host's name for Docker on Linux, which provides none (podman and Docker
 # Desktop do): compose.yaml's server and REST core carry the same entry, so
@@ -255,14 +262,15 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [mcp.ob1.internal]
     logging: *logging
 
   # The stable tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh, and on the default network
-  # where its database is; nothing public routes to it.
+  # the server's environment. Reached on the mesh, and on `data` and `egress`,
+  # where its database and its model provider are; nothing public routes to it.
   stable-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-stable-server
     pull_policy: never
@@ -277,7 +285,8 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [api.ob1.internal]
     healthcheck:
@@ -327,14 +336,15 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [mcp.canary.ob1.internal]
     logging: *logging
 
   # The canary tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh, and on the default network
-  # where its database is; nothing public routes to it.
+  # the server's environment. Reached on the mesh, and on `data` and `egress`,
+  # where its database and its model provider are; nothing public routes to it.
   canary-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-canary-server
     pull_policy: never
@@ -349,7 +359,8 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [api.canary.ob1.internal]
     healthcheck:
@@ -399,14 +410,15 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [mcp.working.ob1.internal]
     logging: *logging
 
   # The working tier's REST core (SMD-2284): the server's image run as `bun api.ts`, with
-  # the server's environment. Reached on the mesh, and on the default network
-  # where its database is; nothing public routes to it.
+  # the server's environment. Reached on the mesh, and on `data` and `egress`,
+  # where its database and its model provider are; nothing public routes to it.
   working-api:
     image: ${COMPOSE_PROJECT_NAME:-open-brain-tiers}-working-server
     pull_policy: never
@@ -421,7 +433,8 @@ services:
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     extra_hosts: *host-alias
     networks:
-      default: {}
+      data: {}
+      egress: {}
       mesh:
         aliases: [api.working.ob1.internal]
     healthcheck:
@@ -463,10 +476,10 @@ services:
       ob1.proxy-routes: *tier-routes
     ports:
       - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
-    # The default network, where the port is published, and the mesh, where
-    # it reaches each tier's server by name; no search domains, so an absent
+    # `edge`, its own, where the port is published, and the mesh, where it
+    # reaches each tier's server by name; no search domains, so an absent
     # name is never looked for under the host's.
-    networks: [default, mesh]
+    networks: [edge, mesh]
     dns_search: ["."]
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
@@ -501,6 +514,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    networks: [egress]
+    restart: unless-stopped
     logging: *logging
 
   ollama-pull:
@@ -521,6 +536,7 @@ services:
         [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
         [ -z "$$OB1_EXTRACT_ESCALATE_MODEL" ] || ollama pull "$$OB1_EXTRACT_ESCALATE_MODEL"
     restart: "no"
+    networks: [egress]
     logging: *logging
 
 volumes:
@@ -530,10 +546,17 @@ volumes:
   ollama:
 
 networks:
-  # The internal network the proxy reaches the tiers' servers on, and where
-  # their REST cores answer; no route out.
+  # compose.yaml's, those this stack's services join (SMD-2583): `mesh`,
+  # internal, where the proxy reaches the tiers' servers and their REST cores
+  # answer; `data`, internal, the three Postgres services and what connects
+  # to them; `egress`, outward, the model provider and Ollama; `edge`,
+  # outward, the proxy's alone, where its port is published.
   mesh:
     internal: true
+  data:
+    internal: true
+  egress: {}
+  edge: {}
 
 configs:
   # The proxy's route table, inline: x-tier-routes above.
