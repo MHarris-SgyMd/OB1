@@ -56,7 +56,11 @@ export default definePlugin({
           return { status: 400, body: { code: "NOT_JSON", retryable: false } };
         }
         if (typeof text !== "string" || !text.trim()) return { status: 400, body: { code: "NO_TEXT", retryable: false } };
-        if (id !== undefined && (typeof id !== "string" || id.length < 1 || id.length > 200)) return { status: 400, body: { code: "BAD_ID", retryable: false } };
+        // A NUL Postgres will not store: refused here, before the capture's
+        // model calls, which would otherwise run on every resend and fail.
+        if (text.includes("\u0000")) return { status: 400, body: { code: "BAD_TEXT", retryable: false } };
+        // Printable ASCII: a lone surrogate would reach Postgres as U+FFFD, and two such ids would be one.
+        if (id !== undefined && (typeof id !== "string" || !/^[\x21-\x7e]{1,200}$/.test(id))) return { status: 400, body: { code: "BAD_ID", retryable: false } };
         const content = text;
         const capture = () => ctx.call("capture_thought", { content, source: "example-hook", trust: "ingested" });
         // The core's refusal, as the sender reads it: one the core says is worth retrying is a 503 it will send again.
@@ -100,7 +104,7 @@ export default definePlugin({
         try {
           captured = await capture();
         } catch (err) {
-          // Thrown on, for the REST core's fault log; the sender is told FAILED, a 500 it retries.
+          // Thrown on, for the REST core's fault log; the sender is told FAILED, a 500, which a sender such as Slack retries of its own accord.
           await release();
           throw err;
         }

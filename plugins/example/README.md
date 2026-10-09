@@ -4,7 +4,7 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 
 - **The core, as the caller.** `recent` lists the newest thoughts through the core's `list_thoughts`. `ctx.call` is the only way a plugin reaches the brain's thoughts.
 - **A table of its own.** `add_note` and `list_notes` keep notes pinned to thoughts in `plugin_example.notes`, made by `migrations/001_notes.sql`.
-- **A webhook.** `capture` takes a signed POST and captures its text as a thought, as a Slack or Telegram plugin's would. It refuses a delivery signed more than five minutes ago, and runs a delivery it has seen once (`plugin_example.deliveries`, made by `migrations/002_deliveries.sql`).
+- **A webhook.** `capture` takes a signed POST and captures its text as a thought, as a Slack or Telegram plugin's would. It refuses a delivery signed more than five minutes from the server's clock, either way, and runs a delivery it has seen once (`plugin_example.deliveries`, made by `migrations/002_deliveries.sql`).
 
 ## What it does
 
@@ -14,12 +14,13 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 | Pin a note to a thought | `example_add_note` | `POST /v1/plugins/example/notes` | `write` | `thought_id`, `note` (1 to 2000 characters) | `{ note: { id, thought_id, note, written_by, created_at } }` |
 | A thought's notes | `example_list_notes` | `GET /v1/plugins/example/notes` | `read` | `thought_id` | `{ notes: [...] }`, oldest first |
 
-**The webhook**, `POST /hooks/example/capture`, takes `{"text": "…"}`, and an `"id"` (1 to 200 characters) if the sender names its deliveries. It is signed over the time and the body. `x-example-timestamp` is the Unix time in seconds, and `x-example-signature` is the hex HMAC-SHA256 of `<timestamp>.<body>` (the raw body) under the secret `OB1_HOOK_SECRETS` gives the example.
+**The webhook**, `POST /hooks/example/capture`, takes `{"text": "…"}`, and an `"id"` (1 to 200 printable ASCII characters, no spaces) if the sender names its deliveries. It is signed over the time and the body. `x-example-timestamp` is the Unix time in seconds, and `x-example-signature` is the hex HMAC-SHA256 of `<timestamp>.<body>` (the raw body) under the secret `OB1_HOOK_SECRETS` gives the example.
 
 - **Signed within five minutes** of the server's clock, it captures the text through the core as `hook:example` (trust `ingested`, source `example-hook`) and answers 202 with the thought's id.
 - **Unsigned, mis-signed or with no timestamp**, it answers 401 (`BAD_SIGNATURE`, `NO_TIMESTAMP`). Signed but more than five minutes off, it answers 401 `STALE_DELIVERY`, so a recorded delivery cannot be resent later (SMD-2755).
 - **An id it has captured** is answered 200 with that thought's id and `"duplicate": true`, and runs nothing. One whose first delivery is still being captured is answered 409 `IN_FLIGHT`. A capture that fails gives the id back, so the sender's retry runs, and the claim of one that never finished (the server stopped mid-capture) lapses after three minutes for the same reason. Ids are kept eleven minutes, twice the tolerance and a minute. By then a resend of the same bytes is stale, but a retry the sender signs afresh with the same id is captured again.
 - **A capture the core refuses** is answered 422 `CORE_REFUSED`, with the core's code as `refused`. It is 503 when the core says the refusal is worth retrying (`retryable: true`), and the id is given back either way.
+- **Text with a NUL character**, which Postgres will not store, is answered 400 `BAD_TEXT` before any model call; a malformed id, 400 `BAD_ID`.
 - **With no secret configured**, it answers 503 `HOOK_NOT_CONFIGURED`.
 
 It is served only while `OB1_HOOKS` names the example, and reachable from outside only with `deploy/compose.hooks-public.yaml`:

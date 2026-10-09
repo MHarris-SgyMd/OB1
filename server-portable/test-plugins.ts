@@ -534,15 +534,20 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const now = Math.floor(Date.now() / 1000);
   r = await deliver(on, body, sign(body, now - 301));
   assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "a delivery signed 301 s ago: 401 STALE_DELIVERY, and the core never ran");
-  r = await deliver(on, body, sign(body, now + 301));
-  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "one dated 301 s ahead: 401 STALE_DELIVERY too");
+  r = await deliver(on, body, sign(body, now + 310));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "one dated 310 s ahead: 401 STALE_DELIVERY too (the 301 s edges are [12]'s, on a clock of its own)");
   r = await deliver(on, body, { ...sign(body, now - 301), "x-example-timestamp": String(now) });
   assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a stale delivery with its timestamp made fresh: 401 BAD_SIGNATURE — the time is signed");
+  r = await deliver(on, body, { "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP" && calls.length === 0, "a sender that signs the body alone, as before SMD-2755, sends no timestamp: 401 NO_TIMESTAMP");
   r = await deliver(on, body, { "x-example-timestamp": String(now), "x-example-signature": hmacSha256Hex(SECRET, body) });
-  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a signature over the body alone, as before SMD-2755: 401 BAD_SIGNATURE");
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a signature over the body alone, a timestamp beside it: 401 BAD_SIGNATURE — the time is not in what was signed");
   r = await deliver(on, "{not json", sign("{not json"));
   assert(r.status === 400, "a signed body that is not JSON: 400");
-  for (const id of [7, "", "x".repeat(201)]) {
+  const nul = JSON.stringify({ text: "a NUL \u0000 here", id: "evt-nul" });
+  r = await deliver(on, nul, sign(nul));
+  assert(r.status === 400 && (await code(r)) === "BAD_TEXT" && calls.length === 0, "text with a NUL, which Postgres will not store: 400 BAD_TEXT, before any claim or model call");
+  for (const id of [7, "", "x".repeat(201), "a\u0000b", "\ud800", "has space", "é"]) {
     const withId = JSON.stringify({ text: "t", id });
     r = await deliver(on, withId, sign(withId));
     assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is no string of 1 to 200 characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
@@ -651,12 +656,19 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   let failFirst: (e: Error) => void = () => {};
   answer = () => new Promise((_ok, fail) => { failFirst = fail; });
   const slow = send("evt-7");
-  while (claims.get("evt-7") !== null) await Bun.sleep(1);
+  /** Waits for the stand-in to reach a state, and fails rather than hangs if the handler never gets there. */
+  const until = async (what: string, done: () => boolean) => {
+    for (let i = 0; !done(); i++) {
+      if (i > 2000) throw new Error(`evt-7: ${what} never happened`);
+      await Bun.sleep(1);
+    }
+  };
+  await until("the first claim", () => claims.get("evt-7") === null);
   lapsed.add("evt-7");
   let finishRetry: (v: unknown) => void = () => {};
   answer = () => new Promise((ok) => { finishRetry = ok; });
   const retry = send("evt-7");
-  while (lapsed.has("evt-7")) await Bun.sleep(1);
+  await until("the retry's claim", () => !lapsed.has("evt-7"));
   failFirst(new Error("embedder timed out"));
   r = await slow;
   assert(r.status === 500 && claims.has("evt-7") && claims.get("evt-7") === null, `the first attempt's late failure leaves the retry's claim standing (${r.status})`);
@@ -705,7 +717,8 @@ console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separato
   assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at), '{"token":"y"}') })) === "BAD_SIGNATURE", "a signature over another body: BAD_SIGNATURE");
   assert(reason(v({ "x-ts": String(at), "x-sig": `v0=${sig(String(at))}` })) === "BAD_SIGNATURE", "a prefix the scheme does not name: BAD_SIGNATURE");
   const old = String(at - 300);
-  assert(v({ "x-ts": old, "x-sig": sig(old) }).ok, "300 s old, the default tolerance: verified");
+  const soon = String(at + 300);
+  assert(v({ "x-ts": old, "x-sig": sig(old) }).ok && v({ "x-ts": soon, "x-sig": sig(soon) }).ok, "300 s old, or 300 s ahead, the default tolerance: verified");
   const older = String(at - 301);
   assert(reason(v({ "x-ts": older, "x-sig": sig(older) })) === "STALE_DELIVERY", "301 s old: STALE_DELIVERY");
   const ahead = String(at + 301);
