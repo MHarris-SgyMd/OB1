@@ -1,21 +1,24 @@
 # Example Plugin
 
-The template a plugin starts from (SMD-2310). It has one read operation, `recent`, which lists the newest thoughts' ids, types and capture times. It reads them through the core's `list_thoughts`, as the caller, which is the only way a plugin reaches the brain's thoughts.
+The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
+
+- **The core, as the caller.** `recent` lists the newest thoughts through the core's `list_thoughts`. `ctx.call` is the only way a plugin reaches the brain's thoughts.
+- **A table of its own.** `add_note` and `list_notes` keep notes pinned to thoughts in `plugin_example.notes`, made by `migrations/001_notes.sql`.
 
 ## What it does
 
-| | |
-|---|---|
-| MCP tool | `example_recent` |
-| REST route | `GET /v1/plugins/example/recent?limit=5` (`/api/v1/plugins/example/recent` through the proxy, where `/api` is on) |
-| Scope | `read`: a read or a write key |
-| Input | `limit`, 1 to 20, default 5 |
-| Output | `{ thoughts: [{ id, type, created_at }] }` |
+| Operation | MCP tool | REST route | Scope | Input | Output |
+|---|---|---|---|---|---|
+| Recent thought ids | `example_recent` | `GET /v1/plugins/example/recent` | `read` | `limit`, 1 to 20, default 5 | `{ thoughts: [{ id, type, created_at }] }` |
+| Pin a note to a thought | `example_add_note` | `POST /v1/plugins/example/notes` | `write` | `thought_id`, `note` (1 to 2000 characters) | `{ note: { id, thought_id, note, written_by, created_at } }` |
+| A thought's notes | `example_list_notes` | `GET /v1/plugins/example/notes` | `read` | `thought_id` | `{ notes: [...] }`, oldest first |
+
+Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
 
 ## Prerequisites
 
 - A working Open Brain stack (`deploy/compose.yaml`).
-- A key with read scope: `bun keygen.ts --name me --scope read` in `server-portable/`.
+- A key with read scope (`bun keygen.ts --name me --scope read` in `server-portable/`), and one with write scope (`--scope write`) to pin notes.
 
 ## Turn it on
 
@@ -25,13 +28,13 @@ The template a plugin starts from (SMD-2310). It has one read operation, `recent
    OB1_PLUGINS=example
    ```
 
-2. Recreate the servers so they read it: `docker compose up -d server api` from `deploy/`.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes the plugin's role and schema and applies `001_notes.sql`, and the servers wait for it.
 3. Check it:
-   - preflight's `plugins` row says `example — enabled`;
-   - `GET /v1/whoami` lists `example_recent` for a read key;
-   - an MCP client sees the `example_recent` tool.
+   - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
+   - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
+   - an MCP client sees the same tools.
 
-Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. The tool, the route and its OpenAPI entry are gone.
+Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
 
 ## Start your own plugin
 
@@ -40,5 +43,7 @@ Copy this directory to `plugins/<name>/` and set `name` in `index.ts` to the dir
 ## Troubleshooting
 
 - **The server refuses to start: "OB1_PLUGINS names … which is no plugin in this build".** The name is not in `plugins/registry.ts` in the image that is running. Check the spelling, or rebuild the image after adding a plugin.
-- **`403 FORBIDDEN` with `needs: "read"`.** The key's scope does not reach the operation: a capture-only key cannot read.
-- **`422 CORE_REFUSED`.** The core refused the `list_thoughts` call the operation made; the message names the core's code.
+- **Preflight's `plugin tables` row fails with "migration(s) not applied".** The migrator has not run with `OB1_PLUGINS` set. Recreate it as in step 2, or run `OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL"` in `db/`.
+- **`403 FORBIDDEN` with `needs: "write"` or `"read"`.** The key's scope does not reach the operation: a read key cannot pin a note, and a capture-only key cannot read.
+- **`404 NO_SUCH_THOUGHT`.** The thought is not there, or the key cannot read it.
+- **`422 CORE_REFUSED`.** The core refused the `list_thoughts` call `recent` made; the message names the core's code.

@@ -47,7 +47,7 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under db/ or any of the seven category directories runs
+ *  12. a .sql file under db/ or any of the eight category directories runs
  *      nothing that needs Supabase — no `service_role`, `authenticated` or
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
@@ -2115,10 +2115,10 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
-const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "plugins"];
 
 function checkSupabaseIsms() {
   for (const dir of SQL_RULE_DIRS) {
@@ -5810,7 +5810,7 @@ function tierStack(compose: Mapping): Mapping {
     };
     services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...omitKeys(c.migrate?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
     services[`${t}-server`] = tierServer(c.server, "mcp");
     services[`${t}-api`] = tierServer(c.api, "api");
   }

@@ -51,14 +51,17 @@
  */
 
 import type { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
+  PLUGIN_NAME_RE,
   alignVectorSearchPath,
   pinPublicFirst,
+  pluginForeignOwned,
+  pluginIdents,
   migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -86,6 +89,8 @@ import { commandLine, consoleWriter, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
+/** The plugins (SMD-2310): beside db/ in a checkout, and beside the migrator's /app in its image. */
+const PLUGINS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "plugins");
 
 /**
  * What one migrator run is asked to do — the CLI's flags, typed (SMD-2304).
@@ -113,6 +118,14 @@ export interface MigrateOptions {
   groups?: string;
   /** With grant: revoke what else the role holds here, in the grant's transaction (SMD-2289). */
   exact?: boolean;
+  /**
+   * OB1_PLUGINS's value (SMD-2310): the plugins whose migrations a plain run
+   * applies, after the core's, each in its own schema as its own role, into
+   * the plugin_migrations ledger. A plugin not named is not read.
+   */
+  plugins?: string | null;
+  /** Where plugins live; the tree's plugins/ unless a suite names another. */
+  pluginsDir?: string;
   writer?: Writer;
 }
 
@@ -492,6 +505,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     seeds: string[];
   };
 
+  /** An enabled plugin's migrations (SMD-2310): its schema and its role (db/config.mjs's pluginIdents), and its files in order. */
+  type PluginMigrations = { name: string; schema: string; role: string; files: { name: string; sql: string; sha: string }[] };
+
   /**
    * A migration that needs a newer pgvector than the server may have says so in
    * its header — `-- requires: pgvector >= 0.8.0` — and the migrator judges the
@@ -555,8 +571,50 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return 2;
   }
 
+  /**
+   * The enabled plugins' migrations (SMD-2310): OB1_PLUGINS's names, each a
+   * plugin's directory (its manifest there), its files NNN_name.sql in
+   * plugins/<name>/migrations/ under the core's naming rule, read and hashed
+   * as the core's are. Null, the problem printed, on a name that is no
+   * plugin, a name given twice, or a listing whose names collide — refused
+   * before anything runs.
+   */
+  function loadPluginMigrations(): PluginMigrations[] | null {
+    const dir = opts.pluginsDir ?? PLUGINS_DIR;
+    const names = (opts.plugins ?? "").split(",").map((n) => n.trim()).filter(Boolean);
+    const found: PluginMigrations[] = [];
+    for (const name of names) {
+      if (!PLUGIN_NAME_RE.test(name) || name.length > 32 || !existsSync(join(dir, name, "index.ts"))) {
+        err(`OB1_PLUGINS names ${JSON.stringify(name)}, which is no plugin in ${dir}`);
+        return null;
+      }
+      if (found.some((p) => p.name === name)) {
+        err(`OB1_PLUGINS names ${JSON.stringify(name)} twice`);
+        return null;
+      }
+      const migrationsDir = join(dir, name, "migrations");
+      const files = existsSync(migrationsDir) ? readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort() : [];
+      const problem = migrationNameProblem(files);
+      if (problem) {
+        err(`plugin ${name}: ${problem}`);
+        return null;
+      }
+      found.push({
+        name,
+        ...pluginIdents(name),
+        files: files.map((file) => {
+          const template = readFileSync(join(migrationsDir, file), "utf8");
+          return { name: file, sql: substitute(template, file), sha: migrationSha(template) };
+        }),
+      });
+    }
+    return found;
+  }
+
   const migrations = loadMigrations();
   if (migrations === null) return 2;
+  const plugins = loadPluginMigrations();
+  if (plugins === null) return 2;
   if (migrations.length === 0) {
     err(`No .sql files in ${MIGRATIONS_DIR}`);
     return 2;
@@ -1202,7 +1260,162 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         "the database already reflects it, update schema_migrations.sha256 by hand."
     );
   }
-  return floorBlocked || drifted > 0 ? 1 : 0;
+  const coreCode = floorBlocked || drifted > 0 ? 1 : 0;
+  if (plugins.length === 0) return coreCode;
+  const named = plugins.map((p) => p.name).join(", ");
+  if (baseline || reapply) {
+    out(`\nplugins: ${named} — not run under ${baseline ? "--baseline" : "--reapply"}; a plain run applies their migrations`);
+    return coreCode;
+  }
+  if (coreCode !== 0 && !dryRun) {
+    err(`\nplugins: ${named} — not applied while the core's migrations are not clean`);
+    return coreCode;
+  }
+  return Math.max(coreCode, await migratePlugins());
+
+  /**
+   * The enabled plugins' migrations (SMD-2310), after the core's: each plugin
+   * in a schema of its own (plugin_<name>) owned by a role of its own
+   * (ob1_plugin_<name>, NOLOGIN), every file run as that role with that
+   * schema first on the path — so a plugin's SQL names its tables bare and
+   * Postgres refuses it the core's, which the role holds no privilege on —
+   * and recorded in plugin_migrations, a ledger of its own beside
+   * schema_migrations, which nothing that reads the core's ledger sees. A
+   * plugin not enabled is not read: its schema, tables and rows stay as they
+   * are. 0, or 1 on a failure (the line names it; files before it stay
+   * applied and recorded, as the core's do) or a drift.
+   */
+  async function migratePlugins(): Promise<number> {
+    out(`\nplugins: ${named} — ledger plugin_migrations`);
+    if (!dryRun) {
+      await sql`
+        CREATE TABLE IF NOT EXISTS public.plugin_migrations (
+          plugin      text NOT NULL,
+          name        text NOT NULL,
+          sha256      text NOT NULL,
+          applied_at  timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (plugin, name)
+        )
+      `;
+    }
+    const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
+    const recorded = new Map<string, string>(
+      ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
+    );
+    let pluginRan = 0;
+    let pluginSkipped = 0;
+    let pluginDrifted = 0;
+    for (const p of plugins as PluginMigrations[]) {
+      out(`  plugin ${p.name}  (schema ${p.schema}, role ${p.role})`);
+      if (p.files.length === 0) {
+        out("  ·  no migrations");
+        continue;
+      }
+      // The role and its schema, made by any run that names the plugin and
+      // finds either missing — not only before a pending file: a brain
+      // restored into a new cluster (roles are not in a dump) records every
+      // file and has no role (review pass 1). Read first, so a run with both
+      // in place and nothing pending asks no privilege of the migrator
+      // (review pass 2: CREATE SCHEMA IF NOT EXISTS checks the database's
+      // CREATE before it looks). The role owns what the plugin makes, the
+      // schema holds it; neither is ever dropped. A migrator that is no
+      // superuser takes membership in the role, so it may SET ROLE to it: on
+      // PG 16 a CREATEROLE role's own grant on a role it makes has ADMIN alone
+      // (createrole_self_grant unset), and CREATE SCHEMA … AUTHORIZATION and
+      // SET ROLE both need SET.
+      const [state] = (await sql`
+        SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
+               EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema,
+               (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
+               current_setting('server_version_num')::int AS version`) as { role: boolean; schema: boolean; superuser: boolean; version: number }[];
+      const canSet = async (q: SQL): Promise<boolean> =>
+        state.superuser || ((await q.unsafe(`SELECT pg_has_role(current_user, $1, '${state.version >= 160000 ? "SET" : "MEMBER"}') AS can`, [p.role])) as { can: boolean }[])[0].can;
+      const pending = p.files.some((m) => !recorded.has(`${p.name}/${m.name}`));
+      if (!dryRun && (!state.role || !state.schema || (pending && !(await canSet(sql))))) {
+        try {
+          await begin(async (tx: SQL) => {
+            if (!state.role) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
+            if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
+            if (!state.schema) await tx.unsafe(`CREATE SCHEMA ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
+          });
+        } catch (caught) {
+          err(`  ✗  plugin ${p.name}: its role and schema could not be made: ${(caught as Error).message}`);
+          err("  The migrating role must be able to CREATE ROLE and CREATE SCHEMA, and to SET ROLE to what it creates; the compose stack's postgres can.");
+          return 1;
+        }
+      }
+      // A schema that was here, and what is in it, handed back to the role
+      // where another owns it: a brain restored into a cluster without the
+      // role comes back owned by the restoring role (the dump's ALTER … OWNER
+      // fails there, or --no-owner skips it), and the plugin's role reaches
+      // none of it (final review). Read first, as above; an ALTER … OWNER
+      // needs the migrator to own the object, or be a superuser, and to SET
+      // ROLE to the role.
+      if (!dryRun && state.schema) {
+        const [{ owner }] = (await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[];
+        const foreign = await pluginForeignOwned(sql, p.schema, p.role);
+        if (owner !== p.role || foreign.length > 0) {
+          try {
+            await begin(async (tx: SQL) => {
+              if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
+              if (owner !== p.role) await tx.unsafe(`ALTER SCHEMA ${quoteIdent(p.schema)} OWNER TO ${quoteIdent(p.role)}`);
+              for (const f of foreign) await tx.unsafe(`ALTER ${f.kind} ${f.ident} OWNER TO ${quoteIdent(p.role)}`);
+            });
+            out(`  ✓  ${owner !== p.role ? `schema ${p.schema} and ` : ""}${foreign.length} object(s) in it handed back to ${p.role}`);
+          } catch (caught) {
+            err(`  ✗  plugin ${p.name}: what another role owns in ${p.schema} could not be handed back to ${p.role}: ${(caught as Error).message}`);
+            err("  The migrating role must own them, or be a superuser, and be able to SET ROLE to the plugin's role.");
+            return 1;
+          }
+        }
+      }
+      for (const m of p.files) {
+        const prior = recorded.get(`${p.name}/${m.name}`);
+        if (prior && prior !== m.sha) {
+          err(`  ⚠  ${p.name}/${m.name}  ALREADY APPLIED BUT FILE CHANGED (was ${prior}, now ${m.sha})`);
+          pluginDrifted++;
+          continue;
+        }
+        if (prior) {
+          out(`  ·  ${m.name}  already applied`);
+          pluginSkipped++;
+          continue;
+        }
+        if (dryRun) {
+          out(`  →  ${m.name}  would apply (${m.sha}) as ${p.role} in ${p.schema}`);
+          pluginRan++;
+          continue;
+        }
+        try {
+          await begin(async (tx: SQL) => {
+            await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(p.role)}`);
+            await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(p.schema)}, public`);
+            await tx.unsafe(m.sql);
+            // The ledger is the core's: recorded as the migrating role, not the plugin's.
+            await tx.unsafe("RESET ROLE");
+            await tx`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES (${p.name}, ${m.name}, ${m.sha})`;
+          });
+        } catch (caught) {
+          const message = (caught as Error).message;
+          err(`  ✗  ${p.name}/${m.name}  FAILED: ${message}`);
+          if (/permission denied/.test(message)) err(`  A plugin's migration runs as ${p.role}, which holds its own schema alone: a core table, or a schema not its own, is refused.`);
+          return 1;
+        } finally {
+          // A temp table the file left past its transaction goes: Postgres
+          // searches temp before any schema, so it would stand in for the
+          // next plugin's table of that name (review pass 1). A session
+          // search_path it set is moot: the next file sets its own, LOCAL,
+          // and the ledger is named by its schema.
+          await sql.unsafe("DISCARD TEMP");
+        }
+        out(`  ✓  ${m.name}  applied`);
+        pluginRan++;
+      }
+    }
+    out(`\nplugins: ${dryRun ? "would apply" : "applied"} ${pluginRan}, skipped ${pluginSkipped}${pluginDrifted ? `, DRIFTED ${pluginDrifted}` : ""}`);
+    if (pluginDrifted > 0) err("\nA plugin's migration file changed after it was applied: add a new file rather than editing an old one, as with the core's.");
+    return pluginDrifted > 0 ? 1 : 0;
+  }
 }
 
 if (import.meta.main) {
@@ -1234,6 +1447,8 @@ if (import.meta.main) {
       grant: cli.value("grant"),
       groups: cli.value("groups"),
       exact: cli.has("exact"),
+      // The plugins the brain runs, as the server reads them (SMD-2310).
+      plugins: process.env.OB1_PLUGINS,
     });
   });
 }

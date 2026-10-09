@@ -1513,8 +1513,19 @@ export interface ThoughtStore {
    */
   jobSink(door: string): JobSink | null;
 
+  /**
+   * A plugin's own tables (SMD-2310): `fn` runs in one transaction as the
+   * plugin's role, its schema first on the path, handed a tagged template and
+   * nothing else. The SQL store's alone; the PostgREST store has none, and a
+   * plugin that reaches for its tables there is told so.
+   */
+  pluginTx?<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T>;
+
   close(): Promise<void>;
 }
+
+/** A plugin's SQL (SMD-2310): a tagged template whose values are bound parameters, answered as rows. */
+export type PluginSql = <R = Record<string, unknown>>(strings: TemplateStringsArray, ...values: unknown[]) => Promise<R[]>;
 
 export type StoreEnv = {
   /**

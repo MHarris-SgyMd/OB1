@@ -262,6 +262,12 @@ export const REAPPLY_COMMAND: string;
 export const LOCK_TIMEOUT_S: number;
 /** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */
 export function migrationNameProblem(names: string[]): string | null;
+/** A plugin's name: lower-case words joined by single hyphens (SMD-2310). */
+export const PLUGIN_NAME_RE: RegExp;
+/** A plugin's own Postgres schema and the role that owns it: `plugin_<name>`, `ob1_plugin_<name>`, hyphens read as underscores (SMD-2310). */
+export function pluginIdents(name: string): { schema: string; role: string };
+/** What in a plugin's schema its role does not own — relations, routines, types — each with the ALTER keyword that hands it back and its owner; none for a missing role (SMD-2310). */
+export function pluginForeignOwned(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>, schema: string, role: string): Promise<{ kind: string; ident: string; owner: string }[]>;
 /** The SET list that returns a claim row to its pool — requeue()'s. */
 export const REQUEUE_SET_SQL: string;
 
