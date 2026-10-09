@@ -93,10 +93,9 @@
  * upstream's shape is driven before the sidecars are applied.
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
- * default export's `fetch` is the handler driven here (SMD-1799) — under the
- * loader extensions/test-auth.ts uses for Deno's specifiers; every server
- * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
- * supabase-js import to it for the two that did not, until then). The model provider is
+ * default export's `fetch` is the handler driven here (SMD-1799); every server
+ * imports compat/supabase-sql itself since SMD-1798, and resolves its packages
+ * through the committed node_modules links (SMD-1991). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
  * recognisable — as are Readwise's book lookup and the extraction worker
  * smart-ingest triggers (SMD-2110), and everything below the tool or
@@ -137,7 +136,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
-import { createAssert, PACKAGES, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -304,22 +303,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The servers' handlers; their packages from this directory's install ──────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-// PACKAGES (db/test-support.ts): the stack's four names, the same list test-auth.ts's loader and pin guard read.
-const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
-// A recipe or integration imports STACK's four by bare name and has no install of its own beside it, so they resolve
-// from extensions/node_modules here (test-auth.ts has the same loader). Until SMD-1798 this loader also resolved a
-// quoted supabase-js specifier to the shim; until SMD-1800 it read Deno's specifiers (a `jsr:` line, an `npm:`
-// prefix) — neither is in the tree now, and check 11 and 22 refuse them.
-Bun.plugin({
-  name: "vendored-packages-from-extensions",
-  setup(build) {
-    build.onLoad({ filter: VENDORED }, async (args) => {
-      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
-        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
-      return { contents: src, loader: "ts" };
-    });
-  },
-});
+// A recipe or integration imports STACK's four by bare name and has no install of its own beside it; they resolve
+// from extensions/node_modules through the committed recipes/node_modules and integrations/node_modules links,
+// which test-auth.ts holds (SMD-1991).
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)

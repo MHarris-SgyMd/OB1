@@ -177,33 +177,49 @@ named in `OB1_PLUGINS`, which the compose migrator reads from `deploy/.env` as
 the servers do. A plain run applies their migrations **after the core's**, and
 only when the core's are clean:
 
+- **The login role.** Every plugin's SQL runs on a connection logged in as
+  `ob1_plugins`: LOGIN, NOINHERIT, no superuser, holding `SET` on each plugin's
+  role and nothing on the core. A run makes it with `OB1_PLUGIN_DB_PASSWORD`
+  when it is missing, and never changes an existing role's password: the
+  servers log in with the one it was made with. A run that would apply a
+  plugin's file, or make the role, without the password is refused before
+  anything runs (exit 2); one with nothing of the plugins' to do asks for it
+  not at all.
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
-  hyphen in the name reads as `_`). Both are made by any run that names the
-  plugin and finds one missing, even with nothing pending, and are never
-  dropped. A migrator that is no superuser takes membership in the role it
-  made (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand it the schema
-  and run as it.
-- **A restored brain.** A dump restored without its owners brings the schema
-  back owned by the restoring role: with `--no-owner`, as a tier's refresh
-  restores (`tier.ts`), or into a cluster without the plugin's role (roles
-  are the cluster's, not the dump's), where the dump's `ALTER … OWNER` fails. A run
-  that names the plugin makes the role and hands it back the schema and every
-  table, view, sequence, routine and type in it that another role owns
-  (`db/config.mjs`'s `pluginForeignOwned`). An `ALTER … OWNER` needs the
-  migrator to own the object, or be a superuser.
-- **Between files.** After each file the migrator discards the session's temp
-  tables and restores its search path, so one plugin's leftovers never meet
-  the next plugin's SQL.
-- **How a file runs.** Each file runs in its own transaction under
-  `SET LOCAL ROLE ob1_plugin_<name>`, with the plugin's schema first on the
-  path. A table the plugin creates is its own, named bare. The role holds
-  nothing on the core's tables, so a migration that reads or writes one is
-  refused by Postgres (`permission denied`) and records nothing.
+  hyphen in the name reads as `_`).
+  - **When they are made.** Any run that names the plugin and finds the role,
+    the schema or the login role's `SET` on it missing makes them, even with
+    nothing pending. A run with all three in place and nothing pending asks
+    the migrator no privilege. None is ever dropped.
+  - **A migrator that is no superuser** takes `SET` on a role it made
+    (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand the role its
+    schema.
+  - **A restored brain.** A dump restored without its owners brings the
+    schema back owned by the restoring role: with `--no-owner`, as a tier's
+    refresh restores (`tier.ts`), or into a cluster without the plugin's role
+    (roles are the cluster's, not the dump's), where the dump's
+    `ALTER … OWNER` fails. A run that names the plugin makes the role and
+    hands it back the schema and every table, view, sequence, routine and
+    type in it that another role owns (`db/config.mjs`'s
+    `pluginForeignOwned`). An `ALTER … OWNER` needs the migrator to own the
+    object, or be a superuser.
+- **How a file runs.** Each file runs in its own transaction on the login
+  connection, under `SET LOCAL ROLE ob1_plugin_<name>` with the plugin's
+  schema first on the path. A table the plugin creates is its own, named bare.
+  Neither role holds anything on the core's tables, so a migration that reads
+  or writes one is refused by Postgres (`permission denied`). That holds even
+  for SQL that undoes the plugin's role (`END;`, `RESET ROLE`): it lands on
+  `ob1_plugins`, not on the migrator. From there it could `SET ROLE` to
+  another plugin's role, but not reach the core. After each file the login
+  connection's temp tables are discarded.
 - **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
-  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`.
-  Nothing that reads the core's ledger sees it. An edited file is a drift and
-  exits 1, as a core file does.
+  name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`,
+  by the migrator's own connection once the file has committed. Nothing that
+  reads the core's ledger sees it. If that write fails after the file
+  committed, the file runs again on the next run, which is why a plugin's
+  migration says `IF NOT EXISTS`. An edited file is a drift and exits 1, as a
+  core file does.
 - **A plugin not named** is not read. Its schema, tables and ledger rows stay
   as they are.
 
@@ -213,27 +229,36 @@ and the role and schema each would run as. It makes nothing. `--baseline` and
 or one given twice, is refused before anything runs (exit 2).
 
 ```bash
-OB1_PLUGINS=example bun migrate.ts --url "$DATABASE_URL" --dry-run
+OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_URL" --dry-run
 ```
 
 The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
-`SET ROLE` to what it creates; the compose stack's `postgres` can. The server
-reaches a plugin's tables as the same role (`ctx.db`), so its own role must be
-able to `SET ROLE` to it (the `SET` option on PG 16). Preflight's `plugin
-tables` row checks that, the role, the schema, that both the schema and every
-object in it are the plugin role's, by the migrator's own list, and every
-file recorded at its sha. `--grant` does not yet give a
-non-superuser server role that membership: SMD-2728. The server runs each
-plugin's transactions on a small pool of their own, so what a plugin's SQL
-leaves on a session, such as a temp table (which Postgres searches before any
-schema) or a session setting, never meets a core query. `SET ROLE` holds a
-plugin's SQL to its own tables only while that SQL does not undo the role, so
-role changes, transaction control and session settings in a plugin's code are
-the consistency checker's to refuse, and a plugin is curated.
+grant a plugin's role to `ob1_plugins`; the compose stack's `postgres` can.
+
+**Preflight.** The servers' plugin pools log in as `ob1_plugins` too, one small
+pool per plugin, so what a plugin's SQL leaves on a session never meets a core
+query. A temp table, for one, is searched before any schema. Preflight's
+`plugin tables` row checks:
+
+- that `ob1_plugins` exists, can log in with the server's
+  `OB1_PLUGIN_DB_PASSWORD` (and is who the connection is: a database URL with
+  no host cannot have its user replaced, and is refused), is no superuser and
+  NOINHERIT, is a member of no role but the plugins' and inherits none by a
+  grant's own option, and holds no `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+  or `TRUNCATE` on a core table or view;
+- that it holds `SET` on each plugin's role;
+- the plugin's role and schema, and that the schema and every object in it
+  are the plugin role's, by the migrator's own list;
+- every file recorded at its sha.
+
+The server's own role needs no membership. What holds hostile plugin code is
+curation: a plugin's TypeScript runs in the server's process. The database's
+roles hold its SQL whatever that SQL does. Check 31 of the consistency checker
+guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2551 assertions: 2551 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2575 assertions: 2575 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-four (84) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1275,7 +1300,7 @@ afresh. The settled rows are those with a decline in the log —
 `AND canonical_agent_id IS NULL` for the name-only ones. `thought_changes`
 reads a restamp as "re-captured … the label moved to this key" and a decline
 as "re-captured … the label kept". It refuses to apply
-without 055, 060, 073 or 074. test-schema [73], test-upgrade [20af],
+without 055, 060, 073 or 074. test-schema [74], test-upgrade [20af],
 test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
 
 ## What changed relative to the guide
@@ -2835,6 +2860,7 @@ the function a deployment actually has.
 ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
+OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts   # section F: under load at one and ten connections
 
 # At scale (SMD-1018): one scale per container, and give the container the
 # shared memory the parallel HNSW build keeps its graph in — at least the
@@ -2902,6 +2928,32 @@ cover it — the table 014's header's decision about the bounds rests on. The
 headline table is in the header of `migrations/014_filtered_match_thoughts.sql`;
 the scale tables are in FORK.md change 28; the real-corpus version is
 `evals/eval-filtered.ts`.
+
+Section F runs only when `OB1_BENCH_LOAD` names connection counts (SMD-1500).
+`1,10` is one connection and the server's default pool of ten. It runs last for
+its scale, so the sections above are measured as before. N connections, each its
+own backend, call `match_thoughts` closed-loop for `OB1_BENCH_LOAD_S` seconds
+(60) a run. There are three mixes:
+- the unfiltered default path alone;
+- the broad filter alone;
+- a broad, a band and a thin filter in turn, one call each (50%, 1% and 900
+  rows; at a million rows and up, the HNSW walk, the tier whose plan flips
+  between GIN and the walk, and the exact branch).
+
+It prints QPS per run, and per slot its calls, p50 and p99 beside sections A
+and B's single-call medians, and how many of the exact top 10 its answers
+hold. It also counts the answers that differed from a reference pass's (each
+query asked once, on one connection, before the runs); the one-connection run
+is that count's control. The database container's anonymous memory is sampled
+from its cgroup through `pg_read_file` (a superuser on Linux; otherwise the
+table says why not), against what 014's header prices the walks at. Its CPU
+time and the rest of the machine's are read across each run, so a table says
+how busy everything else on the machine was meanwhile: other containers, the
+kernel and the machine's side of the network path (and, on a Linux host with no
+VM between, the bench's own client). A failure under load is reported without
+discarding the other sections, and the bench then exits 1. `bench-load.ts`
+holds the loop; test-schema [73] holds its pure parts, test-live [39] the loop.
+Six runs at 60 s add about seven minutes a scale.
 
 The before arm runs only up to 100,000 rows: its defect is established there,
 and above that every question is about the shipped function. The rows are
@@ -3735,8 +3787,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2551 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1158 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2575 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1166 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

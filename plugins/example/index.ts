@@ -14,6 +14,8 @@ export default definePlugin({
   name: "example",
   title: "Example plugin",
   description: "The plugin template: a read operation over the core, and notes pinned to thoughts in a table of its own. Copy the directory to start a plugin.",
+  // The operator GUI's nav entry (SMD-2280 renders the page): a thought's notes.
+  gui: { pages: [{ path: "/notes", label: "Notes" }] },
   operations: {
     recent: operation({
       title: "Recent thought ids",

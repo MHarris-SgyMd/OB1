@@ -54,6 +54,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
+import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -10397,7 +10398,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
     await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
     const wakeMs = Date.now() - wokenAt;
-    const awakeBeat = await beat();
+    // The awake stamp lands after the wake's line and the leases' return (the
+    // passes stop, their claims move to the tail, then the sleep is stamped
+    // ended), so it is polled for, bounded: a sleep that never stamps it still
+    // fails below. Read at once, it raced the stamp (SMD-1500 review pass 1).
+    // The value the poll saw is the one asserted: a re-read could catch the
+    // next sleep's stamp (review pass 2).
+    let awakeBeat = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (awakeBeat = await beat())?.running === false, 3_000);
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
       `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
     // The thought the wake left goes to the back of the queue: claims are taken
@@ -10611,6 +10619,81 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await sql`DELETE FROM query_log`;
     await sql.close();
+  }
+}
+
+console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory and CPU are read or the reason they are not is given (SMD-1500)");
+{
+  const pool = Array.from({ length: 4 }, () => new SQL({ url: URL_, max: 1 }));
+  const memory = new SQL({ url: URL_, max: 1 });
+  /** Every run bounded: a loop that ignored its deadline would otherwise hang the suite. */
+  const bounded = <T,>(p: Promise<T>) => Promise.race([p, Bun.sleep(15_000).then(() => { throw new Error("the closed loop outran its deadline by 15 s"); })]);
+  try {
+    const pids = await assertDistinctBackends(pool);
+    assert(new Set(pids).size === 4, `four connections, four backends (pids ${pids.join(", ")})`);
+    let refused = "";
+    await assertDistinctBackends([pool[0], pool[0]]).catch((err) => (refused = (err as Error).message));
+    assert(/2 connections reached 1 backends/.test(refused), `one backend under two connections is refused, since its calls would queue (${refused || "not refused"})`);
+
+    const nap = 0.05;
+    const call = async (db: SQL, slot: number, query: number) => {
+      await db`SELECT pg_sleep(${nap})`;
+      return [`${slot}/${query}`];
+    };
+    const one = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1, slots: 2, queries: 3, call }));
+    const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, monitor: memory }));
+    assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
+    const lastStart = Math.max(...four.records.map((r) => r.at));
+    assert(lastStart > 500 && lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
+    assert(new Set(four.records.map((r) => `${r.slot}/${r.query}`)).size === 6 && four.records.every((r) => r.ids[0] === `${r.slot}/${r.query}` && r.ms >= nap * 1000 * 0.9), "every (slot, query) pair is reached, and each record is its own call's pair and time");
+    const m = four.memory;
+    if (typeof m === "string") assert(m.length > 0, `the container's memory is not readable here, and the run says why (${m})`);
+    else assert(m.samples >= 3 && m.peak.anon >= m.idle.anon && m.peak.current >= m.peak.anon && typeof four.cpu !== "string" && four.cpu.cpus >= 1 && typeof one.memory === "string" && typeof one.cpu === "string", `the container's memory was sampled through the run (${m.samples} samples, anon ${(m.idle.anon / 1048576).toFixed(0)} → ${(m.peak.anon / 1048576).toFixed(0)} MiB) and its CPU read across it (${JSON.stringify(four.cpu)}); a run given no connection to read through reads neither`);
+
+    // The peak, not the last reading: the first call sorts two million rows
+    // under a large work_mem in a backend of its own, held 400 ms by the same
+    // statement, and closes it, so the memory rises and falls inside the run
+    // (~150 MiB measured on with-postgres.sh's container).
+    let spiked = false;
+    const spike = async (db: SQL) => {
+      if (spiked) {
+        await db`SELECT pg_sleep(${nap})`;
+        return [];
+      }
+      spiked = true;
+      const own = new SQL({ url: URL_, max: 1 });
+      try {
+        await own.begin(async (tx: SQL) => {
+          await tx`SET LOCAL work_mem = '256MB'`;
+          await tx`SELECT count(*), pg_sleep(0.4) FROM (SELECT g FROM generate_series(1, 2000000) g ORDER BY g DESC OFFSET 0) s`;
+        });
+      } finally {
+        await own.close();
+      }
+      return [];
+    };
+    // Three seconds: the spike (connect, sort, 0.4 s held) is over well before
+    // the end, so samples land after it on a slow runner too (review pass 2).
+    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, monitor: memory }));
+    const pm = peaked.memory;
+    if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
+    else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.02, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.02 or more)`);
+
+    let calls = 0;
+    const failing = async (db: SQL) => {
+      if (++calls === 3) throw new Error("a call refused");
+      await db`SELECT pg_sleep(0.02)`;
+      return [];
+    };
+    const t0 = performance.now();
+    const thrown = await bounded(closedLoop({ pool, seconds: 5, slots: 1, queries: 1, call: failing })).then(() => "not thrown", (err) => (err as Error).message);
+    const ms = performance.now() - t0;
+    assert(thrown === "a call refused" && ms < 1000 && calls <= 3 + pool.length, `the first error stops every connection and is thrown (${thrown}, after ${ms.toFixed(0)} ms of a 5 s run, ${calls} calls)`);
+  } catch (err) {
+    // A run that outran its bound, or a refusal, is this section's failure, not the suite's crash.
+    assert(false, `[39] stopped: ${(err as Error).message}`);
+  } finally {
+    await Promise.all([...pool, memory].map((db) => db.close()));
   }
 }
 
