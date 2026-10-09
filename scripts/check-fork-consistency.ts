@@ -298,8 +298,9 @@
  *      outside a comment, no YAML 1.1 number; each rule is the only catch of
  *      one of its probes
  *  28. the proxy's other route tables are held byte for byte, and only its
- *      backends answer it (SMD-2658, SMD-2685): compose.yaml's and
- *      compose.api-public.yaml's tables, as mounted config and as proxy label,
+ *      backends answer it (SMD-2658, SMD-2685): compose.yaml's,
+ *      compose.api-public.yaml's and compose.hooks-public.yaml's (SMD-2310)
+ *      tables, as mounted config and as proxy label,
  *      each equal to the table built here, with no comment in it (Traefik
  *      renders a route file as a Go template); in every compose file directly
  *      in deploy/ (any case, and any name outside printable ASCII) but
@@ -2840,6 +2841,8 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
+  OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
@@ -5305,7 +5308,7 @@ const ROOT_ROLE: TransportRole = {
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
     // The enabled plugins, read once from the environment (SMD-2310): manifests checked, nothing run.
-    ["./core/plugins.ts", new Set(["loadPlugins", "LoadedPlugin"])],
+    ["./core/plugins.ts", new Set(["enabledHooks", "hookSecrets", "loadPlugins", "LoadedHook", "LoadedPlugin"])],
     // Their tool names, for the request line (SMD-1849): a name list, no logic.
     ["./telemetry.ts", new Set(["knowTools"])],
   ]),
@@ -5317,7 +5320,7 @@ const ROOT_ROLE: TransportRole = {
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere"])],
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
@@ -5765,7 +5768,8 @@ const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
-// compose.yaml's and compose.api-public.yaml's tables from them too.
+// compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
+// tables from them too.
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
   `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
@@ -5785,7 +5789,7 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
 /** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD"];
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -5998,8 +6002,9 @@ checkTierStack();
 // table can emit any router; and a line YAML reads as a key that a reviewer
 // reads as a comment, one led by a no-break space, is a router nobody
 // reviewed (SMD-2294's pass 7 ran it live). Check 27 holds the three-brain
-// stack's table. This holds the other two, compose.yaml's x-proxy-routes and
-// compose.api-public.yaml's x-api-route: as Bun.YAML parses each file, the
+// stack's table. This holds the others, compose.yaml's x-proxy-routes,
+// compose.api-public.yaml's x-api-route and compose.hooks-public.yaml's
+// x-hooks-route (SMD-2310): as Bun.YAML parses each file, the
 // config compose mounts and the proxy label that copies it are each the table
 // built here, byte for byte (the anchor itself compose ignores), and it
 // carries no comment (each file's notes on its routes are YAML comments above
@@ -6065,6 +6070,7 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
+  + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
   + ROUTE_TIER_PATHS + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
@@ -6078,10 +6084,16 @@ const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
   + "  middlewares:\n    api-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n    api-strip:\n      stripPrefix:\n        prefixes: [\"/api\"]\n"
   + "  services:\n" + routeService("api", `http://${tierMeshName("api", "stable")}.:8000`);
+/** compose.hooks-public.yaml's route table (SMD-2310), byte for byte, as Bun.YAML reads the block: /hooks/ to the REST core, path kept. */
+const HOOKS_ROUTE_TABLE = "http:\n  routers:\n"
+  + routeRouter("hooks-public", "PathPrefix(`/hooks/`)", 36, "hooks-no-forwarder", "hooks")
+  + "  middlewares:\n    hooks-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n"
+  + "  services:\n" + routeService("hooks", `http://${tierMeshName("api", "stable")}.:8000`);
 /** [the file under deploy/, the config compose mounts, where the proxy mounts it, the proxy label that copies it, the table's name here, the table]. */
 const ROUTE_FILES = [
   ["compose.yaml", "proxy-routes", "/etc/traefik/dynamic/routes.yaml", "ob1.proxy-routes", "PROXY_ROUTE_TABLE", PROXY_ROUTE_TABLE],
   ["compose.api-public.yaml", "proxy-api-route", "/etc/traefik/dynamic/api.yaml", "ob1.proxy-api-route", "API_ROUTE_TABLE", API_ROUTE_TABLE],
+  ["compose.hooks-public.yaml", "proxy-hooks-route", "/etc/traefik/dynamic/hooks.yaml", "ob1.proxy-hooks-route", "HOOKS_ROUTE_TABLE", HOOKS_ROUTE_TABLE],
 ] as const;
 /** compose.yaml's proxy as Bun.YAML reads it, its label (the table rule's) and its `logging` (check 29's, x-logging for every service) aside. */
 const PROXY_SERVICE = {
@@ -6116,6 +6128,7 @@ const PROXY_SERVICE = {
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
+  "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.host-ports.yaml": { services: { postgres: ["ports"], ollama: ["ports"], jev: ["ports"] }, top: [] },
   "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
@@ -6355,8 +6368,8 @@ function checkRouteTables() {
     if (rules.size === 1) soleCatch.add([...rules][0]);
   }
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
-  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml" };
-  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml and compose.api-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml and compose.hooks-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
   // …and the commands its notes tell an operator to run: the downloads of those files and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
     const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });

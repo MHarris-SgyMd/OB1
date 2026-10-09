@@ -6,7 +6,7 @@
 // reached as api.ob1.internal on the mesh, and at /api only where the operator
 // names deploy/compose.api-public.yaml.
 
-import { agents, closeStore, db, env, initEnv, plugins, serveHere } from "./root.ts";
+import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { routable } from "./auth.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
@@ -32,6 +32,7 @@ export const app = createRestApp({
   resolve: (principal) => agents().resolve(db(), principal),
   track: calls.track,
   plugins,
+  hooks,
 });
 
 // Stopping on SIGTERM, what is in flight finished (SMD-2250), as the MCP

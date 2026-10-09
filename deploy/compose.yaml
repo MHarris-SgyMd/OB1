@@ -69,6 +69,13 @@ x-plugin-env: &plugin-env
   # the plugins' pools log in with it, never as postgres.
   OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
 
+# The plugins' webhooks (SMD-2310), merged by the REST core alone, which
+# serves them: the plugins OB1_HOOKS names and the secrets OB1_HOOK_SECRETS
+# gives each. The proxy reaches /hooks only with compose.hooks-public.yaml.
+x-hook-env: &hook-env
+  OB1_HOOKS: ${OB1_HOOKS:-}
+  OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
+
 # The proxy's route table (SMD-1846), which Traefik's file provider reads. It
 # lives here rather than in a file of its own because compose.yaml is the file
 # a release ships (scripts/release-artifacts.ts, ASSETS): a pinned stack on a
@@ -127,6 +134,11 @@ x-plugin-env: &plugin-env
 #           deploy/compose.api-public.yaml, whose router (priority 36) wins
 #           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
 #           legacy route, where the MCP server takes a POST at every path;
+#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`), so
+#           a delivery to a plugin's webhook never falls to the legacy route
+#           and the MCP server, until the operator names
+#           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
+#           it to the REST core (SMD-2310);
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -221,6 +233,12 @@ x-proxy-routes: &proxy-routes |
         priority: 35
         entryPoints: [web]
         middlewares: [api-off]
+        service: noop@internal
+      hooks-off:
+        rule: "Path(`/hooks`) || PathPrefix(`/hooks/`)"
+        priority: 35
+        entryPoints: [web]
+        middlewares: [not-served]
         service: noop@internal
       mcp:
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
@@ -654,7 +672,7 @@ services:
     pull_policy: never
     command: ["api.ts"]
     environment:
-      <<: [*server-env, *plugin-env]
+      <<: [*server-env, *plugin-env, *hook-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     depends_on:
       postgres:

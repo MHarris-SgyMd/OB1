@@ -19,6 +19,7 @@ A directory, `plugins/<name>/`, with:
   - **Each operation** declares a title, a description and the scope a key needs (`read`, `capture` or `write`). It also declares its REST method and path under the plugin's, an input and an output as zod shapes, and a handler.
   - **The handler** returns `ok(value)` or `refuse(status, CODE, facts)`. A value is held to the output schema; one that does not fit is the plugin's fault, answered as `FAILED`.
   - **GUI pages** (optional), `gui: { pages: [{ path, label }] }`: each a path under the plugin's and the label its nav entry shows. The REST core lists an enabled plugin's pages at `GET /v1/plugins`, the registry the operator GUI's nav reads (SMD-2280 renders the pages).
+- **Webhooks** (optional), `hooks: { <name>: { description, handler } }`: a capture source's inbound endpoints. See "A plugin's webhooks" below.
 - `migrations/` (optional): the plugin's tables, as `NNN_name.sql` files. See below.
 - `README.md` and `metadata.json` (`"category": "plugins"`), as every contribution has.
 - An entry in [registry.ts](registry.ts). The server runs only plugins built into its image; nothing is loaded by a name the environment gives.
@@ -33,11 +34,23 @@ A plugin's tables live in a Postgres schema of its own, `plugin_<name>`, owned b
 - **No foreign keys into the core.** A row that names a thought holds its id, and the operation checks the thought through the core, as the example's `add_note` does.
 - **Turning a plugin off** removes its operations and runs none of its migrations. Its schema, tables and rows are left as they are.
 
+## A plugin's webhooks
+
+A capture source (Slack, Telegram, Readwise) needs an endpoint its service can POST to, and that service holds no brain key. A plugin declares each such endpoint as a hook:
+
+- **Where.** The REST core serves it at `/hooks/<plugin>/<name>`, but only for a plugin the operator names in `OB1_HOOKS` (also enabled in `OB1_PLUGINS`). The proxy reaches it only with `deploy/compose.hooks-public.yaml`, so a webhook is off unless the operator turns on both.
+- **The handler** is given the request's headers, query, its body as the bytes sent (at most 1 MiB, counted as they arrive; POST alone) and as UTF-8 text, and the secret `OB1_HOOK_SECRETS` gives its plugin. It verifies the delivery itself, over the bytes: `hmacSha256Hex` and `safeEqual` from the SDK cover the common HMAC signature. With no secret set for the plugin, the REST core answers 503 and never calls the handler.
+- **What it may do.** It runs as `hook:<plugin>`, a caller of capture scope alone. Through `ctx.call` it can add a thought, written as the hook on its audit row, but nothing a sender posts can read, change or delete one. It reaches its plugin's own tables through `ctx.db` as an operation does.
+- **Its answer** is a status a sender reads (200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503) and an optional JSON object body. A handler that throws is answered `FAILED` with nothing of why — the sender is anonymous — and the message goes to the REST core's log.
+
+The example's `capture` hook is the template ([example/README.md](example/README.md)).
+
 ## The rules a plugin is held to
 
 Checked when the server starts, so a malformed manifest stops it:
 
 - No two operations share a tool name, and none takes a core tool's name.
+- A hook's name is one path segment of lower-case words and hyphens, with a description and a handler.
 - No two operations of a plugin have routes that one request could match (`/items/{id}` beside `/items/latest`).
 - A path field is a string field.
 - An output schema does not transform: MCP holds the answer to it a second time.
