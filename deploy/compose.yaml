@@ -599,6 +599,7 @@ services:
       # a forward.
       OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
       OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+      OB1_PROPOSALS_WARN_DAYS: ${OB1_PROPOSALS_WARN_DAYS:-}
       # Which pipeline tier this server runs as (SMD-1806); stamped on every
       # query_log row. Unset is a plain brain. The three-tier compose
       # (compose.tiers.yaml) sets it per service; here it is a plain forward.

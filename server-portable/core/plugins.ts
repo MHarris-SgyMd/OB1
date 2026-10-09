@@ -303,7 +303,9 @@ export function hookPrincipal(plugin: string): Principal {
  */
 export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"] }, request: HookRequest): Promise<HookAnswer> {
   const ctx = contextFor(hook.plugin, { core: deps.core, principal: hookPrincipal(hook.plugin), track: deps.track });
-  const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret }, request);
+  // The core's settings as this delivery finds them, read only by a hook that asks.
+  const core = deps.core;
+  const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret, get captureSeconds() { return core.captureSeconds(); } }, request);
   if (!answer || !HOOK_STATUSES.has(answer.status)) throw new Error(`${hook.path} answered status ${answer?.status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);
   if (answer.body !== undefined && (answer.body === null || typeof answer.body !== "object" || Array.isArray(answer.body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
   return answer;

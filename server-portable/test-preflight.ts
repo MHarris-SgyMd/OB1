@@ -166,7 +166,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 24, "…twenty-four of them as the catalog-only skip (061's lineage, the workers' heartbeats, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 25, "…twenty-five of them as the catalog-only skip (061's lineage, the workers' heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -1587,12 +1587,14 @@ else {
    * proposal table. The states are written as the tool would leave them: a
    * pass stopped mid-way warns with the counts (the universe being the thoughts
    * with entities, not every thought) and the command that finishes it under
-   * the key's own model; pending proposals ride the line as a count with the
-   * command that lists them, and alone they are ok, not a warning — the pass
-   * proposes, a reviewer decides. Before 015 or 029 there is nothing to read.
+   * the key's own model. The queue the pass leaves is the proposals row's
+   * (SMD-2680): ok with the count and the listing while young, a warning once
+   * the oldest waits past OB1_PROPOSALS_WARN_DAYS — the pass proposes, a
+   * reviewer decides. Before 015 or 029 there is nothing to read.
    */
   const CONS = "consolidate:other-judge@p1";
-  assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out), "with no consolidation rows and no proposals the check is ok and says so");
+  assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out) && /✓\s+proposals\s+none pending\s*$/m.test(noRecord.out),
+         `with no consolidation rows and no proposals both checks are ok and say so (${row(noRecord.out, "proposals")})`);
   // The pool's universe is thoughts with entities AND a vector; give three a vector for the count.
   await claims.unsafe(`UPDATE thoughts SET embedding = ('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector WHERE id IN ('${ids[0]}', '${ids[1]}', '${ids[2]}')`);
   await claims`SELECT record_thought_entities(${ids[0]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
@@ -1605,8 +1607,16 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${CONS} AND thought_id = ${ids[0]}::uuid`;
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consMid = await run(SQL_ENV);
-  assert(consMid.code === 0 && new RegExp(`consolidate pass\\s+${rx(CONS)}: 3 thoughts with entities — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a consolidation pass under this key stopped before it finished; 1 proposal\\(s\\) pending review — cd db && bun consolidate\\.ts --url \\$DATABASE_URL --list`).test(consMid.out),
-         `a consolidation pass stopped mid-way warns with its counts over the thoughts with entities, and the queue (${consMid.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim()})`);
+  assert(consMid.code === 0 && new RegExp(`consolidate pass\\s+${rx(CONS)}: 3 thoughts with entities — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a consolidation pass under this key stopped before it finished\\s*$`, "m").test(consMid.out),
+         `a consolidation pass stopped mid-way warns with its counts over the thoughts with entities, and no queue: that is the proposals row's (${consMid.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim()})`);
+  assert(/^\s*✓\s+proposals\s+1 pending review, the oldest judged \d+ s ago — review with cd db && bun consolidate\.ts --url \$DATABASE_URL --list, or the list_supersession_proposals tool, then --accept or --reject each\s*$/m.test(consMid.out),
+         `…the proposals row counts the queue, ok while it is young, with the listing and the MCP tool (SMD-2680; ${row(consMid.out, "proposals")})`);
+  // A knob that is not whole days warns on its own; a young queue gains no
+  // "unreviewed past" and no backlog remedy beside it (run-it, review pass 1).
+  const youngBad = await run({ ...SQL_ENV, OB1_PROPOSALS_WARN_DAYS: "1w" });
+  assert(/^\s*!\s+proposals\s+1 pending review, the oldest judged \d+ s ago — OB1_PROPOSALS_WARN_DAYS is "1w", not whole days from 1 to 3650, so 7 days are used\s*$/m.test(youngBad.out)
+      && /^\s*→ Set OB1_PROPOSALS_WARN_DAYS to whole days, 1 to 3650, or unset it for 7\.\s*$/.test(fix(youngBad.out, "proposals")),
+         `…a bad knob beside a young queue warns about the knob alone (${row(youngBad.out, "proposals").slice(0, 200)} / ${fix(youngBad.out, "proposals").trim().slice(0, 120)})`);
   assert(/Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
          "…and the remedy runs the worker under the key's own judge model — the judge's knob, so the extractor stays put (SMD-1901) — since another shell would pool under another key");
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
@@ -1616,13 +1626,13 @@ else {
   // queue still said; its lease expired: a worker that died holding it (SMD-2423).
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-live', 1)`;
   const consLive = await run(SQL_ENV);
-  assert(/✓\s+consolidate pass\s+\S+: 3 thoughts with entities — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending; 1 proposal\(s\) pending review/.test(consLive.out) && !/Finish it/.test(fix(consLive.out, "consolidate pass")),
-         `a live lease on a consolidation pass reads running, ok, with the queue and no remedy (${row(consLive.out, "consolidate pass")})`);
+  assert(/✓\s+consolidate pass\s+\S+: 3 thoughts with entities — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \(leases live until \d\d:\d\d UTC\), 0 pending\s*$/m.test(consLive.out) && !/Finish it/.test(fix(consLive.out, "consolidate pass")),
+         `a live lease on a consolidation pass reads running, ok, with no remedy (${row(consLive.out, "consolidate pass")})`);
   assert((consLive.out.match(/^\s*[✓✗!·]\s+consolidate pass\s/gm) ?? []).length === 1 && !/none unfinished/.test(row(consLive.out, "consolidate pass")),
          "…one row for the key: no stopped row beside it, no none unfinished (review pass 1)");
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consDied = await run(SQL_ENV);
-  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired; 1 proposal/.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
+  assert(/!\s+consolidate pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired\s*$/m.test(consDied.out) && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts/m.test(fix(consDied.out, "consolidate pass")),
          `an expired lease reads as a worker that died holding it (${row(consDied.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   // A follower between its polls holds no lease: its fresh heartbeat for the
@@ -1650,18 +1660,18 @@ else {
   // Stamped again right before the read: its age is asserted to the second (review pass 3).
   await followerBeat(20);
   const consFollowed = await run(SQL_ENV);
-  assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 20 s ago\): 1 pending between its polls; 1 proposal/.test(consFollowed.out),
+  assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 20 s ago\): 1 pending between its polls\s*$/m.test(consFollowed.out),
          `a fresh follower heartbeat for the key reads running between polls (${row(consFollowed.out, "consolidate pass")})`);
   // A follower mid-pass says so, not "between its polls" (review pass 3).
   await followerBeat(20, { running: true });
-  assert(/a follower is running this key \(stamped \d+ s ago\): 1 pending; 1 proposal/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a follower stamped mid-pass is not said to be between its polls");
+  assert(/a follower is running this key \(stamped \d+ s ago\): 1 pending\s*$/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a follower stamped mid-pass is not said to be between its polls");
   // A follower killed outright: its heartbeat stale, its claim's lease still
   // live until it lapses. The heartbeat is the fresher word — the row says the
   // follower is gone, not running (review pass 3, a walkthrough).
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-killed', 1)`;
   await followerBeat(600, { running: true });
   const consKilled = await run(SQL_ENV);
-  assert(/!\s+consolidate pass\s+\S+: .* — its follower is not running \(the workers row says so\), and 1 claim\(s\) it held keep live leases until \d\d:\d\d UTC; 1 proposal/.test(consKilled.out)
+  assert(/!\s+consolidate pass\s+\S+: .* — its follower is not running \(the workers row says so\), and 1 claim\(s\) it held keep live leases until \d\d:\d\d UTC\s*$/m.test(consKilled.out)
       && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p1, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
          `a follower whose heartbeat went stale while its claim's lease is live reads not running, pointing to the restart (${row(consKilled.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
@@ -1670,7 +1680,7 @@ else {
   // how it goes back — a follower never retries it (review pass 1).
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND status = 'pending'`;
   const consFollowFailed = await run(SQL_ENV);
-  assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry; 1 proposal/.test(consFollowFailed.out)
+  assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry\s*$/m.test(consFollowFailed.out)
       && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p1\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
          `a follower beside a failed row warns, naming it and the retry (${row(consFollowFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${CONS} AND last_error = 'stub: not JSON'`;
@@ -1713,7 +1723,7 @@ else {
   assert(/a pass under this key is running: 1 in flight/.test(row(consSleptLive.out, "consolidate pass")) && !/Start it again/.test(fix(consSleptLive.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consSleptStale.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptStale.out, "consolidate pass")),
          `asleep, the scheduler's live claim beside an old workers-profile row reads running, no restart; a stale heartbeat:sleep claims nothing (${row(consSleptLive.out, "consolidate pass")} | ${row(consSleptStale.out, "consolidate pass")})`);
-  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\); 1 proposal/.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
+  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\)\s*$/m.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
   assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(consSleptDied.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptDied.out, "consolidate pass"))
@@ -1725,8 +1735,8 @@ else {
          "…with a failed row, --retry-failed in the remedy");
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${CONS}`;
   const consDone = await run(SQL_ENV);
-  assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out),
-         "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect — and the thought never pooled is not a signal");
+  assert(/consolidate pass\s+none unfinished\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out) && /^\s*✓\s+proposals\s+1 pending review/m.test(consDone.out),
+         "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect, and the proposals row's — and the thought never pooled is not a signal");
   // 070 (SMD-2313): the pending proposal set on a lineage pair — the newer
   // thought's derived_from naming the older, raw, as a page names its
   // evidence — is counted by the lineage check with its id, and the remedy is
@@ -1757,15 +1767,92 @@ else {
   // 063 (SMD-1732): a stale proposal — a text moved under a pending verdict
   // — is counted beside the pending ones, with the reviewer's command; both
   // clauses join with "; " when both stand (fourth review pass, cold read:
-  // the clause had no tooth).
+  // the clause had no tooth). The proposals row's since SMD-2680.
   await claims`UPDATE supersession_proposals SET status = 'stale' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   const consStale = await run(SQL_ENV);
-  assert(/consolidate pass\s+none unfinished; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not\) — cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale\s*$/m.test(consStale.out),
-         `a stale proposal alone is counted with the pass's rule (067) and the reviewer's command (${consStale.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 240)})`);
+  assert(/^\s*✓\s+proposals\s+none pending; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not\) — the next pass settles them; to decide one sooner, cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale shows each with its --accept --force or --reject\s*$/m.test(consStale.out) && /consolidate pass\s+none unfinished\s*$/m.test(consStale.out),
+         `a stale proposal alone is counted with the pass's rule (067), ok (${row(consStale.out, "proposals").slice(0, 240)})`);
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consBoth = await run(SQL_ENV);
-  assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list; 1 stale \(/.test(consBoth.out),
-         `…and pending beside stale reads as two clauses (${consBoth.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim().slice(0, 200)})`);
+  assert(/^\s*✓\s+proposals\s+1 pending review, the oldest judged \d+ s ago; 1 stale \(a text moved under the verdict[^)]*\) — review with cd db && bun consolidate\.ts --url \$DATABASE_URL --list \(--list stale for the stale ones\), or the list_supersession_proposals tool/m.test(consBoth.out),
+         `…and pending beside stale reads as two clauses, the listing naming both (${row(consBoth.out, "proposals").slice(0, 240)})`);
+  // The queue's age (SMD-2680): the oldest pending row past
+  // OB1_PROPOSALS_WARN_DAYS (7 unset) warns — a backlog, never a failure —
+  // with the listing, the tool and the knob; the knob moves the line, and a
+  // value that is not whole days says so and keeps 7. The stale row's age is
+  // not the queue's.
+  await claims`UPDATE supersession_proposals SET judged_at = now() - interval '8 days' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[2]}::uuid`;
+  await claims`UPDATE supersession_proposals SET judged_at = now() - interval '30 days' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
+  const qOld = await run(SQL_ENV);
+  const qOldJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(qOld.code === 0 && /^\s*!\s+proposals\s+1 pending review, the oldest judged 8 d ago; 1 stale \([^)]*\) — unreviewed past 7 day\(s\)\s*$/m.test(qOld.out)
+      && /^\s*→ A backlog, not a fault: review them — cd db && bun consolidate\.ts --url \$DATABASE_URL --list \(--list stale for the stale ones\), or the list_supersession_proposals tool, then --accept or --reject each\. OB1_PROPOSALS_WARN_DAYS \(7\) sets how long after its verdict a proposal may wait before this row warns; a pass that re-judges a stale proposal restarts its clock\.\s*$/.test(fix(qOld.out, "proposals"))
+      && qOldJson.ok === true && qOldJson.checks.some((c) => c.name === "proposals" && c.status === "warn"),
+         `a pending proposal past 7 days warns, ok:true, naming the listing, the tool and the knob (exit ${qOld.code}: ${row(qOld.out, "proposals").slice(0, 200)} / ${fix(qOld.out, "proposals").trim().slice(0, 200)})`);
+  const qKnob = await run({ ...SQL_ENV, OB1_PROPOSALS_WARN_DAYS: "10" });
+  const qBad = await run({ ...SQL_ENV, OB1_PROPOSALS_WARN_DAYS: "1w" });
+  // The range's two ends: 0 would warn on every proposal at once, past 3650 would silence the row (run-it, review pass 1).
+  const qZero = await run({ ...SQL_ENV, OB1_PROPOSALS_WARN_DAYS: "0" });
+  const qHuge = await run({ ...SQL_ENV, OB1_PROPOSALS_WARN_DAYS: "3651" });
+  assert([qZero, qHuge].every((r, i) => new RegExp(`; OB1_PROPOSALS_WARN_DAYS is "${["0", "3651"][i]}", not whole days from 1 to 3650, so 7 days are used\\s*$`).test(row(r.out, "proposals"))),
+         `0 and 3651 are outside the knob's range and keep 7 (${row(qZero.out, "proposals").slice(-90)} / ${row(qHuge.out, "proposals").slice(-90)})`);
+  assert(/^\s*✓\s+proposals\s+1 pending review, the oldest judged 8 d ago/m.test(qKnob.out)
+      && /^\s*!\s+proposals\s+1 pending review, the oldest judged 8 d ago; .* — unreviewed past 7 day\(s\); OB1_PROPOSALS_WARN_DAYS is "1w", not whole days from 1 to 3650, so 7 days are used\s*$/m.test(qBad.out)
+      && /^\s*→ A backlog, not a fault: review them — cd db && bun consolidate\.ts.* Set OB1_PROPOSALS_WARN_DAYS to whole days, 1 to 3650, or unset it for 7\.\s*$/.test(fix(qBad.out, "proposals")),
+         `OB1_PROPOSALS_WARN_DAYS=10 keeps an 8-day queue ok; "1w" says so, keeps 7, and the old queue keeps its words and remedy (${row(qKnob.out, "proposals").slice(0, 120)} / ${row(qBad.out, "proposals").slice(0, 200)})`);
+  // How many pending rows pair two tickets the board does not link, by 079's
+  // rule: filed under two different tickets (metadata.ticket, else issue — a
+  // Linear section row carries ticket alone), and no active Linear link
+  // between them now. The pending pair is ids[0]–ids[2]: a ticket row and
+  // another ticket's section counts; a link made since the verdict takes it
+  // out; two rows of one ticket, and the stale pair, never count.
+  await claims`UPDATE thoughts SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('issue', 'SMD-9001') WHERE id = ${ids[0]}::uuid`;
+  await claims`UPDATE thoughts SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('issue', 'SMD-9002') WHERE id = ${ids[1]}::uuid`;
+  // ids[2] carries an issue too, ids[0]'s: `ticket` comes first, as 079 and
+  // node_state read it, so the pair is two tickets (review pass 3).
+  await claims`UPDATE thoughts SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('ticket', 'SMD-9002', 'issue', 'SMD-9001') WHERE id = ${ids[2]}::uuid`;
+  const qBoard = await run(SQL_ENV);
+  await claims`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${ids[0]}::uuid, 'link', ${{ relation: "relates_to", system: "linear", target: "SMD-9002" }}::jsonb)`;
+  const qLinked = await run(SQL_ENV);
+  await claims`UPDATE thought_facets SET payload = payload || '{"relation": "duplicate_of"}'::jsonb WHERE thought_id = ${ids[0]}::uuid AND kind = 'link' AND payload->>'target' = 'SMD-9002'`;
+  const qDuplicate = await run(SQL_ENV);
+  // Only an active Linear duplicate_of takes a pair out: a closed one, or one
+  // another system holds, does not (review pass 3).
+  await claims`UPDATE thought_facets SET payload = payload || '{"system": "github"}'::jsonb WHERE thought_id = ${ids[0]}::uuid AND kind = 'link' AND payload->>'target' = 'SMD-9002'`;
+  const qOtherSystem = await run(SQL_ENV);
+  await claims`UPDATE thought_facets SET payload = payload || '{"system": "linear"}'::jsonb, valid_until = now() WHERE thought_id = ${ids[0]}::uuid AND kind = 'link' AND payload->>'target' = 'SMD-9002'`;
+  const qClosed = await run(SQL_ENV);
+  // A board count refused — EXECUTE on 079's predicate revoked from PUBLIC —
+  // under a role holding the capture and server groups: the row warns with
+  // that grant and never shows the count as none (review pass 3).
+  const { grantStatements } = await import("../db/config.mjs");
+  await claims.unsafe("DROP ROLE IF EXISTS pf_board");
+  await claims.unsafe("CREATE ROLE pf_board LOGIN PASSWORD 'board'");
+  await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_board");
+  for (const st of grantStatements("pf_board", { groups: ["capture", "server"] })) await claims.unsafe(st);
+  await claims.unsafe("REVOKE EXECUTE ON FUNCTION consolidation_tickets_linked(jsonb, jsonb) FROM PUBLIC");
+  let qBoardRefused: Awaited<ReturnType<typeof run>>;
+  try {
+    qBoardRefused = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_board:board@") });
+  } finally {
+    await claims.unsafe("GRANT EXECUTE ON FUNCTION consolidation_tickets_linked(jsonb, jsonb) TO PUBLIC");
+    await claims.unsafe("DROP OWNED BY pf_board");
+    await claims.unsafe("DROP ROLE pf_board");
+  }
+  await claims`DELETE FROM thought_facets WHERE thought_id = ${ids[0]}::uuid AND kind = 'link' AND payload->>'target' = 'SMD-9002'`;
+  await claims`UPDATE thoughts SET metadata = metadata || jsonb_build_object('ticket', 'SMD-9001') WHERE id = ${ids[2]}::uuid`;
+  const qOneTicket = await run(SQL_ENV);
+  await claims`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid)`;
+  assert(/proposals\s+1 pending review, the oldest judged 8 d ago; 1 pair two tickets the board does not link; 1 stale/.test(row(qBoard.out, "proposals"))
+      && /proposals\s+1 pending review, the oldest judged 8 d ago; 1 stale/.test(row(qLinked.out, "proposals"))
+      && /proposals\s+1 pending review, the oldest judged 8 d ago; 1 stale/.test(row(qDuplicate.out, "proposals"))
+      && /proposals\s+1 pending review, the oldest judged 8 d ago; 1 pair two tickets the board does not link; 1 stale/.test(row(qOtherSystem.out, "proposals"))
+      && /proposals\s+1 pending review, the oldest judged 8 d ago; 1 pair two tickets the board does not link; 1 stale/.test(row(qClosed.out, "proposals"))
+      && /proposals\s+1 pending review, the oldest judged 8 d ago; 1 stale/.test(row(qOneTicket.out, "proposals")),
+         `a pending proposal between a ticket row and another ticket's section is counted; once Linear links the two, or marks one a duplicate of the other, it is not — a closed or another system's duplicate link does not count; two rows of one ticket, and the stale pair, never are (${row(qBoard.out, "proposals").slice(0, 160)} / ${row(qLinked.out, "proposals").slice(0, 120)} / ${row(qOneTicket.out, "proposals").slice(0, 120)})`);
+  assert(/!\s+proposals\s+1 pending review, the oldest judged 8 d ago; board pairs not counted \(permission denied for function consolidation_tickets_linked\); 1 stale/.test(qBoardRefused!.out)
+      && /→ GRANT EXECUTE ON FUNCTION consolidation_tickets_linked\(jsonb, jsonb\) TO <the server's role>; — PUBLIC holds it unless a REVOKE took it \(079\)\..*A backlog, not a fault/.test(fix(qBoardRefused!.out, "proposals")),
+         `a refused board count warns with its grant beside the old queue's remedy, and is not shown as none (${row(qBoardRefused!.out, "proposals").slice(0, 220)} / ${fix(qBoardRefused!.out, "proposals").trim().slice(0, 160)})`);
   await claims`DELETE FROM supersession_proposals WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[2]}::uuid`;
   await claims`UPDATE supersession_proposals SET status = 'pending' WHERE older_id = ${ids[0]}::uuid AND newer_id = ${ids[1]}::uuid`;
   const consOk = JSON.parse((await run(SQL_ENV, "--json")).out) as { checks: { name: string; status: string }[] };
@@ -1779,6 +1866,7 @@ else {
   const pre029 = await run(SQL_ENV);
   assert(pre029.code === 0 && /consolidate pass\s+not checked — supersession_proposals does not exist \(migration 029 not applied\)/.test(pre029.out),
          "before migration 029 there is no queue to read, and the check says so rather than warning");
+  assert(/·\s+proposals\s+no supersession_proposals — migration 029 is not applied\.\s*$/m.test(pre029.out), `…and the proposals row skips, saying why (${row(pre029.out, "proposals")})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("029") });
   assert(/consolidate pass\s+none unfinished\s*$/m.test((await run(SQL_ENV)).out), "…and 029 applied it is ok again");
 
@@ -2911,6 +2999,10 @@ else {
              `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
       assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
              `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+      // The queue refused (SMD-2680, review pass 2): a warning naming the table and the narrowed grant.
+      assert(/!\s+proposals\s+could not verify: permission denied for table supersession_proposals/.test(asReader.out)
+          && /→ Grant the server's role SELECT on supersession_proposals — the server group's row \(SMD-2680\): cd db && bun migrate\.ts --url <the owner's connection string> --grant <role> --groups capture,server/.test(fix(asReader.out, "proposals")),
+             `…and the proposals row names the refused table and the grant (${row(asReader.out, "proposals")} ${fix(asReader.out, "proposals").trim().slice(0, 160)})`);
       // information_schema shows a role no column of a table it holds no
       // privilege on; pg_attribute shows them all (SMD-2238). A migrated
       // brain is never told to re-apply 046 or 021, or to apply 013.
