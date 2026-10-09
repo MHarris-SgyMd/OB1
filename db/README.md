@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2583 assertions: 2583 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-four (84) migrations applied, and
+`bun test-schema.ts` prints `2627 assertions: 2627 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-five (85) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1042,7 +1042,8 @@ text, the trust the row already carries is an echo of a read (a client
 writing back the metadata it fetched) and declares nothing, while a new text
 weighs every word — a lowering and an echo of a lower trust cannot be told
 apart there, and the lower label is the safe error. The trust follows the content
-as the mark does: a re-capture or a metadata-only edit keeps it, and a
+as the mark does: a re-capture (except, since 085, one a capture-only key's
+stamp yields to — below) or a metadata-only edit keeps it, and a
 text-changing edit takes the editor's. The stamp has to be in the write
 functions' bodies, because since 060 the projector writes the row from the
 event, so 073 redefines both inserting `upsert_thought` forms and
@@ -1054,7 +1055,7 @@ from, so after `set_agent_kind` the same call fills both — and never raises
 one: the lowest of what that write recorded (or the claim it filed while its
 key was unclassified), the key's kind now, and the row's own word, so a key
 reclassified down takes its rows down, one reclassified up leaves their trust
-where it was (a text-changing edit restamps a row), a lowering a writer set
+where it was (a text-changing edit stamps a row afresh), a lowering a writer set
 before 073 is kept (a word off the ladder is replaced), and a text no audit
 row vouches for loses its trust with its marks. The read tools print it on
 the `By:` line (`not recorded` for none) and put a fixed notice on an ingested
@@ -1239,6 +1240,68 @@ before then is never noted. Apply it before running the server that reads it: wi
 `ob1_thought_taken` every capture-only key's `supersedes` is the server's error
 to retry. It refuses to apply without 060 or 061. test-schema [72],
 test-upgrade [20ae], test-e2e-sql [13b] and [13e].
+
+Migration 085 has a capture-only key's stamp yield to the first classified
+key that can read to re-capture the text, at a higher trust (SMD-2664). A
+capture-only key may declare a trust below its kind — the Chrome extension
+labels every capture `ingested` — and when a write key later captured the
+same text, the capture landed on that row and 050's same-text rule kept the
+capture key's `actor_kind`, `actor_name` and `trust`: the writer's thought
+dropped out of every `min_trust` read above `ingested` and carried the
+outside-text notice. The stores now call `ob1_restamp_recapture` after
+`ob1_note_recapture`, when a capture without `recapture: 'keep'` lands on an
+existing row. It moves nothing unless the row's stamp is still a
+capture-only key's: its capture row carries 082's `"scope": "capture"` mark,
+and no update since has changed the text (by 003's fingerprint) or
+restamped it. A lowering by a key that can read — the operator's own
+`ingested` — stands under 050's rule. An unclassified writer, or a call with
+no actor, moves and records nothing. A classified writer is weighed: the
+stamp the write would have put on a new text — the key's kind, and the
+trust the write declared when that is lower — against the row's (operator >
+agent > ingested > none). Higher, it appends one update event moving the
+whole stamp to the writer, `"restamped": true` in its diff; not higher, it
+records the decline, `{"restamp_declined": true}`, once per agent. Either
+event moves `updated_at`, as the note does. A decline by another agent
+settles the row against every other agent: the operator's equal
+`ingested` re-capture of a capture key's outside text is not undone by an
+agent key's re-send after it. The same agent's own later landing may still
+move it; "the same" is by agent id, so a decline naming none — a name-only
+writer: board-sync, or any key while its registry lookup fails, through an
+outage or a misconfiguration, or is refused — settles the row for every
+caller. The record
+is the restamp's own, not 082's note, which is also written for landings
+that can move nothing and skipped on rows 082 counts as taken. The first
+classified writer settles the row whatever it declared: an agent key
+declaring `ingested`, or an `ingested`-kind key, landing first leaves the
+capture key's stamp and refuses the operator after it — trust kept low, the
+direction a label may err in. So when a capture-only key captured a text first, the first
+classified key that can read to capture it after leaves the higher of
+their two trusts, and once moved, no later re-capture moves it. A
+capture-only actor restamps nothing, and nor does a call whose fingerprint
+is no longer the row's (the text moved since the capture). A metadata edit
+still keeps the stamp, board-sync's metadata patch adopting a row in place
+included. `backfill_thought_actors` now reads a restamp with no
+text-writing row after it, by `seq`, as the row's writer, so a pass after a
+restamp — run after `set_agent_kind`, as above — keeps the stamp rather than
+putting the lower one back; a key reclassified down still takes its rows
+down.
+
+For an operator upgrading to 085: a stamp kept by a re-capture before 085
+moves at the next re-capture by a classified key that can read at a higher
+trust, whichever key 082 noted; a capture-only key's row from before the scope mark — every capture a
+server before 082 wrote, the Chrome extension's pages included — stays as it
+is. Only a classified key is weighed, and a re-capture made while a key was
+unclassified is not replayed when it is classified: classify write keys
+(`set_agent_kind`) before relying on this. A label settled by another key's
+decline, or a name-only one, has no reset: a text edit by a key that can
+read, or deleting the thought and capturing the text again, stamps it
+afresh. The settled rows are those with a decline in the log —
+`SELECT DISTINCT thought_id FROM thought_audit WHERE diff ? 'restamp_declined'`,
+`AND canonical_agent_id IS NULL` for the name-only ones. `thought_changes`
+reads a restamp as "re-captured … the label moved to this key" and a decline
+as "re-captured … the label kept". It refuses to apply
+without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
+test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
 
 ## What changed relative to the guide
 
@@ -3756,7 +3819,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2583 assertions, PGlite, no container
+bun test-schema.ts                          # 2627 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1189 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
