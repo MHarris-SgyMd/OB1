@@ -18,6 +18,7 @@ A directory, `plugins/<name>/`, with:
   - **The name** is the directory's: lower-case words joined by hyphens.
   - **Each operation** declares a title, a description and the scope a key needs (`read`, `capture` or `write`). It also declares its REST method and path under the plugin's, an input and an output as zod shapes, and a handler.
   - **The handler** returns `ok(value)` or `refuse(status, CODE, facts)`. A value is held to the output schema; one that does not fit is the plugin's fault, answered as `FAILED`.
+  - **GUI pages** (optional), `gui: { pages: [{ path, label }] }`: each a path under the plugin's and the label its nav entry shows. The REST core lists an enabled plugin's pages at `GET /v1/plugins`, the registry the operator GUI's nav reads (SMD-2280 renders the pages).
 - `migrations/` (optional): the plugin's tables, as `NNN_name.sql` files. See below.
 - `README.md` and `metadata.json` (`"category": "plugins"`), as every contribution has.
 - An entry in [registry.ts](registry.ts). The server runs only plugins built into its image; nothing is loaded by a name the environment gives.
@@ -42,10 +43,18 @@ Checked when the server starts, so a malformed manifest stops it:
 - An output schema does not transform: MCP holds the answer to it a second time.
 - A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
 
+Held by check 28 of `scripts/check-fork-consistency.ts`, on every push:
+
+- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own directory's files, nothing else; zod comes from the SDK. It loads nothing by name at run time, and calls no `fetch`, `Bun`, `process`, `Deno` or `eval`.
+- **Its SQL stays in its schema and its role.** A migration file, or a template literal in its code, names no core table and no schema but its own. It also runs no role, session or transaction change. `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it, so these are refused:
+  - `RESET ROLE`, `SET ROLE` or `SET SESSION AUTHORIZATION`;
+  - a `search_path` change or `set_config`;
+  - `COMMIT`, `ROLLBACK` or `BEGIN` as a statement (a migration file that commits leaves the rest running as the migrator);
+  - a temp object, a session advisory lock, a cursor `WITH HOLD`, `PREPARE`, `LISTEN` or `DISCARD`.
+- **The registry and the directories agree.** `plugins/registry.ts` imports and lists exactly the plugin directories, and a manifest's name is its directory's.
+
 Held by the maintainer's review:
 
-- **Imports.** A plugin imports `server-portable/plugin-sdk.ts` and its own files, nothing else; zod comes from the SDK.
-- **No role, session or transaction change in its SQL.** `SET ROLE` holds a plugin's SQL to its own tables only while that SQL does not undo it. These are refused in review: `RESET ROLE`, `SET ROLE` or `SET SESSION AUTHORIZATION`; a `search_path` change or `set_config`; `COMMIT`, `ROLLBACK` or `BEGIN` (a migration file that commits leaves the rest running as the migrator); and temp objects, session advisory locks or held cursors.
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 

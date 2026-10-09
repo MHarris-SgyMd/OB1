@@ -115,7 +115,7 @@ const issuesOf = (error: z.ZodError) => error.issues.map((i) => ({ path: i.path.
  */
 const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
   ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
-  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
+  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/plugins$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
 ];
 const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[] => {
   const methods = new Set<string>([...ROUTE_METHODS, ...plugins].filter(([re]) => re.test(path)).map(([, m]) => m));
@@ -221,6 +221,26 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     return principal;
   }
+
+  // The enabled plugins (SMD-2310), for the operator GUI's nav (SMD-2280):
+  // each plugin's name, title and description, its pages (a path under the
+  // plugin's and a label), and the operations of it this key may call. Any
+  // caller's key; a disabled plugin is not listed. Before the operations'
+  // route below, which takes every other path under /v1/plugins.
+  app.get("/v1/plugins", async (c) => {
+    const p = await caller(c);
+    if (p instanceof Response) return p;
+    if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
+    return c.json({
+      plugins: (deps.plugins?.() ?? []).map((pl) => ({
+        name: pl.name,
+        title: pl.title,
+        description: pl.description,
+        pages: pl.pages,
+        operations: pl.operations.filter((op) => unlocks(p, op.scope)).map((op) => op.tool),
+      })),
+    });
+  });
 
   // Who is calling: the key's name, its scope, its stable agent id, the
   // operations it may call, and — forwarded — who carried it (`act`): what the

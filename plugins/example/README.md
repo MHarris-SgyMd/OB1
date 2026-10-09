@@ -13,7 +13,7 @@ The template a plugin starts from (SMD-2310). It shows both halves of a plugin:
 | Pin a note to a thought | `example_add_note` | `POST /v1/plugins/example/notes` | `write` | `thought_id`, `note` (1 to 2000 characters) | `{ note: { id, thought_id, note, written_by, created_at } }` |
 | A thought's notes | `example_list_notes` | `GET /v1/plugins/example/notes` | `read` | `thought_id` | `{ notes: [...] }`, oldest first |
 
-Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
+It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
 
 ## Prerequisites
 
@@ -32,6 +32,7 @@ Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plu
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
+   - `GET /v1/plugins` lists the plugin and its Notes page;
    - an MCP client sees the same tools.
 
 Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.

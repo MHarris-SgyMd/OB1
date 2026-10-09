@@ -171,10 +171,22 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
   - its own tables come through a plugin-scoped handle;
   - egress goes through the shared gate.
 - **A plugin that needs an inbound webhook** (a capture source) is exposed at `/hooks/<name>`, off by default and turned on per plugin.
-- **Plugins are curated.** They run in the REST core's process with the brain's privileges, so every plugin is maintainer-reviewed. `integrations/` stops being an open category for anything that touches the brain. Contributions that never touch the brain are out of this repo's surface.
+- **Plugins are curated.** They run in the brain's own processes (the REST core's and the MCP server's) with the brain's privileges, so every plugin is maintainer-reviewed. `integrations/` stops being an open category for anything that touches the brain. Contributions that never touch the brain are out of this repo's surface.
 - **The six curated extensions port to plugins** (SMD-2311). Each tool becomes an operation. Each `schema.sql` becomes plugin migrations that adopt existing tables. professional-crm's direct `thoughts` read (`extensions/professional-crm/index.ts:480-485`) becomes a core-operation call. Upstream's multi-user `user_id` columns get a decision for each plugin (SMD-1716 stays deferred).
 - **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280).
 - **Identity** is the REST core's (decision 12). No plugin mints or checks its own keys.
+
+**As built (SMD-2310, 2026-10-08).** The mechanism settles what the decisions left open:
+
+- **Where.** A plugin is `plugins/<name>/`, a curated category. `plugins/registry.ts` imports each one by name, so the set a server can run is fixed when its image is built, and `OB1_PLUGINS` picks from it. The manifest is built with `server-portable/plugin-sdk.ts`.
+- **Projection.** An operation is a REST route `/v1/plugins/<name>/<path>` and an MCP tool `<name>_<operation>`. Both servers serve it, the MCP server in-process as it does the core's operations. It sits behind the gate a core operation of its scope sits behind (`tools.ts`'s `unlocks`).
+- **Tables.** Each plugin has a schema, `plugin_<name>`, owned by a NOLOGIN role, `ob1_plugin_<name>`.
+  - **Migrations** run as that role in that schema, recorded in `plugin_migrations` beside `schema_migrations`.
+  - **At runtime** the handle `ctx.db` runs as the same role, on a connection pool of the plugin's own.
+  - **Grants** are the role's ownership of its schema. The planned list of grants per plugin is not needed: the role holds nothing else.
+  - **The boundary:** Postgres refuses the role the core's tables. Check 28 of the consistency checker refuses the code that could undo that: a role, session or transaction change; a core table or another schema named; an import past the SDK; `fetch`, `process` or `Bun`.
+- **GUI pages.** The manifest declares each page (a path and a label), and the REST core lists the enabled plugins and their pages at `GET /v1/plugins`. That is the registry the GUI's nav reads; the pages themselves are SMD-2280's to render.
+- **Egress.** A plugin makes no outbound call of its own (check 28). A model call through the shared gate, offered as a core service, comes with the first plugin that needs one: smart-ingest's port, SMD-2690.
 
 ## Migration order
 
