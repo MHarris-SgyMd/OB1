@@ -8,13 +8,14 @@ import { createContext, type CoreDeps, type Ctx } from "./context.ts";
 import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
+import type { PluginSql } from "../store.ts";
 
 export type { CoreDeps, CoreEnv, Ctx } from "./context.ts";
 export type { Outcome, Refusal, RefusalCode, Failure } from "./refusal.ts";
 export { failure } from "./refusal.ts";
 export { SPECS, type Input, type ToolSpec } from "./schemas.ts";
 export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from "./calls.ts";
-export { loadPlugins, runOperation, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
+export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
@@ -40,6 +41,16 @@ export function createCore(deps: CoreDeps) {
     retryFailed: bind(ctx, workers.retryFailed),
     releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
     runWorker: bind(ctx, workers.runWorker),
+    /**
+     * A plugin's own tables (SMD-2310): a transaction as its role, in its
+     * schema (store-sql.ts's pluginTx). The store has none on PostgREST, and
+     * says so when a plugin asks.
+     */
+    pluginTx: async <T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> => {
+      const store = await ctx.store();
+      if (!store.pluginTx) throw new Error(`a plugin's tables need the SQL store; this brain runs the ${store.kind} store`);
+      return store.pluginTx(plugin, fn);
+    },
   };
 }
 

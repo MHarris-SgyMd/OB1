@@ -47,7 +47,7 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under db/ or any of the seven category directories runs
+ *  12. a .sql file under db/ or any of the eight category directories runs
  *      nothing that needs Supabase — no `service_role`, `authenticated` or
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
@@ -298,8 +298,9 @@
  *      outside a comment, no YAML 1.1 number; each rule is the only catch of
  *      one of its probes
  *  28. the proxy's other route tables are held byte for byte, and only its
- *      backends answer it (SMD-2658, SMD-2685): compose.yaml's and
- *      compose.api-public.yaml's tables, as mounted config and as proxy label,
+ *      backends answer it (SMD-2658, SMD-2685): compose.yaml's,
+ *      compose.api-public.yaml's and compose.hooks-public.yaml's (SMD-2310)
+ *      tables, as mounted config and as proxy label,
  *      each equal to the table built here, with no comment in it (Traefik
  *      renders a route file as a Go template); in every compose file directly
  *      in deploy/ (any case, and any name outside printable ASCII) but
@@ -329,6 +330,21 @@
  *      (SMD-2677); the address is read from the binding's JSON, whose key
  *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
  *      or would track, a `{{ … }}` action at a time; no exceptions
+ *  31. a plugin stays inside its schema and its role (SMD-2310) — an
+ *      accident guard in front of the database's boundary, not a sandbox: its
+ *      SQL — a migration file, a tagged template literal in its TypeScript
+ *      (an untagged one is text) — names no core table (db/migrations/'
+ *      CREATE TABLEs and the two ledgers) and no schema but its own, and runs
+ *      no role, session or transaction change (RESET or SET ROLE, a
+ *      search_path or set_config, COMMIT, ROLLBACK or BEGIN as a statement, a
+ *      temp object, a session advisory lock, a cursor WITH HOLD, PREPARE,
+ *      LISTEN, DISCARD); its TypeScript imports the SDK and its own files
+ *      alone, no test file from code the server runs, and calls no fetch,
+ *      Bun, process, Deno, eval or import(); its directory holds TypeScript,
+ *      migrations/*.sql, a README and metadata.json alone;
+ *      plugins/registry.ts imports and lists exactly the plugin directories,
+ *      a manifest's name is its directory's, and its migration files are
+ *      named by the core's rule; each held by in-memory probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28 and 29 parse YAML with Bun.YAML)
@@ -2115,10 +2131,10 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
-const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills"];
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "plugins"];
 
 function checkSupabaseIsms() {
   for (const dir of SQL_RULE_DIRS) {
@@ -2826,6 +2842,8 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
+  OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
@@ -5291,7 +5309,7 @@ const ROOT_ROLE: TransportRole = {
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
     // The enabled plugins, read once from the environment (SMD-2310): manifests checked, nothing run.
-    ["./core/plugins.ts", new Set(["loadPlugins", "LoadedPlugin"])],
+    ["./core/plugins.ts", new Set(["enabledHooks", "hookSecrets", "loadPlugins", "LoadedHook", "LoadedPlugin"])],
     // Their tool names, for the request line (SMD-1849): a name list, no logic.
     ["./telemetry.ts", new Set(["knowTools"])],
   ]),
@@ -5303,7 +5321,7 @@ const ROOT_ROLE: TransportRole = {
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "initEnv", "plugins", "serveHere"])],
+    ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
@@ -5751,7 +5769,8 @@ const TIERS = ["stable", "canary", "working"] as const;
 /** A tier's name on the mesh: compose.yaml's own for stable, the tier's under it for the others. */
 const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? `${kind}.ob1.internal` : `${kind}.${tier}.ob1.internal`;
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
-// compose.yaml's and compose.api-public.yaml's tables from them too.
+// compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
+// tables from them too.
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
   `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
@@ -5770,8 +5789,8 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
-/** compose.yaml's server and REST core knobs a tier's servers do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS"];
+/** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -5802,7 +5821,8 @@ function tierStack(compose: Mapping): Mapping {
     const tierServer = (svc: Mapping | undefined, kind: "mcp" | "api") => {
       const networks = (svc?.networks ?? {}) as Mapping;
       return {
-        ...svc,
+        // An extension key (compose.yaml's server anchors its block under x-env) is compose.yaml's own, not the tier's.
+        ...omitKeys(svc, Object.keys(svc ?? {}).filter((k) => k.startsWith("x-"))),
         image,
         environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(svc?.environment), OB1_TIER: `\${OB1_TIER:-${t}}` },
         depends_on: renameKeys(svc?.depends_on, toTier),
@@ -5811,7 +5831,7 @@ function tierStack(compose: Mapping): Mapping {
     };
     services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
-    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...(c.migrate?.environment as Mapping), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
+    services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...omitKeys(c.migrate?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
     services[`${t}-server`] = tierServer(c.server, "mcp");
     services[`${t}-api`] = tierServer(c.api, "api");
   }
@@ -5986,8 +6006,9 @@ checkTierStack();
 // table can emit any router; and a line YAML reads as a key that a reviewer
 // reads as a comment, one led by a no-break space, is a router nobody
 // reviewed (SMD-2294's pass 7 ran it live). Check 27 holds the three-brain
-// stack's table. This holds the other two, compose.yaml's x-proxy-routes and
-// compose.api-public.yaml's x-api-route: as Bun.YAML parses each file, the
+// stack's table. This holds the others, compose.yaml's x-proxy-routes,
+// compose.api-public.yaml's x-api-route and compose.hooks-public.yaml's
+// x-hooks-route (SMD-2310): as Bun.YAML parses each file, the
 // config compose mounts and the proxy label that copies it are each the table
 // built here, byte for byte (the anchor itself compose ignores), and it
 // carries no comment (each file's notes on its routes are YAML comments above
@@ -6053,6 +6074,7 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
+  + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
   + ROUTE_TIER_PATHS + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
@@ -6066,10 +6088,16 @@ const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
   + "  middlewares:\n    api-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n    api-strip:\n      stripPrefix:\n        prefixes: [\"/api\"]\n"
   + "  services:\n" + routeService("api", `http://${tierMeshName("api", "stable")}.:8000`);
+/** compose.hooks-public.yaml's route table (SMD-2310), byte for byte, as Bun.YAML reads the block: /hooks/ to the REST core, path kept. */
+const HOOKS_ROUTE_TABLE = "http:\n  routers:\n"
+  + routeRouter("hooks-public", "PathPrefix(`/hooks/`)", 36, "hooks-no-forwarder", "hooks")
+  + "  middlewares:\n    hooks-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n"
+  + "  services:\n" + routeService("hooks", `http://${tierMeshName("api", "stable")}.:8000`);
 /** [the file under deploy/, the config compose mounts, where the proxy mounts it, the proxy label that copies it, the table's name here, the table]. */
 const ROUTE_FILES = [
   ["compose.yaml", "proxy-routes", "/etc/traefik/dynamic/routes.yaml", "ob1.proxy-routes", "PROXY_ROUTE_TABLE", PROXY_ROUTE_TABLE],
   ["compose.api-public.yaml", "proxy-api-route", "/etc/traefik/dynamic/api.yaml", "ob1.proxy-api-route", "API_ROUTE_TABLE", API_ROUTE_TABLE],
+  ["compose.hooks-public.yaml", "proxy-hooks-route", "/etc/traefik/dynamic/hooks.yaml", "ob1.proxy-hooks-route", "HOOKS_ROUTE_TABLE", HOOKS_ROUTE_TABLE],
 ] as const;
 /** compose.yaml's proxy as Bun.YAML reads it, its label (the table rule's) and its `logging` (check 29's, x-logging for every service) aside. */
 const PROXY_SERVICE = {
@@ -6104,14 +6132,15 @@ const PROXY_SERVICE = {
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
+  "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   // Postgres's port, and the outward network it is published on (SMD-2583).
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
-/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build` and `volumes` SERVICE_BUILDS' and SERVICE_MOUNTS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose. */
-const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "networks", "ports"];
+/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build` and `volumes` SERVICE_BUILDS' and SERVICE_MOUNTS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
+const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "networks", "ports", "x-env"];
 /** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
@@ -6368,8 +6397,8 @@ function checkRouteTables() {
     if (rules.size === 1) soleCatch.add([...rules][0]);
   }
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
-  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml" };
-  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml and compose.api-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml and compose.hooks-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
   // …and the commands its notes tell an operator to run: the downloads of those files and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
     const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
@@ -6490,6 +6519,306 @@ function checkHostIpTemplates() {
   }
 }
 checkHostIpTemplates();
+
+// ── Check 31: a plugin's code stays in its schema, its role and the SDK (SMD-2310) ──
+//
+// A plugin runs in the brain's servers. Its SQL runs on a connection logged
+// in as ob1_plugins, then under SET LOCAL ROLE to its own role with its schema
+// first on the path (db/migrate.ts, store-sql.ts's pluginTx), and Postgres
+// refuses both roles the core's tables: that is the boundary. This check is
+// the accident guard in front of it — code that would read like an attempt
+// to leave it fails a push, so it is seen in review — not a sandbox: a
+// plugin's TypeScript runs in the server's process, and curation is what
+// holds hostile code (plugins/README.md). It reads:
+//  - its SQL, a migration file or a TAGGED template literal in its
+//    TypeScript (found by a lexer, `${…}` and nested templates included):
+//    no core table's name anywhere (db/migrations/' CREATE TABLEs and the two
+//    ledgers), no schema but its own (`public.`, another plugin's, pg_temp),
+//    no Unicode-escaped name; no role, session or transaction change — SET or
+//    RESET of role, session_authorization or search_path (quoted or not),
+//    RESET ALL, set_config, SET SESSION, a temp object, a session advisory
+//    lock, a cursor WITH HOLD, LISTEN, DISCARD, and outside a plpgsql body
+//    BEGIN, END, ABORT, COMMIT, ROLLBACK (but ROLLBACK TO), START
+//    TRANSACTION, PREPARE and EXECUTE as statements; inside one, EXECUTE
+//    (dynamic SQL this check cannot read), COMMIT and ROLLBACK;
+//  - its TypeScript: imports of the SDK and its own directory's files alone
+//    (static, re-exported or bare), none of a test file from code that is not
+//    one, and no global that reaches past ctx — fetch, eval, Function,
+//    Reflect, globalThis, self, Bun, process, Deno, require, Worker,
+//    WebSocket, XMLHttpRequest, EventSource, import() — by name, aliased or not;
+//  - its directory: TypeScript, its migrations, a README and metadata.json,
+//    nothing else; plugins/registry.ts imports and lists exactly the plugin
+//    directories; a manifest's name is its directory's; migration files are
+//    named by the core's rule.
+
+/** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
+function coreTables(): Set<string> {
+  const names = new Set(["schema_migrations", "plugin_migrations"]);
+  const dir = join(ROOT, "db", "migrations");
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".sql"))) {
+    for (const m of sqlUncommented(readFileSync(join(dir, f), "utf8")).matchAll(/\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?public"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?/gi)) names.add(m[1].toLowerCase());
+  }
+  return names;
+}
+
+/** A plugin SQL hit: its line and what it does. */
+type PluginHit = { line: number; what: string };
+
+/** SQL with its comments and single-quoted strings blanked (sqlUncommented), its quoted identifiers read bare, and each dollar-quoted body marked: [start, end) spans. */
+function pluginSqlCode(sqlText: string): { code: string; bodies: [number, number][] } {
+  // A quoted identifier is its name: "role" is role, and "public"."thoughts" public.thoughts. Same length, so lines keep.
+  const code = sqlUncommented(sqlText).replace(/"([^"]*)"/g, (_m, name: string) => ` ${name} `);
+  const bodies: [number, number][] = [];
+  const open = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/g;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(code))) {
+    const close = code.indexOf(m[0], m.index + m[0].length);
+    if (close < 0) break;
+    bodies.push([m.index + m[0].length, close]);
+    open.lastIndex = close + m[0].length;
+  }
+  return { code, bodies };
+}
+
+/** What a plugin's SQL reaches past its schema or its role for, one hit per finding. Pure over a text. */
+function pluginSqlProblems(sqlText: string, core: ReadonlySet<string>, firstLine = 1): PluginHit[] {
+  const { code, bodies } = pluginSqlCode(sqlText);
+  const hits: PluginHit[] = [];
+  const at = (index: number) => firstLine + code.slice(0, index).split("\n").length - 1;
+  const inBody = (index: number) => bodies.some(([a, b]) => index >= a && index < b);
+  const hit = (index: number, what: string) => hits.push({ line: at(index), what });
+  // A Unicode-escaped name or string spells anything; nothing a plugin needs.
+  // Read after the quotes are gone (pluginSqlCode), so the prefix alone: U& before a name or a string.
+  for (const x of code.matchAll(/\bU&/gi)) hit(x.index!, "spells a name or string with U& escapes, which this check cannot read");
+  for (const x of code.matchAll(/(?<![\w$.])([a-z_][a-z0-9_]*)(?![\w$])/gi)) {
+    if (core.has(x[1].toLowerCase())) hit(x.index!, `names the core table ${x[1]}`);
+  }
+  for (const x of code.matchAll(/(?<![\w$])(public|plugin_[a-z0-9_]+|pg_temp[a-z0-9_]*)\s*\.\s*[a-z_]/gi)) hit(x.index!, `qualifies a name with the schema ${x[1]}: a plugin names its own tables bare, and no other schema's`);
+  const SESSION: [RegExp, string][] = [
+    [/\b(?:SET|RESET)\s+(?:LOCAL\s+|SESSION\s+)?(?:ROLE|SESSION_AUTHORIZATION|SESSION\s+AUTHORIZATION|SEARCH_PATH)\b/gi, "changes the role or the search path"],
+    [/\bRESET\s+ALL\b/gi, "resets every setting, the role among them"],
+    [/\bset_config\b/gi, "calls set_config, which sets the role or the path by name"],
+    [/\bSET\s+SESSION\b/gi, "sets a setting for the session, past the transaction"],
+    [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:GLOBAL\s+|LOCAL\s+)?(?:TEMP|TEMPORARY)\b/gi, "makes a temp object, which outlives the transaction and is searched before any schema"],
+    [/\bpg_(?:try_)?advisory_(?:lock|unlock)(?:_shared|_all)?\b/gi, "takes or drops a session advisory lock, which outlives the transaction"],
+    [/\bWITH\s+HOLD\b/gi, "holds a cursor past the transaction"],
+    [/\bLISTEN\b/gi, "listens on the session, past the transaction"],
+    [/\bDISCARD\b/gi, "discards session state"],
+  ];
+  for (const [re, what] of SESSION) for (const x of code.matchAll(re)) hit(x.index!, what);
+  // Statements outside a plpgsql body; a body's BEGIN … END is its block.
+  for (const x of code.matchAll(/(?:^|;)\s*(BEGIN|END|ABORT|COMMIT|ROLLBACK(?!\s+TO\b)|START\s+TRANSACTION|PREPARE|EXECUTE)\b/gi)) {
+    const i = x.index! + x[0].indexOf(x[1]);
+    if (!inBody(i)) hit(i, `runs ${x[1].replace(/\s+/g, " ").toUpperCase()} as a statement, which ends or works around the transaction the plugin's role holds in`);
+  }
+  // Inside a body: dynamic SQL, which this check cannot read, and a procedure's transaction control.
+  for (const x of code.matchAll(/\b(EXECUTE|COMMIT|ROLLBACK(?!\s+TO\b))\b/gi)) {
+    if (inBody(x.index!)) hit(x.index!, `runs ${x[1].toUpperCase()} in a plpgsql body: dynamic SQL or a transaction change this check cannot read`);
+  }
+  return hits;
+}
+
+/** A tagged template literal in TypeScript: its text, `${…}` read as one placeholder, and where it starts. Untagged ones (UI and log text) are not SQL. */
+function taggedTemplates(text: string): { body: string; index: number }[] {
+  const found: { body: string; index: number }[] = [];
+  const NOT_TAGS = new Set(["return", "typeof", "case", "in", "of", "yield", "await", "new", "throw", "else", "do", "void", "delete", "instanceof"]);
+  let i = 0;
+  // Scans from i to the end of one template (i at its opening backtick); returns its body and the index after it.
+  const template = (start: number): { body: string; end: number } => {
+    let body = "";
+    let j = start + 1;
+    while (j < text.length) {
+      const ch = text[j];
+      if (ch === "\\") { body += text.slice(j, j + 2); j += 2; continue; }
+      if (ch === "`") return { body, end: j + 1 };
+      if (ch === "$" && text[j + 1] === "{") { body += "$1"; j = expression(j + 2); continue; }
+      body += ch;
+      j++;
+    }
+    return { body, end: j };
+  };
+  // Scans a `${…}` expression from j to just past its closing brace, reading the templates inside it too.
+  const expression = (from: number): number => {
+    let depth = 1;
+    let j = from;
+    while (j < text.length && depth > 0) {
+      const ch = text[j];
+      if (ch === "'" || ch === '"') { j = quoted(j); continue; }
+      if (ch === "`") { const t = template(j); record(j, t.body); j = t.end; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    return j;
+  };
+  const quoted = (from: number): number => {
+    const q = text[from];
+    let j = from + 1;
+    while (j < text.length && text[j] !== q && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const record = (index: number, body: string) => {
+    const before = text.slice(0, index).replace(/\s+$/, "");
+    const word = before.match(/[A-Za-z_$][\w$]*$/)?.[0];
+    // A tag is a name, a call or index result, or a name with type arguments (sql<Row>`…`).
+    const tagged = word ? !NOT_TAGS.has(word) : /[)\]>]$/.test(before);
+    if (tagged) found.push({ body, index });
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "/" && text[i + 1] === "/") { while (i < text.length && text[i] !== "\n") i++; continue; }
+    if (ch === "/" && text[i + 1] === "*") { const e = text.indexOf("*/", i + 2); i = e < 0 ? text.length : e + 2; continue; }
+    if (ch === "'" || ch === '"') { i = quoted(i); continue; }
+    if (ch === "`") { const t = template(i); record(i, t.body); i = t.end; continue; }
+    i++;
+  }
+  return found;
+}
+
+/** The SDK, the one module outside its directory a plugin may import. */
+const PLUGIN_SDK = "../../server-portable/plugin-sdk.ts";
+/** A test file, by the tree's spelling. */
+const PLUGIN_TEST_FILE = /(^|\/)(test-[^/]+|[^/]+\.test)\.ts$/;
+/** The globals that reach past ctx — by name, so an alias of one is caught where it is taken. */
+const PLUGIN_GLOBALS = /(?<![\w$.])(fetch|eval|Function|Reflect|globalThis|self|Bun|process|Deno|require|Worker|SharedWorker|WebSocket|XMLHttpRequest|EventSource)(?![\w$])|(?<![\w$.])import\s*\(/g;
+
+/** What a plugin's TypeScript reaches for, one hit per finding. `registry`: plugins/registry.ts, which imports each plugin's index.ts. Pure over a text. */
+function pluginTsProblems(text: string, core: ReadonlySet<string>, opts: { registry?: boolean; testFile?: boolean } = {}): PluginHit[] {
+  const hits: PluginHit[] = [];
+  const lineAt = (index: number) => text.slice(0, index).split("\n").length;
+  const code = blanked(text, true);
+  const commentsGone = blanked(text, false);
+  const imports = [
+    ...[...commentsGone.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']/g)],
+    ...[...commentsGone.matchAll(/(?<![\w$.])import\s*["']([^"']+)["']/g)],
+  ];
+  for (const m of imports) {
+    const spec = m[1];
+    const allowed = opts.registry
+      ? spec === "../server-portable/plugin-sdk.ts" || /^\.\/[a-z0-9-]+\/index\.ts$/.test(spec)
+      : spec === PLUGIN_SDK || (spec.startsWith("./") && !spec.includes("..") && spec.endsWith(".ts"));
+    if (!allowed) hits.push({ line: lineAt(m.index!), what: `imports ${spec}: a plugin imports ${PLUGIN_SDK} and its own directory's .ts files alone` });
+    else if (!opts.testFile && PLUGIN_TEST_FILE.test(spec)) hits.push({ line: lineAt(m.index!), what: `imports the test file ${spec} from code that runs in the server` });
+  }
+  for (const m of code.matchAll(PLUGIN_GLOBALS)) {
+    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else (a local of that name is renamed)` });
+  }
+  for (const t of taggedTemplates(commentsGone)) {
+    for (const h of pluginSqlProblems(t.body, core, lineAt(t.index))) hits.push(h);
+  }
+  return hits;
+}
+
+const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
+  // Its SQL, in a handler's tagged template.
+  ["const r = await sql`SELECT count(*) FROM thoughts`;", "ts", true],
+  ["const r = await sql`SELECT * FROM notes WHERE id = ${id}`;", "ts", false],
+  ["const rows = await q<{ n: number }>`SELECT count(*) FROM thoughts`;", "ts", true],
+  ["const r = await sql`SELECT * FROM notes n, ${\"x\"} WHERE ${`a ${b}`} = 1 AND id IN (SELECT id FROM thought_audit)`;", "ts", true],
+  ["// SELECT * FROM thoughts\nconst x = 1;", "ts", false],
+  ["const tick = \"`\";\nawait sql`RESET ROLE`;", "ts", true],
+  ["await sql`INSERT INTO public.notes VALUES (1)`;", "ts", true],
+  ["await sql`RESET ROLE`;", "ts", true],
+  ["await sql`SET \"role\" = 'postgres'`;", "ts", true],
+  ["await sql`SELECT pg_catalog.set_config('role', 'none', true)`;", "ts", true],
+  ["await sql`SET session_authorization = DEFAULT`;", "ts", true],
+  ["await sql`END; SELECT 1`;", "ts", true],
+  ["await sql`ABORT`;", "ts", true],
+  ["await sql`SELECT * FROM notes, U&\"\\0074houghts\"`;", "ts", true],
+  ["await sql`DO $$ BEGIN EXECUTE 'RES' || 'ET ROLE'; END $$`;", "ts", true],
+  // Text that is not SQL: an untagged template is UI or log text.
+  ["log(`could not commit ${id}: prepare your notes, then listen`);", "ts", false],
+  ["throw new Error(`skipped ${n} rows from jobs`);", "ts", false],
+  ["return `FROM thoughts`;", "ts", false],
+  // Its imports and globals.
+  ["import { db } from \"../../server-portable/root.ts\";", "ts", true],
+  ["import \"../../server-portable/store-sql.ts\";", "ts", true],
+  ["export * from \"../../server-portable/root.ts\";", "ts", true],
+  ["import { definePlugin, z } from \"../../server-portable/plugin-sdk.ts\";\nimport { helper } from \"./helper.ts\";", "ts", false],
+  ["import { helper } from \"./helper.js\";", "ts", true],
+  ["import { reset } from \"./test-backdoor.ts\";", "ts", true],
+  ["import x from \"../other/index.ts\";", "ts", true],
+  ["const r = await fetch(\"https://example.com\");", "ts", true],
+  ["const f = fetch;", "ts", true],
+  ["const g = globalThis[\"fe\" + \"tch\"];", "ts", true],
+  ["const { env } = process;", "ts", true],
+  ["(0, eval)(\"1\");", "ts", true],
+  ["new Worker(\"./w.ts\");", "ts", true],
+  ["const m = await import(name);", "ts", true],
+  ["const s = \"fetch( is only text\";", "ts", false],
+  ["const n = ctx.caller.name; const r = await ctx.call(\"fetch\", { id });", "ts", false],
+  // Its migrations.
+  ["CREATE TABLE IF NOT EXISTS notes (id uuid PRIMARY KEY);", "sql", false],
+  ["-- FROM thoughts, in a comment\nCREATE TABLE IF NOT EXISTS notes (id int);", "sql", false],
+  ["CREATE TABLE IF NOT EXISTS peek AS SELECT id FROM thoughts;", "sql", true],
+  ["CREATE TABLE x (id uuid REFERENCES thought_audit (id));", "sql", true],
+  ["SELECT * FROM notes, thoughts;", "sql", true],
+  ["SELECT * FROM notes JOIN \"thoughts\" t ON true;", "sql", true],
+  ["DO $$ BEGIN RAISE NOTICE 'x'; END $$;", "sql", false],
+  ["CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $fn$\nBEGIN\n  NEW.updated_at := now();\n  RETURN NEW;\nEND;\n$fn$;", "sql", false],
+  ["DO $$ BEGIN EXECUTE 'RESET ROLE'; END $$;", "sql", true],
+  ["CREATE TABLE a (id int);\nCOMMIT;\nDROP TABLE thoughts;", "sql", true],
+  ["CREATE TABLE a (id int);\nEND;\nSELECT 1;", "sql", true],
+  ["BEGIN;\nCREATE TABLE a (id int);", "sql", true],
+  ["CREATE TEMP TABLE shadow (x int);", "sql", true],
+  ["SELECT pg_advisory_lock(1);", "sql", true],
+  ["SELECT pg_advisory_xact_lock(1);", "sql", false],
+  ["CREATE TABLE readings (temp numeric, prepared boolean);", "sql", false],
+  ["SAVEPOINT a; ROLLBACK TO SAVEPOINT a;", "sql", false],
+  ["CREATE TABLE b (id int); SELECT * FROM plugin_other.items;", "sql", true],
+  ["SELECT 'FROM thoughts' AS text;", "sql", false],
+  ["RESET \"role\";", "sql", true],
+];
+
+async function checkPlugins() {
+  const { migrationNameProblem } = await import("../db/config.mjs");
+  const core = coreTables();
+  if (!core.has("thoughts") || core.size < 10) fail(SELF, `check 31 reads ${core.size} core tables from db/migrations/ (thoughts ${core.has("thoughts") ? "among them" : "missing"}) — the reader is broken, not the plugins clean`);
+  for (const [probe, kind, hit] of PLUGIN_PROBES) {
+    const found = kind === "sql" ? pluginSqlProblems(probe, core) : pluginTsProblems(probe, core);
+    if (hit && found.length === 0) fail(SELF, `check 31 no longer catches its probe: ${JSON.stringify(probe)}`);
+    if (!hit && found.length > 0) fail(SELF, `check 31 catches a non-probe: ${JSON.stringify(probe)} — ${found.map((h) => h.what).join("; ")}`);
+  }
+  const base = join(ROOT, "plugins");
+  if (!existsSync(base)) return;
+  const dirs = readdirSync(base).filter((d) => statSync(join(base, d)).isDirectory() && !d.startsWith(".") && d !== "node_modules");
+  // The registry: exactly the directories, each by its index.ts, each in PLUGINS; held to the plugin rules itself.
+  const registryPath = join(base, "registry.ts");
+  const registry = existsSync(registryPath) ? readFileSync(registryPath, "utf8") : "";
+  if (!registry) fail("plugins/registry.ts", "no registry: the server imports every plugin from plugins/registry.ts");
+  for (const h of pluginTsProblems(registry, core, { registry: true })) fail(`plugins/registry.ts:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+  const registryCode = blanked(registry, false);
+  const imported = new Map<string, string>();
+  for (const m of registryCode.matchAll(/\bimport\s+(?!type\b)([A-Za-z_$][\w$]*)\s+from\s*["']\.\/([^/"']+)\/index\.ts["']/g)) imported.set(m[2], m[1]);
+  const listed = new Set([...(registryCode.match(/\bPLUGINS\b[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]));
+  for (const d of dirs) {
+    const where = `plugins/${d}`;
+    const index = join(base, d, "index.ts");
+    if (!existsSync(index)) { fail(where, "no index.ts: a plugin's manifest is its index.ts"); continue; }
+    const binding = imported.get(d);
+    if (!binding) fail("plugins/registry.ts", `does not import ./${d}/index.ts: a plugin the registry does not import is one no server runs`);
+    else if (!listed.has(binding)) fail("plugins/registry.ts", `imports ./${d}/index.ts as ${binding} but PLUGINS does not list it`);
+    const name = blanked(readFileSync(index, "utf8"), false).match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
+    if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
+    // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
+    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    const migrationFiles: string[] = [];
+    for (const f of files) {
+      const rel = relative(join(base, d), f).split(sep).join("/");
+      if (/^migrations\/[^/]+\.sql$/.test(rel)) { migrationFiles.push(rel.slice("migrations/".length)); continue; }
+      if (rel === "README.md" || rel === "metadata.json") continue;
+      if (!rel.endsWith(".ts") || rel.endsWith(".d.ts")) { fail(`${where}/${rel}`, "a plugin holds TypeScript, its migrations/*.sql, a README.md and a metadata.json, nothing else: a file of another kind is code or data this check does not read (check 31, SMD-2310)"); continue; }
+      for (const h of pluginTsProblems(readFileSync(f, "utf8"), core, { testFile: PLUGIN_TEST_FILE.test(rel) })) fail(`${where}/${rel}:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+    }
+    const problem = migrationNameProblem(migrationFiles);
+    if (problem) fail(`${where}/migrations`, problem);
+    for (const f of migrationFiles) {
+      for (const h of pluginSqlProblems(readFileSync(join(base, d, "migrations", f), "utf8"), core)) fail(`${where}/migrations/${f}:${h.line}`, `${h.what} (check 31, SMD-2310)`);
+    }
+  }
+  for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
+}
+await checkPlugins();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

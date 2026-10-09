@@ -17,7 +17,7 @@ Every extension produces exactly four files in `extensions/{extension-slug}/`:
 
 ## File 1: the packages (no file of its own)
 
-An extension ships no import map or package.json: `bun extensions/<slug>/index.ts` resolves `hono`, `zod`, `@hono/mcp` and `@modelcontextprotocol/sdk` from `extensions/node_modules`, which `extensions/package.json` pins — one MCP stack across the tree, held by `extensions/test-auth.ts` (until SMD-1800 each extension carried a `deno.json` mirroring those pins for `deno check`). Import exactly those four by bare name; if the extension needs another package, add it to `extensions/package.json` (and to test-auth's `PACKAGES`) rather than beside the extension. No `@supabase/supabase-js`: the server imports the repository's SQL shim by relative path (File 4).
+An extension ships no import map or package.json: `bun extensions/<slug>/index.ts` resolves `hono`, `zod`, `@hono/mcp` and `@modelcontextprotocol/sdk` from `extensions/node_modules`, which `extensions/package.json` pins — one MCP stack across the tree, held by `extensions/test-auth.ts` (until SMD-1800 each extension carried a `deno.json` mirroring those pins for `deno check`). Import exactly those four by bare name; if the extension needs another package, add it to `extensions/package.json` rather than beside the extension. No `@supabase/supabase-js`: the server imports the repository's SQL shim by relative path (File 4).
 
 ---
 

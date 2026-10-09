@@ -155,7 +155,8 @@ jobs:
 
       # Plugins in the contract (SMD-2310) over a stub core: the manifests,
       # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
-      # whoami and MCP tools/list behind the scope gate, and ctx.call's gate.
+      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
+      # plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks.
       - name: Plugins in the contract
         working-directory: server-portable
         run: bun test-plugins.ts
@@ -661,6 +662,15 @@ jobs:
       - name: The REST core agrees with MCP
         working-directory: server-portable
         run: bun test-rest-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # A plugin's tables (SMD-2310): the migrator's plugin ledger, the plugin
+      # role's boundary (its own schema, none of the core's tables), the
+      # example plugin's operations through both servers, preflight's row.
+      - name: Plugin tables, their ledger and their role
+        working-directory: server-portable
+        run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
@@ -1195,6 +1205,11 @@ jobs:
           # API_ROUTE_TABLE).
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-api-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
+          # The webhooks' overlay (SMD-2310), the same way: no port, its route
+          # file its label, the forwarder slot deleted, the REST core by its
+          # rooted mesh name — and beside /api's, both routes on the proxy.
+          docker compose -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml --profile local-models config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-hooks-route"] == .configs["proxy-hooks-route"].content) and (.services.proxy.labels | has("ob1.proxy-api-route")) and (.configs["proxy-hooks-route"].content | test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-hooks-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
           # REST core join stable's mesh under the canary's names alone, the
           # canary's own `mesh` stays its own, and it adds no port (the one the
@@ -1258,12 +1273,14 @@ jobs:
           # it), are handed the worker key, mount the checkout read-only,
           # reach a host model by the host alias, wait for the schema, keep
           # their grace periods (120 s, 60 s), and stop after three refusals
-          # rather than loop; and each command's last line is exactly its
+          # rather than loop; take no plugin knob — the plugin login role's
+          # password is the two servers' and the migrator's (SMD-2310); and
+          # each command's last line is exactly its
           # worker's exec'd --follow, so no flag (a --switch-key would lift
           # the model-change refusal) rides along. The refusals themselves
           # are run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
@@ -1349,7 +1366,7 @@ jobs:
           # port binds loopback"; the ports by it and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy.
@@ -1421,11 +1438,14 @@ jobs:
           }
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
+          hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
           proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
@@ -1440,6 +1460,7 @@ jobs:
             fi
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -2228,6 +2249,63 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
           grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
+      # SMD-2310: a plugin's webhook reaches the REST core only through the
+      # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
+      # plugin is turned on for this step alone — the migrator, recreated with
+      # the REST core, applies its table as ob1_plugins, and the REST core's
+      # preflight finds it in place; the proxy is recreated with --no-deps, so
+      # the MCP server, whose environment the knobs change too, is left as it
+      # was — then off again, so every other step sees
+      # the plugin-free stack it expects (smoke.sh holds tools/list to the
+      # manifest). With the overlay off /hooks is the proxy's 404; on, a
+      # delivery signed with another secret is the plugin's 401 and a signed
+      # one captures through the core as the hook's own caller, read back on
+      # the mesh; a plugin it does not serve is the REST core's 404. SMD-2755:
+      # each delivery signs its time with its body — one signed ten minutes
+      # ago, as a recorded one resent would be, is 401 STALE_DELIVERY, and the
+      # captured one resent with its id is 200, the same thought, run once.
+      - name: A plugin's webhook reaches the REST core only by the overlay, and captures as its hook
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
+          SECRET=$(openssl rand -hex 16)
+          PLUGIN_PW=$(openssl rand -hex 16)
+          export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }
+          BODY="{\"id\":\"ci-$(openssl rand -hex 8)\",\"text\":\"ci: a capture through the example webhook\"}"
+          post() { code -X POST -H 'content-type: application/json' "$@"; }
+          # deliver BODY [TIMESTAMP [SECRET]]: signed as the example's sender signs, the HMAC of "<timestamp>.<body>".
+          deliver() {
+            local ts
+            ts="${2:-$(date +%s)}"
+            post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
+          }
+          c=$(deliver "$BODY")
+          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(deliver "$BODY" "" other)
+          [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY" "$(( $(date +%s) - 600 ))")
+          { [ "$c" = 401 ] && [ "$(jq -r '.code // empty' /tmp/hook-body 2>/dev/null)" = STALE_DELIVERY ]; } || { echo "a delivery signed ten minutes ago answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
+          id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
+          { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
+          { [ "$c" = 200 ] && [ "$(jq -c '[.id, .duplicate]' /tmp/hook-body 2>/dev/null)" = "[\"$id\",true]" ]; } || { echo "the same delivery resent answered $c, not 200 and the same thought: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
+          grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
+          c=$(post -d '{}' "$B/hooks/nothing/here")
+          [ "$c" = 404 ] || { echo "a plugin the REST core does not serve answered $c through /hooks" >&2; exit 1; }
+          c=$(code "$B/hooks/example/capture")
+          [ "$c" = 405 ] || { echo "a GET of the webhook answered $c, not 405" >&2; exit 1; }
+          unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(deliver "$BODY")
+          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes

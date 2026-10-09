@@ -359,6 +359,18 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   assert(bare !== "" && !/restated/.test(bare), `a metadata side that is not an object still reads "metadata", not "restated" (${bare.split("\n").slice(1).join(" | ")})`);
   assert(cellEntries.some((e) => /content → "b"; metadata: topics$/m.test(e)), "beside a content change the marks go and a real key stays");
   assert(cellEntries.some((e) => /content → "c"; metadata$/m.test(e)), "a content change with a non-object metadata side keeps the bare metadata part");
+  // 085's two events (SMD-2664): a re-capture weighed against a capture-only
+  // key's label reads as a re-capture, moved or kept — not as an edit, nor as
+  // 082's note's "restated" (review pass 5's walkthrough).
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name, actor_kind) VALUES (${B}::uuid, 'update', '{"restamped": true, "metadata": {"before": {"actor_name": "hook", "actor_kind": "agent", "trust": "ingested", "source": "mcp"}, "after": {"actor_name": "laptop", "actor_kind": "operator", "trust": "operator", "source": "mcp"}}}'::jsonb, 'laptop', 'operator')`;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name, actor_kind) VALUES (${B}::uuid, 'update', '{"restamp_declined": true}'::jsonb, 'laptop', 'operator')`;
+  const weighed = entriesOf(await laptop.call("thought_changes", { since: cursor0 }));
+  const moved = weighed.find((e) => /re-captured by laptop \(operator\)/.test(e) && /label moved/.test(e)) ?? "";
+  const kept = weighed.find((e) => /re-captured by laptop \(operator\)/.test(e) && /label kept/.test(e)) ?? "";
+  assert(/\n   the capture-only key's label moved to this key \(metadata: actor_kind, actor_name, trust\)$/.test(moved) && !/edited|restated/.test(moved),
+    `a restamp reads "re-captured", the label moved to the key, the marks that moved named (${moved.split("\n").join(" | ")})`);
+  assert(/\n   the capture-only key's label kept: this key's trust is not higher/.test(kept) && !/edited|restated/.test(kept),
+    `a decline reads "re-captured", the label kept (${kept.split("\n").join(" | ")})`);
   let bad = "";
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
   assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);

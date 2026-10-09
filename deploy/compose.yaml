@@ -57,6 +57,26 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 
+# The plugins' knobs (SMD-2310), merged by the MCP server and the REST core
+# alone: the workers merge the server's block, and none of them runs a plugin
+# or needs the plugin login role's password. The migrator forwards its own.
+x-plugin-env: &plugin-env
+  # The plugins the brain runs: names from plugins/registry.ts,
+  # comma-separated; unset, none. Both servers serve the same set; preflight
+  # refuses a name that is no plugin. The three-tier stack leaves it out
+  # (check 27's TIER_OMITTED_ENV).
+  OB1_PLUGINS: ${OB1_PLUGINS:-}
+  # The password of ob1_plugins, the login role every plugin's SQL runs on:
+  # the plugins' pools log in with it, never as postgres.
+  OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
+
+# The plugins' webhooks (SMD-2310), merged by the REST core alone, which
+# serves them: the plugins OB1_HOOKS names and the secrets OB1_HOOK_SECRETS
+# gives each. The proxy reaches /hooks only with compose.hooks-public.yaml.
+x-hook-env: &hook-env
+  OB1_HOOKS: ${OB1_HOOKS:-}
+  OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
+
 # The proxy's route table (SMD-1846), which Traefik's file provider reads. It
 # lives here rather than in a file of its own because compose.yaml is the file
 # a release ships (scripts/release-artifacts.ts, ASSETS): a pinned stack on a
@@ -115,6 +135,11 @@ x-logging: &logging
 #           deploy/compose.api-public.yaml, whose router (priority 36) wins
 #           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
 #           legacy route, where the MCP server takes a POST at every path;
+#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`), so
+#           a delivery to a plugin's webhook never falls to the legacy route
+#           and the MCP server, until the operator names
+#           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
+#           it to the REST core (SMD-2310);
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -209,6 +234,12 @@ x-proxy-routes: &proxy-routes |
         priority: 35
         entryPoints: [web]
         middlewares: [api-off]
+        service: noop@internal
+      hooks-off:
+        rule: "Path(`/hooks`) || PathPrefix(`/hooks/`)"
+        priority: 35
+        entryPoints: [web]
+        middlewares: [not-served]
         service: noop@internal
       mcp:
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
@@ -409,6 +440,13 @@ services:
       # is one batch, for a brain with millions of legacy rows that finishes by
       # hand (023's header). Same no-fallback rule as above.
       OB1_BACKFILL_LIMIT: ${OB1_BACKFILL_LIMIT:-}
+      # The plugins the brain runs (SMD-2310), as the servers read them: a run
+      # applies their migrations after the core's, each in its own schema as
+      # its own role. A plugin not named is left as it is.
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
+      # The password the migrator makes ob1_plugins with, the login role the
+      # plugins' migrations and the servers' plugin pools run on.
+      OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -443,8 +481,10 @@ services:
     # Anchored: `board-sync` below inherits this block whole (`<<: *server-env`),
     # so the provider, embedding and egress knobs are forwarded once, here, and a
     # worker that embeds and tags exactly as a capture does reads exactly what
-    # the server reads. Check 14 parses anchors and merge keys (SMD-1954).
-    environment: &server-env
+    # the server reads. Check 14 parses anchors and merge keys (SMD-1954). It
+    # sits under an extension key, which compose ignores, so the server's
+    # `environment` below can add the plugin knobs no worker takes.
+    x-env: &server-env
       # No OB1_STORE on purpose: the SQL store is the server's default (FORK.md
       # change 97), and this stack — the "Full stack, no Supabase" CI job — is
       # the deployment that proves it. Setting it here would let the default
@@ -566,11 +606,6 @@ services:
       # same `public origin` row, naming the MCP server.
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
-      # The plugins the brain runs (SMD-2310): names from plugins/registry.ts,
-      # comma-separated; unset, none. The REST core below takes this block, so
-      # both servers serve the same set; preflight refuses a name that is no
-      # plugin. The three-tier stack leaves it out (check 27's TIER_OMITTED_ENV).
-      OB1_PLUGINS: ${OB1_PLUGINS:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
       # unset (it read Number("") = 0 until SMD-1843's first review pass found
       # the copy and the reader together — Bun's SQL refuses a pool of 0 at
@@ -582,6 +617,8 @@ services:
       # variable, so compose waits exactly what the server plans for.
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
       PORT: "8000"
+    environment:
+      <<: [*server-env, *plugin-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # No `ports:`. The proxy below is the stack's published port and reaches
     # this server as mcp.ob1.internal:8000 on the mesh (SMD-1846, SMD-2294);
@@ -650,7 +687,8 @@ services:
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never
     command: ["api.ts"]
-    environment: *server-env
+    environment:
+      <<: [*server-env, *plugin-env, *hook-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     depends_on:
       postgres:
@@ -953,7 +991,8 @@ services:
     restart: on-failure:3
     logging: *logging
 
-  # Proposals only: consolidation never applies one. Each waits for review
+  # Consolidation never applies a proposal; since 084 it stores related,
+  # evolves and duplicate verdicts as relation facets. Each proposal waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
   # a stale one the next pass settles (067). Beside extraction: the pool holds
   # only thoughts with entities and a vector, and a candidate shares an

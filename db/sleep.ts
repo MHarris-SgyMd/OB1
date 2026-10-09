@@ -28,8 +28,9 @@
  *    migration's backfill — until set_agent_kind(<name>, 'ingested') says
  *    they are background.
  *  - The passes it runs write no thought_audit row (extraction writes the
- *    entity tables; consolidation writes proposals) and call no server, so
- *    its own work never wakes it.
+ *    entity tables; consolidation writes proposals and, since 084, relation
+ *    facets with their lineage) and call no server, so its own work never
+ *    wakes it.
  * The default is from the stable brain's logs over 14 days (2026-09-23 to
  * 10-07), replayed at each quiet — the scheduler did not run there, and
  * stable logs reads: 3,379 live events, the median gap 0.3 s; at 300 s it

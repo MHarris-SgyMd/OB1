@@ -54,6 +54,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
+import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -5254,6 +5255,11 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
   let judgeDownUntil = 0;
   let judgeDown: "503" | "hang" = "503";
+  /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
+  let rotaAnswer = "duplicate";
+  let rotaConfidence = 0.85;
+  /** Token alternatives for the rota answer's verdict, when set (review pass 1: the floor on the relation words' mass). */
+  let rotaTop: [string, number][] | null = null;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -5283,7 +5289,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" };
       else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "outdates", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
       else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "outdates", supersedes: "B", confidence: 0.9, reason: "guessing" };
-      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: "duplicate", supersedes: "unknown", confidence: 0.85, reason: "the same rota" };
+      else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: rotaAnswer, supersedes: "unknown", confidence: rotaConfidence, reason: "the same rota" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
       const content = JSON.stringify(answer);
@@ -5294,7 +5300,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       // floor sets it aside on the token score (review pass 1). The others come
       // without, as from an endpoint that returns none, and record what they state.
       const tokenTop: [string, number][] | null = /monthly/.test(a) && /annually/.test(b) ? [["out", 0.9], ["dup", 0.07], ["rel", 0.03]]
-        : /lowconf/.test(a) && /lowconf/.test(b) ? [["out", 0.3], ["rel", 0.6], ["ev", 0.1]] : null;
+        : /lowconf/.test(a) && /lowconf/.test(b) ? [["out", 0.3], ["rel", 0.6], ["ev", 0.1]]
+        : /rota/.test(a) && /rota/.test(b) ? rotaTop : null;
       if (body.logprobs && tokenTop) {
         const at = content.indexOf('"verdict":"') + '"verdict":"'.length;
         const tok = (token: string, top: [string, number][] = [[token, 1]]) => ({ token, logprob: Math.log(top[0][1]), top_logprobs: top.map(([t, p]) => ({ token: t, logprob: Math.log(p) })) });
@@ -5429,6 +5436,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
   assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 under confidence 0\.5 not recorded.*; of 3 proposing verdict\(s\), confidence from token probabilities on 2, from the number the model wrote on 1/.test(first.out),
          `…two proposals recorded, one undirected, one too weak to record on its token score though it states 0.9, and the floor cut two on token probabilities and one on the written number (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  // SMD-1873 PR 2 (084): the deploy pair's evolves, at the floor, is a relation on the newer thought.
+  assert(/relations: 1 added, 0 kept, 0 replaced, 0 closed/.test(first.out), `…and the evolves verdict is one relation added (${first.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
@@ -6350,6 +6359,176 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     const [{ err: relicErr }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${relicNew}::uuid`;
     assert(run.code === 1 && /answered the verdict "conflict", not one of prompt 4's five/.test(String(relicErr)),
            `an answer in p3's words fails its thought and names the word, where it used to read as an answer not JSON (exit ${run.code}: ${relicErr})`);
+
+    // SMD-1873 PR 2 (084): the duplicate is a relation on the newer thought,
+    // with its lineage; judged again it is replaced by another word, and
+    // closed by an answer that sees none.
+    const relOf = async () => (await sql`SELECT f.id::text AS id, f.payload->>'relation' AS relation, (f.payload->>'confidence')::float AS confidence, f.valid_until IS NULL AS active,
+                                                (SELECT count(*)::int FROM derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${KEY}) AS lineage
+                                           FROM thought_facets f WHERE f.kind = 'relation' AND f.thought_id = ${rotaNew}::uuid AND f.payload->>'target' = ${rotaOld}::text ORDER BY f.created_at, f.id`) as { id: string; relation: string; confidence: number; active: boolean; lineage: number }[];
+    const r1 = await relOf();
+    assert(r1.length === 1 && r1[0].relation === "duplicate" && r1[0].active && r1[0].confidence === 0.85 && r1[0].lineage === 1 && /relations: 1 added, 0 kept, 0 replaced, 0 closed/.test(run.out),
+      `the duplicate is a relation on the newer thought at the confidence the answer states, its lineage under the pass's key (${JSON.stringify(r1)})`);
+    const rejudge = async (answer: string, confidence = 0.85) => {
+      rotaAnswer = answer;
+      rotaConfidence = confidence;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      return consolidate();
+    };
+    const asRelated = await rejudge("related");
+    const r2 = await relOf();
+    assert(/relations: 0 added, 0 kept, 1 replaced, 0 closed/.test(asRelated.out) && r2.length === 2 && r2.filter((r) => r.active).map((r) => r.relation).join() === "related",
+      `judged again as related, the duplicate is replaced: closed, and a related edge standing (${JSON.stringify(r2.map((r) => [r.relation, r.active]))})`);
+    const again = await rejudge("related");
+    assert(/relations: 0 added, 1 kept, 0 replaced, 0 closed/.test(again.out) && (await relOf()).filter((r) => r.active).length === 1,
+      `judged related again by the same pass at the same confidence, the edge is kept (${again.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const status = await consolidate("--status");
+    assert(/relations: \d+ standing \(\d+ related, \d+ evolves, 0 duplicate\) — --list relations shows them/.test(status.out), `--status counts the relations standing by word (${status.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const listed = await consolidate("--list", "relations");
+    assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out),
+      `--list relations shows the edge with both thoughts, and nothing edited since it was judged (exit ${listed.code})`);
+    // A side's text moved since the judgement: the edge is flagged (SMD-2726 closes it).
+    await sql`UPDATE thoughts SET content = content || ' — on weekdays' WHERE id = ${rotaOld}::uuid`;
+    const listedEdited = await consolidate("--list", "relations");
+    assert(/\] related  EDITED SINCE JUDGED/.test(listedEdited.out), "…and once a side's text moves, the edge is flagged EDITED SINCE JUDGED");
+    // Review pass 1: the floor cuts on the three relation words' mass. A
+    // related at 0.45 by its token, with 0.40 on evolves, is a relation the
+    // model holds at 0.85: written (a replace, its score another), at 0.45.
+    rotaTop = [["rel", 0.45], ["ev", 0.4], ["un", 0.15]];
+    const split = await rejudge("related", 0.9);
+    rotaTop = null;
+    const rs = await relOf();
+    assert(/relations: 0 added, 0 kept, 1 replaced, 0 closed/.test(split.out) && rs.find((r) => r.active)?.confidence === 0.45,
+      `a related at 0.45 by its token with 0.85 on the three relation words is written at 0.45 — the floor reads the mass, not the word alone (${split.out.split("\n").find((l) => /relations:/.test(l))?.trim()}; ${JSON.stringify(rs.find((r) => r.active))})`);
+    // Here the answer states 0.3 and carries no token probabilities: under the floor.
+    const under = await rejudge("related", 0.3);
+    assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(under.out) && (await relOf()).every((r) => !r.active),
+      `a relation verdict under the floor writes none and closes the standing edge (${under.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const asUnrelated = await rejudge("unrelated");
+    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(asUnrelated.out) && (await relOf()).every((r) => !r.active),
+      "judged unrelated with no edge standing, nothing is closed — a retract with nothing to retract is none");
+    // A brain without 084: the pass counts the verdicts and says relations are not stored.
+    await sql.unsafe(`ALTER FUNCTION record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation_hidden`);
+    try {
+      const without = await rejudge("duplicate");
+      const noList = await consolidate("--list", "relations");
+      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
+        `without 084 the pass counts the verdict and says relations are not stored, and --list relations names the migration (${without.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    } finally {
+      await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
+    }
+    // Review pass 3: a relation the pass will not judge again is said so —
+    // one under another judge key, and one whose older side is superseded
+    // (the candidate rule leaves a superseded thought out).
+    await sql`SELECT record_thought_relation(${rotaNew}::uuid, ${rotaOld}::uuid, 'related', 0.6, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
+    const superseder = await seed("The on-call rota, as of this week.", 14, 0, ["rota-replacement"]);
+    await sql`UPDATE thoughts SET supersedes = ${rotaOld}::uuid WHERE id = ${superseder}::uuid`;
+    const marked = await consolidate("--list", "relations");
+    const statusOther = await consolidate("--status");
+    assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
+      `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+    // Review pass 4: a side superseded on the NEWER thought is marked too.
+    const newerSuperseder = await seed("The on-call rota, newer still.", 15, 0, ["rota-next"]);
+    await sql`UPDATE thoughts SET supersedes = ${rotaNew}::uuid WHERE id = ${newerSuperseder}::uuid`;
+    const markedNewer = await consolidate("--list", "relations");
+    assert(/\] related  .*OLDER SUPERSEDED  NEWER SUPERSEDED/.test(markedNewer.out),
+      `--list relations marks a relation whose newer side is superseded (${markedNewer.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+    await sql`UPDATE thoughts SET supersedes = NULL WHERE id IN (${superseder}::uuid, ${newerSuperseder}::uuid)`;
+
+    // Review pass 4 (run-it: pass 3's role paths had no test). Under a role
+    // granted without the structure group: --status warns, naming the group
+    // and this role; a follower says at its start that it stores none, takes
+    // the grant up on its next poll, and a grant revoked while the judge holds
+    // the call stops relations there without failing the thought; the
+    // summary reports the relation stored and the verdicts counted only.
+    const RROLE = "ob1_live_relations";
+    const rUrl = URL_.replace(/\/\/[^@]*@/, `//${RROLE}:ob1relations@`);
+    const [{ mayCreate: mayCreateR }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (rUrl === URL_ || !mayCreateR) {
+      skip("a consolidation role without the structure group stores no relations and says so, and a follower takes a grant up", rUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropR = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RROLE}') THEN EXECUTE 'DROP OWNED BY ${RROLE}'; EXECUTE 'DROP ROLE ${RROLE}'; END IF; END $$`);
+      await dropR();
+      const rEnv = { ...env, DATABASE_URL: rUrl };
+      const asRole = async (opts: Omit<ConsolidateOptions, "writer">) => {
+        const lines: string[] = [];
+        const code = await runConsolidate({ url: rUrl, env: rEnv, ...opts, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        return { code, out: lines.join("\n") };
+      };
+      const claimOf = async () => ((await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`)[0]?.status as string | undefined);
+      const standing = async () => (await sql`SELECT payload->>'relation' AS relation, payload->>'judge_key' AS key FROM thought_facets
+                                               WHERE kind = 'relation' AND thought_id = ${rotaNew}::uuid AND valid_until IS NULL`) as { relation: string; key: string }[];
+      const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 500) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+      try {
+        await sql.unsafe(`CREATE ROLE ${RROLE} LOGIN PASSWORD 'ob1relations'`);
+        const granted = await migrateInProcess({ grant: RROLE, groups: "capture,server,worker,extraction" });
+        assert(granted.code === 0, `the role is granted capture, server, worker and extraction (exit ${granted.code}: ${granted.stderr.trim().slice(0, 200)})`);
+        const roleStatus = await asRole({ status: true });
+        assert(roleStatus.code === 0 && roleStatus.out.includes(`relations: a run under this role would store none — this role lacks INSERT on thought_facets (the structure group) — cd db && bun migrate.ts --url <owner's url> --grant ${RROLE} --groups structure (`),
+          `--status under a role without the structure group says a run would store none, naming the group and the role (${roleStatus.out.split("\n").find((l) => /would store none/.test(l))?.trim().slice(0, 220)})`);
+
+        rotaAnswer = "related";
+        rotaConfidence = 0.85;
+        await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+        const ac = new AbortController();
+        const lines: string[] = [];
+        const following = runConsolidate({ url: rUrl, env: rEnv, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+        try {
+          await waitFor(async () => (await claimOf()) === "succeeded");
+          const offFirst = await claimOf();
+          const startSaid = lines.some((l) => l.startsWith("  relations: not stored this run — this role lacks INSERT on thought_facets (the structure group)"));
+          assert(offFirst === "succeeded" && startSaid && (await standing()).every((r) => r.key !== KEY),
+            `a follower under that role says at its start that it stores none, and judges the pair without storing it (${offFirst}; ${JSON.stringify(await standing())})`);
+
+          const more = await migrateInProcess({ grant: RROLE, groups: "structure" });
+          await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+          await waitFor(async () => (await standing()).some((r) => r.key === KEY));
+          assert(more.code === 0 && lines.includes("  relations: stored from this poll on") && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
+            `granted the structure group, the follower stores relations from its next poll (${JSON.stringify(await standing())})`);
+
+          // The revoke lands while the judge holds the call: the write is refused.
+          rotaAnswer = "duplicate";
+          onJudge = async () => { onJudge = null; await sql.unsafe(`REVOKE INSERT ON thought_facets FROM ${RROLE}`); };
+          await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+          await waitFor(async () => (await claimOf()) !== undefined && (await claimOf()) !== "pending" && (await claimOf()) !== "claimed");
+          const afterRevoke = await claimOf();
+          assert(afterRevoke === "succeeded" && lines.some((l) => l.startsWith("  relations: not stored from this pair on — this role lacks INSERT on thought_facets")) &&
+                 JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
+            `a grant revoked mid-pass stops relations at that pair, which succeeds with its standing relation untouched, rather than failing the thought (${afterRevoke}; ${lines.find((l) => /from this pair on/.test(l))?.trim().slice(0, 120)})`);
+        } finally {
+          onJudge = null;
+          ac.abort();
+          await Promise.race([following, Bun.sleep(10_000)]);
+        }
+        const summary = lines.find((l) => /^ {2}relations: \d+ added/.test(l)) ?? "";
+        assert(/^ {2}relations: 0 added, 0 kept, 1 replaced, 0 closed; 2 related, evolves or duplicate verdict\(s\) counted only, judged while relations were not stored — this role lacks INSERT on thought_facets/.test(summary),
+          `the summary of a run that stored relations for part of it gives what it stored and what it counted only (${summary.trim().slice(0, 200)})`);
+
+        // The remedy names only what the role lacks; an UPDATE granted on a column is enough.
+        await sql.unsafe(`GRANT INSERT ON thought_facets TO ${RROLE}; REVOKE UPDATE ON thought_facets FROM ${RROLE}; GRANT UPDATE (valid_until) ON thought_facets TO ${RROLE}; REVOKE UPDATE ON derivations FROM ${RROLE}`);
+        const partial = await asRole({ status: true });
+        assert(partial.out.includes(`this role lacks UPDATE on derivations (the capture group) — cd db && bun migrate.ts --url <owner's url> --grant ${RROLE} --groups capture`) && !/lacks[^—]*thought_facets/.test(partial.out),
+          `the remedy names the one privilege the role lacks, and an UPDATE on thought_facets' column counts (${partial.out.split("\n").find((l) => /would store none/.test(l))?.trim().slice(0, 200)})`);
+      } finally {
+        await dropR();
+      }
+    }
+
+    // Review pass 4 (walkthrough): a thought this key judged before 084 was
+    // applied is counted, with the statement that re-pools exactly those; an
+    // edge on a text edited since is counted beside the standing ones.
+    await sql`UPDATE thought_work_claims SET finished_at = (SELECT applied_at FROM schema_migrations WHERE name LIKE '084%') - interval '1 day'
+               WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+    await sql`UPDATE thoughts SET content = content || ' — and weekends' WHERE id = ${rotaOld}::uuid`;
+    const before084 = await consolidate("--status");
+    const hint = before084.out.split("\n").find((l) => /judged under this key before 084/.test(l)) ?? "";
+    const stmt = /: (DELETE FROM thought_work_claims .*)$/.exec(hint)?.[1];
+    assert(/relations: 1 thought\(s\) judged under this key before 084 was applied have none/.test(hint) && stmt?.includes(`work_type = '${KEY}'`) === true && /1 on a text edited since judged/.test(before084.out),
+      `--status counts the thoughts judged before 084 with the statement to re-pool them, and the edges on an edited text (${hint.trim().slice(0, 160)})`);
+    if (stmt) await sql.unsafe(stmt);
+    const repooled = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`) as { id: string }[];
+    const [{ others }] = (await sql`SELECT count(*)::int AS others FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'succeeded'`) as { others: number }[];
+    assert(stmt !== undefined && repooled.length === 0 && others > 0, `…and that statement clears exactly those claims (${others} other succeeded claim(s) kept)`);
   }
 
   judge.stop(true);
@@ -10306,6 +10485,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
         const answer = /monthly/.test(a) && /annually/.test(b)
           ? { verdict: "outdates", supersedes: "B", evidence: (b.match(/\S*annually\S*/)?.[0] ?? ""), confidence: 0.92, reason: "monthly billing against annual" }
+          // SMD-1873 PR 2: the deploy note relates to both billing notes — a relation write under the sleep.
+          : /deploy/.test(a + b) ? { verdict: "related", supersedes: "unknown", confidence: 0.9, reason: "the billing deploy" }
           : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
       }
@@ -10334,7 +10515,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
-    await capture("The deploy runs from main.", "op-sleep", 2, 1);
+    // On the billing notes' axis, between them in time: judged against each (SMD-1873 PR 2).
+    const deploy = await capture("The deploy runs from main.", "op-sleep", 2);
     // The newer side already has entities (an earlier model's pass), the older
     // none: judged before extraction reaches the older, the newer would find
     // no candidate and its claim would end, the pair never judged.
@@ -10381,6 +10563,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot wake it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
+    // 084 (SMD-1873 PR 2): the deploy note's two related verdicts are relation
+    // facets with their lineage — written by the sleep's pass, and still no audit row.
+    const rels = (await sql`SELECT f.thought_id::text AS newer, f.payload->>'target' AS older,
+                                   (SELECT count(*)::int FROM derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = f.id) AS lineage
+                              FROM thought_facets f WHERE f.kind = 'relation' AND f.valid_until IS NULL ORDER BY f.created_at`) as { newer: string; older: string; lineage: number }[];
+    const relPairs = rels.map((r) => `${r.newer === newer ? "newer" : r.newer === deploy ? "deploy" : r.newer}→${r.older === deploy ? "deploy" : r.older === older ? "older" : r.older}:${r.lineage}`).sort().join(",");
+    assert(relPairs === "deploy→older:1,newer→deploy:1" && (await auditRows()) === auditBefore,
+      `…and its related verdicts are relations with their lineage, the deploy note's to each billing note, with no audit row either (${relPairs})`);
     assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
 
     // --follow: a live read wakes it mid-call; the passes stop at once.
@@ -10397,7 +10587,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
     await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
     const wakeMs = Date.now() - wokenAt;
-    const awakeBeat = await beat();
+    // The awake stamp lands after the wake's line and the leases' return (the
+    // passes stop, their claims move to the tail, then the sleep is stamped
+    // ended), so it is polled for, bounded: a sleep that never stamps it still
+    // fails below. Read at once, it raced the stamp (SMD-1500 review pass 1).
+    // The value the poll saw is the one asserted: a re-read could catch the
+    // next sleep's stamp (review pass 2).
+    let awakeBeat = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (awakeBeat = await beat())?.running === false, 3_000);
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
       `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
     // The thought the wake left goes to the back of the queue: claims are taken
@@ -10611,6 +10808,81 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await sql`DELETE FROM query_log`;
     await sql.close();
+  }
+}
+
+console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory and CPU are read or the reason they are not is given (SMD-1500)");
+{
+  const pool = Array.from({ length: 4 }, () => new SQL({ url: URL_, max: 1 }));
+  const memory = new SQL({ url: URL_, max: 1 });
+  /** Every run bounded: a loop that ignored its deadline would otherwise hang the suite. */
+  const bounded = <T,>(p: Promise<T>) => Promise.race([p, Bun.sleep(15_000).then(() => { throw new Error("the closed loop outran its deadline by 15 s"); })]);
+  try {
+    const pids = await assertDistinctBackends(pool);
+    assert(new Set(pids).size === 4, `four connections, four backends (pids ${pids.join(", ")})`);
+    let refused = "";
+    await assertDistinctBackends([pool[0], pool[0]]).catch((err) => (refused = (err as Error).message));
+    assert(/2 connections reached 1 backends/.test(refused), `one backend under two connections is refused, since its calls would queue (${refused || "not refused"})`);
+
+    const nap = 0.05;
+    const call = async (db: SQL, slot: number, query: number) => {
+      await db`SELECT pg_sleep(${nap})`;
+      return [`${slot}/${query}`];
+    };
+    const one = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 1, slots: 2, queries: 3, call }));
+    const four = await bounded(closedLoop({ pool, seconds: 1, slots: 2, queries: 3, call, monitor: memory }));
+    assert(four.records.length >= 3 * one.records.length, `four connections make about four times one connection's calls in the same second (one ${one.records.length}, four ${four.records.length}); calls queued on one backend would make about as many`);
+    const lastStart = Math.max(...four.records.map((r) => r.at));
+    assert(lastStart > 500 && lastStart < 1000 && four.elapsedMs >= 1000 && four.elapsedMs < 1000 + nap * 1000 + 300, `no call starts after the deadline (the last began at ${lastStart.toFixed(0)} ms), and the calls in flight at it are awaited: the run ends after it, within a call (${four.elapsedMs.toFixed(0)} ms)`);
+    assert(new Set(four.records.map((r) => `${r.slot}/${r.query}`)).size === 6 && four.records.every((r) => r.ids[0] === `${r.slot}/${r.query}` && r.ms >= nap * 1000 * 0.9), "every (slot, query) pair is reached, and each record is its own call's pair and time");
+    const m = four.memory;
+    if (typeof m === "string") assert(m.length > 0, `the container's memory is not readable here, and the run says why (${m})`);
+    else assert(m.samples >= 3 && m.peak.anon >= m.idle.anon && m.peak.current >= m.peak.anon && typeof four.cpu !== "string" && four.cpu.cpus >= 1 && typeof one.memory === "string" && typeof one.cpu === "string", `the container's memory was sampled through the run (${m.samples} samples, anon ${(m.idle.anon / 1048576).toFixed(0)} → ${(m.peak.anon / 1048576).toFixed(0)} MiB) and its CPU read across it (${JSON.stringify(four.cpu)}); a run given no connection to read through reads neither`);
+
+    // The peak, not the last reading: the first call sorts two million rows
+    // under a large work_mem in a backend of its own, held 400 ms by the same
+    // statement, and closes it, so the memory rises and falls inside the run
+    // (~150 MiB measured on with-postgres.sh's container).
+    let spiked = false;
+    const spike = async (db: SQL) => {
+      if (spiked) {
+        await db`SELECT pg_sleep(${nap})`;
+        return [];
+      }
+      spiked = true;
+      const own = new SQL({ url: URL_, max: 1 });
+      try {
+        await own.begin(async (tx: SQL) => {
+          await tx`SET LOCAL work_mem = '256MB'`;
+          await tx`SELECT count(*), pg_sleep(0.4) FROM (SELECT g FROM generate_series(1, 2000000) g ORDER BY g DESC OFFSET 0) s`;
+        });
+      } finally {
+        await own.close();
+      }
+      return [];
+    };
+    // Three seconds: the spike (connect, sort, 0.4 s held) is over well before
+    // the end, so samples land after it on a slow runner too (review pass 2).
+    const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, monitor: memory }));
+    const pm = peaked.memory;
+    if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
+    else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.02, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.02 or more)`);
+
+    let calls = 0;
+    const failing = async (db: SQL) => {
+      if (++calls === 3) throw new Error("a call refused");
+      await db`SELECT pg_sleep(0.02)`;
+      return [];
+    };
+    const t0 = performance.now();
+    const thrown = await bounded(closedLoop({ pool, seconds: 5, slots: 1, queries: 1, call: failing })).then(() => "not thrown", (err) => (err as Error).message);
+    const ms = performance.now() - t0;
+    assert(thrown === "a call refused" && ms < 1000 && calls <= 3 + pool.length, `the first error stops every connection and is thrown (${thrown}, after ${ms.toFixed(0)} ms of a 5 s run, ${calls} calls)`);
+  } catch (err) {
+    // A run that outran its bound, or a refusal, is this section's failure, not the suite's crash.
+    assert(false, `[39] stopped: ${(err as Error).message}`);
+  } finally {
+    await Promise.all([...pool, memory].map((db) => db.close()));
   }
 }
 

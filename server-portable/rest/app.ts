@@ -13,7 +13,7 @@ import type { AgentOutcome } from "../agents.ts";
 import { SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
-import { runOperation, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
+import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
 import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOptions, type Method } from "./routes.ts";
@@ -39,6 +39,39 @@ export interface RestDeps {
   log?: (line: string) => void;
   /** The enabled plugins (root.ts's plugins), read at the first request that needs them; none when absent (SMD-2310). */
   plugins?: () => readonly LoadedPlugin[];
+  /** The webhooks served and their secrets (root.ts's hooks), read at the first delivery; none when absent (SMD-2310). */
+  hooks?: () => { hooks: readonly LoadedHook[]; secrets: ReadonlyMap<string, string> };
+  /**
+   * Where a webhook fault's one line goes — the message its anonymous sender
+   * is not told — stderr unless a suite listens. Not the request line, which
+   * holds no free text (telemetry.ts); that line still says the 500 and FAILED.
+   */
+  faultLog?: (line: string) => void;
+}
+
+/** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
+export const HOOK_BODY_LIMIT = 1024 * 1024;
+
+/** A request's body as bytes, read until `limit` and no further: null, the stream cancelled, past it. */
+async function boundedBody(req: Request, limit: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
 }
 
 /**
@@ -142,7 +175,7 @@ const issuesOf = (error: z.ZodError) => error.issues.map((i) => ({ path: i.path.
  */
 const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
   ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
-  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
+  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/plugins$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
 ];
 const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[] => {
   const methods = new Set<string>([...ROUTE_METHODS, ...plugins].filter(([re]) => re.test(path)).map(([, m]) => m));
@@ -156,6 +189,7 @@ type RestEnv = { Variables: { template?: string } };
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const app = new Hono<RestEnv>();
   const log = (r: RequestRecord) => (deps.log ? deps.log(requestLine(r)) : logRequest(r));
+  const faultLog = deps.faultLog ?? ((line: string) => console.error(line));
 
   // The enabled plugins' operations (SMD-2310), read at the first request that
   // needs them — the environment is seeded by then — and the document with
@@ -263,6 +297,24 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     return principal;
   }
+
+  // The enabled plugins (SMD-2310), for the operator GUI's nav (SMD-2280):
+  // each plugin's name, title and description, its pages (a path under the
+  // plugin's and a label), and the operations of it this key may call. Any
+  // caller's key; a disabled plugin is not listed, nor one the key can call nothing of. Before the operations'
+  // route below, which takes every other path under /v1/plugins.
+  app.get("/v1/plugins", async (c) => {
+    const p = await caller(c);
+    if (p instanceof Response) return p;
+    if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
+    // A plugin none of whose operations the key may call is not listed: its pages would be a nav entry to nothing the key can use.
+    return c.json({
+      plugins: (deps.plugins?.() ?? [])
+        .map((pl) => ({ pl, operations: pl.operations.filter((op) => unlocks(p, op.scope)).map((op) => op.tool) }))
+        .filter(({ operations }) => operations.length > 0)
+        .map(({ pl, operations }) => ({ name: pl.name, title: pl.title, description: pl.description, pages: pl.pages, operations })),
+    });
+  });
 
   // Who is calling: the key's name, its scope, its stable agent id, the
   // operations it may call, and — forwarded — who carried it (`act`): what the
@@ -408,6 +460,64 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (outcome.ok) return c.json(outcome.value, 200);
     const { status, ...facts } = outcome.refusal;
     return c.json(facts, status);
+  });
+
+  // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
+  // for a plugin OB1_HOOKS names, with no key — the sender holds none — so the
+  // handler verifies the delivery against its secret. Its body is counted as
+  // it arrives and cut at HOOK_BODY_LIMIT, and handed over as the bytes sent
+  // (a signature is over them) and as text; the handler runs as
+  // `hook:<plugin>`, a capture-only caller. Off, or a name it does not serve,
+  // the path is NO_ROUTE, as any unrouted one.
+  app.all("/hooks/:plugin/:hook", async (c) => {
+    // Reached through a prefix another route strips — compose.api-public.yaml's
+    // /api, whose router sends X-Forwarded-Prefix — not through
+    // compose.hooks-public.yaml, which keeps the path: the operator who named
+    // /api did not open /hooks, so it is no route here (final review).
+    if (c.req.header("x-forwarded-prefix") !== undefined) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
+    const served = deps.hooks?.();
+    const hook = served?.hooks.find((h) => h.plugin === c.req.param("plugin") && h.name === c.req.param("hook"));
+    if (!hook || !served) {
+      c.set("template", "-");
+      return refuse(c, 404, { code: "NO_ROUTE" });
+    }
+    c.set("template", hook.path);
+    if (c.req.method !== "POST") return refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
+    // No secret, nothing to verify a delivery against: refused here, whatever the handler would do (PR 4 review pass 1).
+    const secret = served.secrets.get(hook.plugin);
+    if (!secret) return c.json({ code: "HOOK_NOT_CONFIGURED", retryable: false }, 503);
+    const tooLarge = () => c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    if (Number(c.req.header("content-length") ?? "0") > HOOK_BODY_LIMIT) return tooLarge();
+    // Read with a running count and cut at the limit: a chunked body declares
+    // no length, and reading it whole first let an anonymous sender fill the
+    // server's memory (PR 4 review pass 1). Kept as bytes — a signature is
+    // over what was sent, which decoding would change (a BOM, invalid UTF-8).
+    let body: Uint8Array | null;
+    try {
+      body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
+    } catch {
+      // The sender went away mid-body: nothing to answer it with, and nothing of why.
+      return c.json({ code: "REFUSED_INPUT", retryable: false }, 400);
+    }
+    if (body === null) return tooLarge();
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((value, name) => { headers[name.toLowerCase()] = value; });
+    const query: Record<string, string> = {};
+    for (const [k, v] of queryOf(c.req.url)) query[k] = v;
+    let answer;
+    try {
+      answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
+    } catch (err) {
+      // The sender is anonymous: it is told FAILED and nothing of why; the
+      // operator's stderr has the message, one line, bounded.
+      faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
+      return c.json({ code: "FAILED", retryable: false }, 500);
+    }
+    if (answer.status === 204) return c.body(null, 204);
+    return c.json(answer.body ?? {}, answer.status);
   });
 
   // A path a route serves, sent with another method, is a 405 naming the

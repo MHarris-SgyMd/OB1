@@ -34,7 +34,11 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
-import { pluginNames, pluginProblem } from "./core/plugins.ts";
+import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
+import { migrationSha } from "../db/version.mjs";
 import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -48,6 +52,114 @@ const asJson = args.includes("--json");
 const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
+
+/** A plugin's migrations directory, in the image's plugins/ as in a checkout (SMD-2310). */
+const pluginMigrationsDir = (name: string) => join(import.meta.dir, "..", "plugins", name, "migrations");
+/** A plugin's migration files, in order; none for a plugin with no tables. */
+const pluginMigrationFiles = (name: string): string[] => {
+  const dir = pluginMigrationsDir(name);
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sql")).sort() : [];
+};
+
+/**
+ * What an enabled plugin's tables lack (SMD-2310), one phrase each: its role,
+ * its schema, this connection's right to SET ROLE to the role, a migration
+ * file plugin_migrations does not record, or one recorded at another sha.
+ * A plugin with no migrations has no tables to lack. The files are the
+ * image's plugins/, as the migrator reads them.
+ */
+async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>, names: string[], url: string, password: string | undefined): Promise<string[]> {
+  const problems: string[] = [];
+  if (!names.some((n) => pluginMigrationFiles(n).length > 0)) return problems;
+  // The login role every plugin's SQL runs on (PR 3 review pass 1): there,
+  // able to log in with the password this server holds, no superuser, NOINHERIT,
+  // and holding nothing on the core — SQL that undoes a plugin's role lands on
+  // it, so its privileges are the boundary's.
+  const login = PLUGIN_LOGIN_ROLE;
+  const [l] = (await sql`
+    SELECT r.rolcanlogin AS can_login, r.rolsuper AS superuser, r.rolinherit AS inherit,
+           (SELECT string_agg(c.relname, ', ' ORDER BY c.relname)
+              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+               AND (has_table_privilege(${login}, c.oid, 'SELECT') OR has_table_privilege(${login}, c.oid, 'INSERT')
+                 OR has_table_privilege(${login}, c.oid, 'UPDATE') OR has_table_privilege(${login}, c.oid, 'DELETE')
+                 OR has_table_privilege(${login}, c.oid, 'TRUNCATE'))) AS reaches
+      FROM pg_roles r WHERE r.rolname = ${login}`) as { can_login: boolean; superuser: boolean; inherit: boolean; reaches: string | null }[];
+  if (!l) return [`no role ${login}: the migrator makes it, with OB1_PLUGIN_DB_PASSWORD, when it applies a plugin's migrations`];
+  if (!l.can_login) problems.push(`${login} cannot log in`);
+  if (l.superuser) problems.push(`${login} is a superuser: a plugin's SQL that undoes its role would hold the database (ALTER ROLE ${login} NOSUPERUSER)`);
+  if (l.inherit) problems.push(`${login} inherits its plugin roles' rights: every plugin's SQL would reach every plugin's tables (ALTER ROLE ${login} NOINHERIT)`);
+  // Any membership but SET on a plugin's role: a role it could SET ROLE to, or
+  // one whose rights it inherits by the grant's own option (PG 16), would be
+  // reached by SQL that undoes the plugin's role; has_table_privilege alone
+  // cannot see the first (PR 3 review pass 2).
+  const [mem] = (await sql`
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE NOT starts_with(r.rolname, 'ob1_plugin_')) AS other,
+           string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE (to_jsonb(m) ->> 'inherit_option')::boolean) AS inherited
+      FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
+  if (mem?.other) problems.push(`${login} is a member of ${mem.other}: a plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
+  if (mem?.inherited) problems.push(`${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
+  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login})`);
+  if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
+  else {
+    const { SQL } = await import("bun");
+    // A URL with no host cannot carry the login role: failed, as the plugin's
+    // first transaction would be, not a warning (final review).
+    let loginUrl: string | null = null;
+    try {
+      loginUrl = pluginLoginUrl(url, password);
+    } catch (e) {
+      problems.push((e as Error).message);
+    }
+    if (loginUrl) {
+      const probe = new SQL({ url: loginUrl, max: 1 });
+      try {
+        const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
+        if (who !== login) problems.push(`the plugins' connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
+      } catch (e) {
+        problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
+      } finally {
+        await probe.close().catch(() => {});
+      }
+    }
+  }
+  const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
+  const recorded = new Map<string, string>(
+    ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
+  );
+  for (const name of names) {
+    const dir = pluginMigrationsDir(name);
+    const files = pluginMigrationFiles(name);
+    if (files.length === 0) continue;
+    const { schema, role } = pluginIdents(name);
+    // SET ROLE needs the SET option from PG 16, which MEMBER does not read: a
+    // `GRANT … WITH SET FALSE` is membership a SET ROLE refuses (review pass 1).
+    // The login role's, not this connection's: the plugins' pools log in as it.
+    const [r] = (await sql`
+      SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) AS role_present,
+             EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS schema_present,
+             CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
+                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(${login}, ${role}, 'SET')
+                  ELSE pg_has_role(${login}, ${role}, 'MEMBER') END AS can_set,
+             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null }[];
+    if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
+    if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
+    if (!r.can_set) problems.push(`${name}: ${login} cannot SET ROLE ${role} (the migrator grants it; GRANT ${role} TO ${login}, WITH SET TRUE, INHERIT FALSE on PG 16 and later)`);
+    // Owned by another role — a brain restored without the plugin's role, say
+    // — the plugin's role reaches none of it, and every ctx.db call is
+    // refused. What the migrator hands back, read by its own query
+    // (db/config.mjs's pluginForeignOwned).
+    const foreign = await pluginForeignOwned(sql, schema, role);
+    if (r.schema_owner !== role || foreign.length > 0)
+      problems.push(`${name}: not owned by ${role}: ${[...(r.schema_owner !== role ? [`schema ${schema} (${r.schema_owner})`] : []), ...foreign.map((f) => `${f.ident} (${f.owner})`)].join(", ")} — a migrator run that names the plugin hands them back`);
+    const pending = files.filter((f) => !recorded.has(`${name}/${f}`));
+    const drifted = files.filter((f) => recorded.has(`${name}/${f}`) && recorded.get(`${name}/${f}`) !== migrationSha(readFileSync(join(dir, f), "utf8")));
+    if (pending.length) problems.push(`${name}: ${pending.length} migration(s) not applied (${pending.join(", ")})`);
+    if (drifted.length) problems.push(`${name}: ${drifted.join(", ")} changed after it was applied`);
+  }
+  return problems;
+}
 
 // Trimmed once, as root.ts's initEnv trims the server's — the gate judges the
 // values the server will read (SMD-1843).
@@ -170,7 +282,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -778,8 +890,41 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
 {
   const problem = pluginProblem(env.OB1_PLUGINS);
   const names = pluginNames(env.OB1_PLUGINS);
+  // A plugin with tables reaches them through the SQL store alone: on the
+  // PostgREST store its operations would fail at their first call, and the
+  // plugin tables row below runs only on the SQL path (review pass 1).
+  const tabled = names.filter((n) => pluginMigrationFiles(n).length > 0);
   if (problem) add("plugins", "fail", problem, "Name plugins from plugins/registry.ts in OB1_PLUGINS, comma-separated, or unset it");
+  else if (store === "postgrest" && tabled.length)
+    add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
+        "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
+  // The webhooks (SMD-2310): OB1_HOOKS names enabled plugins with a webhook,
+  // OB1_HOOK_SECRETS is well formed — the server does not start otherwise —
+  // and a served plugin with no secret is said: its handler has nothing to
+  // verify a delivery against, and the example's refuses every one.
+  if (!problem && (env.OB1_HOOKS || env.OB1_HOOK_SECRETS)) {
+    const { secrets, problem: secretProblem } = hookSecrets(env.OB1_HOOK_SECRETS);
+    let hookProblem: string | null = secretProblem;
+    let served: string[] = [];
+    if (!hookProblem) {
+      try {
+        served = [...new Set(enabledHooks(loadPlugins(env.OB1_PLUGINS), env.OB1_HOOKS).map((h) => h.plugin))];
+      } catch (e) {
+        hookProblem = (e as Error).message;
+      }
+    }
+    if (hookProblem) add("plugin webhooks", "fail", hookProblem, "Name plugins enabled in OB1_PLUGINS that have webhooks in OB1_HOOKS, and give OB1_HOOK_SECRETS as plugin=secret pairs separated by spaces");
+    else {
+      const unsecret = served.filter((n) => !secrets.has(n));
+      const stray = [...secrets.keys()].filter((n) => !served.includes(n));
+      if (unsecret.length || stray.length)
+        add("plugin webhooks", "warn",
+            `${served.join(", ") || "none"} served${unsecret.length ? `; no secret for ${unsecret.join(", ")}` : ""}${stray.length ? `; a secret for ${stray.join(", ")}, which OB1_HOOKS does not serve` : ""}`,
+            "Give each served plugin a secret in OB1_HOOK_SECRETS (openssl rand -hex 32), and the sender the same one");
+      else add("plugin webhooks", "ok", `${served.join(", ")} served at /hooks/<plugin>/<name>, each with its secret — public only with deploy/compose.hooks-public.yaml`);
+    }
+  }
 }
 
 // ── Public origin ────────────────────────────────────────────────────────────
@@ -2363,7 +2508,7 @@ if (configFailed) {
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2388,6 +2533,11 @@ if (configFailed) {
                    lp_s AS (SELECT p.id, p.older_id, p.newer_id FROM public.supersession_proposals p WHERE p.status IN ('pending', 'stale') LIMIT ${BOUND}),
                    lp AS (SELECT s.id FROM lp_s s JOIN public.thoughts n ON n.id = s.newer_id JOIN public.thoughts o ON o.id = s.older_id
                            WHERE COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)),
+                   -- 084 (SMD-1873): an active judged relation and its lineage row. A brain before 084 holds no relation facet, so
+                   -- the CTE reads nothing there; a closed relation is history, its row kept or not.
+                   re_s AS (SELECT id FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
+                   re AS (SELECT s.id FROM re_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2407,7 +2557,9 @@ if (configFailed) {
                                  (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
                             FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
-                           WHERE d.artifact_kind <> 'proposal'
+                           -- 084: a relation, like a proposal, is the consolidation pass's to judge again, not rebuild_derived's
+                           -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
+                           WHERE d.artifact_kind NOT IN ('proposal', 'relation')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2420,6 +2572,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
+                     (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2432,7 +2585,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
-                     (SELECT count(*)::int FROM lp_s) AS lp_read`)) as Census[];
+                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2442,18 +2595,21 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
             if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
+            if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
             // knows no section).
-            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
+            const sectionRemedy = (Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "")
+              // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
+              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -4076,6 +4232,25 @@ if (configFailed) {
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)}, past this server's tree (${tree}) — a newer tree migrated this brain`,
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
+
+        // An enabled plugin's tables (SMD-2310): the login role the plugins'
+        // SQL runs on, its role, its schema, the login role's right to SET
+        // ROLE to it, and each of its migration files
+        // recorded in plugin_migrations at the file's sha. Failed, not warned:
+        // the server would list operations that fail at their first call.
+        // Silent with no plugin enabled, or one with no migrations; an
+        // unknown name is the plugins row's.
+        if (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null) {
+          try {
+            const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS), conn.url, env.OB1_PLUGIN_DB_PASSWORD);
+            if (problems.length)
+              add("plugin tables", "fail", problems.join("; "),
+                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same password> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+            else add("plugin tables", "ok", `${pluginNames(env.OB1_PLUGINS).join(", ")} — each plugin's role, schema and migrations in place`);
+          } catch (e) {
+            add("plugin tables", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_roles, pg_namespace and plugin_migrations.");
+          }
+        }
 
         // The version the brain was migrated under (044, SMD-1804): schema_version
         // in ob1_config, reported beside the highest migration the ledger records.

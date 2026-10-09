@@ -309,6 +309,14 @@ const FUNCTIONS = [
   "ob1_note_recapture(uuid, jsonb)",
   "ob1_lapse_capture_pointers()",
   "ob1_check_capture_pointer()",
+  // 084 (SMD-1873): the judged relation's write and the two triggers'
+  // functions; the triggers go with thoughts and thought_facets, the indexes
+  // with thought_facets.
+  "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)",
+  "ob1_close_relations_to_deleted()",
+  "ob1_drop_relation_derivation()",
+  // 085 (SMD-2664): a re-capture at a higher trust moves the stamp.
+  "ob1_restamp_recapture(uuid, text, jsonb, text)",
 ];
 
 /**
@@ -479,6 +487,13 @@ export async function dropSchema(url: string): Promise<void> {
     }
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
+    // The plugins' (SMD-2310): each plugin_<name> schema the migrator made,
+    // with its tables, and their ledger. Their roles are the cluster's and
+    // stay: a later run finds one and makes no second.
+    for (const { nspname } of (await admin`SELECT nspname FROM pg_namespace WHERE starts_with(nspname, 'plugin_')`) as { nspname: string }[]) {
+      await admin.unsafe(`DROP SCHEMA ${quoteIdent(nspname)} CASCADE`);
+    }
+    await admin.unsafe("DROP TABLE IF EXISTS public.plugin_migrations");
     // 014 seeds two database-level settings. They are not schema, so a fresh
     // start must clear them too, or every later run inherits whatever the
     // previous one left. Best effort: only the owner may, and a throwaway
@@ -593,13 +608,12 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The MCP stack — the four packages extensions/package.json installs for the
  * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
- * holds server-portable's and the Kubernetes image's package.json to them, and
- * both extension loaders (test-auth, test-writes) rewrite exactly these bare
- * names to that install. A name added here alone reaches every reader.
+ * holds server-portable's and the Kubernetes image's package.json to them. The
+ * recipes and integrations reach that install through the committed
+ * recipes/node_modules and integrations/node_modules links (SMD-1991). A name
+ * added here alone reaches every reader.
  */
 export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcontextprotocol/sdk"];
-/** A specifier of one of STACK's packages — the bare name or a subpath of it. No name holds a regex metacharacter. */
-export const PACKAGES = new RegExp(`^(${STACK.join("|")})(/|$)`);
 
 /**
  * The MCP stack server-portable runs on since SMD-2278 — stage 1 of the SDK v2

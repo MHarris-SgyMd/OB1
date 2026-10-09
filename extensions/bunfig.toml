@@ -1,0 +1,9 @@
+# Bun reads this file for any command run from extensions/: the three suites
+# (test-auth, test-writes, test-tools) and package.json's scripts. With
+# auto-install off, a package that does not resolve fails the import instead of
+# Bun fetching whatever npm serves. That holds for the recipe and integration
+# servers the suites import in-process, which reach this directory's install
+# through the committed recipes/ and integrations/ node_modules links (SMD-1991).
+# `bun install` is unaffected.
+[install]
+auto = "disable"

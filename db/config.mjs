@@ -1341,6 +1341,92 @@ export function migrationNameProblem(names) {
   return null;
 }
 
+/**
+ * A plugin's name (SMD-2310): lower-case words joined by single hyphens, at
+ * most 32 characters — server-portable/core/plugins.ts holds a manifest to it,
+ * and the migrator holds OB1_PLUGINS to it before a name reaches an identifier.
+ */
+export const PLUGIN_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+/**
+ * A plugin's own Postgres schema and the role that owns it (SMD-2310): its
+ * name, hyphens read as underscores. The migrator makes both and runs the
+ * plugin's migrations as the role, in the schema; the server's handle
+ * (store-sql.ts's pluginTx) sets the same two, so the plugin's tables are the
+ * role's and the core's are not.
+ * @param {string} name
+ * @returns {{ schema: string, role: string }}
+ */
+export function pluginIdents(name) {
+  const snake = name.replace(/-/g, "_");
+  return { schema: `plugin_${snake}`, role: `ob1_plugin_${snake}` };
+}
+
+/**
+ * The login role every plugin's SQL runs on (SMD-2310): NOINHERIT, no
+ * superuser, holding SET on each plugin's role and nothing on the core. The
+ * servers' plugin pools and the migrator's plugin phase connect as it, then
+ * SET LOCAL ROLE to the plugin's own; SQL that undoes that role lands here,
+ * where Postgres still refuses it the core's tables. Its password is the
+ * operator's secret, OB1_PLUGIN_DB_PASSWORD.
+ */
+export const PLUGIN_LOGIN_ROLE = "ob1_plugins";
+
+/**
+ * The connection string for PLUGIN_LOGIN_ROLE: `url` with its user and
+ * password replaced, every other part kept. Throws on a URL that names no
+ * host — a socket URL (`postgres:///db?host=/run/postgresql`) — where the URL
+ * parser ignores a user set on it, and the connection would fall back to the
+ * server's own role (PR 3 review pass 2): plugin SQL never runs as that. The
+ * password is percent-encoded, so a `%` in it reaches the server as itself.
+ * @param {string} url
+ * @param {string} password
+ * @returns {string}
+ */
+export function pluginLoginUrl(url, password) {
+  const u = new URL(url);
+  u.username = PLUGIN_LOGIN_ROLE;
+  u.password = encodeURIComponent(password);
+  if (u.username !== PLUGIN_LOGIN_ROLE) throw new Error(`the database URL names no host, so a plugin's connection cannot log in as ${PLUGIN_LOGIN_ROLE}: give DATABASE_URL a host (a socket directory as ?host= keeps a host in the URL's own part)`);
+  return u.toString();
+}
+
+/**
+ * What in a plugin's schema its role does not own (SMD-2310), each with the
+ * ALTER … OWNER TO keyword that hands it back and its owner: a relation, a
+ * routine or a type a brain restored without the role left the restoring
+ * role's — a dump's ALTER … OWNER fails where the role is missing, and
+ * `--no-owner` skips it. An index follows its table, and a sequence a column
+ * owns (serial, identity) its table, so neither is listed. One query for the
+ * migrator, which hands each back, and preflight, which names them. None for a
+ * role that does not exist.
+ * @param {(strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>} sql
+ * @param {string} schema
+ * @param {string} role
+ * @returns {Promise<{ kind: string, ident: string, owner: string }[]>}
+ */
+export async function pluginForeignOwned(sql, schema, role) {
+  return /** @type {{ kind: string, ident: string, owner: string }[]} */ (await sql`
+    SELECT kind, ident, pg_get_userbyid(owner) AS owner FROM (
+      SELECT CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
+                            WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'c' THEN 'TYPE' ELSE 'TABLE' END AS kind,
+             format('%I.%I', n.nspname, c.relname) AS ident, c.relowner AS owner, 0 AS ord
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = ${schema} AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+         AND NOT (c.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i')))
+      UNION ALL
+      SELECT CASE p.prokind WHEN 'a' THEN 'AGGREGATE' ELSE 'ROUTINE' END, p.oid::regprocedure::text, p.proowner, 1
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = ${schema}
+      UNION ALL
+      SELECT 'TYPE', format('%I.%I', n.nspname, t.typname), t.typowner, 2
+        FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+       WHERE n.nspname = ${schema} AND t.typtype IN ('e', 'd', 'r')
+    ) o
+    WHERE o.owner <> (SELECT oid FROM pg_roles WHERE rolname = ${role})
+    ORDER BY ord, ident`);
+}
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
 
 /**
@@ -2005,7 +2091,10 @@ export const ROLE_GRANTS = Object.freeze({
   // releases work, upserts its job key into `ob1_config` (reembed's
   // --switch-model, extract's key), and, for consolidate.ts, records and
   // resolves proposals in `supersession_proposals` (029's SECURITY INVOKER
-  // record/accept functions run as the caller).
+  // record/accept functions run as the caller). Its judged relations (084)
+  // are written with the structure group's INSERT on `thought_facets` and the
+  // capture group's UPDATE and derivations writes; a role without the
+  // structure group stores none, and the pass says so.
   worker: Object.freeze([
     Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
     // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).

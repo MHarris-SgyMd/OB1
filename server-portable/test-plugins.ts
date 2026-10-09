@@ -14,8 +14,9 @@
 import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
-import { visibleToolNames } from "./tools.ts";
-import { loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
+import { unlocks, visibleToolNames } from "./tools.ts";
+import { enabledHooks, hookSecrets, loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
+import { hmacSha256Hex, verifyTimestamped, type HookRequest } from "./plugin-sdk.ts";
 import type { Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
@@ -23,6 +24,7 @@ import { createRestApp } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
+import { pluginLoginUrl } from "../db/config.mjs";
 
 const { assert, report } = createAssert();
 
@@ -38,6 +40,9 @@ process.env.OPENROUTER_API_KEY = "stub-openrouter";
 process.env.OB1_PLUGINS = "example";
 const sha = (raw: string) => createHash("sha256").update(raw).digest("hex");
 process.env.MCP_ACCESS_KEYS = `r:read:${sha("read-raw")},w:write:${sha("write-raw")},c:capture:${sha("cap-raw")}`;
+
+/** The example's tools a key of `scope` reaches: its manifest through the gate — what whoami and tools/list add to the core's. */
+const exampleTools = (scope: "read" | "write" | "capture") => loadPlugins("example")[0].operations.filter((o) => unlocks({ scope }, o.scope)).map((o) => o.tool).sort();
 
 /** A manifest with one operation, `fields` over a sound one. */
 const withOp = (name: string, key: string, fields: Record<string, unknown> = {}): PluginManifest =>
@@ -68,6 +73,14 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     ["no operations", [definePlugin({ name: "crm", title: "T", description: "D", operations: {} })], /no operations/],
     ["no title", [withOp("crm", "list", { title: " " })], /a title and a description are required/],
     ["no handler", [withOp("crm", "list", { handler: undefined })], /no handler/],
+    ["a page path with a field", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items/{id}", label: "Items" }] } }], /a page's path is segments of lower-case words and hyphens/],
+    ["two pages on one path", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "A" }, { path: "/items", label: "B" }] } }], /two pages share the path/],
+    ["a page label of two lines", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "Items\nSecond" }] } }], /a label is one line of at most 40 characters/],
+    ["a page label over 40 characters", [{ ...withOp("crm", "list"), gui: { pages: [{ path: "/items", label: "x".repeat(41) }] } }], /a label is one line of at most 40 characters/],
+    ["a page that is no object", [{ ...withOp("crm", "list"), gui: { pages: [null as never] } }], /a page is \{ path, label \}/],
+    ["a hook named with a slash", [{ ...withOp("crm", "list"), hooks: { "a/b": { description: "d", handler: async () => ({ status: 200 }) } } }], /a hook's name is lower-case words joined by single hyphens/],
+    ["a hook with no handler", [{ ...withOp("crm", "list"), hooks: { inbound: { description: "d" } as never } }], /hook "inbound": no handler/],
+    ["a hook with no description", [{ ...withOp("crm", "list"), hooks: { inbound: { description: " ", handler: async () => ({ status: 200 }) } } }], /hook "inbound": a description is required/],
   ];
   for (const [label, manifests, want] of cases) {
     const problems = manifestProblems(manifests).join("; ");
@@ -111,6 +124,9 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   const op = ex.operations[0];
   assert(ex.name === "example" && op.tool === "example_recent" && op.path === "/v1/plugins/example/recent" && op.scope === "read" && op.method === "GET", `the example's operation: ${op.tool} at ${op.method} ${op.path}, scope ${op.scope}`);
   assert(op.annotations.readOnlyHint === true, "a read operation is annotated read-only");
+  assert(exampleTools("read").join() === "example_list_notes,example_recent" && exampleTools("write").join() === "example_add_note,example_list_notes,example_recent" && exampleTools("capture").length === 0,
+    `the example's tools by scope: a read key its two reads, a write key all three, a capture key none (${exampleTools("read")} / ${exampleTools("write")} / ${exampleTools("capture")})`);
+  assert(ex.operations.find((o) => o.key === "add_note")?.annotations.readOnlyHint === undefined, "a write operation carries no read-only hint");
   let thrown = "";
   try { loadPlugins("example,crm"); } catch (e) { thrown = (e as Error).message; }
   assert(/OB1_PLUGINS names "crm", which is no plugin in this build \(known: example\)/.test(thrown), `a name that is no plugin throws, naming it and the known ones (${thrown})`);
@@ -121,6 +137,23 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   try { loadPlugins("", [withOp("Bad", "x")]); } catch (e) { thrown = (e as Error).message; }
   assert(/a plugin manifest is malformed/.test(thrown), "a malformed manifest in the tree throws even when no plugin is enabled");
   assert(pluginProblem("nope") !== null && pluginProblem("example") === null && pluginProblem(undefined) === null, "pluginProblem: the throw as a sentence, null when sound");
+  // The plugin login role's URL: its user replaced, its password encoded, and a URL with no host refused —
+  // the parser ignores a user set on one, and the connection would be the server's own role.
+  const login = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain?sslmode=disable", "a%41b@c:d/e#f?g&h=i"));
+  assert(login.username === "ob1_plugins" && decodeURIComponent(login.password) === "a%41b@c:d/e#f?g&h=i" && login.host === "db:5432" && login.search === "?sslmode=disable", "the login URL: the user replaced, the password encoded (a % kept), the rest kept");
+  let noHost = "";
+  try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p"); } catch (e) { noHost = (e as Error).message; }
+  assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);
+  // That refusal is a plugin transaction's, not the store's start: a server on
+  // such a URL with the password set still starts and serves the core.
+  const { SqlStore } = await import("./store-sql.ts");
+  let store: InstanceType<typeof SqlStore> | null = null;
+  let built = "";
+  try { store = new SqlStore("postgres:///brain?host=/var/run/postgresql", { pluginPassword: "p" }); } catch (e) { built = (e as Error).message; }
+  let txSaid = "";
+  if (store) await store.pluginTx("example", async () => 1).catch((e: Error) => { txSaid = e.message; });
+  assert(store !== null && built === "" && /names no host/.test(txSaid), `the store builds; the plugin's transaction is refused, naming why (${built || txSaid})`);
+  await store?.close();
 }
 
 // ── A stub core: each operation answers what the case below asks of it ──────
@@ -156,7 +189,7 @@ console.log("\n[3] Enabled, the operation is in whoami for the scopes that reach
     const on = await json(await hit(enabled, "/v1/whoami", { key }));
     const ops = on.body.operations as string[];
     assert(ops.includes("example_recent") === sees, `a ${scope} key's whoami ${sees ? "lists" : "does not list"} example_recent`);
-    const want = [...visibleToolNames({ scope }), ...(sees ? ["example_recent"] : [])].sort();
+    const want = [...visibleToolNames({ scope }), ...exampleTools(scope)].sort();
     assert(JSON.stringify(ops) === JSON.stringify(want), `a ${scope} key's whoami is the core's operations and the plugin's it may call, sorted`);
     const off = await json(await hit(disabled, "/v1/whoami", { key }));
     assert(!(off.body.operations as string[]).includes("example_recent"), `disabled, a ${scope} key's whoami does not list it`);
@@ -177,6 +210,22 @@ console.log("\n[3] Enabled, the operation is in whoami for the scopes that reach
   assert(!Object.keys(off.paths).some((p) => p.startsWith("/v1/plugins/")), "disabled, the document has no plugin path");
   const ids = Object.values(on.paths).flatMap((m) => Object.values(m).map((o) => o.operationId));
   assert(new Set(ids).size === ids.length, "operationIds stay unique with a plugin's beside the core's");
+  assert(on.paths["/v1/plugins"]?.get?.operationId === "plugins", "the document lists the plugin registry");
+  // The GUI's nav registry: an enabled plugin, its pages, the operations of it the key may call.
+  type Listed = { plugins: { name: string; title: string; pages: { path: string; label: string }[]; operations: string[] }[] };
+  for (const [key, scope] of [["read-raw", "read"], ["write-raw", "write"]] as const) {
+    const listed = (await (await hit(enabled, "/v1/plugins", { key })).json()) as Listed;
+    const ex = listed.plugins.find((pl) => pl.name === "example");
+    assert(listed.plugins.length === 1 && ex?.title === "Example plugin" && JSON.stringify(ex.pages) === '[{"path":"/notes","label":"Notes"}]', `a ${scope} key reads the enabled plugin and its nav page`);
+    assert(JSON.stringify([...(ex?.operations ?? [])].sort()) === JSON.stringify(exampleTools(scope)), `with the operations of it a ${scope} key may call (${ex?.operations.join(", ") || "none"})`);
+  }
+  const forCapture = (await (await hit(enabled, "/v1/plugins", { key: "cap-raw" })).json()) as Listed;
+  assert(forCapture.plugins.length === 0, "a capture key, which can call none of the example's operations, is listed no plugin: no nav entry to nothing it can use");
+  const offList = (await (await hit(disabled, "/v1/plugins", { key: "read-raw" })).json()) as Listed;
+  assert(offList.plugins.length === 0, "disabled, the registry lists nothing: the GUI's nav shows no page of it");
+  assert((await hit(enabled, "/v1/plugins")).status === 401, "the registry needs a key");
+  const post = await hit(enabled, "/v1/plugins", { key: "read-raw", method: "POST", body: "{}" });
+  assert(post.status === 405 && /GET/.test(post.headers.get("allow") ?? ""), "a POST to the registry is a 405 naming GET");
 }
 
 console.log("\n[4] The operation over REST: the gate, the input held to its schema, the answer held to its output; disabled, no route");
@@ -346,7 +395,7 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   for (const [key, scope, sees] of [["read-raw", "read", true], ["write-raw", "write", true], ["cap-raw", "capture", false]] as const) {
     const tools = ((await rpc(key, "tools/list", {})).result?.tools ?? []) as Tool[];
     const names = tools.map((t) => t.name).sort();
-    const want = [...visibleToolNames({ scope }), ...(sees ? ["example_recent"] : [])].sort();
+    const want = [...visibleToolNames({ scope }), ...exampleTools(scope)].sort();
     assert(JSON.stringify(names) === JSON.stringify(want), `a ${scope} key's tools/list is the core's and ${sees ? "example_recent" : "no plugin tool"} (${names.filter((n) => n.startsWith("example")).join() || "none"})`);
     if (sees) {
       const tool = tools.find((t) => t.name === "example_recent")!;
@@ -407,8 +456,278 @@ console.log("\n[8] Preflight: a name in OB1_PLUGINS that is no plugin fails the 
   };
   const bad = run("example,nope");
   assert(bad.exit !== 0 && bad.row?.status === "fail" && /"nope", which is no plugin/.test(bad.row.detail), `an unknown name fails the plugins row (${JSON.stringify(bad.row)})`);
+  const hooksRow = (env: Record<string, string>) => {
+    const p = Bun.spawnSync(["bun", "--no-env-file", "preflight.ts", "--json"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env }, stdout: "pipe", stderr: "pipe" });
+    const parsed = JSON.parse(p.stdout.toString() || "{}") as { checks?: { name: string; status: string; detail: string }[] } | { name: string; status: string; detail: string }[];
+    return (Array.isArray(parsed) ? parsed : parsed.checks ?? []).find((c) => c.name === "plugin webhooks");
+  };
+  const noPlugin = hooksRow({ OB1_PLUGINS: "example", OB1_HOOKS: "crm" });
+  assert(noPlugin?.status === "fail" && /"crm", which is no enabled plugin with a webhook/.test(noPlugin.detail), `OB1_HOOKS naming no enabled plugin with a webhook fails the plugin webhooks row (${JSON.stringify(noPlugin)})`);
+  const noSecret = hooksRow({ OB1_PLUGINS: "example", OB1_HOOKS: "example" });
+  assert(noSecret?.status === "warn" && /no secret for example/.test(noSecret.detail), `a served plugin with no secret warns (${JSON.stringify(noSecret)})`);
+  const served = hooksRow({ OB1_PLUGINS: "example", OB1_HOOKS: "example", OB1_HOOK_SECRETS: "example=abc" });
+  assert(served?.status === "ok" && !served.detail.includes("abc"), `a served plugin with its secret: ok, and the secret never printed (${JSON.stringify(served)})`);
   const good = run("example");
   assert(good.row?.status === "ok" && /example — enabled/.test(good.row.detail), `a sound name is reported enabled (${JSON.stringify(good.row)})`);
+  // A plugin with tables on the PostgREST store: its operations would fail at their first call.
+  const p = Bun.spawnSync(["bun", "--no-env-file", "preflight.ts", "--json"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_PLUGINS: "example", OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "stub" }, stdout: "pipe", stderr: "pipe" });
+  const parsed = JSON.parse(p.stdout.toString() || "{}") as { checks?: { name: string; status: string; detail: string }[] } | { name: string; status: string; detail: string }[];
+  const postgrest = (Array.isArray(parsed) ? parsed : parsed.checks ?? []).find((c) => c.name === "plugins");
+  assert(postgrest?.status === "fail" && /example keeps tables, which need the SQL store/.test(postgrest.detail), `a plugin with tables on the PostgREST store fails the plugins row (${JSON.stringify(postgrest)})`);
+}
+
+console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alone, the body bounded, the handler's verification and its capture as the hook's own caller");
+{
+  // Which hooks are served, and their secrets.
+  const enabledEx = loadPlugins("example");
+  assert(enabledHooks(enabledEx, undefined).length === 0, "OB1_HOOKS unset: no webhook served");
+  assert(JSON.stringify(enabledHooks(enabledEx, "example").map((h) => h.path)) === '["/hooks/example/capture"]', "OB1_HOOKS=example: the example's capture hook, at /hooks/example/capture");
+  let thrown = "";
+  try { enabledHooks(enabledEx, "crm"); } catch (e) { thrown = (e as Error).message; }
+  assert(/OB1_HOOKS names "crm", which is no enabled plugin with a webhook/.test(thrown), `a name that is no enabled plugin is refused (${thrown})`);
+  thrown = "";
+  try { enabledHooks(loadPlugins(undefined), "example"); } catch (e) { thrown = (e as Error).message; }
+  assert(/no enabled plugin/.test(thrown), "a plugin in OB1_HOOKS but not OB1_PLUGINS is refused: no webhook without its plugin");
+  const parsed = hookSecrets("example=abc=def  other=x");
+  assert(parsed.problem === null && parsed.secrets.get("example") === "abc=def" && parsed.secrets.get("other") === "x", "OB1_HOOK_SECRETS: plugin=secret pairs by spaces, the first = the separator");
+  assert(/entry 2 is not plugin=secret/.test(hookSecrets("example=a nosecret").problem ?? "") && /twice/.test(hookSecrets("a=1 a=2").problem ?? ""), "a pair with no = and a name given twice are refused, by position and not by text");
+  assert(!(hookSecrets("example=topsecret oops").problem ?? "").includes("topsecret"), "a refusal never prints a secret");
+
+  // Over REST.
+  const SECRET = "hook-secret-0123";
+  const faults: string[] = [];
+  const hookApp = (hooksRaw: string | undefined, secretsRaw: string | undefined, withCore: Core = core) => createRestApp({
+    core: withCore, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")}` }), resolve: async () => identity, track: (run) => run(), log: (l) => lines.push(l), faultLog: (l) => faults.push(l),
+    plugins: () => loadPlugins("example"),
+    hooks: () => ({ hooks: enabledHooks(loadPlugins("example"), hooksRaw), secrets: hookSecrets(secretsRaw).secrets }),
+  });
+  const on = hookApp("example", `example=${SECRET}`);
+  const deliver = (app: ReturnType<typeof hookApp>, body: string, headers: Record<string, string> = {}, path = "/hooks/example/capture", method = "POST") =>
+    app.fetch(new Request(`http://api${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: method === "GET" ? undefined : body }));
+  const body = JSON.stringify({ text: "a thought from a webhook" });
+  /** The example's signature: over "<timestamp>.<body>", the timestamp beside it (SMD-2755). */
+  const sign = (data: string | Uint8Array, ts = Math.floor(Date.now() / 1000), key = SECRET) => ({
+    "x-example-timestamp": String(ts),
+    "x-example-signature": hmacSha256Hex(key, new Uint8Array([...new TextEncoder().encode(`${ts}.`), ...(typeof data === "string" ? new TextEncoder().encode(data) : data)])),
+  });
+  const signed = sign(body);
+  calls.length = 0;
+  answer = async () => coreOk({ id: "t-hook" });
+  let r = await deliver(on, body, signed);
+  const got = (await r.json()) as Record<string, unknown>;
+  assert(r.status === 202 && got.id === "t-hook", `a signed delivery: 202 and the thought's id (${r.status} ${JSON.stringify(got)})`);
+  const capture = calls.find((c) => c.name === "capture");
+  assert(capture?.principal.name === "hook:example" && capture.principal.scope === "capture" && (capture.input as { trust?: string; source?: string }).trust === "ingested" && (capture.input as { source?: string }).source === "example-hook", `it captured through the core as hook:example, capture scope, trust ingested (${JSON.stringify(capture?.principal)})`);
+  const hookLine = JSON.parse(lines.at(-1) ?? "{}");
+  assert(hookLine.method === "POST" && hookLine.route === "/hooks/example/capture" && hookLine.status === 202 && !("agent" in hookLine), `one request line, naming the hook's route, no key's name (${lines.at(-1)})`);
+  // Through compose.api-public.yaml's /api, which strips its prefix and says so: no route, the handler never runs.
+  calls.length = 0;
+  r = await deliver(on, body, { ...signed, "x-forwarded-prefix": "/api" });
+  assert(r.status === 404 && calls.length === 0, "a delivery that came through /api (X-Forwarded-Prefix): 404, the handler never ran — /api does not open /hooks");
+  calls.length = 0;
+  const code = async (res: Response) => ((await res.json()) as { code?: string }).code;
+  r = await deliver(on, body, sign(body, undefined, "another"));
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a delivery signed with another secret: 401 BAD_SIGNATURE, and the core never ran");
+  r = await deliver(on, body);
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP", "an unsigned delivery: 401");
+  // Replays (SMD-2755): a recorded delivery verifies for the tolerance alone.
+  const now = Math.floor(Date.now() / 1000);
+  r = await deliver(on, body, sign(body, now - 301));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "a delivery signed 301 s ago: 401 STALE_DELIVERY, and the core never ran");
+  r = await deliver(on, body, sign(body, now + 310));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "one dated 310 s ahead: 401 STALE_DELIVERY too (the 301 s edges are [12]'s, on a clock of its own)");
+  r = await deliver(on, body, { ...sign(body, now - 301), "x-example-timestamp": String(now) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a stale delivery with its timestamp made fresh: 401 BAD_SIGNATURE — the time is signed");
+  r = await deliver(on, body, { "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP" && calls.length === 0, "a sender that signs the body alone, as before SMD-2755, sends no timestamp: 401 NO_TIMESTAMP");
+  r = await deliver(on, body, { "x-example-timestamp": String(now), "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a signature over the body alone, a timestamp beside it: 401 BAD_SIGNATURE — the time is not in what was signed");
+  r = await deliver(on, "{not json", sign("{not json"));
+  assert(r.status === 400, "a signed body that is not JSON: 400");
+  const nul = JSON.stringify({ text: "a NUL \u0000 here", id: "evt-nul" });
+  r = await deliver(on, nul, sign(nul));
+  assert(r.status === 400 && (await code(r)) === "BAD_TEXT" && calls.length === 0, "text with a NUL, which Postgres will not store: 400 BAD_TEXT, before any claim or model call");
+  for (const id of [7, "", "x".repeat(201), "a\u0000b", "\ud800", "has space", "é"]) {
+    const withId = JSON.stringify({ text: "t", id });
+    r = await deliver(on, withId, sign(withId));
+    assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is not 1 to 200 printable ASCII characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
+  }
+  calls.length = 0;
+  r = await deliver(hookApp("example", undefined), body, signed);
+  assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED" && calls.length === 0, "no secret for the plugin: the REST core refuses, 503, and the handler never runs");
+  r = await deliver(hookApp(undefined, `example=${SECRET}`), body, signed);
+  assert(r.status === 404 && calls.length === 0, "OB1_HOOKS unset: the webhook is no route, whatever is sent");
+  r = await deliver(on, body, signed, "/hooks/example/nothing");
+  assert(r.status === 404, "a hook the plugin does not have: 404");
+  r = await deliver(on, body, {}, "/hooks/example/capture", "GET");
+  assert(r.status === 405 && r.headers.get("allow") === "POST", "a GET of a webhook: 405, Allow POST");
+  const big = JSON.stringify({ text: "x".repeat(1024 * 1024) });
+  r = await deliver(on, big, sign(big));
+  assert(r.status === 413 && calls.length === 0, "a body over 1 MiB: 413, before the handler reads it");
+  answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
+  r = await deliver(on, body, signed);
+  assert(r.status === 422 && ((await r.json()) as { refused?: string }).refused === "REFUSED", "the core refusing the capture: the plugin's 422, naming the core's code");
+  answer = async () => { throw new Error("store down at secret-host:5432"); };
+  lines.length = 0;
+  r = await deliver(on, body, signed);
+  const fault = (await r.json()) as Record<string, unknown>;
+  assert(r.status === 500 && fault.code === "FAILED" && !JSON.stringify(fault).includes("secret-host"), `a fault: 500 FAILED, and nothing of why to the anonymous sender (${JSON.stringify(fault)})`);
+  assert(faults.length === 1 && faults[0] === "api hook /hooks/example/capture fault: store down at secret-host:5432", `the message goes to the fault log, one line (${JSON.stringify(faults)})`);
+  const faultLine = JSON.parse(lines.at(-1) ?? "{}");
+  assert(faultLine.status === 500 && faultLine.code === "FAILED" && !lines.some((l) => l.includes("secret-host")), `the request line says the 500 and FAILED, never the message (${lines.at(-1)})`);
+  // A chunked body with no length, past the limit: cut as it arrives, never read whole.
+  let pulled = 0;
+  const chunk = new Uint8Array(64 * 1024).fill(32);
+  const stream = new ReadableStream<Uint8Array>({ pull(controller) { pulled++; if (pulled > 64) controller.close(); else controller.enqueue(chunk); } });
+  calls.length = 0;
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: stream, headers: { "x-example-signature": "x" }, duplex: "half" } as RequestInit));
+  assert(r.status === 413 && pulled <= 20 && calls.length === 0, `a chunked body past 1 MiB: 413, cut after ${pulled} of 64 chunks, and the handler never ran`);
+  // The bytes as sent: a BOM-prefixed body the sender signed verifies.
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(body)]);
+  answer = async () => coreOk({ id: "t-bom" });
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", ...sign(bom) } }));
+  assert(r.status === 202, `a body signed over its bytes, BOM and all, verifies (${r.status})`);
+  // A delivery's id (SMD-2755), over a stand-in for the example's deliveries
+  // table (test-plugins-sql runs the real one): claimed before the capture,
+  // given back when the capture fails so the sender's retry runs; a resend of
+  // a captured one runs nothing, and of one still running is told to retry.
+  const claims = new Map<string, string | null>();
+  /** Unfinished claims past their lease, which the next claim of the id takes. */
+  const lapsed = new Set<string>();
+  /** Each claim's claimed_at, as the claim returns it and the release matches it. */
+  const claimedAt = new Map<string, string>();
+  let tick = 0;
+  let recordFails = false;
+  const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const q = strings.join("?").replace(/\s+/g, " ").trim();
+    const id = values[0] as string;
+    if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve([]);
+    if (q.startsWith("INSERT INTO deliveries (id) VALUES (?) ON CONFLICT (id) DO UPDATE SET claimed_at = now() WHERE deliveries.thought_id IS NULL AND")) {
+      if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) {
+        const at = `t${++tick}`;
+        return Promise.resolve((claims.set(id, null), claimedAt.set(id, at), [{ claimed: at }]));
+      }
+      return Promise.resolve([]);
+    }
+    if (q.startsWith("SELECT thought_id FROM deliveries WHERE id =")) return Promise.resolve(claims.has(id) ? [{ thought_id: claims.get(id) }] : []);
+    if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz")) return Promise.resolve((claims.get(id) === null && claimedAt.get(id) === values[1] && claims.delete(id), []));
+    if (q.startsWith("INSERT INTO deliveries (id, thought_id) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET thought_id =")) {
+      if (recordFails) return Promise.reject(new Error("connection reset"));
+      return Promise.resolve((claims.set(id, values[1] as string), []));
+    }
+    throw new Error(`the stand-in table has no answer for: ${q}`);
+  };
+  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
+  const withIds = hookApp("example", `example=${SECRET}`, tableCore);
+  const send = (id: string) => { const b = JSON.stringify({ id, text: `delivery ${id}` }); return deliver(withIds, b, sign(b)); };
+  const captures = () => calls.filter((c) => c.name === "capture").length;
+  calls.length = 0;
+  answer = async () => coreOk({ id: "t-once" });
+  r = await send("evt-1");
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-once" && claims.get("evt-1") === "t-once", "a delivery with an id: 202, its id kept with its thought");
+  r = await send("evt-1");
+  const dup = (await r.json()) as { id?: string; duplicate?: boolean };
+  assert(r.status === 200 && dup.id === "t-once" && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
+  answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
+  r = await send("evt-2");
+  assert(r.status === 422 && !claims.has("evt-2"), "a capture the core refuses gives its claim back");
+  answer = async () => { throw new Error("embedder down"); };
+  r = await send("evt-3");
+  assert(r.status === 500 && !claims.has("evt-3"), "a capture that throws gives its claim back too");
+  answer = async () => coreOk({ id: "t-retry" });
+  calls.length = 0;
+  r = await send("evt-2");
+  const retried = r.status;
+  r = await send("evt-3");
+  assert(retried === 202 && r.status === 202 && captures() === 2, `so the sender's retries run, and capture (${retried}, ${r.status}, ${captures()} captures)`);
+  claims.set("evt-4", null);
+  calls.length = 0;
+  r = await send("evt-4");
+  const busy = (await r.json()) as { code?: string; retryable?: boolean };
+  assert(r.status === 409 && busy.code === "IN_FLIGHT" && busy.retryable === true && captures() === 0, `a delivery whose first is still running: 409 IN_FLIGHT, retryable, nothing run (${r.status} ${JSON.stringify(busy)})`);
+  lapsed.add("evt-4");
+  r = await send("evt-4");
+  assert(r.status === 202 && captures() === 1 && claims.get("evt-4") === "t-retry", `one whose claim outlived its lease — the server stopped mid-capture — is taken and captured (${r.status}, ${captures()} captures)`);
+  recordFails = true;
+  r = await send("evt-5");
+  recordFails = false;
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-retry", `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
+  // A first attempt that outlives its lease and then fails gives back its own claim, not the retry's that took it.
+  let failFirst: (e: Error) => void = () => {};
+  answer = () => new Promise((_ok, fail) => { failFirst = fail; });
+  const slow = send("evt-7");
+  /** Waits for the stand-in to reach a state, and fails rather than hangs if the handler never gets there. */
+  const until = async (what: string, done: () => boolean) => {
+    for (let i = 0; !done(); i++) {
+      if (i > 2000) throw new Error(`evt-7: ${what} never happened`);
+      await Bun.sleep(1);
+    }
+  };
+  await until("the first claim", () => claims.get("evt-7") === null);
+  lapsed.add("evt-7");
+  let finishRetry: (v: unknown) => void = () => {};
+  answer = () => new Promise((ok) => { finishRetry = ok; });
+  const retry = send("evt-7");
+  await until("the retry's claim", () => !lapsed.has("evt-7"));
+  failFirst(new Error("embedder timed out"));
+  r = await slow;
+  assert(r.status === 500 && claims.has("evt-7") && claims.get("evt-7") === null, `the first attempt's late failure leaves the retry's claim standing (${r.status})`);
+  finishRetry(coreOk({ id: "t-seven" }));
+  r = await retry;
+  assert(r.status === 202 && claims.get("evt-7") === "t-seven", `and the retry records its thought (${r.status})`);
+  answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
+  r = await send("evt-6");
+  const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
+  assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
+  answer = async () => coreOk({ thoughts: [] });
+  // A handler's answer the REST core will not pass on.
+  const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
+    hooks: { teapot: { description: "Answers a status no sender reads.", handler: async () => ({ status: 418 as never }) }, list: { description: "Answers an array.", handler: async () => ({ status: 200, body: [] as never }) } } });
+  const oddApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, track: (run) => run(), log: () => {},
+    plugins: () => loadPlugins("probe-kit", [odd]), hooks: () => ({ hooks: enabledHooks(loadPlugins("probe-kit", [odd]), "probe-kit"), secrets: new Map([["probe-kit", "s"]]) }) });
+  r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/teapot", { method: "POST", body: "{}" }));
+  assert(r.status === 500, "a hook answering a status no sender reads is the plugin's fault: 500");
+  r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/list", { method: "POST", body: "{}" }));
+  assert(r.status === 500, "a hook answering a body that is no JSON object: 500");
+}
+
+console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separator and body; a time outside the tolerance refused, and only once signed (SMD-2755)");
+{
+  const KEY = "8f42a73054b1749f8f58848be5e6502c";
+  const at = 1_700_000_000;
+  const req = (headers: Record<string, string>, text = '{"token":"x"}'): HookRequest => ({ headers, query: {}, body: new TextEncoder().encode(text), text });
+  // Slack's documented example: v0=HMAC(secret, "v0:<ts>:<body>").
+  const slack = { signatureHeader: "X-Slack-Signature", timestampHeader: "X-Slack-Request-Timestamp", prefix: "v0:", separator: ":", signaturePrefix: "v0=" };
+  const slackBody = "token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554%2F96rGlfmibIGlgcZRskXaIFfN&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c";
+  const slackSent = req({ "x-slack-request-timestamp": "1531420618", "x-slack-signature": "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503" }, slackBody);
+  const slackAt = 1531420618 * 1000;
+  const SLACK_DOC_SECRET = "8f742231b10e8888abcd99yyyzzz85a5"; // Slack's "Verifying requests from Slack" example, public
+  assert(JSON.stringify(verifyTimestamped(slackSent, SLACK_DOC_SECRET, slack, slackAt)) === '{"ok":true,"timestamp":1531420618}', "Slack's documented signed request verifies in Slack's form, the header names in any case");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, separator: "." }, slackAt).ok === false, "and not with another separator");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, prefix: "" }, slackAt).ok === false, "nor without the v0: prefix");
+  const v = (headers: Record<string, string>, now = at * 1000, tolerance?: number) => verifyTimestamped(req(headers), KEY, { signatureHeader: "x-sig", timestampHeader: "x-ts", ...(tolerance ? { toleranceSeconds: tolerance } : {}) }, now);
+  const sig = (ts: string, text = '{"token":"x"}') => hmacSha256Hex(KEY, `${ts}.${text}`);
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)) }).ok, "the plain form: HMAC of <ts>.<body>, hex");
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)).toUpperCase() }).ok, "upper-case hex is the same signature");
+  const reason = (x: ReturnType<typeof v>) => (x.ok ? "ok" : x.code);
+  assert(reason(v({ "x-sig": sig(String(at)) })) === "NO_TIMESTAMP", "no timestamp: NO_TIMESTAMP");
+  for (const ts of ["", "17e8", "-1", " 1700000000", "1700000000.5", "1".repeat(13)]) assert(reason(v({ "x-ts": ts, "x-sig": sig(ts) })) === "NO_TIMESTAMP", `a timestamp that is not Unix seconds, ${JSON.stringify(ts)}: NO_TIMESTAMP, though signed`);
+  assert(reason(v({ "x-ts": String(at) })) === "BAD_SIGNATURE", "no signature: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at + 1)) })) === "BAD_SIGNATURE", "a signature over another time: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at), '{"token":"y"}') })) === "BAD_SIGNATURE", "a signature over another body: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": `v0=${sig(String(at))}` })) === "BAD_SIGNATURE", "a prefix the scheme does not name: BAD_SIGNATURE");
+  const old = String(at - 300);
+  const soon = String(at + 300);
+  assert(v({ "x-ts": old, "x-sig": sig(old) }).ok && v({ "x-ts": soon, "x-sig": sig(soon) }).ok, "300 s old, or 300 s ahead, the default tolerance: verified");
+  const older = String(at - 301);
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older) })) === "STALE_DELIVERY", "301 s old: STALE_DELIVERY");
+  const ahead = String(at + 301);
+  assert(reason(v({ "x-ts": ahead, "x-sig": sig(ahead) })) === "STALE_DELIVERY", "301 s ahead of the clock: STALE_DELIVERY");
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older, "other") })) === "BAD_SIGNATURE", "a stale time on a delivery the secret did not sign: BAD_SIGNATURE, never STALE — the sender learns nothing of the clock");
+  assert(v({ "x-ts": older, "x-sig": sig(older) }, at * 1000, 400).ok && reason(v({ "x-ts": String(at - 61), "x-sig": sig(String(at - 61)) }, at * 1000, 60)) === "STALE_DELIVERY", "the tolerance is the scheme's to set");
+  let thrown = "";
+  try { v({ "x-ts": String(at), "x-sig": sig(String(at)) }, at * 1000, -5); } catch (e) { thrown = (e as Error).message; }
+  assert(/toleranceSeconds -5 is not a positive number/.test(thrown), "a tolerance that is no positive number is the plugin's fault: thrown");
 }
 
 report();
