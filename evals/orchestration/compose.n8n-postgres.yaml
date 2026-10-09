@@ -16,6 +16,8 @@ services:
       POSTGRES_USER: n8n
       POSTGRES_DB: n8n
       POSTGRES_PASSWORD: ${ORCH_DB_PASSWORD}
+    # Where the profile's n8n is (SMD-2583): never `data`, the brain's.
+    networks: [egress]
     volumes:
       - n8n-pgdata:/var/lib/postgresql/data
     healthcheck:
