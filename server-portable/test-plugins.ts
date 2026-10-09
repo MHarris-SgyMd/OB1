@@ -631,7 +631,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   answer = async () => coreOk({ id: thought(1) });
   r = await send("evt-1");
   assert(r.status === 202 && ((await r.json()) as { id?: string }).id === thought(1) && claims.get("evt-1") === thought(1), "a delivery with an id: 202, its id kept with its thought");
-  assert(JSON.stringify(pruneBound) === "[660,360]" && leaseBound === 360, `its window eleven minutes, its lease the core's capture deadline (300 s here) and a minute, through the REST app (${JSON.stringify(pruneBound)}, ${leaseBound})`);
+  assert(JSON.stringify(pruneBound) === '[660,360,""]' && leaseBound === 360, `its window eleven minutes, its lease the core's capture deadline (300 s here) and a minute, through the REST app (${JSON.stringify(pruneBound)}, ${leaseBound})`);
   r = await send("evt-1");
   const dup = (await r.json()) as { id?: string; duplicate?: boolean };
   assert(r.status === 200 && dup.id === thought(1) && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
@@ -761,7 +761,7 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   const T1 = "00000000-0000-4000-8000-000000000001";
   const leaseOf = () => bound.find((b) => b.q.startsWith("INSERT INTO deliveries (id) VALUES"))?.values[1];
   const done = await onceById({ db, captureSeconds: deadline({ OB1_LLM_TIMEOUT: "600" }) }, "evt-1", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660 });
-  assert(JSON.stringify(done) === '{"ran":"v"}' && leaseOf() === 660 && JSON.stringify(bound[0].values) === "[660,660]", `with OB1_LLM_TIMEOUT=600, the lease is 660 s, longer than one capture's model calls, and the prune keeps a claim that long (${leaseOf()}, ${JSON.stringify(bound[0].values)})`);
+  assert(JSON.stringify(done) === '{"ran":"v"}' && leaseOf() === 660 && JSON.stringify(bound[0].values) === '[660,660,""]', `with OB1_LLM_TIMEOUT=600, the lease is 660 s, longer than one capture's model calls, and the prune keeps a claim that long (${leaseOf()}, ${JSON.stringify(bound[0].values)})`);
   assert(bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true && JSON.stringify(bound.at(-1)?.values) === `["evt-1","${T1}"]`, "the run's thought is recorded against its id");
   bound.length = 0;
   await onceById({ db, captureSeconds: 120.3 }, "evt-2", async () => ({ value: "v", thoughtId: null }), { keepSeconds: 660 });
@@ -776,12 +776,17 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   bound.length = 0;
   let notUuid = "";
   try { await onceById({ db, captureSeconds: 120 }, "evt-7", async () => ({ value: "v", thoughtId: "U024BE7LH-1531420618" }), { keepSeconds: 660 }); } catch (e) { notUuid = (e as Error).message; }
-  assert(/a uuid, or null/.test(notUuid) && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true && !bound.some((b) => b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
-    `a run that hands back no thought id of the core's (a sender's own id) is thrown, its claim given back, nothing recorded (${notUuid})`);
+  assert(/a uuid, or null/.test(notUuid) && !bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE id = ?") || b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
+    `a run that hands back no thought id of the core's (a sender's own id) is thrown, nothing recorded, and its claim kept: a resend is 409 until the lease, not run again (${notUuid})`);
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "Ev0123", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660, scope: "events" });
+  const scoped = bound.find((b) => b.q.startsWith("DELETE FROM deliveries WHERE claimed_at"))?.values;
+  assert(JSON.stringify(scoped) === '[660,180,"events"]' && bound.slice(1).every((b) => b.values[0] === "events Ev0123"),
+    `a scope: its ids kept as "<scope> <id>", and its prune held to its own scope (${JSON.stringify(scoped)}, ${JSON.stringify(bound.slice(1).map((b) => b.values[0]))})`);
   claimed = [];
   const busy = await onceById({ db, captureSeconds: 120 }, "evt-4", async () => { throw new Error("never run"); }, { keepSeconds: 660 });
   assert(JSON.stringify(busy) === '{"inFlight":true}', `an id claimed and not yet captured: in flight, the run not called (${JSON.stringify(busy)})`);
-  const refusedWith = async (id: string, captureSeconds: number, options: { keepSeconds: number; leaseSeconds?: number }) => {
+  const refusedWith = async (id: string, captureSeconds: number, options: Parameters<typeof onceById>[3]) => {
     try {
       await onceById({ db, captureSeconds }, id, async () => ({ value: 0, thoughtId: null }), options);
       return "";
@@ -790,13 +795,20 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
     }
   };
   bound.length = 0;
-  assert(/printable ASCII/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown");
-  assert(/keepSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /keepSeconds NaN is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: NaN }))
-    && /leaseSeconds NaN is not a positive/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })) && /leaseSeconds 0 is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 0 }))
-    && /leaseSeconds Infinity is not a positive/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: Infinity })),
+  assert(/an id is 1 to 200/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown");
+  assert(/keepSeconds 0 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /keepSeconds NaN is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: NaN }))
+    && /leaseSeconds NaN is not a number/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })) && /leaseSeconds 0 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 0 }))
+    && /leaseSeconds Infinity is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: Infinity })),
     "a window that is no positive number or Infinity, or a lease that is no positive number, the plugin's own or the default: thrown");
+  assert(/keepSeconds 660 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: "660" as never })) && /keepSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 1e10 }))
+    && /leaseSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 1e10 })) && /leaseSeconds 9999999940 is not/.test(await refusedWith("evt-5", 9999999880, { keepSeconds: 660 })),
+    "a window or lease that is no number, or past 10^9 s, where Postgres's timestamps would overflow on every claim: thrown");
+  assert(/scope "Events" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "Events" })) && /scope "a b" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "a b" }))
+    && /scope "x{33}" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "x".repeat(33) })) && /an id is 1 to 200/.test(await refusedWith("", 120, { keepSeconds: 660, scope: "events" })),
+    "a scope that is not lower-case words and hyphens of at most 32 characters, or an empty id under one: thrown");
   assert(bound.length === 0, `and each before any claim: no statement run (${bound.length})`);
-  assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some(isDeliveryId), "isDeliveryId: 1 to 200 printable ASCII characters");
+  assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some((v) => isDeliveryId(v)), "isDeliveryId: 1 to 200 characters from ! to ~");
+  assert(isDeliveryId("x".repeat(193), "events") && !isDeliveryId("x".repeat(194), "events") && !isDeliveryId("", "events"), "under a scope, an id leaves room for it and its space; an empty one is still refused");
 }
 
 report();

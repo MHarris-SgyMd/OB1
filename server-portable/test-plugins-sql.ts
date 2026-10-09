@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
+import type { PluginSql } from "./plugin-sdk.ts";
 import { migrationSha } from "../db/version.mjs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
 
@@ -372,6 +373,19 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     const kept = await rowOf(longId);
     assert(typeof longHeld === "object" && longHeld.status === 409 && kept !== undefined && kept.thought_id === null && (await rowOf(doneId)) === undefined,
       `a core whose captures may run 1200 s: a claim twelve minutes old outlives the eleven-minute window, 409, while a captured id that old is pruned (${JSON.stringify(longHeld)}, ${JSON.stringify(kept)})`);
+    // Scopes: two hooks' ids in the one table, each pruned by its own window.
+    const { onceById } = await import("./plugin-sdk.ts");
+    const handle = { db: { tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", fn) }, captureSeconds: 120 };
+    const forGood = `rw-${RUN}`;
+    const shortLived = `ev-${RUN}`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${`readwise ${forGood}`}, ${thought}, now() - interval '12 minutes'), (${`events ${shortLived}`}, ${thought}, now() - interval '12 minutes')`;
+    const once = (scope: string, id: string, keepSeconds: number) => onceById(handle, id, async () => ({ value: "ran", thoughtId: thought }), { keepSeconds, scope });
+    const fresh = await once("events", `ev-${RUN}-new`, 660);
+    const survivors = (await sql`SELECT id FROM plugin_example.deliveries WHERE id IN (${`readwise ${forGood}`}, ${`events ${shortLived}`})`).map((r: { id: string }) => r.id);
+    assert("ran" in fresh && JSON.stringify(survivors) === JSON.stringify([`readwise ${forGood}`]), `a scope's claim prunes its own scope's old ids, not another's (${JSON.stringify(survivors)})`);
+    const again = await once("readwise", forGood, Infinity);
+    const elsewhere = await once("events", forGood, 660);
+    assert("duplicate" in again && again.duplicate === thought && "ran" in elsewhere, `so a hook kept for good still knows its id twelve minutes on, and the same id under another scope is another delivery (${JSON.stringify(again)}, ${JSON.stringify(elsewhere)})`);
   } finally {
     await store.close();
   }
