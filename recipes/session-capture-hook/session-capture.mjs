@@ -59,7 +59,7 @@
  *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste (SessionEnd + PreCompact); installs nothing
  *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
- *   bun session-capture.mjs --check                      # config + endpoint + key scope; writes nothing
+ *   bun session-capture.mjs --check                      # config + endpoint (warned if on the legacy root) + key scope; writes nothing
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
@@ -1371,6 +1371,10 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
       signal: ac.signal,
     });
     const text = await r.text();
+    // The proxy's legacy root route marks every answer it carries; --check
+    // reads it off the config to say the url must move to /mcp (SMD-2686).
+    const deprecation = r.headers.get("deprecation");
+    if (deprecation) cfg.deprecation = deprecation;
     const wrongUrl = (what) => new CaptureError("refused", `${what} from ${cfg.url} — not the MCP endpoint, or a proxy in front of it; check the url in ${CONFIG_PATH}`);
     // The server answers inside a 200 — a 4xx is a proxy, a login page, or a
     // URL that is not the endpoint: said once and given up, not retried five
@@ -2329,6 +2333,13 @@ export async function main(argv) {
     // The summary mode, and whether a configured model would run — read from the
     // config, the model endpoint not called (SMD-2014).
     if (cfg.summary === "model") console.log(modelStatusLine(cfg));
+    // An answer from the root through the proxy's legacy route works until
+    // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
+    if (cfg.deprecation) {
+      let to = "its /mcp";
+      try { const u = new URL(cfg.url); if (u.pathname === "/") to = `${u.origin}/mcp${u.search}`; } catch { /* fetch took it, so it parses */ }
+      console.error(`warning: ${cfg.url} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${process.env.OB1_BRAIN_URL ? "OB1_BRAIN_URL" : CONFIG_PATH} (deploy/README.md, "Moving a client to /mcp")`);
+    }
     if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);

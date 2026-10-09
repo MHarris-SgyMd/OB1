@@ -1645,6 +1645,43 @@ else {
   assert([consBeatStale, consEnded].every((r) => /!\s+consolidate pass\s+\S+: .* — a consolidation pass under this key stopped before it finished/.test(r.out)
       && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.$/m.test(r.out) && !/Finish it: cd db && OB1_JUDGE_MODEL/.test(r.out)),
          "a stale or ended follower heartbeat is no running pass: the row reads stopped, and points to the workers row's restart rather than a second remedy");
+  // The sleep scheduler, fresh, runs the current judge's key (SMD-1794): the
+  // row is its, with no remedy that starts a worker beside it — not even with
+  // the workers profile's ended row still there. Under another judge the key
+  // is not the scheduler's, and the row reads stopped as before.
+  await followerBeat(20, { outcome: "stopped", ended: true });
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, now() - interval '20 seconds')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const consSlept = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  const consOtherJudge = await run(SQL_ENV);
+  // Only the stopped case is the scheduler's (review pass 2): a dead worker's
+  // expired lease keeps its warning and remedy beside a fresh heartbeat:sleep,
+  // and a scheduler whose last pass failed warns, with no second worker.
+  await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead-beside-sleep', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
+  const consSleptDied = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Asleep, the scheduler's own claim holds a live lease beside the workers
+  // profile's old ended row: not "start it again", a second worker (review
+  // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  await claims`SELECT claim_thoughts(${CONS}, 'consolidate-sleephost-1-0-aaaaaaaa', 1)`;
+  const consSleptLive = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, updated_at = now() - interval '600 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptStale = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${CONS}`}, 'heartbeat:sleep')`;
+  assert(/a pass under this key is running: 1 in flight/.test(row(consSleptLive.out, "consolidate pass")) && !/Start it again/.test(fix(consSleptLive.out, "consolidate pass"))
+      && /stopped before it finished/.test(row(consSleptStale.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptStale.out, "consolidate pass")),
+         `asleep, the scheduler's live claim beside an old workers-profile row reads running, no restart; a stale heartbeat:sleep claims nothing (${row(consSleptLive.out, "consolidate pass")} | ${row(consSleptStale.out, "consolidate pass")})`);
+  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\); 1 proposal/.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
+      && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
+         `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
+  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(consSleptDied.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptDied.out, "consolidate pass"))
+      && /!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key .*, and its last pass failed/.test(consSleptFailed.out) && !/Finish it|Start it again/.test(fix(consSleptFailed.out, "consolidate pass")),
+         `…but a dead worker's expired lease keeps its warning beside it, and a failed last pass warns with no second worker (${row(consSleptDied.out, "consolidate pass")} | ${row(consSleptFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
@@ -3359,6 +3396,13 @@ else {
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed" }), 10);
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a live follower whose last pass hit a down provider says so");
+
+    // The sleep scheduler's row (SMD-1794): named "sleep", and gone stale, its restart from a checkout.
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await beat("heartbeat:sleep", v({ every_s: 60 }), 600);
+    const sleepOut = await run(SQL_ENV);
+    assert(/!\s+workers\s+sleep stale \(last stamped 10 min ago, every 60 s\)$/.test(row(sleepOut.out, "workers")) && /sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile workers run --rm --no-deps extract bun db\/sleep\.ts --follow, .*; from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\./.test(fix(sleepOut.out, "workers")),
+      `a stale heartbeat:sleep reads as the sleep scheduler's and names its restart (${row(sleepOut.out, "workers")} | ${fix(sleepOut.out, "workers")})`);
 
     // Each claim worker's restart, and a stale row with an alarm told its restart first.
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;

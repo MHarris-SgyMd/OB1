@@ -15,7 +15,8 @@
  * posts; a second ending supersedes the first, and one prepared while the
  * checkpoint before it is still posting steps aside for it (SMD-2035); a provenance refusal is retried
  * without provenance; a dead endpoint keeps the payload for a later run; the
- * printed hook carries no key; --check tells a capture key from a wider one.
+ * printed hook carries no key; --check tells a capture key from a wider one,
+ * and warns on a url the proxy's legacy route answers (SMD-2686).
  */
 
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync } from "node:fs";
@@ -2123,7 +2124,7 @@ console.log("\n[8] Detached: the hook returns inside the SessionEnd budget and t
 }
 
 // ── [9] The printed hook and --check ────────────────────────────────────────
-console.log("\n[9] The printed hook carries no secret; --check tells a capture key from a wider one");
+console.log("\n[9] The printed hook carries no secret; --check tells a capture key from a wider one, and warns on the legacy route");
 {
   const noHarness = await runHook({}, {}, ["--print-hook", "--event", "Stop", "--min-interval", "20"]);
   assert(noHarness.code === 0 && /"Stop"/.test(noHarness.out) && /--min-interval 20/.test(noHarness.out), `--print-hook with no harness named and flags after it prints the Claude Code hook (exit ${noHarness.code}: ${(noHarness.err || "").slice(0, 60)})`);
@@ -2166,6 +2167,20 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
+  // The proxy's legacy root route: the fake's answers, each marked deprecated (SMD-2686).
+  const legacy = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
+    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200" } });
+  } });
+  const LEGACY = `http://127.0.0.1:${legacy.port}/`;
+  writeFileSync(CONFIG, JSON.stringify({ url: LEGACY, key: "cap-key" }), { mode: 0o600 });
+  const onRoot = await spawnScript(["--check"]);
+  assert(onRoot.code === 0 && /capture_thought alone/.test(onRoot.out) && onRoot.err.includes(`warning: ${LEGACY} answered through the proxy's deprecated legacy route (Deprecation: @1790899200), which stops answering at v2.0.0 — set the url to ${LEGACY}mcp in ${CONFIG} (`),
+    `--check on the legacy root: still ok, and a warning naming the url to move to and the file it is in (SMD-2686; ${onRoot.err.trim().slice(0, 120)})`);
+  const onEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: `${LEGACY}sub` } });
+  assert(onEnv.code === 0 && onEnv.err.includes(`set the url to its /mcp in OB1_BRAIN_URL (`), `…a url off the root is told its /mcp, and one from OB1_BRAIN_URL names the variable, not the file (${onEnv.err.trim().slice(0, 120)})`);
+  assert(!/deprecated/.test(ok.err) && !/deprecated/.test(wide.err), "…and no such warning where the answer carries no Deprecation header");
+  legacy.stop(true);
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
