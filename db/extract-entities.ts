@@ -207,11 +207,12 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * the pool — and run() returns 130 (a statement already committed stays so).
  * `onPass` is called once, as the pass begins — where the CLI installs its
  * signal handlers (stopOnSignals) — with the pass's stop (db/lease.ts's
- * PassStop). Its hard stop returns the leases at once and wakes a worker
- * pausing on a provider error, and run() returns 130 (2 after the provider's
- * refusal) once the model call in hand does (at most --timeout per window),
- * writing and releasing nothing for it; a call after run() has returned does
- * nothing. Neither is used by --status or --dry-run, which have no pass.
+ * PassStop). Its hard stop returns the leases at once, aborts the model call
+ * in hand — no further window or retry is sent (SMD-1794) — and wakes a
+ * worker pausing on a provider error, and run() returns 130 (2 after the
+ * provider's refusal), writing and releasing nothing for the thought in hand;
+ * a --decide decider call in hand is waited for. A call after run() has
+ * returned does nothing. Neither is used by --status or --dry-run, which have no pass.
  */
 export interface ExtractOptions {
   url?: string;
@@ -819,6 +820,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * sleep (pass 3).
    */
   const onStop = new AbortController();
+  /** Aborted by the hard stop: the model call in hand, and any window or retry after it (SMD-1794). */
+  const onHardStop = new AbortController();
   /**
    * The pass's own wake, a new one for each pass: a transient pause wakes on
    * the first stop and on another worker's provider outage, which ends the
@@ -906,7 +909,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
       // call — per window of a long thought (SMD-1879).
-      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal);
     } finally {
       llmMs += Date.now() - t0;
     }
@@ -1096,6 +1099,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
+                // The hard stop aborted the call: the thought is abandoned, not failed.
+                if (hardStopped) return;
                 // The database went away under the write: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -1304,6 +1309,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (stopping) {
       hardStopped = true;
       onStop.abort();
+      onHardStop.abort();
       halt.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));

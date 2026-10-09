@@ -4178,17 +4178,26 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // stop — every worker's leases returned while the thought is still in hand,
   // which the worker then abandons: no write, no release of a row no longer
   // its own (review pass 1: it recorded the thought, then failed to release).
+  // The model call in hand is aborted with it (SMD-1794): a 5 s answer does
+  // not hold run(), and no call follows the stop.
   let hardStop: PassStop | undefined;
   const hardFrom = calls;
+  slowMs = 5000;
   const hardRun = extractInProcess({ workers: 1, onPass: (s) => { hardStop = s; } });
   await inHand(hardFrom);
   const firstStop = hardStop?.();
+  const hardAt = Date.now();
+  const callsAtHard = calls;
   const release = hardStop?.();
   await release;
   const heldAfterRelease = (await noteClaims()).claimed ?? 0;
   const hard = await hardRun;
+  const hardMs = Date.now() - hardAt;
+  slowMs = 600;
   assert(firstStop === null && release instanceof Promise && heldAfterRelease === 0 && hard.code === 130 && hard.stderr.includes(`second signal — exiting now; leases not returned in time expire within 900 s`),
          `a second call of the stop onPass hands returns the release of the workers' leases, made before the thought in hand finished (${heldAfterRelease} held after it, exit ${hard.code})`);
+  assert(hardMs < 1500 && calls === callsAtHard,
+         `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
   // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
