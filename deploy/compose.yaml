@@ -345,8 +345,9 @@ x-forwarder: &forwarder |
   // is down, so it dials only an address inside the subnet of an interface no default route leaves by,
   // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
   // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
-  // this file, which compose would read as a variable, and no exclamation mark, which check 27 refuses
-  // in compose.tiers.yaml (compose reads one as a YAML tag): the script is inline in both.
+  // this file, which compose would read as a variable, no exclamation mark, which check 27 refuses in
+  // compose.tiers.yaml (compose reads one as a YAML tag), and no number written with an underscore,
+  // which check 27 reads as YAML 1.1 would: the script is inline in both.
   import net from "node:net";
   import { lookup } from "node:dns/promises";
   import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
@@ -407,7 +408,8 @@ x-forwarder: &forwarder |
    * route (front), and none of: the forwarder's own addresses (it would dial itself, each hop asking again,
    * measured in the thousands of sockets a second), the subnet's network, gateway and broadcast addresses
    * (the gateway is the host, and answers on its own ports, measured), or a link-local address. None at all
-   * when no default route was read: then which interface is front is not known (review pass 1).
+   * when no default route by an interface the forwarder has was read: then which interface is front is not
+   * known (review passes 1 and 2).
    */
   export function pick(addresses: string[], interfaces: Record<string, NetworkInterfaceInfo[] | undefined>, defaults: Set<string>): string | undefined {
     // A default route counts only by an interface the forwarder has: a route with no device reads as `*`.

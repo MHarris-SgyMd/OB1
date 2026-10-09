@@ -119,12 +119,14 @@ jobs:
       - name: Dashboard reply parsers
         run: bun dashboards/open-brain-dashboard/test-parsers.ts
 
-      # The forwarder's address rule (SMD-2583): which lookup answers it dials —
+      # The forwarder's self-check (SMD-2583): which lookup answers it dials —
       # an address on front alone, never its own, the gateway, a network or
       # broadcast address or a link-local one, and none when no default route
-      # was read — and the PROXY line it writes. Bun only, no container; the
-      # deploy-stack job runs it again from the copy compose mounts.
-      - name: The forwarder's address rule
+      # was read — the PROXY line it writes, and how it closes: a reply after
+      # the client's half-close arrives whole, and a client that never ends
+      # its side is let go. Bun only, no container; the deploy-stack job runs
+      # it again from the copy compose mounts.
+      - name: The forwarder's address rule and how it closes
         run: bun deploy/forwarder.ts --self-check
 
   portable-server:
@@ -1331,8 +1333,8 @@ jobs:
       # alone, so it asks no resolver outside the stack: a public name does
       # not resolve there, where the same image on the forwarder's outward
       # network resolves it (so a missing tool cannot pass). The forwarder's
-      # address rule runs from the copy compose.yaml mounts (--self-check). The
-      # proxy logs a client by the PROXY line, not as the forwarder. And with
+      # self-check runs from the copy compose.yaml mounts. The proxy logs a
+      # client by the PROXY line, as neither the forwarder nor itself. And with
       # the proxy stopped, a decoy answering to the proxy's name on `edge` is
       # what the forwarder resolves, and gets nothing: the forwarder dials only
       # an address on `front`, refuses, and says so.
