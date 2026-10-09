@@ -1196,9 +1196,11 @@ included. `backfill_thought_actors` now reads a restamp with no
 text-writing row after it, by `seq`, as the row's writer, so a pass after a
 restamp — run after `set_agent_kind`, as above — keeps the stamp rather than
 putting the lower one back; a key reclassified down still takes its rows
-down. A stamp kept by a re-capture before 083 moves at the next re-capture
-by a classified key that can read at a higher trust, whichever key 082
-noted; a capture-only key's row from before the scope mark — every capture a
+down.
+
+For an operator upgrading to 083: a stamp kept by a re-capture before 083
+moves at the next re-capture by a classified key that can read at a higher
+trust, whichever key 082 noted; a capture-only key's row from before the scope mark — every capture a
 server before 082 wrote, the Chrome extension's pages included — stays as it
 is. Only a classified key is weighed, and a re-capture made while a key was
 unclassified is not replayed when it is classified: classify write keys

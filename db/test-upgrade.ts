@@ -3671,7 +3671,7 @@ console.log("\n[20ae] Migration 082: refused by name without 060; onto a populat
   await sql.close();
 }
 
-console.log("\n[20af] Migration 083: refused by name without 074; onto a populated brain at the file before it — the restamp and the backfill's new body, no row and no audit row moved, a stamp a write key's re-capture kept before the upgrade left as it is; a re-capture after it moves the stamp, and a backfill pass keeps it; a re-apply a no-op (SMD-2664)");
+console.log("\n[20af] Migration 083: refused by name without 074; onto a populated brain at the file before it — the restamp and the backfill's new body, no row and no audit row moved, a stamp a write key's re-capture kept before the upgrade left as it is; after it, a re-capture moves the stamp through the stores' path, a note written under 082 settles nothing, a backfill pass keeps the restamp, and an edit racing a restamp stays the writer by seq; a re-apply a no-op (SMD-2664)");
 {
   const the083 = MIGRATIONS.find((f) => f.endsWith("_recapture_restamps_trust.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);

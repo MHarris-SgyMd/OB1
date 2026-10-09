@@ -140,10 +140,10 @@ RETURNS boolean
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_meta jsonb;
-  v_fp   text;
-  v_new  jsonb;
-  v_ev   uuid;
+  v_meta  jsonb;
+  v_fp    text;
+  v_new   jsonb;
+  v_ev    uuid;
   v_agent uuid;
 BEGIN
   -- 005's guard, for the actor as upsert_thought reads it from its envelope.
@@ -247,8 +247,11 @@ BEGIN
     RETURN false;
   END IF;
   -- The trust it lands at is the event's declaration, so the audit row's
-  -- trust is the row's — and a declaration above the key's kind, clamped by
-  -- the stamp, is not filed a second time (the capture's own event did).
+  -- trust is the row's (the append and the stamp read the same registry
+  -- kind; a name the stamp trims and the append does not — a padded
+  -- name-only envelope, which the server never sends — can part them) — and
+  -- a declaration above the key's kind, clamped by the stamp, is not filed a
+  -- second time (the capture's own event did).
   v_ev := ob1_append_thought_event(p_id, 'update', v_meta->>'source',
             ob1_thought_diff('update', NULL, NULL, v_meta, v_new, false, false, NULL, NULL, NULL, NULL, v_fp, v_fp)
               || '{"restamped": true}'::jsonb,
