@@ -460,6 +460,23 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     await Promise.all(tracked);
     assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId}: no thought captured; its id given back`,
       `a deferred capture the core refuses: its claim given back and a fault naming the delivery, not lost without a word (${JSON.stringify(deferredFaults.at(-1))})`);
+    // A handler that fails after claiming with defer: its sender is told 500
+    // and retries, so the claim is given back now, not left to the lease.
+    const brokenHook = { ...laterHook, name: "broken", path: "/hooks/example/broken",
+      handler: async (ctx: Parameters<typeof hook.handler>[0], req: { text: string }) => {
+        await laterHook.handler(ctx, req);
+        throw new Error("the handler's own fault, after its claim");
+      } };
+    const brokenId = `evt-${RUN}-later-broken`;
+    const brokenText = JSON.stringify({ id: brokenId });
+    const scriptedOk = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : async () => coreOk({ id: thought })) }) as never;
+    const brokenSaid = await runHook(brokenHook, { core: scriptedOk, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) },
+      { headers: {}, query: {}, body: new TextEncoder().encode(brokenText), text: brokenText }).then(() => "", (e: Error) => e.message);
+    await Promise.all(tracked);
+    const retried = await deferredVia(brokenId, async () => coreOk({ id: thought }));
+    await Promise.all(tracked);
+    assert(brokenSaid === "the handler's own fault, after its claim" && retried.status === 202 && (await rowOf(brokenId))?.thought_id === thought,
+      `a handler that fails after a deferred claim gives the id back at once: the sender's retry of its 500 is claimed and captured, not told 409 until the lease (${retried.status})`);
   } finally {
     await store.close();
   }

@@ -144,14 +144,18 @@ export interface HookContext {
    * sender that wants one sooner than the work takes (Slack: three seconds):
    * it starts on the event loop's next turn after the handler returns an
    * answer the runtime takes, and not at all if the handler throws or answers
-   * what is refused. The runtime owns it: a failure is caught and written to
-   * the REST core's fault log as one line, never a rejection that would stop
-   * the process, and the server's stop waits for it as for a request, within
-   * OB1_STOP_GRACE. Its sender has its 2xx by then and resends nothing: work
-   * that fails is told only to the fault log, and work a crash or the stop's
-   * cut ends only to the stop's count of what it cut, if to anything.
+   * what is refused — `discarded` runs then instead, to undo what the handler
+   * did for the work (onceById gives its claim back). The runtime owns both:
+   * a failure is caught and written to the REST core's fault log as one line,
+   * never a rejection that would stop the process, and the server's stop
+   * waits for them as for a request, within OB1_STOP_GRACE — those deferred
+   * while the handler or deferred work runs; one from a timer the handler
+   * left is outside that count. Its sender has its 2xx by then and resends
+   * nothing: work that fails is told only to the fault log, and work a crash
+   * or the stop's cut ends only to the stop's count of what it cut, if to
+   * anything.
    */
-  defer(work: () => Promise<unknown>): void;
+  defer(work: () => Promise<unknown>, discarded?: () => Promise<unknown>): void;
 }
 
 export interface PluginHook {
@@ -340,9 +344,10 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   if (!claim.claimed) return claim.thoughtId ? { duplicate: claim.thoughtId } : { inFlight: true };
   const claimedAt = claim.at;
   // One that cannot be given back lapses with the lease.
-  const release = () =>
-    ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).catch(() => undefined);
-  let released = false;
+  // Whether it was given back: one that cannot be lapses with the lease.
+  const release = (): Promise<boolean> =>
+    ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).then(() => true, () => false);
+  let released: boolean | null = null;
   const finish = async (): Promise<T> => {
     let done: OnceRun<T>;
     try {
@@ -353,8 +358,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     }
     const thoughtId = done.thoughtId;
     if (thoughtId === null) {
-      await release();
-      released = true;
+      released = await release();
       return done.value;
     }
     // Anything else would fail the record unseen. Not given back: a resend is
@@ -370,16 +374,22 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   if (options.defer) {
     // Its sender has its answer: a run that captured nothing is a fault to
     // tell, not a claim given back for a retry that will not come.
-    ctx.defer!(() =>
-      finish().then(
-        (value) => {
-          if (released) throw new Error(`delivery ${key}: no thought captured; its id given back`);
-          return value;
-        },
-        (err: unknown) => {
-          throw new Error(`delivery ${key}: ${err instanceof Error ? err.message : String(err)}`);
-        },
-      ));
+    // Named short, so a long id leaves the fault line's 300 characters to the fault (review pass 2).
+    const named = `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key}`;
+    ctx.defer!(
+      () =>
+        finish().then(
+          (value) => {
+            if (released !== null) throw new Error(`${named}: no thought captured; its id ${released ? "given back" : "left to lapse at the lease"}`);
+            return value;
+          },
+          (err: unknown) => {
+            throw new Error(`${named}: ${err instanceof Error ? err.message : String(err)}`);
+          },
+        ),
+      // The handler failed after the claim: its sender is told 500 and retries, so the id is given back now, not at the lease.
+      () => release(),
+    );
     return { deferred: true };
   }
   return { ran: await finish() };
