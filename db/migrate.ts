@@ -57,11 +57,13 @@ import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
+  PLUGIN_LOGIN_ROLE,
   PLUGIN_NAME_RE,
   alignVectorSearchPath,
   pinPublicFirst,
   pluginForeignOwned,
   pluginIdents,
+  pluginLoginUrl,
   migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -126,6 +128,14 @@ export interface MigrateOptions {
   plugins?: string | null;
   /** Where plugins live; the tree's plugins/ unless a suite names another. */
   pluginsDir?: string;
+  /**
+   * OB1_PLUGIN_DB_PASSWORD (SMD-2310): the password of the login role plugin
+   * migrations run on (PLUGIN_LOGIN_ROLE), which a run makes with it when the
+   * role is missing. Required by a plain run that names a plugin with
+   * migrations, with `url` — the plugin phase opens its own connection as
+   * that role, beside `sql`.
+   */
+  pluginPassword?: string | null;
   writer?: Writer;
 }
 
@@ -611,10 +621,33 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found;
   }
 
+  /** Whether a plugin phase would log in: a file the plugin ledger lacks, or no login role yet. Read-only. */
+  async function pluginsNeedLogin(found: PluginMigrations[]): Promise<boolean> {
+    const [{ ledger, login }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger, EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS login`) as { ledger: boolean; login: boolean }[];
+    if (!login) return true;
+    const recorded = new Set<string>(ledger ? ((await sql`SELECT plugin, name FROM public.plugin_migrations`) as { plugin: string; name: string }[]).map((r) => `${r.plugin}/${r.name}`) : []);
+    return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
+  }
+
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
   if (plugins === null) return 2;
+  // A plain run that would apply a plugin's file, or make the login role, needs
+  // the login role's password and the URL its connection is built from:
+  // refused before anything runs, so a run never applies the core and stops
+  // at the plugins. One with nothing of the plugins' to do asks neither (PR 3
+  // review pass 2: it blocked a by-hand core-only run).
+  if (!dryRun && !baseline && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
+    if (!opts.pluginPassword?.trim()) {
+      err(`OB1_PLUGINS names a plugin with migrations, and OB1_PLUGIN_DB_PASSWORD is not set: a plugin's SQL runs as ${PLUGIN_LOGIN_ROLE}, a login role the migrator makes with that password. Set it in deploy/.env (openssl rand -hex 32) and run again.`);
+      return 2;
+    }
+    if (!opts.url) {
+      err(`the plugin phase opens its own connection as ${PLUGIN_LOGIN_ROLE}, built from the database URL: pass url beside sql.`);
+      return 2;
+    }
+  }
   if (migrations.length === 0) {
     err(`No .sql files in ${MIGRATIONS_DIR}`);
     return 2;
@@ -1276,17 +1309,21 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   /**
    * The enabled plugins' migrations (SMD-2310), after the core's: each plugin
    * in a schema of its own (plugin_<name>) owned by a role of its own
-   * (ob1_plugin_<name>, NOLOGIN), every file run as that role with that
-   * schema first on the path — so a plugin's SQL names its tables bare and
-   * Postgres refuses it the core's, which the role holds no privilege on —
-   * and recorded in plugin_migrations, a ledger of its own beside
-   * schema_migrations, which nothing that reads the core's ledger sees. A
-   * plugin not enabled is not read: its schema, tables and rows stay as they
-   * are. 0, or 1 on a failure (the line names it; files before it stay
-   * applied and recorded, as the core's do) or a drift.
+   * (ob1_plugin_<name>, NOLOGIN), and recorded in plugin_migrations, a ledger
+   * of its own beside schema_migrations, which nothing that reads the core's
+   * ledger sees. Every file runs on a connection logged in as the plugin
+   * login role (PLUGIN_LOGIN_ROLE: NOINHERIT, no superuser, SET on each
+   * plugin's role and nothing on the core), then as the plugin's role with
+   * its schema first on the path: a plugin's SQL names its tables bare, and
+   * Postgres refuses it the core's — even SQL that undoes the role, which
+   * lands on the login role, not the migrator (PR 3 review pass 1: a file
+   * that said END; ran its rest as the migrator). A plugin not enabled is not
+   * read: its schema, tables and rows stay as they are. 0, or 1 on a failure
+   * (the line names it; files before it stay applied and recorded, as the
+   * core's do) or a drift.
    */
   async function migratePlugins(): Promise<number> {
-    out(`\nplugins: ${named} — ledger plugin_migrations`);
+    out(`\nplugins: ${named} — ledger plugin_migrations, run as ${PLUGIN_LOGIN_ROLE}`);
     if (!dryRun) {
       await sql`
         CREATE TABLE IF NOT EXISTS public.plugin_migrations (
@@ -1302,119 +1339,167 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const recorded = new Map<string, string>(
       ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
     );
-    let pluginRan = 0;
-    let pluginSkipped = 0;
-    let pluginDrifted = 0;
-    for (const p of plugins as PluginMigrations[]) {
-      out(`  plugin ${p.name}  (schema ${p.schema}, role ${p.role})`);
-      if (p.files.length === 0) {
-        out("  ·  no migrations");
-        continue;
-      }
-      // The role and its schema, made by any run that names the plugin and
-      // finds either missing — not only before a pending file: a brain
-      // restored into a new cluster (roles are not in a dump) records every
-      // file and has no role (review pass 1). Read first, so a run with both
-      // in place and nothing pending asks no privilege of the migrator
-      // (review pass 2: CREATE SCHEMA IF NOT EXISTS checks the database's
-      // CREATE before it looks). The role owns what the plugin makes, the
-      // schema holds it; neither is ever dropped. A migrator that is no
-      // superuser takes membership in the role, so it may SET ROLE to it: on
-      // PG 16 a CREATEROLE role's own grant on a role it makes has ADMIN alone
-      // (createrole_self_grant unset), and CREATE SCHEMA … AUTHORIZATION and
-      // SET ROLE both need SET.
-      const [state] = (await sql`
-        SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
-               EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema,
-               (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
-               current_setting('server_version_num')::int AS version`) as { role: boolean; schema: boolean; superuser: boolean; version: number }[];
-      const canSet = async (q: SQL): Promise<boolean> =>
-        state.superuser || ((await q.unsafe(`SELECT pg_has_role(current_user, $1, '${state.version >= 160000 ? "SET" : "MEMBER"}') AS can`, [p.role])) as { can: boolean }[])[0].can;
-      const pending = p.files.some((m) => !recorded.has(`${p.name}/${m.name}`));
-      if (!dryRun && (!state.role || !state.schema || (pending && !(await canSet(sql))))) {
-        try {
-          await begin(async (tx: SQL) => {
-            if (!state.role) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
-            if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
-            if (!state.schema) await tx.unsafe(`CREATE SCHEMA ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
-          });
-        } catch (caught) {
-          err(`  ✗  plugin ${p.name}: its role and schema could not be made: ${(caught as Error).message}`);
-          err("  The migrating role must be able to CREATE ROLE and CREATE SCHEMA, and to SET ROLE to what it creates; the compose stack's postgres can.");
-          return 1;
+    const [me] = (await sql`SELECT current_user AS who, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser, current_setting('server_version_num')::int AS version`) as { who: string; superuser: boolean; version: number }[];
+    /** SET ROLE's own privilege: the SET option from PG 16, membership before. */
+    const setPrivilege = me.version >= 160000 ? "SET" : "MEMBER";
+    /** The grant that gives SET and nothing else: on PG 16 the options say so; before, the member's NOINHERIT does. */
+    const setGrant = (role: string, to: string) => `GRANT ${quoteIdent(role)} TO ${to}${me.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`;
+    const can = async (q: SQL, who: string, role: string): Promise<boolean> =>
+      // A CASE, not AND: Postgres may evaluate either side of AND first, and pg_has_role on a missing role errors.
+      ((await q.unsafe(`SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1) AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2) THEN pg_has_role($1, $2, '${setPrivilege}') ELSE false END AS can`, [who, role])) as { can: boolean }[])[0].can;
+    const hasFiles = (plugins as PluginMigrations[]).some((p) => p.files.length > 0);
+
+    // The login role, made once with the operator's password and never altered
+    // after: a second password would lock out the servers still holding the
+    // first. Preflight logs in as it, so a password that does not match is
+    // said there.
+    let pluginSql: SQL | null = null;
+    /** The login connection, opened at the first file that runs, its login checked: plugin SQL never runs as the migrator (PR 3 review pass 2). */
+    const loginSql = async (): Promise<SQL> => {
+      if (pluginSql) return pluginSql;
+      pluginSql = openSql(pluginLoginUrl(opts.url as string, opts.pluginPassword as string));
+      const [{ who }] = (await pluginSql`SELECT session_user AS who`) as { who: string }[];
+      if (who !== PLUGIN_LOGIN_ROLE) throw new Error(`the plugins' connection logged in as ${who}, not ${PLUGIN_LOGIN_ROLE}`);
+      return pluginSql;
+    };
+    if (!dryRun && hasFiles) {
+      try {
+        const [{ present }] = (await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS present`) as { present: boolean }[];
+        if (!present) {
+          const [{ statement }] = (await sql`SELECT format('CREATE ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', ${PLUGIN_LOGIN_ROLE}::text, ${opts.pluginPassword ?? ""}::text) AS statement`) as { statement: string }[];
+          await sql.unsafe(statement);
+          out(`  ✓  role ${PLUGIN_LOGIN_ROLE}  made (LOGIN, NOINHERIT; SET on each plugin's role, nothing else)`);
         }
+      } catch (caught) {
+        err(`  ✗  role ${PLUGIN_LOGIN_ROLE} could not be made: ${(caught as Error).message}`);
+        err("  The migrating role must be able to CREATE ROLE; the compose stack's postgres can.");
+        return 1;
       }
-      // A schema that was here, and what is in it, handed back to the role
-      // where another owns it: a brain restored into a cluster without the
-      // role comes back owned by the restoring role (the dump's ALTER … OWNER
-      // fails there, or --no-owner skips it), and the plugin's role reaches
-      // none of it (final review). Read first, as above; an ALTER … OWNER
-      // needs the migrator to own the object, or be a superuser, and to SET
-      // ROLE to the role.
-      if (!dryRun && state.schema) {
-        const [{ owner }] = (await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[];
-        const foreign = await pluginForeignOwned(sql, p.schema, p.role);
-        if (owner !== p.role || foreign.length > 0) {
+    }
+    try {
+      let pluginRan = 0;
+      let pluginSkipped = 0;
+      let pluginDrifted = 0;
+      for (const p of plugins as PluginMigrations[]) {
+        out(`  plugin ${p.name}  (schema ${p.schema}, role ${p.role})`);
+        if (p.files.length === 0) {
+          out("  ·  no migrations");
+          continue;
+        }
+        // The role, its schema and the login role's SET on it, made by any
+        // run that names the plugin and finds one missing — not only before a
+        // pending file: a brain restored into a new cluster (roles are not in
+        // a dump) records every file and has no role (review pass 1). Read
+        // first, so a run with all in place and nothing pending asks no
+        // privilege of the migrator (review pass 2: CREATE SCHEMA IF NOT
+        // EXISTS checks the database's CREATE before it looks). The role owns
+        // what the plugin makes, the schema holds it; neither is ever dropped.
+        // A migrator that is no superuser takes SET on the role to hand it a
+        // new schema (CREATE SCHEMA … AUTHORIZATION needs it): on PG 16 a
+        // CREATEROLE role's own grant on a role it makes has ADMIN alone
+        // (createrole_self_grant unset). The files themselves run on the
+        // login role, so the migrator needs no SET to run them.
+        const [state] = (await sql`
+          SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
+                 EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema`) as { role: boolean; schema: boolean }[];
+        const loginCan = state.role && (await can(sql, PLUGIN_LOGIN_ROLE, p.role));
+        if (!dryRun && (!state.role || !state.schema || !loginCan)) {
           try {
             await begin(async (tx: SQL) => {
-              if (!(await canSet(tx))) await tx.unsafe(`GRANT ${quoteIdent(p.role)} TO CURRENT_USER${state.version >= 160000 ? " WITH SET TRUE, INHERIT FALSE" : ""}`);
-              if (owner !== p.role) await tx.unsafe(`ALTER SCHEMA ${quoteIdent(p.schema)} OWNER TO ${quoteIdent(p.role)}`);
-              for (const f of foreign) await tx.unsafe(`ALTER ${f.kind} ${f.ident} OWNER TO ${quoteIdent(p.role)}`);
+              if (!state.role) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
+              if (!state.schema) {
+                if (!me.superuser && !(await can(tx, me.who, p.role))) await tx.unsafe(setGrant(p.role, "CURRENT_USER"));
+                await tx.unsafe(`CREATE SCHEMA ${quoteIdent(p.schema)} AUTHORIZATION ${quoteIdent(p.role)}`);
+              }
+              if (!(await can(tx, PLUGIN_LOGIN_ROLE, p.role))) await tx.unsafe(setGrant(p.role, quoteIdent(PLUGIN_LOGIN_ROLE)));
             });
-            out(`  ✓  ${owner !== p.role ? `schema ${p.schema} and ` : ""}${foreign.length} object(s) in it handed back to ${p.role}`);
           } catch (caught) {
-            err(`  ✗  plugin ${p.name}: what another role owns in ${p.schema} could not be handed back to ${p.role}: ${(caught as Error).message}`);
-            err("  The migrating role must own them, or be a superuser, and be able to SET ROLE to the plugin's role.");
+            err(`  ✗  plugin ${p.name}: its role and schema could not be made: ${(caught as Error).message}`);
+            err(`  The migrating role must be able to CREATE ROLE and CREATE SCHEMA, to SET ROLE to what it creates, and to grant it to ${PLUGIN_LOGIN_ROLE}; the compose stack's postgres can.`);
             return 1;
           }
         }
-      }
-      for (const m of p.files) {
-        const prior = recorded.get(`${p.name}/${m.name}`);
-        if (prior && prior !== m.sha) {
-          err(`  ⚠  ${p.name}/${m.name}  ALREADY APPLIED BUT FILE CHANGED (was ${prior}, now ${m.sha})`);
-          pluginDrifted++;
-          continue;
+        // A schema that was here, and what is in it, handed back to the role
+        // where another owns it: a brain restored without its owners
+        // (--no-owner, as a tier's refresh restores, or into a cluster
+        // without the role, where the dump's ALTER … OWNER fails) comes back
+        // the restoring role's, and the plugin's role reaches none of it
+        // (final review). Read first, as above; an ALTER … OWNER needs the
+        // migrator to own the object, or be a superuser, and to SET ROLE to
+        // the role.
+        if (!dryRun && state.schema) {
+          const [{ owner }] = (await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[];
+          const foreign = await pluginForeignOwned(sql, p.schema, p.role);
+          if (owner !== p.role || foreign.length > 0) {
+            try {
+              await begin(async (tx: SQL) => {
+                if (!me.superuser && !(await can(tx, me.who, p.role))) await tx.unsafe(setGrant(p.role, "CURRENT_USER"));
+                if (owner !== p.role) await tx.unsafe(`ALTER SCHEMA ${quoteIdent(p.schema)} OWNER TO ${quoteIdent(p.role)}`);
+                for (const f of foreign) await tx.unsafe(`ALTER ${f.kind} ${f.ident} OWNER TO ${quoteIdent(p.role)}`);
+              });
+              out(`  ✓  ${owner !== p.role ? `schema ${p.schema} and ` : ""}${foreign.length} object(s) in it handed back to ${p.role}`);
+            } catch (caught) {
+              err(`  ✗  plugin ${p.name}: what another role owns in ${p.schema} could not be handed back to ${p.role}: ${(caught as Error).message}`);
+              err("  The migrating role must own them, or be a superuser, and be able to SET ROLE to the plugin's role.");
+              return 1;
+            }
+          }
         }
-        if (prior) {
-          out(`  ·  ${m.name}  already applied`);
-          pluginSkipped++;
-          continue;
-        }
-        if (dryRun) {
-          out(`  →  ${m.name}  would apply (${m.sha}) as ${p.role} in ${p.schema}`);
+        for (const m of p.files) {
+          const prior = recorded.get(`${p.name}/${m.name}`);
+          if (prior && prior !== m.sha) {
+            err(`  ⚠  ${p.name}/${m.name}  ALREADY APPLIED BUT FILE CHANGED (was ${prior}, now ${m.sha})`);
+            pluginDrifted++;
+            continue;
+          }
+          if (prior) {
+            out(`  ·  ${m.name}  already applied`);
+            pluginSkipped++;
+            continue;
+          }
+          if (dryRun) {
+            out(`  →  ${m.name}  would apply (${m.sha}) as ${p.role} in ${p.schema}`);
+            pluginRan++;
+            continue;
+          }
+          try {
+            await (await loginSql()).begin(async (tx: SQL) => {
+              await tx.unsafe(`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
+              await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
+              await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(p.role)}`);
+              await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(p.schema)}, public`);
+              await tx.unsafe(m.sql);
+            });
+            // The ledger is the core's, written by the migrator's own
+            // connection once the file has committed: the login role holds
+            // nothing on it. A ledger write that fails after the file
+            // committed leaves the file to run again — which is why a
+            // plugin's migration says IF NOT EXISTS, as the core's do.
+            await sql`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES (${p.name}, ${m.name}, ${m.sha})`;
+          } catch (caught) {
+            const message = (caught as Error).message;
+            err(`  ✗  ${p.name}/${m.name}  FAILED: ${message}`);
+            if (/permission denied/.test(message)) err(`  A plugin's migration runs as ${p.role} on ${PLUGIN_LOGIN_ROLE}, which hold its own schema alone: a core table, or a schema not its own, is refused.`);
+            if (/password authentication failed/.test(message)) err(`  ${PLUGIN_LOGIN_ROLE} keeps the password it was made with: set OB1_PLUGIN_DB_PASSWORD to it, or change the role's password and the variable together.`);
+            return 1;
+          } finally {
+            // A temp table the file left past its transaction goes: Postgres
+            // searches temp before any schema, so it would stand in for the
+            // next plugin's table of that name (review pass 1).
+            if (pluginSql) await (pluginSql as SQL).unsafe("DISCARD TEMP").catch(() => {});
+          }
+          out(`  ✓  ${m.name}  applied`);
           pluginRan++;
-          continue;
         }
-        try {
-          await begin(async (tx: SQL) => {
-            await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(p.role)}`);
-            await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(p.schema)}, public`);
-            await tx.unsafe(m.sql);
-            // The ledger is the core's: recorded as the migrating role, not the plugin's.
-            await tx.unsafe("RESET ROLE");
-            await tx`INSERT INTO public.plugin_migrations (plugin, name, sha256) VALUES (${p.name}, ${m.name}, ${m.sha})`;
-          });
-        } catch (caught) {
-          const message = (caught as Error).message;
-          err(`  ✗  ${p.name}/${m.name}  FAILED: ${message}`);
-          if (/permission denied/.test(message)) err(`  A plugin's migration runs as ${p.role}, which holds its own schema alone: a core table, or a schema not its own, is refused.`);
-          return 1;
-        } finally {
-          // A temp table the file left past its transaction goes: Postgres
-          // searches temp before any schema, so it would stand in for the
-          // next plugin's table of that name (review pass 1). A session
-          // search_path it set is moot: the next file sets its own, LOCAL,
-          // and the ledger is named by its schema.
-          await sql.unsafe("DISCARD TEMP");
-        }
-        out(`  ✓  ${m.name}  applied`);
-        pluginRan++;
       }
+      out(`\nplugins: ${dryRun ? "would apply" : "applied"} ${pluginRan}, skipped ${pluginSkipped}${pluginDrifted ? `, DRIFTED ${pluginDrifted}` : ""}`);
+      if (pluginDrifted > 0) err("\nA plugin's migration file changed after it was applied: add a new file rather than editing an old one, as with the core's.");
+      return pluginDrifted > 0 ? 1 : 0;
+    } finally {
+      // Widened: assigned inside loginSql, which the checker's flow analysis does not follow.
+      const opened = pluginSql as SQL | null;
+      if (opened) await opened.close().catch(() => {});
     }
-    out(`\nplugins: ${dryRun ? "would apply" : "applied"} ${pluginRan}, skipped ${pluginSkipped}${pluginDrifted ? `, DRIFTED ${pluginDrifted}` : ""}`);
-    if (pluginDrifted > 0) err("\nA plugin's migration file changed after it was applied: add a new file rather than editing an old one, as with the core's.");
-    return pluginDrifted > 0 ? 1 : 0;
   }
 }
 
@@ -1447,8 +1532,12 @@ if (import.meta.main) {
       grant: cli.value("grant"),
       groups: cli.value("groups"),
       exact: cli.has("exact"),
-      // The plugins the brain runs, as the server reads them (SMD-2310).
+      // The plugins the brain runs, as the server reads them, and the
+      // password of the login role their SQL runs on (SMD-2310); the URL too,
+      // which that role's connection is built from.
       plugins: process.env.OB1_PLUGINS,
+      pluginPassword: process.env.OB1_PLUGIN_DB_PASSWORD,
+      url,
     });
   });
 }

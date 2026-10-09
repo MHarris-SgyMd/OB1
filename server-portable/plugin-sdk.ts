@@ -92,7 +92,17 @@ export interface PluginManifest {
   description: string;
   /** Each operation, keyed by its name: lower-case letters, digits and underscores. Its tool is `<name>_<key>`, a hyphen in the plugin's name read as `_`. */
   operations: Record<string, PluginOperation>;
+  /**
+   * The plugin's pages in the operator GUI (SMD-2280): each a path under the
+   * plugin's own and the label its nav entry shows. The REST core lists an
+   * enabled plugin's at GET /v1/plugins, which the GUI's nav reads; the pages
+   * themselves are the GUI's to render.
+   */
+  gui?: { pages: GuiPage[] };
 }
+
+/** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */
+export type GuiPage = { path: string; label: string };
 
 /** One operation, its handler's input and answer typed from its own schemas. */
 export function operation<I extends Shape, O extends Shape>(op: PluginOperation<I, O>): PluginOperation {
