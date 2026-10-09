@@ -2199,6 +2199,142 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(past === null, `an instant an hour and a quarter ahead by the database's clock is passed over (${past})`);
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
 
+  // What consolidation found (SMD-2680): the proposal queue and the standing
+  // relations, each against a count taken here row by row. Five thoughts,
+  // three tickets: t0 and t1 two ticket rows (`issue`), t2 a second row of
+  // t1's ticket, t3 no ticket, t4 a dated section of a third ticket (`ticket`
+  // alone, as the Linear adapter writes it). Pending: t0–t1 and t2–t4 (board
+  // pairs), t1–t2 (one ticket), t3–t0 (one side no ticket); stale: t0–t4;
+  // rejected: t1–t4. Standing relations: t1→t0 and t4→t1 related (board
+  // pairs), t2→t1 evolves (one ticket), t3→t0 duplicate; t4→t0 related,
+  // closed. Then Linear links t0's ticket to t1's: those pairs leave the
+  // board count, by 079's rule read now.
+  {
+    assert(db.proposals && db.proposals.pending === 0 && db.proposals.oldestPendingS === null && db.relations && db.relations.related === 0,
+      `with nothing judged the queue and the relations are there, empty (${JSON.stringify(db.proposals)}, ${JSON.stringify(db.relations)})`);
+    const t = ids.slice(0, 5);
+    const issues = ["SMD-7001", "SMD-7002", "SMD-7002", null, null];
+    // The corpus files some thoughts under a ticket already: kept, cleared, put back after.
+    const had = (await sql`SELECT id::text AS id, jsonb_strip_nulls(jsonb_build_object('issue', metadata->'issue', 'ticket', metadata->'ticket')) AS keys
+                             FROM thoughts WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND (metadata ? 'issue' OR metadata ? 'ticket')`) as { id: string; keys: unknown }[];
+    await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    for (const [i, issue] of issues.entries()) if (issue) await sql`UPDATE thoughts SET metadata = metadata || ${{ issue }}::jsonb WHERE id = ${t[i]}::uuid`;
+    await sql`UPDATE thoughts SET metadata = metadata || ${{ ticket: "SMD-7003" }}::jsonb WHERE id = ${t[4]}::uuid`;
+    const propose = async (older: string, newer: string) => {
+      await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, 'e2e', 0.9, 'consolidate:e2e@p4', NULL)`;
+      return (await sql`SELECT id FROM supersession_proposals WHERE older_id = ${older}::uuid AND newer_id = ${newer}::uuid`)[0].id as string;
+    };
+    await propose(t[0], t[1]);
+    await propose(t[1], t[2]);
+    await propose(t[2], t[4]);
+    const oldest = await propose(t[3], t[0]);
+    await sql`UPDATE supersession_proposals SET judged_at = now() - interval '5 days' WHERE id = ${oldest}::uuid`;
+    const stale = await propose(t[0], t[4]);
+    await sql`UPDATE supersession_proposals SET status = 'stale', judged_at = now() - interval '40 days' WHERE id = ${stale}::uuid`;
+    const rejected = await propose(t[1], t[4]);
+    await sql`SELECT review_supersession_proposal(${rejected}::uuid, 'reject', 'e2e', NULL, NULL)`;
+    const relate = (newer: string, older: string, word: string) =>
+      sql`SELECT record_thought_relation(${newer}::uuid, ${older}::uuid, ${word}, 0.7, 'consolidate:e2e@p4', NULL, 'a', 'b', NULL)`;
+    await relate(t[1], t[0], "related");
+    await relate(t[4], t[1], "related");
+    await relate(t[2], t[1], "evolves");
+    await relate(t[3], t[0], "duplicate");
+    await relate(t[4], t[0], "related");
+    await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND thought_id = ${t[4]}::uuid AND payload->>'target' = ${t[0]}`;
+
+    // The count by hand: every row read, the rule applied here.
+    // A ticket is metadata.ticket, else metadata.issue; whether Linear links
+    // two is 079's own predicate, asked per pair.
+    const ticketOf = new Map((await sql`SELECT id::text AS id, coalesce(metadata->>'ticket', metadata->>'issue') AS k FROM thoughts`).map((r: { id: string; k: string | null }) => [r.id, r.k]));
+    let linkedPairs = new Set<string>();
+    const readLinks = async () => {
+      linkedPairs = new Set((await sql`SELECT a.id::text AS a, b.id::text AS b FROM thoughts a, thoughts b
+                                         WHERE a.id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND b.id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND consolidation_tickets_linked(a.metadata, b.metadata)`)
+        .map((r: { a: string; b: string }) => `${r.a}|${r.b}`));
+    };
+    await readLinks();
+    const boardPair = (a: string, b: string) => ticketOf.get(a) != null && ticketOf.get(b) != null && ticketOf.get(a) !== ticketOf.get(b) && !linkedPairs.has(`${a}|${b}`);
+    const rows = await sql`SELECT older_id::text AS o, newer_id::text AS n, status, extract(epoch FROM now() - judged_at)::float8 AS age FROM supersession_proposals`;
+    const before = (await health("e2e-key") as Record<string, any>).database ?? {};
+    const pend = rows.filter((r: { status: string }) => r.status === "pending");
+    const want = {
+      pending: pend.length,
+      stale: rows.filter((r: { status: string }) => r.status === "stale").length,
+      oldest: Math.max(...pend.map((r: { age: number }) => r.age)),
+      board: pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length,
+    };
+    const facets = (await sql`SELECT thought_id::text AS h, payload, valid_until FROM thought_facets WHERE kind = 'relation'`).filter((f: { valid_until: unknown }) => f.valid_until === null);
+    const byWord = (w: string) => facets.filter((f: { payload: { relation: string } }) => f.payload.relation === w).length;
+    const wantRel = { related: byWord("related"), evolves: byWord("evolves"), duplicate: byWord("duplicate"), boardPairs: facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length };
+    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.boardPairs === 2,
+      `the fixture is what the comment says (${JSON.stringify(want)}, ${JSON.stringify(wantRel)})`);
+    assert(before.proposals?.boardPairs === want.board && before.relations?.boardPairs === wantRel.boardPairs,
+      `before any link, a ticket row and another ticket's section count as a board pair (${before.proposals?.boardPairs}, ${before.relations?.boardPairs})`);
+    // Linear links t0's ticket to t1's after the verdicts: nothing moves the
+    // rows, and the count reads the link now.
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[0]}::uuid, 'link', ${{ relation: "relates_to", system: "linear", target: "SMD-7002" }}::jsonb)`;
+    await readLinks();
+    want.board = pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length;
+    wantRel.boardPairs = facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length;
+    assert(want.board === 1 && wantRel.boardPairs === 1, `…the link takes t0–t1 out of both counts by hand (${want.board}, ${wantRel.boardPairs})`);
+
+    const found = (await health("e2e-key") as Record<string, any>).database ?? {};
+    const q = found.proposals ?? {};
+    assert(q.pending === want.pending && q.stale === want.stale && q.boardPairs === want.board && Math.abs(q.oldestPendingS - want.oldest) <= 2 && q.oldestPendingS >= 5 * 86400,
+      `keyed /health's proposals are the queue counted by hand: pending, stale, the oldest's age, the board pairs — not one ticket's two rows, not a row with no ticket, not a stale or rejected row (${JSON.stringify(q)} vs ${JSON.stringify(want)})`);
+    assert(JSON.stringify(found.relations) === JSON.stringify(wantRel),
+      `…and its relations the standing ones by word, the closed one not counted, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
+    assert(Object.keys(found.unread ?? {}).length === 0, `every read answered (${JSON.stringify(found.unread)})`);
+    const table = await call("brain_info");
+    const pRow = table.split("\n").find((l) => l.startsWith("Proposals"));
+    const rRow = table.split("\n").find((l) => l.startsWith("Relations"));
+    assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\)$/.test(rRow ?? ""),
+      `the tool's table carries the same counts (${pRow} / ${rRow})`);
+
+    // A server role granted capture and server — no worker group — reads the
+    // queue: the server group's SELECT on supersession_proposals (SMD-2680).
+    const { grantStatements } = await import("../db/config.mjs");
+    await sql.unsafe(`DROP ROLE IF EXISTS e2e_server_only`);
+    await sql.unsafe(`CREATE ROLE e2e_server_only LOGIN PASSWORD 'server'`);
+    await sql.unsafe(`GRANT USAGE ON SCHEMA public TO e2e_server_only`);
+    for (const st of grantStatements("e2e_server_only", { groups: ["capture", "server"] })) await sql.unsafe(st);
+    const asServer = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//e2e_server_only:server@"), max: 1 });
+    try {
+      const f = await (await import("./brain-info.ts")).readDatabaseFacts(asServer);
+      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread),
+        `a role granted capture and server alone reads the queue and the relations (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
+    } finally {
+      await asServer.close();
+      await sql.unsafe(`DROP OWNED BY e2e_server_only`);
+      await sql.unsafe(`DROP ROLE e2e_server_only`);
+    }
+
+    // Taken back with their lineage rows, so the corpus is as it was.
+    const made = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])
+                            UNION ALL SELECT id::text FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`).map((r: { id: string }) => r.id);
+    await sql`DELETE FROM derivations WHERE artifact_id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+    // Linear marks t4's ticket a duplicate of t2's: 079 leaves duplicate_of
+    // to the judge, but the board relates the two, so t2–t4 and t4→t1 leave
+    // both counts (review pass 2).
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[4]}::uuid, 'link', ${{ relation: "duplicate_of", system: "linear", target: "SMD-7002" }}::jsonb)`;
+    const dup = (await health("e2e-key") as Record<string, any>).database ?? {};
+    assert(dup.proposals?.boardPairs === 0 && dup.relations?.boardPairs === 0 && dup.proposals?.pending === want.pending,
+      `a pair Linear marks duplicate is not one the board does not link (${dup.proposals?.boardPairs}, ${dup.relations?.boardPairs})`);
+    // The other way round — t2's ticket marked the duplicate — holds each
+    // read's other direction (review pass 3).
+    await sql`DELETE FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[4]}::uuid AND payload->>'target' = 'SMD-7002'`;
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[2]}::uuid, 'link', ${{ relation: "duplicate_of", system: "linear", target: "SMD-7003" }}::jsonb)`;
+    const dupBack = (await health("e2e-key") as Record<string, any>).database ?? {};
+    assert(dupBack.proposals?.boardPairs === 0 && dupBack.relations?.boardPairs === 0,
+      `…whichever ticket Linear marks the duplicate (${dupBack.proposals?.boardPairs}, ${dupBack.relations?.boardPairs})`);
+
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    await sql`DELETE FROM thought_facets WHERE kind = 'link' AND ((thought_id = ${t[0]}::uuid AND payload->>'target' = 'SMD-7002') OR (thought_id = ${t[2]}::uuid AND payload->>'target' = 'SMD-7003'))`;
+    await sql`DELETE FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`;
+    await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    for (const h of had) await sql`UPDATE thoughts SET metadata = metadata || ${h.keys}::jsonb WHERE id = ${h.id}::uuid`;
+  }
+
   // The workers' heartbeats (SMD-2261, db/pass-stamp.ts): none stamped here,
   // then a board-sync row a stopped worker left twenty minutes ago — stale
   // against its five-minute interval, in the keyed body and the tool's row.
@@ -2367,6 +2503,18 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
         `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
       assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: at most ${waiting} backend(s) waiting on the lock, one body`);
+      // The reads that touch a refused table are not tried: one lock wait per
+      // table, not one per read — three here, where six reads touch the three
+      // (SMD-2680: the board-sync watermark, which reads thoughts alone, and
+      // the two board-pair counts, which join it). The queue and the relations stand.
+      // A board count with nothing to count reads 0 with no entry, lock or not
+      // (review pass 5): this corpus holds no proposal and no relation here.
+      const notTried = (f: string) => d.unread?.[f]?.reason === "timeout" && /^not tried — a lock on thoughts \(the table or one of its indexes\) was refused to an earlier read here/.test(d.unread[f].message);
+      const relTotal = (d.relations?.related ?? 0) + (d.relations?.evolves ?? 0) + (d.relations?.duplicate ?? 0);
+      const boardOk = (f: string, total: number, parent: { boardPairs?: unknown } | undefined) => total === 0 ? !(f in (d.unread ?? {})) && parent?.boardPairs === 0 : notTried(f);
+      assert(notTried("boardSync") && boardOk("proposals.boardPairs", d.proposals?.pending ?? -1, d.proposals) && boardOk("relations.boardPairs", relTotal, d.relations) && took < 1500
+          && typeof d.proposals?.pending === "number" && typeof d.relations?.related === "number",
+        `…the reads touching thoughts after its count are not tried — a board count with nothing to count reads 0 — so the probe pays three lock waits (${JSON.stringify(d.proposals)}, ${JSON.stringify(d.relations)}, ${JSON.stringify(Object.keys(d.unread ?? {}))}; ${Math.round(took)} ms)`);
 
       // A probe while the tool's read is in flight has a read of its own, at
       // the health ceilings (review pass 3: keyed by deadline alone, a shared

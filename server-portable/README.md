@@ -369,6 +369,8 @@ Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
+Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
+Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
@@ -396,6 +398,25 @@ worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
 three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
+`Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
+pass's findings show without a query. `Proposals` is the queue a reviewer works:
+how many are pending, how long ago the oldest was judged (a pass that re-judges
+a stale proposal restarts it), how many pair two tickets the board does not link
+— filed under two different tickets, `metadata.ticket` else `metadata.issue`,
+with no active Linear link between them now (079's `child_of`, `blocks`,
+`blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
+after a verdict takes the pair out; not counted before 079 — and the stale
+ones; `none pending` when there is none.
+`consolidate.ts --list` and the `list_supersession_proposals` tool list them,
+and preflight's `proposals` row warns once the oldest has waited past
+`OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
+(084) by word, with their board pairs counted the same way; nothing waits on
+one, so nothing warns (`consolidate.ts --list relations` shows them); `none
+standing` when there is none, `none — migration 084 is not applied` before 084.
+A board count counts rows — proposals, relation facets — not distinct pairs of
+tickets: five proposals between two tickets' thoughts count five, and a pair
+can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
+answer and `no table` before its table's migration.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
@@ -403,7 +424,13 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
-heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261) or
+heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
+`proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
+relations as `relations`, `{ related, evolves, duplicate, boardPairs }`, each
+null when not read or absent; each `boardPairs` is a read of its own, last,
+null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
+did not answer, null with no entry before 079 (or when its field was not read),
+and 0, not read, when there is nothing to count, SMD-2680) or
 `{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
 server's own view of its public origin (SMD-2382): `{ configured, origin,
 advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
@@ -411,7 +438,10 @@ advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers
 process is serving. A database that refuses at once is `database.error`; one
 that never answers (a dropped route) leaves the agent registry unanswered too,
 and the body is then the literal `ok`, as for a key the server cannot vouch for
-(below); tables locked by a migration cost their lock waits. The
+(below); tables locked by a migration cost their lock waits — one per table:
+once a read of one table alone is refused its lock (on the table or one of its
+indexes), a later read that touches it is named in `unread` as not tried rather
+than waiting again. The
 read is one transaction whose statements are capped at 800 ms and whose lock
 waits at 300 ms (never above a stricter setting the role already has), a read
 that does not answer is named in `unread` with its reason (`refused`,
@@ -706,7 +736,7 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 859 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
+bun test-server.ts        # 874 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
 bun test-auth.ts          # 187 — scoped, hashed, named keys
 bun test-rest.ts          # 315 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
 bun test-plugins.ts       # 153 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks

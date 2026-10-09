@@ -46,8 +46,8 @@ export const READ_LOCK_TIMEOUT_MS = 1_000;
 export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "ob1_entities"] as const;
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
-/** The tables the read asks after: the counted ones, the config and the ledger. */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES] as const;
+/** The tables the read asks after: the counted ones, the config, the ledger, and where consolidation's findings stand (SMD-2680). */
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -121,6 +121,27 @@ export interface DatabaseFacts {
    * absent. A worker that never ran on this brain has no row.
    */
   workers: { heartbeats: WorkerHeartbeat[]; ignored: number } | null;
+  /**
+   * The supersession-proposal queue (029, SMD-2680): what consolidation found
+   * that waits on a reviewer. `pending` and `stale` by status; the oldest
+   * pending row's verdict's age in seconds, by the database's clock (null when
+   * none is pending) — since it was judged, which a pass re-judging a stale
+   * row restarts, not since a reviewer first could see the pair; and how many
+   * pending rows pair two tickets the board does not link (see the comment
+   * above PROPOSALS_SQL; its own read, `proposals.boardPairs` in `unread` when
+   * it did not answer, and null without an entry before 079). Null when the
+   * table is absent or not read (`unread` names it). Not a stats read:
+   * preflight's proposals row reads it.
+   */
+  proposals: ProposalQueue | null;
+  /**
+   * The judged relations standing (084, SMD-2680): `relation` facets with no
+   * valid_until, by word, and how many pair two tickets the board does not
+   * link, as `proposals` counts them. Nothing waits on them, so no row warns.
+   * Null when not read or not asked (`stats: false`); zero on a brain without
+   * 084, which holds none.
+   */
+  relations: StandingRelations | null;
   /** Every HNSW index on a table on this connection's search_path. */
   hnsw: HnswIndex[];
   /** Field → why its read did not answer. Empty when every read answered. */
@@ -311,6 +332,132 @@ export function boardSyncValue(w: unknown): string | null {
   return w;
 }
 
+/** The proposal queue as the record carries it (SMD-2680). */
+export interface ProposalQueue {
+  pending: number;
+  stale: number;
+  oldestPendingS: number | null;
+  /** Null where 079's rule is not there to apply. */
+  boardPairs: number | null;
+}
+
+/** The standing judged relations as the record carries them (SMD-2680). */
+export interface StandingRelations {
+  related: number;
+  evolves: number;
+  duplicate: number;
+  /** Null where 079's rule is not there to apply. */
+  boardPairs: number | null;
+}
+
+// A board pair, in both reads below: the two thoughts are filed under two
+// different tickets — coalesce(metadata->>'ticket', metadata->>'issue'), the
+// identity node_state and 079 read, so a Linear section row (`ticket`) counts
+// as its ticket's — and the board relates them in no way, now: 079's
+// consolidation_tickets_linked (child_of, blocks, blocked_by, relates_to)
+// says no, and no active Linear duplicate_of joins them either way. 079 leaves
+// duplicate_of out on purpose, for the judge — a duplicate pair stays a
+// candidate — but a pair Linear marks duplicate is linked as far as a reader
+// of this count is concerned (review pass 2). A link made after a verdict does
+// not move its row (only a text move makes one stale, 063), so the link is
+// read here, not assumed. Before 079 the count is not taken (null): the rule
+// it applies is not there.
+
+// The board pairs are reads of their own, after the rest (review pass 2):
+// 079's predicate is 0.1–0.2 ms a call where it looks a link up (079's note)
+// and more on a ticket many links point at; measured, one statement passed the
+// health cap at about 45k pending rows — and a timeout then takes the board
+// count alone, not the queue beside it.
+
+/** The queue: the pending and stale rows. */
+const PROPOSALS_SQL = (sql: SqlTag) => sql`
+  SELECT count(*) FILTER (WHERE p.status = 'pending')::int AS pending,
+         count(*) FILTER (WHERE p.status = 'stale')::int AS stale,
+         extract(epoch FROM now() - min(p.judged_at) FILTER (WHERE p.status = 'pending'))::float8 AS oldest_s
+    FROM supersession_proposals p
+   WHERE p.status IN ('pending', 'stale')`;
+
+/** The pending rows that pair two tickets the board does not link. */
+const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
+  SELECT count(*) FILTER (WHERE x.ka <> x.kb
+                            AND NOT consolidation_tickets_linked(x.am, x.bm)
+                            AND NOT EXISTS (SELECT 1 FROM thought_facets d JOIN thoughts dh ON dh.id = d.thought_id
+                                             WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
+                                               AND (coalesce(dh.metadata->>'ticket', dh.metadata->>'issue'), d.payload->>'target') IN ((x.ka, x.kb), (x.kb, x.ka))))::int AS n
+    FROM (SELECT o.metadata AS am, n.metadata AS bm,
+                 coalesce(o.metadata->>'ticket', o.metadata->>'issue') AS ka, coalesce(n.metadata->>'ticket', n.metadata->>'issue') AS kb
+            FROM supersession_proposals p
+            JOIN thoughts o ON o.id = p.older_id
+            JOIN thoughts n ON n.id = p.newer_id
+           WHERE p.status = 'pending') x`;
+
+/** The standing relations by word. */
+const RELATIONS_SQL = (sql: SqlTag) => sql`
+  SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
+         count(*) FILTER (WHERE f.payload->>'relation' = 'evolves')::int AS evolves,
+         count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate
+    FROM thought_facets f
+   WHERE f.kind = 'relation' AND f.valid_until IS NULL`;
+
+/**
+ * The standing relations that pair two tickets the board does not link. The
+ * target is cast only on a relation row, whose target 084's trigger checked is
+ * a thought's id — a link facet's target is an identity such as SMD-12. A
+ * standing relation's target exists: 084 closes a relation when its target is
+ * deleted.
+ */
+const RELATIONS_BOARD_SQL = (sql: SqlTag) => sql`
+  SELECT count(*) FILTER (WHERE x.ka <> x.kb
+                            AND NOT consolidation_tickets_linked(x.am, x.bm)
+                            AND NOT EXISTS (SELECT 1 FROM thought_facets d JOIN thoughts dh ON dh.id = d.thought_id
+                                             WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
+                                               AND (coalesce(dh.metadata->>'ticket', dh.metadata->>'issue'), d.payload->>'target') IN ((x.ka, x.kb), (x.kb, x.ka))))::int AS n
+    FROM (SELECT h.metadata AS am, t.metadata AS bm,
+                 coalesce(h.metadata->>'ticket', h.metadata->>'issue') AS ka, coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS kb
+            FROM thought_facets f
+            JOIN thoughts h ON h.id = f.thought_id
+            JOIN thoughts t ON t.id = CASE WHEN f.kind = 'relation' THEN (f.payload->>'target')::uuid END
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL) x`;
+
+/**
+ * What a refusal names: `permission denied for table X` or `for function X`,
+ * as Postgres words it (a table unqualified), or null for another message.
+ * The table row and preflight's remedy name what was refused (review pass 2).
+ */
+export function deniedObject(message: string): { kind: "table" | "function"; name: string } | null {
+  const m = /permission denied for (table|function) (\w+)/i.exec(message);
+  return m ? { kind: m[1].toLowerCase() as "table" | "function", name: m[2] } : null;
+}
+
+/** A count the record may carry: a safe integer at least 0, or a read that did not answer. */
+function countOf(field: string, n: unknown): number {
+  const v = typeof n === "string" ? Number(n) : n;
+  if (!count(v)) throw new Error(`the ${field} read answered ${typeof n === "number" || typeof n === "string" ? "a value that is not a count" : typeof n}`);
+  return v;
+}
+
+/** The queue as the record carries it: counts, and a whole number of seconds for the oldest pending row. */
+export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest_s?: unknown } | undefined): ProposalQueue {
+  if (!row) throw new Error("the proposals read answered no row");
+  const pending = countOf("proposals", row.pending);
+  const age = row.oldest_s == null ? null : Number(row.oldest_s);
+  if (age !== null && !Number.isFinite(age)) throw new Error("the proposals read answered an age that is not a number");
+  // judged_at defaults to now(); a clock moved back can leave it ahead of the read's.
+  // The board pairs are their own read's (boardPairsValue), filled in after.
+  return { pending, stale: countOf("proposals", row.stale), oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)), boardPairs: null };
+}
+
+/** The standing relations as the record carries them. */
+export function relationsValue(row: { related?: unknown; evolves?: unknown; duplicate?: unknown } | undefined): StandingRelations {
+  if (!row) throw new Error("the relations read answered no row");
+  return { related: countOf("relations", row.related), evolves: countOf("relations", row.evolves), duplicate: countOf("relations", row.duplicate), boardPairs: null };
+}
+
+/** A board-pair read's answer: a count, or a read that did not answer. */
+export function boardPairsValue(field: string, row: { n?: unknown } | undefined): number {
+  return countOf(field, row?.n);
+}
+
 /**
  * Read the database's facts over a direct connection — the SQL store's pool, or
  * preflight's own client — in one transaction. Raises only when the transaction
@@ -345,6 +492,8 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
              -- path reaches, and the schema is the point of the message.
              (SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE c.oid = to_regclass('schema_migrations')) AS ledger_resolves_to,
+             -- 079's pair rule, which the findings' board pairs apply (SMD-2680).
+             to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS tickets_linked,
              jsonb_build_object(
                'ob1_config', to_regclass('ob1_config') IS NOT NULL,
                -- The fork's ledger resolves only if the table the path
@@ -355,12 +504,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'thoughts', to_regclass('thoughts') IS NOT NULL,
                'thought_audit', to_regclass('thought_audit') IS NOT NULL,
                'thought_chunks', to_regclass('thought_chunks') IS NOT NULL,
-               'ob1_entities', to_regclass('ob1_entities') IS NOT NULL) AS resolved,
+               'ob1_entities', to_regclass('ob1_entities') IS NOT NULL,
+               'supersession_proposals', to_regclass('supersession_proposals') IS NOT NULL,
+               'thought_facets', to_regclass('thought_facets') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -388,6 +539,8 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       databaseBytes: null,
       boardSync: null,
       workers: null,
+      proposals: null,
+      relations: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
     };
@@ -398,7 +551,9 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
     // has it where this role cannot reach.
     // `clear` takes a value back when the savepoint fails after the read wrote
     // it (its RELEASE, say), so a fact is never both read and unread (review pass 4).
-    type Guarded = { field: string; table?: KnownTable; read: (sp: SqlTag) => Promise<void>; clear: () => void };
+    // `joins` names the other tables a read touches (SMD-2680), so a lock
+    // already refused on one of them is not waited on again below.
+    type Guarded = { field: string; table?: KnownTable; joins?: KnownTable[]; read: (sp: SqlTag) => Promise<void>; clear: () => void };
     const guarded: Guarded[] = [
       {
         field: "ob1_config",
@@ -435,6 +590,40 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
             ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
+            { field: "relations", table: "thought_facets" as const, read: async (sp: SqlTag) => { facts.relations = relationsValue((await RELATIONS_SQL(sp))[0]); }, clear: () => { facts.relations = null; } },
+          ]
+        : []),
+      // Not a stats read: preflight's proposals row reads it (SMD-2680).
+      {
+        field: "proposals",
+        table: "supersession_proposals",
+        read: async (sp) => { facts.proposals = proposalsValue((await PROPOSALS_SQL(sp))[0]); },
+        clear: () => { facts.proposals = null; },
+      },
+      // The board pairs last, each its own read, and only where 079's rule is
+      // there to apply (null, no entry, before it): the costly reads, so a
+      // timeout or a deadline takes them alone — the queue's first, the one a
+      // reviewer acts on (review pass 3). Each fills in its field's count once
+      // that field was read; on a stats read, after a refused lock on thoughts
+      // neither is sent.
+      ...(cat.tickets_linked === true
+        ? [
+            { field: "proposals.boardPairs", table: "supersession_proposals" as const, joins: ["thoughts" as const, "thought_facets" as const],
+              read: async (sp: SqlTag) => {
+                if (!facts.proposals) return;
+                // Nothing pending pairs nothing: not sent, so a refusal of 079's predicate cannot speak for an empty queue (review pass 4).
+                facts.proposals.boardPairs = facts.proposals.pending === 0 ? 0 : boardPairsValue("the queue's board pairs", (await PROPOSALS_BOARD_SQL(sp))[0]);
+              },
+              clear: () => { if (facts.proposals) facts.proposals.boardPairs = null; } },
+            ...(stats
+              ? [{ field: "relations.boardPairs", table: "thought_facets" as const, joins: ["thoughts" as const],
+                   read: async (sp: SqlTag) => {
+                     if (!facts.relations) return;
+                     const r = facts.relations;
+                     r.boardPairs = r.related + r.evolves + r.duplicate === 0 ? 0 : boardPairsValue("relations' board pairs", (await RELATIONS_BOARD_SQL(sp))[0]);
+                   },
+                   clear: () => { if (facts.relations) facts.relations.boardPairs = null; } }]
+              : []),
           ]
         : []),
     ];
@@ -462,8 +651,19 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       }
     }
 
+    // A table whose lock a read of it alone was refused (55P03): a later read
+    // that touches it is not tried, so a migration holding one table costs
+    // one lock wait, not one per read (SMD-2680). Only a single-table read
+    // says which table it was; a join's refusal names none.
+    const lockRefused = new Set<KnownTable>();
     for (const g of toRun) {
       if (progress.abandoned) break; // snapshotFacts named what is still pending
+      const refused = [g.table, ...(g.joins ?? [])].find((t): t is KnownTable => t !== undefined && lockRefused.has(t));
+      if (refused) {
+        progress.pending.delete(g.field);
+        facts.unread[g.field] = { reason: "timeout", message: `not tried — a lock on ${refused} (the table or one of its indexes) was refused to an earlier read here (lock timeout)` };
+        continue;
+      }
       try {
         // The field leaves `pending` in the same synchronous step that writes
         // it, before the savepoint's RELEASE round trip: a deadline between
@@ -479,10 +679,28 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         progress.pending.delete(g.field);
         g.clear();
         facts.unread[g.field] = { reason: unreadReason(e), message: message(e) };
+        if (g.table && !g.joins?.length && String((e as { errno?: unknown })?.errno ?? "") === "55P03") lockRefused.add(g.table);
       }
     }
+    settleBoardPairs(facts);
     return facts;
   });
+}
+
+/**
+ * A board count that has nothing to count reads 0, and one whose field was not
+ * read reads nothing: neither keeps an `unread` entry, whatever left it
+ * unread — a lock refused earlier, the deadline (review pass 5). Run on a
+ * finished read and on a snapshot.
+ */
+function settleBoardPairs(facts: DatabaseFacts): void {
+  const settle = (field: string, parent: { boardPairs: number | null } | null, total: number | undefined) => {
+    if (!(field in facts.unread)) return;
+    if (parent === null) delete facts.unread[field];
+    else if (total === 0) { delete facts.unread[field]; parent.boardPairs = 0; }
+  };
+  settle("proposals.boardPairs", facts.proposals, facts.proposals?.pending);
+  settle("relations.boardPairs", facts.relations, facts.relations ? facts.relations.related + facts.relations.evolves + facts.relations.duplicate : undefined);
 }
 
 /** Every read the progress still has pending, named with the reason it was not reached. */
@@ -504,7 +722,10 @@ function markPending(progress: ReadProgress, unread: Unread): void {
 export function snapshotFacts(progress: ReadProgress, unread: Unread = { reason: "deadline", message: "not read before the deadline" }): DatabaseFacts | null {
   progress.abandoned = true;
   markPending(progress, unread);
-  return progress.facts ? structuredClone(progress.facts) : null;
+  if (!progress.facts) return null;
+  const snapshot = structuredClone(progress.facts);
+  settleBoardPairs(snapshot);
+  return snapshot;
 }
 
 /** What the server process knows about itself — no database needed. */
@@ -652,6 +873,31 @@ function workersLine(db: DatabaseSummary): string {
   return heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + tail;
 }
 
+/** "4 pair two tickets the board does not link", `?` when that read did not answer, or nothing. */
+const boardTail = (n: number | null, unread: Unread | undefined) =>
+  unread
+    ? `; board pairs ? (${unread.reason === "refused" && deniedObject(unread.message)?.kind === "function" ? "079's predicate not executable by this role" : unreadWords(unread)})`
+    : n ? `; ${n} pair two tickets the board does not link` : "";
+
+/** The Proposals row: the queue, none, or why it was not read (SMD-2680). */
+function proposalsLine(db: DatabaseSummary): string {
+  const p = db.proposals;
+  if (p === null) return "proposals" in db.unread ? `? (${deniedObject(db.unread.proposals.message)?.name ?? "supersession_proposals"} ${unreadWords(db.unread.proposals)})` : "no table — migration 029 is not applied";
+  const stale = p.stale ? `; ${p.stale} stale` : "";
+  if (p.pending === 0) return `none pending${stale}`;
+  return `${p.pending} pending (the oldest judged ${p.oldestPendingS === null ? "?" : `${ago(p.oldestPendingS)} ago`}${boardTail(p.boardPairs, db.unread["proposals.boardPairs"])})${stale}`;
+}
+
+/** The Relations row: the standing judged relations by word, none, or why they were not read (SMD-2680). */
+function relationsLine(db: DatabaseSummary): string {
+  const r = db.relations;
+  if (r === null) return "relations" in db.unread ? `? (${deniedObject(db.unread.relations.message)?.name ?? "thought_facets"} ${unreadWords(db.unread.relations)})` : "no table — migration 042 is not applied";
+  const n = r.related + r.evolves + r.duplicate;
+  // A brain short of 084 holds none because it cannot yet, not because none was found.
+  if (n === 0) return db.highestMigration !== null && db.highestMigration < 84 ? "none — migration 084 is not applied" : "none standing";
+  return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})`;
+}
+
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
@@ -702,8 +948,10 @@ export function renderBrainInfo(info: BrainInfo): string {
       row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit events · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
       row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
       row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a usable Linear watermark")),
+      row("Relations", relationsLine(db)),
     );
   }
+  lines.push(row("Proposals", proposalsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);
