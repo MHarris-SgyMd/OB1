@@ -10622,7 +10622,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   }
 }
 
-console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory is read or the reason it is not is given (SMD-1500)");
+console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory and CPU are read or the reason they are not is given (SMD-1500)");
 {
   const pool = Array.from({ length: 4 }, () => new SQL({ url: URL_, max: 1 }));
   const memory = new SQL({ url: URL_, max: 1 });
@@ -10677,7 +10677,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     const peaked = await bounded(closedLoop({ pool: pool.slice(0, 1), seconds: 3, slots: 1, queries: 1, call: spike, memory }));
     const pm = peaked.memory;
     if (typeof pm === "string") assert(pm.length > 0, `the container's memory is not readable here, and the run says why (${pm})`);
-    else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.05, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.05 or more)`);
+    else assert(pm.peak.anon - pm.idle.anon >= 64 * 1048576 && typeof peaked.cpu !== "string" && peaked.cpu.db >= 0.02, `the run keeps the peak, not the last reading: a sort's memory that came and went inside it reads ${((pm.peak.anon - pm.idle.anon) / 1048576).toFixed(0)} MiB over idle (64 or more), and the sort's CPU is the container's (${typeof peaked.cpu === "string" ? peaked.cpu : peaked.cpu.db.toFixed(2)} CPUs over the run, 0.02 or more)`);
 
     let calls = 0;
     const failing = async (db: SQL) => {

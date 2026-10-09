@@ -12442,7 +12442,7 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[73] bench-hnsw's section F under load: the schedule, the percentiles, the summary and the cgroup parse (SMD-1500, bench-load.ts)");
+console.log("\n[73] bench-hnsw's section F under load: the schedule, the percentiles, the summary, the cgroup, /proc/stat and cpu.stat parses and the CPU share (SMD-1500, bench-load.ts)");
 {
   // Pure functions of their inputs. The closed loop that uses them needs a
   // server, and test-live.ts [39] holds it to N concurrent backends.

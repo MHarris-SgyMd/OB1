@@ -2791,18 +2791,19 @@ own backend, call `match_thoughts` closed-loop for `OB1_BENCH_LOAD_S` seconds
   between GIN and the walk, and the exact branch).
 
 It prints QPS per run, and per slot its calls, p50 and p99 beside sections A
-and B's single-call medians, and recall@10 against the exact oracle. It also
-counts the answers that differed from the answer one call alone gave to the
-same query; the one-connection run is that count's control. The database
-container's anonymous memory is sampled from its cgroup through `pg_read_file`
-(a superuser on Linux; otherwise the table says why not), against what 014's
-header prices the walks at. Its CPU time and the rest of the machine's are
-read across each run, so a table says how busy everything else on the machine
-was meanwhile: other containers, the kernel and the network path (and, on a
-Linux host with no VM between, the bench's own client). A failure under load is
-reported without discarding the sections above, and the run then exits 1. `bench-load.ts` holds the loop; test-schema [73] holds its pure
-parts, test-live [39] the loop. Six runs at 60 s add about seven minutes a
-scale.
+and B's single-call medians, and how many of the exact top 10 its answers
+hold. It also counts the answers that differed from a reference pass's (each
+query asked once, on one connection, before the runs); the one-connection run
+is that count's control. The database container's anonymous memory is sampled
+from its cgroup through `pg_read_file` (a superuser on Linux; otherwise the
+table says why not), against what 014's header prices the walks at. Its CPU
+time and the rest of the machine's are read across each run, so a table says
+how busy everything else on the machine was meanwhile: other containers, the
+kernel and the machine's side of the network path (and, on a Linux host with no
+VM between, the bench's own client). A failure under load is reported without
+discarding the other sections, and the bench then exits 1. `bench-load.ts`
+holds the loop; test-schema [73] holds its pure parts, test-live [39] the loop.
+Six runs at 60 s add about seven minutes a scale.
 
 The before arm runs only up to 100,000 rows: its defect is established there,
 and above that every question is about the shipped function. The rows are

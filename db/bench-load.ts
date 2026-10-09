@@ -9,7 +9,7 @@
  *
  * What the section does, closed-loop:
  * - Each of N connections is its own backend. It issues its next call the
- *   moment its last one returns, for a fixed wall time.
+ *   moment its last one returns, for a fixed duration.
  * - Each connection walks its own cycle over every (tier, query) pair of the
  *   mix. The connections start on different tiers and different queries, so
  *   they are not asking the same thing in step.
