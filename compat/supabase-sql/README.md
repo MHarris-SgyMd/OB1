@@ -78,19 +78,19 @@ SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 PORT=8787 bun extensions/home-maintenance/index.ts                      # an extension
 
-NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
+SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
 bun integrations/agent-memory-api/index.ts                              # a recipe or integration
 ```
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
-there; a recipe or integration does not, and `NODE_PATH` points it at the same
-pinned install for `hono`, `zod` and `@hono/mcp` (only the servers that import
-them need it — the workers, the APIs on their own key and the webhook receiver
-import nothing but the shim and their own files). The MCP SDK's `exports`
-subpaths Bun does not resolve through `NODE_PATH`: an SDK-importing recipe or
-integration starts because Bun fetches the package into its own cache on first
-start — unpinned, with npm egress once — until SMD-1991 gives those directories
-an install of their own. The other variables are the ones the file's README has
+there. A recipe or integration resolves the same pinned install through
+`recipes/node_modules` and `integrations/node_modules`, committed links to
+`../extensions/node_modules`, so the one `bun install` above serves every server
+from any working directory (SMD-1991). `NODE_PATH`, which these commands used
+to set, does not reach the MCP SDK's `exports` subpaths under Bun. With a
+`node_modules` found above the file, Bun does not fetch a package it cannot
+resolve: a missing install fails the start instead of downloading an unpinned
+copy. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start

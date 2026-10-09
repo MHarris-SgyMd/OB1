@@ -63,7 +63,7 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
@@ -94,27 +94,16 @@ async function importServer(file: string): Promise<Handler> {
 // ── The vendored servers' packages, from this directory's install ────────────
 // A recipe or integration imports STACK's four (hono, zod, @hono/mcp, the SDK) by
 // bare name and has no install of its own beside it (kubernetes-deployment's
-// package.json is the image's, SMD-1800; run from a checkout, Bun fetches the four
-// on demand — SMD-1991), so this loader resolves those names from
-// extensions/node_modules, the pinned versions. Until SMD-1800 it also read Deno's specifiers — a `jsr:`
-// type-only import dropped, `npm:pkg@version` unprefixed, the deno.land postgres
-// driver stubbed for kubernetes-deployment; none is left in the tree (check 11
-// refuses them in every shim importer).
-
-// STACK and PACKAGES — the four packages this directory installs, and a specifier of one — come from
-// db/test-support.ts, so test-writes.ts's loader reads the same list.
-/** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
-const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
-Bun.plugin({
-  name: "vendored-packages-from-extensions",
-  setup(build) {
-    build.onLoad({ filter: VENDORED }, async (args) => {
-      const src = (await Bun.file(args.path).text()).replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) =>
-        PACKAGES.test(spec as string) ? `${lead}${q}${Bun.resolveSync(spec as string, HERE)}${q}` : whole);
-      return { contents: src, loader: "ts" };
-    });
-  },
-});
+// package.json is the image's, SMD-1800). recipes/ and integrations/ each hold a
+// committed `node_modules` link to this directory's, so Bun's own lookup, walking
+// up from the importing file, finds the pinned install. That includes the SDK's
+// `exports` subpaths, which NODE_PATH does not reach (SMD-1991). The servers below
+// are imported through the links, and started through them under `--no-install`.
+for (const dir of ["recipes", "integrations"]) {
+  let target = "";
+  try { target = readlinkSync(join(ROOT, dir, "node_modules")); } catch { /* absent, or not a link */ }
+  assert(target === "../extensions/node_modules", `${dir}/node_modules is a link to ../extensions/node_modules (${target || "not a link"})`);
+}
 
 // ── The servers, and what each tool or route does to the database ───────────
 
@@ -847,11 +836,10 @@ console.log(`\n[${WEBHOOK.file}]`);
 // SMD-1480, FORK.md change 74). Each server on the SQL shim (which imports
 // `bun`) is started here as a child process: `bun <file>` with the
 // environment its README documents — PORT a port this test bound for a
-// moment and released, then polled until the child answers on it; NODE_PATH,
-// since a recipe or integration has no node_modules on its own path and
-// resolves hono, zod and @hono/mcp from this directory's pinned install (the
-// MCP SDK's subpaths it does not: Bun fetches those into its cache, SMD-1991), as its
-// README says — then asked over the port for the one thing that proves it is
+// moment and released, then polled until the child answers on it; with
+// `--no-install` and no NODE_PATH, so a recipe or integration finds its packages
+// through the committed link above or fails to start, rather than having Bun
+// fetch them from npm (SMD-1991) — then asked over the port for the one thing that proves it is
 // that server, authenticating: an MCP server's tools/list under a write key
 // is its full tool list, an API's read probe passes under a read key, a
 // worker dry-runs under one, the receiver admits its secret; each refuses a
@@ -929,14 +917,16 @@ function freePort(): number {
 }
 for (const live of LIVE) {
   const port = freePort();
-  const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), NODE_PATH: join(HERE, "node_modules"), ...live.env };
+  const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), ...live.env };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
-  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL"]) delete env[name];
+  // A NODE_PATH from the shell goes too: the packages resolve through the committed links or not at all (SMD-1991).
+  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
   // Bun's own start line (`Started development server:`, or `Started server:` in production) goes unread: the port is known, so stdout is dropped and the
-  // child is up when the port answers at all (SMD-1799).
-  const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "ignore", stderr: "pipe" });
+  // child is up when the port answers at all (SMD-1799). `--no-install`: a package that does not resolve
+  // fails the start, where Bun would otherwise fetch the latest from npm into its cache (SMD-1991).
+  const proc = Bun.spawn([process.execPath, "--no-install", join(ROOT, live.file)], { env, cwd: ROOT, stdout: "ignore", stderr: "pipe" });
   // Up when the port answers — any status: Bun serves the file's default export on PORT, so a refused
   // connection is "not yet" — or the child exited (`exitCode` is set only when `exited` settles, and a
   // loop that polled it spun for the whole deadline; change 74's pass 1), or the deadline passed.

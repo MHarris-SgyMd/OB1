@@ -82,7 +82,7 @@ This server runs under [Bun](https://bun.sh) against your Postgres: it imports t
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
-PORT=8787 NODE_PATH=extensions/node_modules \
+PORT=8787 \
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 SUPABASE_SERVICE_ROLE_KEY=unused \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
@@ -90,7 +90,7 @@ DEFAULT_USER_ID='your-generated-uuid' \
 bun recipes/work-operating-model-activation/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it. `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it. Its packages resolve from the pinned install through `recipes/node_modules`, a committed link to `../extensions/node_modules` (SMD-1991). `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 - `MCP_ACCESS_KEYS` — `name:scope:sha256` entries, minted as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). Give the session a `write` key: `start_operating_model_session`, `save_operating_model_layer` and `generate_operating_model_exports` are registered only for one; a `read` key gets `query_operating_model` alone.
 - `generate_operating_model_exports` returns all five artifact blobs even if no local files are written
