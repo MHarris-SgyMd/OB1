@@ -23,7 +23,8 @@ export const CATEGORIES = [
  * The directory names under a category that are not contributions: _template
  * is the category's placeholder, _shared the modules the category's servers
  * import (copies of server-portable/auth.ts and, beside MCP servers, sse.ts), node_modules
- * extensions/test-auth.ts's install (gitignored).
+ * extensions/' install (gitignored), and under recipes/ and integrations/ the committed
+ * link to it (SMD-1991).
  */
 export const NOT_CONTRIBUTIONS = ["_template", "_shared", "node_modules"];
 

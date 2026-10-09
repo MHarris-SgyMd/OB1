@@ -64,7 +64,7 @@ This API runs under [Bun](https://bun.sh) against your Postgres: it imports the 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='agent:write:<sha256-of-your-key>' \
 OPENROUTER_API_KEY='…' \
-PORT=8787 bun integrations/agent-memory-api/index.ts
+PORT=8787 bun --no-install integrations/agent-memory-api/index.ts
 ```
 
 `SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `hono` and `zod`, all this API imports, resolve from the pinned install through `integrations/node_modules`, a committed link to `../extensions/node_modules` (SMD-1991; [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). `OPENROUTER_API_KEY` embeds a recall's query and a write-back's memories. Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); the routes below are served at that root, and at `/agent-memory-api/…` too, the prefix upstream's deploy gave them. To reach it from a hosted runtime, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its routes against a real Postgres carrying `schemas/agent-memory` (SMD-1798).

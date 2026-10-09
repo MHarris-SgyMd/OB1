@@ -87,7 +87,7 @@ SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 SUPABASE_SERVICE_ROLE_KEY=unused \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
 DEFAULT_USER_ID='your-generated-uuid' \
-bun recipes/work-operating-model-activation/index.ts
+bun --no-install recipes/work-operating-model-activation/index.ts
 ```
 
 `SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it. Its packages resolve from the pinned install through `recipes/node_modules`, a committed link to `../extensions/node_modules` (SMD-1991). `PORT` unset is 8000, which the core server holds — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. Your **MCP Server URL** is `http://your-host:8787/mcp`; a hosted connector needs the HTTPS form ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).

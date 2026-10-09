@@ -76,10 +76,10 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun extensions/home-maintenance/index.ts                      # an extension
+PORT=8787 bun --no-install extensions/home-maintenance/index.ts         # an extension
 
 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
-bun integrations/agent-memory-api/index.ts                              # a recipe or integration
+bun --no-install integrations/agent-memory-api/index.ts                 # a recipe or integration
 ```
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
@@ -87,10 +87,11 @@ there. A recipe or integration resolves the same pinned install through
 `recipes/node_modules` and `integrations/node_modules`, committed links to
 `../extensions/node_modules`, so the one `bun install` above serves every server
 from any working directory (SMD-1991). `NODE_PATH`, which these commands used
-to set, does not reach the MCP SDK's `exports` subpaths under Bun. With a
-`node_modules` found above the file, Bun does not fetch a package it cannot
-resolve: a missing install fails the start instead of downloading an unpinned
-copy. The other variables are the ones the file's README has
+to set, does not reach the MCP SDK's `exports` subpaths under Bun.
+`--no-install` makes a skipped install fail the start, naming the package.
+Without it, Bun downloads whatever version npm serves when it finds no
+`node_modules` above the file, and a link whose target was never installed
+counts as none. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start

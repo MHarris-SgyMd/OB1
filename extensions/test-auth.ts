@@ -98,7 +98,8 @@ async function importServer(file: string): Promise<Handler> {
 // committed `node_modules` link to this directory's, so Bun's own lookup, walking
 // up from the importing file, finds the pinned install. That includes the SDK's
 // `exports` subpaths, which NODE_PATH does not reach (SMD-1991). The servers below
-// are imported through the links, and started through them under `--no-install`.
+// are imported through the links, and started through them under `--no-install`;
+// kubernetes-deployment resolves its own install instead, if one was made beside it.
 for (const dir of ["recipes", "integrations"]) {
   let target = "";
   try { target = readlinkSync(join(ROOT, dir, "node_modules")); } catch { /* absent, or not a link */ }
