@@ -585,20 +585,19 @@ console.log(`\n[${K8S.file}: a search slower than the idle timeout is answered, 
   }
 }
 
-// ── A provider that never answers ────────────────────────────────────────────
+// ── A provider that fails or never answers ───────────────────────────────────
 //
 // SMD-2692: kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, as
 // the core server's do. The provider is a real server, and the server's fetch
 // reaches it with its init as given, so the deadline under test is the real
-// fetch's signal. search_thoughts' embedding stalls after its headers (the body
-// read), and the tool fails naming the knob. capture_thought's chat call fails
-// each way the core's extractMetadata names (review passes 1 and 2): each is
-// logged, and the capture goes on to its write without tags. Here the write is
-// refused, the database being on a closed port (set above), and a control
-// capture whose tags arrive shows which answer the refusal gives.
-// Until then Bun's 300 s fetch cut was the only bound, and SMD-2001's keepalive
-// let a client sit through it.
-console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1_LLM_TIMEOUT, naming it (SMD-2692)]`);
+// fetch's signal. search_thoughts' embedding stalls or fails each way, and the
+// tool fails naming the knob or the fault. capture_thought's chat call fails
+// each way the core's extractMetadata names: each is logged, and the capture
+// goes on to its write without tags. Here the write is refused, the database
+// being on a closed port (set above), and a control capture whose tags arrive
+// shows which answer the refusal gives. Until then Bun's 300 s fetch cut was
+// the only bound, and SMD-2001's keepalive let a client sit through it.
+console.log(`\n[${K8S.file}: provider calls end at OB1_LLM_TIMEOUT, and each failure is named or falls back (SMD-2692)]`);
 {
   const handler = handlers[SERVERS.indexOf(K8S)];
   assert(handler !== undefined, "the module imported above");
@@ -630,7 +629,7 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
     const realFetch = globalThis.fetch;
     const enc = new TextEncoder();
     const choice = (content: unknown) => Response.json({ choices: [{ message: { content } }] });
-    /** The chat endpoint's answers, by case; the embedding stalls for the search and answers for every capture. */
+    /** The chat endpoint's answers, by case, each a capture's; `tags` is the control. */
     const CHAT: Record<string, () => Response | Promise<Response>> = {
       tags: () => choice(JSON.stringify({ topics: ["x"], type: "idea", metadata_extraction_failed: "provider_timeout" })),
       stall: () => new Promise<Response>(() => {}),
@@ -721,14 +720,9 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
       cut.stop(true);
     }
     const BASE = "https://openrouter.ai/api/v1";
-    const timedOut = `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`;
-    for (const name of ["stall", "503 stalled"]) {
-      const s = searches[name];
-      assert(s.error === timedOut && s.ms >= 1_900 && s.ms < 6_000,
-        `an embedding answered ${name === "stall" ? "200" : "503"} whose body stalls fails search_thoughts at OB1_LLM_TIMEOUT=2, naming it (${Math.round(s.ms)} ms: ${s.error})`);
-    }
-    // The embedding's other failures fail the search too, each named (review pass 3).
     const embedWhy: Record<string, string> = {
+      stall: `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
+      "503 stalled": `Error: Embeddings request to ${BASE} timed out after 2 s (OB1_LLM_TIMEOUT)`,
       "503": `Error: Embeddings request to ${BASE} failed: 503 ${"x".repeat(500)}`,
       html: `Error: Embeddings request to ${BASE} answered a body that is not JSON`,
       empty: `Error: Embeddings request to ${BASE} answered no embedding`,
@@ -738,6 +732,8 @@ console.log(`\n[${K8S.file}: a provider that never answers fails the call at OB1
     for (const [name, error] of Object.entries(embedWhy)) {
       assert(searches[name].error === error, `an embedding answered ${name} fails search_thoughts saying so (${searches[name].error.slice(0, 100)})`);
     }
+    const stalls = [searches.stall.ms, searches["503 stalled"].ms];
+    assert(stalls.every((ms) => ms >= 1_900 && ms < 6_000), `…the two whose bodies stall at the deadline (${stalls.map(Math.round).join(", ")} ms)`);
     const control = captures.tags;
     // Its answer is the database's refusal, not a provider's, so a capture that matches it reached the write (review pass 4).
     assert(control.lines.length === 0 && /Failed to connect|ECONNREFUSED|connection refused/i.test(control.error) && !/Embeddings? |Chat completion|OB1_LLM_TIMEOUT/.test(control.error),

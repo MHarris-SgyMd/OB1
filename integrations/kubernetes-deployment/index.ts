@@ -131,11 +131,10 @@ function bodyOf(r: Response): Promise<string> {
 class ProviderTimeout extends Error {}
 
 /**
- * A provider call under the core server's deadline (SMD-2692): OB1_LLM_TIMEOUT
- * seconds, DEFAULT_LLM_TIMEOUT_S unless set to a positive number (embed.ts's
- * rule), over the answer's headers and body both. Until then Bun's own 300 s
- * fetch cut was the only bound, and since SMD-2001 keeps the reply alive a
- * client sat through all of it. Read per call, as the keys are.
+ * A provider call under the core server's deadline (SMD-2692): OB1_LLM_TIMEOUT,
+ * read per call as the keys are, over the answer's headers and body both. Until
+ * then Bun's own 300 s fetch cut was the only bound, and since SMD-2001 keeps
+ * the reply alive a client sat through all of it.
  */
 async function withDeadline<T>(what: string, base: string, call: (deadline: { signal: AbortSignal; timeout: false }) => Promise<T>): Promise<T> {
   const seconds = llmTimeoutOf(process.env.OB1_LLM_TIMEOUT) ?? DEFAULT_LLM_TIMEOUT_S;
@@ -163,7 +162,6 @@ async function getEmbedding(text: string): Promise<number[]> {
       }),
       ...deadline,
     });
-    // Read as the chat call's below, and an error body capped (review pass 3).
     const body = await bodyOf(r);
     if (!r.ok) throw new Error(`Embeddings request to ${EMBEDDING_API_BASE} failed: ${r.status} ${body.slice(0, PROVIDER_ERROR_CHARS)}`);
     let d: { data?: [{ embedding?: unknown }] } | null;
@@ -180,13 +178,13 @@ async function getEmbedding(text: string): Promise<number[]> {
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  // The capture goes on without its tags when the chat call times out,
-  // answers a status outside 2xx, or answers with no usable tags, the embedding
-  // being what it needs: logged, and recorded on the thought in the core
-  // server's reasons (server-portable/metadata.ts). A deadline that failed the
-  // capture instead would lose one that a model slower than it had always
-  // completed (review pass 1). A chat endpoint that cannot be reached at all
-  // still fails the capture, as on the core server.
+  // The capture goes on without its tags, the embedding being what it needs,
+  // when the chat call times out, answers a status outside 2xx, or answers a
+  // body or content that is not JSON or not a JSON object: logged, and recorded
+  // on the thought in the core server's reasons (server-portable/metadata.ts).
+  // A deadline that failed the capture instead would lose one that a model
+  // slower than it had always completed (review pass 1). A connection refused,
+  // or a name that does not resolve, still fails the capture, as on the core.
   const fallback = (reason: string, why: string): Record<string, unknown> => {
     console.error(`extractMetadata: ${why}`);
     return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: reason };
