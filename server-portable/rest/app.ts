@@ -523,7 +523,13 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     for (const [k, v] of queryOf(c.req.url)) query[k] = v;
     let answer;
     try {
-      answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
+      answer = await runHook(hook, {
+        core: deps.core,
+        secret,
+        track: deps.track,
+        // Work the handler left to run after its answer: the same one line as a fault, after the sender has its answer.
+        deferredFault: (message) => faultLog(`api hook ${hook.path} deferred fault: ${message}`),
+      }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
       // The sender is anonymous: it is told FAILED and nothing of why; the
       // operator's stderr has the message, one line, bounded.

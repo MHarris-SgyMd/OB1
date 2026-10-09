@@ -809,6 +809,63 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   assert(bound.length === 0, `and each before any claim: no statement run (${bound.length})`);
   assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some((v) => isDeliveryId(v)), "isDeliveryId: 1 to 200 characters from ! to ~");
   assert(isDeliveryId("x".repeat(193), "events") && !isDeliveryId("x".repeat(194), "events") && !isDeliveryId("", "events"), "under a scope, an id leaves room for it and its space; an empty one is still refused");
+  // With defer (SMD-2767): the claim made and answered now, the run, its record and its release left to ctx.defer.
+  const left: (() => Promise<unknown>)[] = [];
+  const deferring = { db, captureSeconds: 120, defer: (work: () => Promise<unknown>) => { left.push(work); } };
+  claimed = [{ claimed: "2026-10-09 21:00:00.5+00" }];
+  bound.length = 0;
+  let runs = 0;
+  const now = await onceById(deferring, "evt-8", async () => ({ value: ++runs, thoughtId: T1 }), { keepSeconds: 660, defer: true });
+  assert(JSON.stringify(now) === '{"deferred":true}' && runs === 0 && left.length === 1 && !bound.some((b) => b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
+    `with defer: answered deferred once the id is claimed, the run not yet started and nothing recorded (${JSON.stringify(now)}, ${runs} runs)`);
+  await left[0]();
+  assert(runs === 1 && bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true, "the deferred run records its thought against the id, as an awaited one does");
+  bound.length = 0;
+  await onceById(deferring, "evt-9", async () => { throw new Error("embedder down"); }, { keepSeconds: 660, defer: true });
+  const deferredThrow = await left[1]().then(() => "", (e: Error) => e.message);
+  assert(deferredThrow === "embedder down" && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true, `a deferred run that throws gives its claim back and throws on, for ctx.defer to log (${deferredThrow})`);
+  claimed = [];
+  const busyDeferred = await onceById(deferring, "evt-10", async () => ({ value: 0, thoughtId: T1 }), { keepSeconds: 660, defer: true });
+  assert(JSON.stringify(busyDeferred) === '{"inFlight":true}' && left.length === 2, "an id still running is in flight with defer too, and nothing is deferred");
+  bound.length = 0;
+  const noDefer = await refusedWith("evt-11", 120, { keepSeconds: 660, defer: true } as never);
+  assert(/defer needs the hook's ctx.defer/.test(noDefer) && bound.length === 0, `defer with no ctx.defer to hand: thrown before any claim (${noDefer})`);
+}
+
+console.log("\n[14] ctx.defer: a hook answers before its work ends; the work counted for the stop, and its failure one fault line, never a stopped server (SMD-2767)");
+{
+  const tracked: Promise<unknown>[] = [];
+  const faults: string[] = [];
+  let open: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  let ran = 0;
+  const probe = definePlugin({ name: "probe-defer", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
+    hooks: {
+      later: { description: "Answers at once, its work failing afterwards.", handler: async (ctx) => { ctx.defer(async () => { await gate; ran++; throw new Error("embedder\n  timed out"); }); return { status: 202, body: { accepted: true } }; } },
+      sync: { description: "Defers work that throws before its first await.", handler: async (ctx) => { ctx.defer((() => { throw new Error("at once"); }) as never); return { status: 202 }; } },
+      fine: { description: "Defers work that succeeds.", handler: async (ctx) => { ctx.defer(async () => { ran++; }); return { status: 202 }; } },
+      promise: { description: "Hands defer a promise, not a function.", handler: async (ctx) => { ctx.defer(Promise.resolve() as never); return { status: 202 }; } },
+    } });
+  const deferApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, log: () => {}, faultLog: (l) => faults.push(l),
+    track: (run) => { const p = run(); tracked.push(p); return p; },
+    plugins: () => loadPlugins("probe-defer", [probe]), hooks: () => ({ hooks: enabledHooks(loadPlugins("probe-defer", [probe]), "probe-defer"), secrets: new Map([["probe-defer", "s"]]) }) });
+  const post = (hook: string) => deferApp.fetch(new Request(`http://api/hooks/probe-defer/${hook}`, { method: "POST", body: "{}" }));
+  let r = await post("later");
+  assert(r.status === 202 && ran === 0 && faults.length === 0 && tracked.length === 1, `answered 202 before its deferred work ran, the work counted by the stop's tracker (${r.status}, ${tracked.length} tracked)`);
+  open();
+  await Promise.all(tracked);
+  assert(ran === 1 && JSON.stringify(faults) === '["api hook /hooks/probe-defer/later deferred fault: embedder timed out"]', `the work's failure: one fault line, bounded and on one line (${JSON.stringify(faults)})`);
+  r = await post("later");
+  await Promise.all(tracked);
+  assert(r.status === 202 && ran === 2 && faults.length === 2, `and the server answers on: the failure stopped nothing (${r.status}, ${faults.length} faults)`);
+  r = await post("sync");
+  await Promise.all(tracked);
+  assert(r.status === 202 && faults.at(-1) === "api hook /hooks/probe-defer/sync deferred fault: at once", `work that throws before its first await is caught all the same (${faults.at(-1)})`);
+  r = await post("fine");
+  await Promise.all(tracked);
+  assert(r.status === 202 && ran === 3 && faults.length === 3, "work that succeeds writes no line");
+  r = await post("promise");
+  assert(r.status === 500 && /ctx\.defer takes a function/.test(faults.at(-1) ?? ""), `a promise handed to defer, already running outside the tracker, is the plugin's fault: 500 (${faults.at(-1)})`);
 }
 
 report();

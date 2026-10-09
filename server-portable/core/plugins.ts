@@ -14,6 +14,7 @@ import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
 import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
+import { failure } from "./refusal.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -299,13 +300,35 @@ export function hookPrincipal(plugin: string): Principal {
 /**
  * One delivery to an enabled webhook: the handler's answer, held to a status a
  * sender reads and a JSON object body. A handler that answers otherwise is
- * the plugin's fault, thrown.
+ * the plugin's fault, thrown. Work it defers runs on after the answer, under
+ * `track` so the stop waits for it, its failure handed to `deferredFault` as
+ * one bounded message (SMD-2767).
  */
-export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"] }, request: HookRequest): Promise<HookAnswer> {
+export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"]; deferredFault?: (message: string) => void }, request: HookRequest): Promise<HookAnswer> {
   const ctx = contextFor(hook.plugin, { core: deps.core, principal: hookPrincipal(hook.plugin), track: deps.track });
   // The core's settings as this delivery finds them, read only by a hook that asks.
   const core = deps.core;
-  const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret, get captureSeconds() { return core.captureSeconds(); } }, request);
+  const deferredFault = deps.deferredFault ?? ((message: string) => console.error(`hook ${hook.path} deferred fault: ${message}`));
+  const defer = (work: () => Promise<unknown>) => {
+    // A function, so the work starts under the tracker and a throw before its first await is caught too.
+    if (typeof work !== "function") throw new Error(`${hook.path}: ctx.defer takes a function that starts the work`);
+    const run = () =>
+      Promise.resolve()
+        .then(work)
+        .then(
+          () => undefined,
+          (err) => {
+            // Never a rejection: one left unhandled stops the process, and with it every client.
+            try {
+              deferredFault(failure(err).message.replace(/\s+/g, " ").slice(0, 300));
+            } catch {
+              // A log that throws loses the line, not the server.
+            }
+          },
+        );
+    void (deps.track ? deps.track(run) : run());
+  };
+  const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret, get captureSeconds() { return core.captureSeconds(); }, defer }, request);
   if (!answer || !HOOK_STATUSES.has(answer.status)) throw new Error(`${hook.path} answered status ${answer?.status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);
   if (answer.body !== undefined && (answer.body === null || typeof answer.body !== "object" || Array.isArray(answer.body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
   return answer;

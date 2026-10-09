@@ -409,6 +409,52 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     assert(/deliveries_by_scope/.test(plan) && /Index Cond: .*CASE/.test(plan), `the doc comment's index is the one the scoped prune reads (${plan.replace(/\s+/g, " ").slice(0, 160)})`);
     await sql`DELETE FROM plugin_example.deliveries WHERE id LIKE ${`kept ${RUN}-%`}`;
     await sql.unsafe("DROP INDEX plugin_example.deliveries_by_scope");
+    // A deferred capture (SMD-2767): a hook of the example's plugin that
+    // answers once its id is claimed and leaves the capture to ctx.defer, run
+    // through runHook over the real table — recorded against its id as an
+    // awaited one is, and given back when it throws, with one fault line.
+    const tracked: Promise<unknown>[] = [];
+    const deferredFaults: string[] = [];
+    const laterHook = {
+      plugin: "example", name: "later", path: "/hooks/example/later", description: "Answers before its capture.",
+      handler: async (ctx: Parameters<typeof hook.handler>[0], req: { text: string }) => {
+        const { id } = JSON.parse(req.text) as { id: string };
+        const once = await onceById(ctx, id, async () => {
+          const captured = await ctx.call("capture_thought", { content: `smd2767: ${id}`, source: "example-hook", trust: "ingested" });
+          return { value: captured, thoughtId: captured.ok ? captured.value.id : null };
+        }, { keepSeconds: 660, defer: true });
+        if ("duplicate" in once) return { status: 200 as const, body: { id: once.duplicate, duplicate: true } };
+        if ("inFlight" in once) return { status: 409 as const, body: { code: "IN_FLIGHT", retryable: true } };
+        return { status: 202 as const, body: { accepted: true } };
+      },
+    };
+    const deferredVia = (id: string, capture: () => Promise<unknown>) => {
+      const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : capture) }) as never;
+      const text = JSON.stringify({ id });
+      return runHook(laterHook, { core: scripted, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) }, { headers: {}, query: {}, body: new TextEncoder().encode(text), text });
+    };
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const laterId = `evt-${RUN}-later`;
+    // With a deadline: an answer that waited for the capture would wait on `held` for good.
+    const first = await Promise.race([
+      deferredVia(laterId, async () => { await held; return coreOk({ id: thought }); }),
+      Bun.sleep(5000).then(() => { throw new Error("the deferred capture's answer waited for the capture"); }),
+    ]);
+    const claimRow = await rowOf(laterId);
+    const meanwhile = await deferredVia(laterId, async () => coreOk({ id: thought }));
+    assert(first.status === 202 && claimRow !== undefined && claimRow.thought_id === null && meanwhile.status === 409,
+      `a deferred capture: 202 once its id is claimed, and a resend while it runs is 409 (${first.status}, ${JSON.stringify(claimRow)}, ${meanwhile.status})`);
+    release();
+    await Promise.all(tracked);
+    const afterwards = await deferredVia(laterId, async () => coreOk({ id: thought }));
+    assert((await rowOf(laterId))?.thought_id === thought && afterwards.status === 200 && (afterwards.body as { id?: string }).id === thought && deferredFaults.length === 0,
+      `once it ends, it is recorded against its id as an awaited capture is, and a resend is that thought's duplicate (${JSON.stringify(afterwards)})`);
+    const failingId = `evt-${RUN}-later-fails`;
+    const failing = await deferredVia(failingId, async () => { throw new Error("embedder down"); });
+    await Promise.all(tracked);
+    assert(failing.status === 202 && (await rowOf(failingId)) === undefined && JSON.stringify(deferredFaults) === '["embedder down"]',
+      `a deferred capture that throws: answered 202 all the same, its claim given back, one fault (${failing.status}, ${JSON.stringify(deferredFaults)})`);
   } finally {
     await store.close();
   }
