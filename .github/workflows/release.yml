@@ -279,21 +279,37 @@ jobs:
           # compose.yaml's digest (the overlay does not name it).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
             | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
-          # SMD-2658: the overlay this run ships leaves the project's name, its
-          # networks, every config and the proxy as compose.yaml defines them,
-          # with and without api-public, variables substituted and not. This
-          # holds the file itself, whatever branch of the generator rendered
-          # it; fork-checks renders a rehearsal's form and a tag's, never this
-          # one.
+          # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
+          # the images it pins and their pull policy, on any service but the
+          # proxy, as fork-checks' "The proxy loads only the held route tables"
+          # holds of the generator's two other forms.
+          # Every other service, the proxy, the networks, the configs and the
+          # project's name are compose.yaml's, with and without api-public,
+          # under every profile, and it defines none compose.yaml lacks (a
+          # service under a new one would go unrendered), variables
+          # substituted and not; so no alias,
+          # service or namespace rides in on a release. This holds the file
+          # itself, whatever branch of the generator rendered it; fork-checks
+          # renders a rehearsal's form and a tag's, never this one.
+          list="$(docker compose -f compose.yaml config --profiles)"
+          profiles=()
+          while read -r p; do if [ -n "$p" ]; then profiles+=("--profile=$p"); fi; done <<<"$list"
+          # An image and its pull policy, on any service but the proxy: not a
+          # list the generator keeps, which a change to it could widen
+          # (SMD-2685 review pass 2).
+          pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          rest='delpaths($pins) | with_entries(select(.key | startswith("x-") | not))'
           for public in no yes; do
             for mode in substituted raw; do
               files=(-f compose.yaml)
               if [ "$public" = yes ]; then files+=(-f compose.api-public.yaml); fi
               extra=()
               if [ "$mode" = raw ]; then extra=(--no-interpolate); fi
-              base="$(docker compose "${files[@]}" --profile local-models config "${extra[@]}" --format json | jq -cS '{name, networks, configs, proxy: .services.proxy}')"
-              docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" --profile local-models config "${extra[@]}" --format json \
-                | jq -cS '{name, networks, configs, proxy: .services.proxy}' | jq -e --argjson base "$base" '. == $base' >/dev/null
+              [ "$(docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" config --profiles)" = "$list" ]
+              base="$(docker compose "${files[@]}" "${profiles[@]}" config "${extra[@]}" --format json | jq -c --argjson pins "$pins" "$rest")"
+              docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" "${profiles[@]}" config "${extra[@]}" --format json \
+                | jq -c --argjson pins "$pins" "$rest" | jq -e --argjson base "$base" '. == $base' >/dev/null
             done
           done
           pull=(postgres proxy)
