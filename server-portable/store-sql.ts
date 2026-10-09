@@ -26,6 +26,7 @@ import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
+import { PLUGIN_NAME_RE, pluginIdents, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
@@ -57,6 +58,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  PluginSql,
   UpdateProvenance,
   UpdateResult,
   WriteEvent,
@@ -106,15 +108,30 @@ export function poolSizeFrom(raw: string | undefined, fallback = DEFAULT_PG_POOL
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/** Connections in each plugin's own pool (SMD-2310): its handlers' transactions queue past two. */
+const PLUGIN_POOL_SIZE = 2;
+
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
   private sql: SQL;
+
+  /**
+   * Each plugin's own pool (SMD-2310), made at its first transaction: what a
+   * plugin's SQL leaves on a session — a temp table, which Postgres searches
+   * before any schema and so would stand in for `thoughts` in a core query
+   * that later used the connection, a session setting, an advisory lock, a
+   * cursor held past commit — stays on connections no core query and no
+   * other plugin uses (review pass 1).
+   */
+  private readonly pluginPools = new Map<string, SQL>();
+  private readonly url: string;
 
   constructor(url: string, opts: { max?: number } = {}) {
     // A bounded pool. PostgREST was stateless HTTP, so nothing upstream limits
     // concurrency for us any more — an unbounded pool would let a burst of
     // captures exhaust the server's connection slots.
     this.sql = new SQL({ url, max: opts.max ?? poolSizeFrom(process.env.OB1_PG_POOL) });
+    this.url = url;
   }
 
   async matchThoughts(opts: {
@@ -927,7 +944,38 @@ export class SqlStore implements ThoughtStore {
     };
   }
 
+  /**
+   * A plugin's transaction (SMD-2310): SET LOCAL ROLE to the plugin's role and
+   * its schema first on the path (db/config.mjs's pluginIdents, as the
+   * migrator made them), so its tables are named bare and the core's are
+   * Postgres's to refuse — the role holds no privilege on them. The plugin is
+   * handed a tagged template alone: no unsafe(), no second transaction. A
+   * plugin's SQL that resets the role is the checker's to refuse (SET ROLE is
+   * not a boundary against code that undoes it; plugins are curated).
+   */
+  pluginTx<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> {
+    if (!PLUGIN_NAME_RE.test(plugin) || plugin.length > 32) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
+    const { schema, role } = pluginIdents(plugin);
+    let pool = this.pluginPools.get(plugin);
+    if (!pool) {
+      pool = new SQL({ url: this.url, max: PLUGIN_POOL_SIZE });
+      this.pluginPools.set(plugin, pool);
+    }
+    return pool.begin(async (tx: SQL) => {
+      // No role: a plugin with no migrations, or one the migrator has not run
+      // for — said as that, not as Postgres's bare "does not exist".
+      await tx.unsafe(`SET LOCAL ROLE ${quoteIdent(role)}`).catch((e: Error) => {
+        throw /does not exist/.test(e.message)
+          ? new Error(`plugin ${plugin} has no role ${role}: ctx.db reaches the tables its migrations make (plugins/${plugin}/migrations/), and the migrator makes the role when it applies them`)
+          : e;
+      });
+      await tx.unsafe(`SET LOCAL search_path TO ${quoteIdent(schema)}, public`);
+      const query: PluginSql = (strings, ...values) => tx(strings, ...values) as never;
+      return fn(query);
+    }) as Promise<T>;
+  }
+
   async close(): Promise<void> {
-    await this.sql.close();
+    await Promise.all([this.sql.close(), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
   }
 }

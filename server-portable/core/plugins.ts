@@ -8,6 +8,7 @@
 // operation, behind the caller's own scope, with its own schema.
 
 import { z } from "zod";
+import { PLUGIN_NAME_RE } from "../../db/config.mjs";
 import { PLUGINS } from "../../plugins/registry.ts";
 import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
@@ -19,7 +20,7 @@ import type { createCore } from "./index.ts";
 type Core = ReturnType<typeof createCore>;
 
 /** A plugin's name: lower-case words joined by single hyphens, at most 32 characters. */
-const PLUGIN_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const PLUGIN_NAME = PLUGIN_NAME_RE;
 /** An operation's key: lower-case words joined by single underscores. */
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
@@ -182,9 +183,11 @@ export function pluginProblem(raw: string | undefined, registry: readonly Plugin
 
 export type OpDeps = { core: Core; principal: Principal; track?: CallOptions["track"] };
 
-/** The handler's context for one call: the caller, and the core reached as the caller. */
-export function contextFor({ core, principal, track }: OpDeps): PluginContext {
+/** The handler's context for one call of `plugin`'s operation: the caller, the core reached as the caller, and the plugin's own tables. */
+export function contextFor(plugin: string, { core, principal, track }: OpDeps): PluginContext {
   return {
+    // Read when the handler asks, so an operation that touches no table never reaches the store.
+    db: { tx: (fn) => core.pluginTx(plugin, fn) },
     caller: { name: principal.name, scope: principal.scope as PluginScope, ...(principal.agentId ? { agentId: principal.agentId } : {}) },
     call: async <K extends ToolName>(name: K, input: unknown) => {
       // The type admits a tool name alone; a plugin that casts past it is told, not served.
@@ -204,7 +207,7 @@ export function contextFor({ core, principal, track }: OpDeps): PluginContext {
  * status and a code a client can read.
  */
 export async function runOperation(op: LoadedOp, deps: OpDeps, input: unknown): Promise<PluginOutcome<Record<string, unknown>>> {
-  const out = await op.handler(contextFor(deps), input as never);
+  const out = await op.handler(contextFor(op.plugin, deps), input as never);
   if (!out.ok) {
     const { status, code } = out.refusal;
     if (!REFUSAL_STATUSES.has(status) || !REFUSAL_CODE.test(code)) throw new Error(`${op.tool} refused with status ${status} and code ${JSON.stringify(code)}: a refusal is 400, 403, 404, 409 or 422 with an UPPER_CASE code`);

@@ -709,15 +709,16 @@ those its own way.
 bun test-server.ts        # 859 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
 bun test-auth.ts          # 187 — scoped, hashed, named keys
 bun test-rest.ts          # 315 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 100 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
+bun test-plugins.ts       # 103 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 237 — store conformance, real Postgres in a container
 bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-plugins-sql.ts  # 64 — a plugin's tables: the migrator's plugin ledger, the plugin role's boundary, the example's operations through both servers, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
-`test:sql`, `test:e2e` and `test-rest-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
+`test:sql`, `test:e2e`, `test-rest-sql.ts` and `test-plugins-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
 to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing
@@ -769,7 +770,11 @@ stored in the same write").
   driver let the SQL store run there is SMD-1847 — measured before promised.
 - **The SQL store's pool is bounded** at `OB1_PG_POOL` (default 10). PostgREST was
   stateless HTTP, so nothing upstream limits concurrency any more — an unbounded
-  pool would let a burst of captures exhaust the server's connection slots.
+  pool would let a burst of captures exhaust the server's connection slots. Each
+  enabled plugin with tables adds a pool of two of its own, opened at its first
+  call (SMD-2310), so what a plugin's SQL leaves on a session never meets a core
+  query: a server's budget is `OB1_PG_POOL` plus two per such plugin, and the
+  stack runs two servers.
 - **A live `workerd` request has not been exercised.** The Cloudflare build is
   verified with the real bundler; `wrangler dev` could not be reached from the
   authoring sandbox, and a hello-world worker failed identically there, so the gap
