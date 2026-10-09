@@ -10398,6 +10398,11 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
     await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
     const wakeMs = Date.now() - wokenAt;
+    // The awake stamp lands after the wake's line and the leases' return (the
+    // passes stop, their claims move to the tail, then the sleep is stamped
+    // ended), so it is polled for, bounded: a sleep that never stamps it still
+    // fails below. Read at once, it raced the stamp (SMD-1500 review pass 1).
+    await pollUntil(async () => (await beat())?.running === false, 3_000);
     const awakeBeat = await beat();
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
       `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
