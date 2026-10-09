@@ -104,7 +104,7 @@ publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
 digest and `ollama` by the digest its tag resolved to when the job ran, beside
-`compose.yaml`, `.env.example` and `compose.api-public.yaml` from the same tag, the change files the release
+`compose.yaml`, `.env.example`, `compose.api-public.yaml` and `compose.hooks-public.yaml` from the same tag, the change files the release
 numbered and `scripts/mechanism-yield.ts`'s table. Before the release existed, the
 job brought a stack up from the *pulled* images and held it to this file's checks
 (the `Full stack, no Supabase` lines, `smoke.sh`, no Supabase binary) and to
@@ -118,6 +118,7 @@ curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/comp
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.release.yaml
 curl -fsSL -o .env https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/env.example
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.api-public.yaml   # optional: /api on the proxy, a third -f ("The REST core" below)
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.hooks-public.yaml   # optional: plugins' webhooks at /hooks, another -f ("Plugins' webhooks" below)
 # fill in .env as step 1 says, then:
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
@@ -243,6 +244,7 @@ paths today:
 | --- | --- |
 | `/auth` and everything under it, `/.well-known/oauth-authorization-server/auth`, `/.well-known/openid-configuration/auth`, the bare `/.well-known/oauth-authorization-server` | `auth` (`--profile auth`), as `auth.ob1.internal` on the `mesh` network — the issuer, sign-in, registration and the three discovery documents outside the issuer's path (the bare one is the only one Claude Code reads). Only while it answers: with the profile off, the server stopped or still starting, the proxy's own bodiless 404, so an origin without it says "no OAuth here" as before. Its own answers pass through untouched, the registration cap's 503 and `Retry-After` included |
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
+| `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, SMD-2294). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
 | any other path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404, so a client given a tier's URL with anything changed after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
@@ -433,6 +435,54 @@ is a 401, a scan's poll link reads `/api/v1/jobs/…`; dropped again, a 404. The
 REST core's log is one JSON line per request — method, route template, operation,
 key name, status, an error's code, time ("What the servers log", below) — and
 neither its log nor the proxy's holds a key.
+
+## Plugins' webhooks at `/hooks`
+
+A plugin can declare inbound webhooks: a capture source's endpoint, which a
+service such as Slack, Telegram or Readwise POSTs to (SMD-2310,
+`plugins/README.md`). The REST core serves one at `/hooks/<plugin>/<name>` only
+for a plugin named in `OB1_HOOKS`, which must also be enabled in
+`OB1_PLUGINS`; any other path under `/hooks` is its 404. The proxy answers
+`/hooks` with its bodiless 404 until you name the overlay:
+
+```bash
+# deploy/.env: OB1_PLUGINS=example, OB1_PLUGIN_DB_PASSWORD=…, OB1_HOOKS=example,
+#              OB1_HOOK_SECRETS=example=<openssl rand -hex 32>
+docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
+```
+
+Keep every other `-f` the stack already runs with on the same command —
+`compose.release.yaml`, `compose.api-public.yaml` — or the proxy is recreated
+without them, and `/api` turns off. `/api` does not open `/hooks`: a delivery
+sent to `/api/hooks/…` is the REST core's 404.
+
+- **Keys and secrets.** A webhook takes no brain key, because its sender holds
+  none. Each handler verifies a delivery against the secret `OB1_HOOK_SECRETS`
+  gives its plugin, and refuses one it cannot verify. Preflight's
+  `plugin webhooks` row says which plugins are served and warns of one with no
+  secret.
+- **What a hook may do.** It runs as `hook:<plugin>`, a caller of capture
+  scope alone: it may add a thought, and the audit row names it as the writer,
+  but nothing it is sent can read, change or delete one.
+- **The request.** Its body is counted as it arrives and cut at 1 MiB (413),
+  chunked or not, and handed to the handler as the bytes sent, since a
+  signature is over the bytes. It takes POST alone. A plugin with no secret
+  set is answered 503 before its handler runs, and a handler's fault is
+  `FAILED` to the sender, its message in the REST core's log alone.
+- **The proxy.** It deletes `x-brain-forwarder` on the way in, as `/api`'s
+  route does.
+- **No rate limit.** Nothing limits the rate of deliveries: a sender that
+  floods a webhook is the plugin's to refuse.
+- **Turning it off.** Keep naming the file on every `up` that names the proxy,
+  as with `/api`; dropping it recreates the proxy without the route.
+
+Measured on this stack (CI's "Full stack, no Supabase" job holds each, with the
+example plugin turned on for the step alone):
+- off, `/hooks` is a 404;
+- on, a delivery signed with another secret is the plugin's 401, and a signed
+  one captures a thought the REST core reads back on the mesh;
+- a plugin it does not serve is a 404, and a GET is a 405;
+- dropped again, a 404.
 
 ## Moving a client to /mcp
 

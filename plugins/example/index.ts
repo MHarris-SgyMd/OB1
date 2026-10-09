@@ -3,7 +3,7 @@
 // as the caller (ctx.call) — and keeps one table of its own (ctx.db), made by
 // its migration in migrations/.
 
-import { definePlugin, ok, operation, refuse, z } from "../../server-portable/plugin-sdk.ts";
+import { definePlugin, hmacSha256Hex, ok, operation, refuse, safeEqual, z } from "../../server-portable/plugin-sdk.ts";
 
 /** A note as both operations answer it. */
 const Note = z.object({ id: z.string(), thought_id: z.string(), note: z.string(), written_by: z.string(), created_at: z.string() });
@@ -16,6 +16,29 @@ export default definePlugin({
   description: "The plugin template: a read operation over the core, and notes pinned to thoughts in a table of its own. Copy the directory to start a plugin.",
   // The operator GUI's nav entry (SMD-2280 renders the page): a thought's notes.
   gui: { pages: [{ path: "/notes", label: "Notes" }] },
+  // A capture source's inbound webhook, as a Slack or Telegram plugin's would
+  // be: POST /hooks/example/capture with {"text": "…"}, signed with the
+  // operator's secret (x-example-signature: hex HMAC-SHA256 of the raw body).
+  hooks: {
+    capture: {
+      description: "Captures the delivery's text as a thought of trust ingested, when its signature matches the secret OB1_HOOK_SECRETS gives the example.",
+      async handler(ctx, request) {
+        // The signature is over the bytes sent; the REST core has refused already if no secret is set.
+        const signature = request.headers["x-example-signature"] ?? "";
+        if (!safeEqual(signature, hmacSha256Hex(ctx.secret, request.body))) return { status: 401, body: { code: "BAD_SIGNATURE", retryable: false } };
+        let text: unknown;
+        try {
+          text = (JSON.parse(request.text) as { text?: unknown }).text;
+        } catch {
+          return { status: 400, body: { code: "NOT_JSON", retryable: false } };
+        }
+        if (typeof text !== "string" || !text.trim()) return { status: 400, body: { code: "NO_TEXT", retryable: false } };
+        const captured = await ctx.call("capture_thought", { content: text, source: "example-hook", trust: "ingested" });
+        if (!captured.ok) return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
+        return { status: 202, body: { id: captured.value.id } };
+      },
+    },
+  },
   operations: {
     recent: operation({
       title: "Recent thought ids",

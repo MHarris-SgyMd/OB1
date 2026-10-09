@@ -8,6 +8,7 @@
 // a bare import in the plugin: a plugin's directory has no node_modules of its
 // own, in a checkout or in the image.
 
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Scope } from "./auth.ts";
 import type { ToolName } from "./tools.ts";
@@ -99,6 +100,55 @@ export interface PluginManifest {
    * themselves are the GUI's to render.
    */
   gui?: { pages: GuiPage[] };
+  /**
+   * Its inbound webhooks (SMD-2310), keyed by name: each a POST the REST core
+   * serves at /hooks/<plugin>/<name> with no key — the sender is no brain key
+   * holder, so the handler verifies the request itself, against the secret
+   * the operator set (ctx.secret) — and only while OB1_HOOKS names the
+   * plugin. The proxy reaches them only where the operator names
+   * deploy/compose.hooks-public.yaml.
+   */
+  hooks?: Record<string, PluginHook>;
+}
+
+/**
+ * An inbound webhook's request: its headers (names lower-cased), its query,
+ * its body as the bytes the sender sent (at most 1 MiB) — what a signature is
+ * over — and the same bytes read as UTF-8 text, for parsing.
+ */
+export type HookRequest = { headers: Readonly<Record<string, string>>; query: Readonly<Record<string, string>>; body: Uint8Array; text: string };
+
+/** A webhook's answer to its sender: a status, and a JSON body if it has one. */
+export type HookAnswer = { status: 200 | 202 | 204 | 400 | 401 | 403 | 404 | 409 | 413 | 422 | 503; body?: Record<string, unknown> };
+
+/** What a webhook's handler runs against: the core as the hook's own capture-only caller, the plugin's tables, and its secret. */
+export interface HookContext {
+  /**
+   * A core operation as `hook:<plugin>`, a caller of capture scope alone: a
+   * webhook may add a thought, and nothing it is sent can read, change or
+   * delete one. The audit row names it.
+   */
+  call: PluginContext["call"];
+  readonly db: PluginContext["db"];
+  /** The secret OB1_HOOK_SECRETS gives this plugin: always set — with none, the REST core answers 503 and never calls the handler. */
+  readonly secret: string;
+}
+
+export interface PluginHook {
+  description: string;
+  handler(ctx: HookContext, request: HookRequest): Promise<HookAnswer>;
+}
+
+/** HMAC-SHA256 of `data` (the body's bytes, or text) under `key`, as lower-case hex — the signature most webhook senders send. */
+export function hmacSha256Hex(key: string, data: Uint8Array | string): string {
+  return createHmac("sha256", key).update(data).digest("hex");
+}
+
+/** Whether two strings are equal, in time that does not depend on where they first differ — for comparing a signature. */
+export function safeEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
 }
 
 /** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */

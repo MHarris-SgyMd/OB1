@@ -156,7 +156,7 @@ jobs:
       # Plugins in the contract (SMD-2310) over a stub core: the manifests,
       # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
       # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
-      # plugin login URL, and the GUI's registry at GET /v1/plugins.
+      # plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks.
       - name: Plugins in the contract
         working-directory: server-portable
         run: bun test-plugins.ts
@@ -1205,6 +1205,11 @@ jobs:
           # API_ROUTE_TABLE).
           docker compose -f compose.yaml -f compose.api-public.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-api-route"] == .configs["proxy-api-route"].content) and (.configs["proxy-api-route"].content | test("middlewares: \\[api-no-forwarder, api-strip\\]") and test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-api-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
+          # The webhooks' overlay (SMD-2310), the same way: no port, its route
+          # file its label, the forwarder slot deleted, the REST core by its
+          # rooted mesh name — and beside /api's, both routes on the proxy.
+          docker compose -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml --profile local-models config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-hooks-route"] == .configs["proxy-hooks-route"].content) and (.services.proxy.labels | has("ob1.proxy-api-route")) and (.configs["proxy-hooks-route"].content | test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-hooks-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
           # REST core join stable's mesh under the canary's names alone, the
           # canary's own `mesh` stays its own, and it adds no port (the one the
@@ -1305,7 +1310,7 @@ jobs:
           # port binds loopback"; the ports by it and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy.
@@ -1377,11 +1382,14 @@ jobs:
           }
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
+          hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
           proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
@@ -1396,6 +1404,7 @@ jobs:
             fi
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -2131,6 +2140,51 @@ jobs:
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
           grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
+      # SMD-2310: a plugin's webhook reaches the REST core only through the
+      # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
+      # plugin is turned on for this step alone — the migrator, recreated with
+      # the REST core, applies its table as ob1_plugins, and the REST core's
+      # preflight finds it in place; the proxy is recreated with --no-deps, so
+      # the MCP server, whose environment the knobs change too, is left as it
+      # was — then off again, so every other step sees
+      # the plugin-free stack it expects (smoke.sh holds tools/list to the
+      # manifest). With the overlay off /hooks is the proxy's 404; on, a
+      # delivery signed with another secret is the plugin's 401 and a signed
+      # one captures through the core as the hook's own caller, read back on
+      # the mesh; a plugin it does not serve is the REST core's 404.
+      - name: A plugin's webhook reaches the REST core only by the overlay, and captures as its hook
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
+          SECRET=$(openssl rand -hex 16)
+          PLUGIN_PW=$(openssl rand -hex 16)
+          export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }
+          BODY='{"text":"ci: a capture through the example webhook"}'
+          SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+          post() { code -X POST -H 'content-type: application/json' "$@"; }
+          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(post -H "x-example-signature: $(printf %s "$BODY" | openssl dgst -sha256 -hmac other -hex | sed 's/^.* //')" -d "$BODY" "$B/hooks/example/capture")
+          [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
+          { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
+          grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
+          c=$(post -d '{}' "$B/hooks/nothing/here")
+          [ "$c" = 404 ] || { echo "a plugin the REST core does not serve answered $c through /hooks" >&2; exit 1; }
+          c=$(code "$B/hooks/example/capture")
+          [ "$c" = 405 ] || { echo "a GET of the webhook answered $c, not 405" >&2; exit 1; }
+          unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(post -H "x-example-signature: $SIG" -d "$BODY" "$B/hooks/example/capture")
+          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes

@@ -34,7 +34,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
-import { pluginNames, pluginProblem } from "./core/plugins.ts";
+import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
@@ -899,6 +899,32 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
     add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
         "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
+  // The webhooks (SMD-2310): OB1_HOOKS names enabled plugins with a webhook,
+  // OB1_HOOK_SECRETS is well formed — the server does not start otherwise —
+  // and a served plugin with no secret is said: its handler has nothing to
+  // verify a delivery against, and the example's refuses every one.
+  if (!problem && (env.OB1_HOOKS || env.OB1_HOOK_SECRETS)) {
+    const { secrets, problem: secretProblem } = hookSecrets(env.OB1_HOOK_SECRETS);
+    let hookProblem: string | null = secretProblem;
+    let served: string[] = [];
+    if (!hookProblem) {
+      try {
+        served = [...new Set(enabledHooks(loadPlugins(env.OB1_PLUGINS), env.OB1_HOOKS).map((h) => h.plugin))];
+      } catch (e) {
+        hookProblem = (e as Error).message;
+      }
+    }
+    if (hookProblem) add("plugin webhooks", "fail", hookProblem, "Name plugins enabled in OB1_PLUGINS that have webhooks in OB1_HOOKS, and give OB1_HOOK_SECRETS as plugin=secret pairs separated by spaces");
+    else {
+      const unsecret = served.filter((n) => !secrets.has(n));
+      const stray = [...secrets.keys()].filter((n) => !served.includes(n));
+      if (unsecret.length || stray.length)
+        add("plugin webhooks", "warn",
+            `${served.join(", ") || "none"} served${unsecret.length ? `; no secret for ${unsecret.join(", ")}` : ""}${stray.length ? `; a secret for ${stray.join(", ")}, which OB1_HOOKS does not serve` : ""}`,
+            "Give each served plugin a secret in OB1_HOOK_SECRETS (openssl rand -hex 32), and the sender the same one");
+      else add("plugin webhooks", "ok", `${served.join(", ")} served at /hooks/<plugin>/<name>, each with its secret — public only with deploy/compose.hooks-public.yaml`);
+    }
+  }
 }
 
 // ── Public origin ────────────────────────────────────────────────────────────

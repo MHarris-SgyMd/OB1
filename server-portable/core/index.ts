@@ -15,7 +15,7 @@ export type { Outcome, Refusal, RefusalCode, Failure } from "./refusal.ts";
 export { failure } from "./refusal.ts";
 export { SPECS, type Input, type ToolSpec } from "./schemas.ts";
 export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from "./calls.ts";
-export { loadPlugins, runOperation, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
+export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
