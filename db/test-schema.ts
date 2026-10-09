@@ -77,6 +77,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
+import { pairAt, parseCgroupMemory, parseCpuStat, parseProcStat, cpuShare, percentile, summarise as summariseLoad, type CallRecord } from "./bench-load.ts";
 import {
   BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
@@ -7034,7 +7035,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("084") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, its last definer (053's body plus the relation kind, [73])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("084") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, its last definer (053's body plus the relation kind, [74])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -7233,7 +7234,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const onC = (await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[{"relation":"references","target":"c"}]'::jsonb) AS r`, [tC])).r;
   const cLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link'`, [tC])).id;
   assert(onC.added === 1 && /does not link to itself/.test(await refused(`UPDATE thought_facets SET thought_id = $1::uuid WHERE id = $2::uuid`, [tB, cLink])), "moving a link row onto the thought whose identity it names is judged and refused");
-  assert(/a facet keeps its kind: a link is not turned into a citation/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is refused — since 084 no facet changes its kind ([73])");
+  assert(/a facet keeps its kind: a link is not turned into a citation/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is refused — since 084 no facet changes its kind ([74])");
   assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
@@ -8669,7 +8670,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
   assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `fifteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([73]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+    `fifteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -9213,7 +9214,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "073"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} — 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal — the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("084"), `084 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]) and the relation kind ([73]) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("084"), `084 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
   assert(lastDefinerOf("delete_thought").startsWith("060") && lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("ob1_project_thought_event").startsWith("060") && lastDefinerOf("ob1_refresh_thought_vector").startsWith("060"),
     "060 stays the last definer of delete_thought, the audit trigger, the projector and the refresh — 061 touches none");
   const RECORDS = /ob1:derivation-recorded-with-its-artifact/;
@@ -9497,7 +9498,7 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
   assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
     `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("084") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
-    `one ob1_record_derivation, 084 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) and the relation kind ([73]) (${lastDefinerOf("ob1_record_derivation")})`);
+    `one ob1_record_derivation, 084 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
   // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
   assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
@@ -12441,7 +12442,72 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[73] Migration 084: the consolidation judge's relations — a `relation` facet on the newer thought (related, evolves or duplicate, a target thought, the judge's key and confidence, origin judged), one active per pair, its lineage row written with it; record_thought_relation's set per pair (added, kept, replaced, closed, none); a deleted target closes the edge, a deleted newer thought takes its edges and their lineage (SMD-1873)");
+console.log("\n[73] bench-hnsw's section F under load: the schedule, the percentiles, the summary, the cgroup, /proc/stat and cpu.stat parses and the CPU share (SMD-1500, bench-load.ts)");
+{
+  // Pure functions of their inputs. The closed loop that uses them needs a
+  // server, and test-live.ts [39] holds it to N concurrent backends.
+  const S = 3, Q = 5;
+  const key = (p: { slot: number; query: number }) => `${p.slot}/${p.query}`;
+  const cycle = Array.from({ length: S * Q }, (_, k) => pairAt(0, 1, k, S, Q));
+  assert(new Set(cycle.map(key)).size === S * Q && cycle.every((p) => p.slot < S && p.query < Q), `one connection asks every (slot, query) pair once per cycle of ${S * Q} calls`);
+  assert(cycle.slice(0, S).map((p) => p.slot).join() === "0,1,2" && key(pairAt(0, 1, S * Q, S, Q)) === key(cycle[0]), "a connection alternates its slots call by call, and the cycle repeats");
+  const firsts = Array.from({ length: 10 }, (_, c) => key(pairAt(c, 10, 0, S, Q)));
+  assert(new Set(firsts).size === 10, `ten connections start on ten different pairs (${firsts.join(" ")})`);
+  // The documented run: three slots, 50 queries, ten connections. One offset
+  // into the cycle of pairs started all ten on the same slot here, in step
+  // through the tiers (review pass 1).
+  const documented = Array.from({ length: 10 }, (_, c) => pairAt(c, 10, 0, 3, 50));
+  assert(new Set(documented.map((p) => p.slot)).size === 3 && new Set(documented.map((p) => p.query)).size === 10, `the documented run's ten connections start on all three slots and ten different queries (${documented.map(key).join(" ")})`);
+  const long = Array.from({ length: 150 }, (_, k) => key(pairAt(7, 10, k, 3, 50)));
+  assert(new Set(long).size === 150, "and each of them still asks every pair once a cycle");
+  const spread = Array.from({ length: 4 }, (_, c) => pairAt(c, 4, 0, 1, 100).query);
+  assert(spread.join() === "0,25,50,75", `the connections' cycles start spread evenly round it (${spread.join()})`);
+
+  const hundred = Array.from({ length: 100 }, (_, i) => i + 1);
+  assert(percentile(hundred, 0.99) === 99 && percentile(hundred, 0.5) === 50 && percentile(hundred, 1) === 100, "nearest rank: p99 of 1..100 is 99, p50 is 50, p100 the maximum");
+  assert(percentile([7], 0.99) === 7 && percentile([7], 0.5) === 7 && Number.isNaN(percentile([], 0.5)), "one value is every percentile; none is NaN");
+  assert(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 1000], 0.99) === 1000, "p99 of ten calls is the slowest: the tail is not averaged away");
+
+  // Two slots. Query 0's exact answer is a..j; the loaded calls are recorded
+  // as given, one call alone answered each query with `alone`.
+  const ten = (p: string) => Array.from({ length: 10 }, (_, i) => `${p}${i}`);
+  const want = (_slot: number, q: number) => ten(`q${q}-`);
+  const alone = (_slot: number, q: number) => (q === 2 ? ten("x") : ten(`q${q}-`));
+  const records: CallRecord[] = [
+    { slot: 0, query: 0, at: 0, ms: 5, ids: ten("q0-") },
+    { slot: 0, query: 0, at: 0, ms: 6, ids: ten("q0-").reverse() },
+    { slot: 0, query: 0, at: 0, ms: 7, ids: ten("q0-") },
+    { slot: 0, query: 1, at: 0, ms: 50, ids: ten("y") },
+    { slot: 1, query: 0, at: 0, ms: 1, ids: ten("q0-") },
+  ];
+  const [s0, s1] = summariseLoad(records, [{ key: "t50", label: "50%" }, { key: null, label: "unfiltered" }], want, alone);
+  assert(s0.calls === 4 && s1.calls === 1 && s0.label === "50%", "each slot counts its own calls");
+  assert(s0.recall === 5, `recall is averaged per query, then over queries: query 0 three times at 10, query 1 once at 0 → 5, not 7.5 (got ${s0.recall})`);
+  assert(s0.recallAlone === 10, `one call's recall is over the queries the run reached alone — query 2's answer, never asked here, is left out (got ${s0.recallAlone})`);
+  assert(s0.changed === 1, `a call is changed when its rows, as a set, are not one call alone's — the reversed list is the same set (got ${s0.changed})`);
+  assert(s0.p50 === 6 && s0.p99 === 50 && s1.p50 === 1, `the slot's own calls' percentiles (p50 ${s0.p50}, p99 ${s0.p99})`);
+  const [none] = summariseLoad([], [{ key: "t1", label: "1%" }], want, alone);
+  assert(none.calls === 0 && Number.isNaN(none.p50) && Number.isNaN(none.recall) && none.changed === 0, "a slot the run never reached has no calls and no numbers");
+
+  const stat = "anon 26214400\nfile 188743680\nkernel 1048576\nshmem 8388608\nfile_mapped 1024\nanon_thp 0\n";
+  const m = parseCgroupMemory("223346688\n", stat);
+  assert(m !== null && m.current === 223346688 && m.anon === 26214400 && m.file === 188743680 && m.shmem === 8388608, `memory.current and memory.stat parse to bytes (${JSON.stringify(m)})`);
+  assert(parseCgroupMemory("223346688\n", "anon_thp 0\nfile 1\nshmem 1\n") === null, "anon_thp is not anon: a stat without the anon line is refused");
+  assert(parseCgroupMemory("max\n", stat) === null && parseCgroupMemory("", stat) === null, "a memory.current that is not a byte count is refused");
+  const [dup] = summariseLoad([{ slot: 0, query: 0, at: 0, ms: 1, ids: ["a", "a"] }], [{ key: "t1", label: "1%" }], () => ["a", "b"], () => ["a", "b"]);
+  assert(dup.changed === 1, "two rows of one id are not the two ids one call alone returned: the comparison is of sets, sizes included");
+
+  const procStat = "cpu  1000 50 400 90000 300 20 30 700 600 40\ncpu0 500 25 200 45000 150 10 15 350 300 20\ncpu1 500 25 200 45000 150 10 15 350 300 20\nintr 1 2\n";
+  const vm = parseProcStat(procStat);
+  assert(vm !== null && vm.busyS === 15 && vm.cpus === 2, `/proc/stat: user + nice + system + irq + softirq at USER_HZ 100, not idle, iowait or steal, and not guest, which user already counts; CPUs counted from the cpuN lines (${JSON.stringify(vm)})`);
+  assert(parseProcStat("intr 1 2\n") === null && parseProcStat("cpu  1 2 3 4 5 6 7\n") === null, "a /proc/stat without the cpu line, or without a cpuN line, is refused");
+  assert(parseCpuStat("usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n") === 2.5 && parseCpuStat("user_usec 1\n") === null, "cpu.stat's usage_usec in seconds; without it, null");
+  const share = cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 106, dbS: 14, at: 2000 });
+  assert(share.db === 2 && share.others === 1, `over two seconds the container used 4 CPU-seconds of the machine's 6: two CPUs its own, one the others' (${JSON.stringify(share)})`);
+  assert(cpuShare({ busyS: 100, dbS: 10, at: 0 }, { busyS: 101, dbS: 12, at: 1000 }).others === -1, "the two clocks' skew is printed as it is, a negative share for the others, not clamped to a plausible zero");
+}
+
+console.log("\n[74] Migration 084: the consolidation judge's relations — a `relation` facet on the newer thought (related, evolves or duplicate, a target thought, the judge's key and confidence, origin judged), one active per pair, its lineage row written with it; record_thought_relation's set per pair (added, kept, replaced, closed, none); a deleted target closes the edge, a deleted newer thought takes its edges and their lineage (SMD-1873)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
