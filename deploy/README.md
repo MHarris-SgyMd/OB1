@@ -964,13 +964,22 @@ supersede which"):
   service runs it);
 - an import dated older than thoughts already judged.
 
-**Consolidation only proposes.** Nothing it finds is applied: each proposal
-waits for a person. One whose text moved under it (a stale row) is judged
+**Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged
 again by the next pass, which settles it unless the conflict still stands,
 when it waits for a person again (067). `--list` shows the queue.
 `--accept <id>` or `--reject <id>` decides one, with `--note` giving your
 reason. When the listing says the judge did not state which thought is
 current, an accept needs `--direction newer` or `--direction older`.
+
+Since migration 084 the pass also stores its related, evolves and duplicate
+verdicts as `relation` facets on the newer thought — edges, not proposals,
+nothing to review (`--list relations` lists them). The service connects as the
+superuser, so it stores them. A brain that ran the pass before 084 has none for
+the thoughts judged then: `--status` counts them and prints the `DELETE FROM
+thought_work_claims …` that has the next pass judge exactly those again (their
+model calls again), run with `podman compose -f deploy/compose.yaml exec
+postgres psql -U postgres openbrain -c "…"` (`db/README.md`, "Consolidation:
+proposing which thoughts supersede which").
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list

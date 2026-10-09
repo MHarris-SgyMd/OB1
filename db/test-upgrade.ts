@@ -523,9 +523,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // (min_trust on the hybrid and the current read, SMD-1724), 077 (the
   // current read by the tickets a thought names, SMD-2271), 079 (two
   // tickets Linear links never paired for judgement, SMD-2448), 080 (a
-  // capture-only key's re-capture leaves the row, SMD-2539) and 082 (a
+  // capture-only key's re-capture leaves the row, SMD-2539), 082 (a
   // capture-only key's pointer lapses when another takes its target,
-  // SMD-2638) stay recorded and
+  // SMD-2638), 084 (the judge's relations stored, SMD-1873) and 085 (a
+  // capture-only key's stamp yields to the first classified key that can read
+  // at a higher trust, SMD-2664) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -628,13 +630,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // reads, the re-capture note and the lapse and write-time triggers on
   // 008's thought_audit, refusing by name without 060 or 061 ([20ae]); 083
   // upserts ob1_config.schema_version for the 1.7.0 cut, needing only 006's
-  // table — all
+  // table; 084 adds the relation facet kind, its write, the triggers on
+  // thoughts and thought_facets and the lineage kind, refusing by name
+  // without 042, 053, 061 or 064 ([20af]); 085 adds the restamp and
+  // redefines 073's backfill_thought_actors on its own body, refusing by
+  // name without 055, 060, 073 or 074 ([20ag]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 54, `030 is among the last fifty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 56, `030 is among the last fifty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3667,6 +3673,139 @@ console.log("\n[20ae] Migration 082: refused by name without 060; onto a populat
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the082 });
   const [{ trg }] = await sql`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname IN ('thought_audit_lapse_capture_pointers', 'thought_audit_check_capture_pointer')`;
   assert(trg === 2 && (await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 082 is a no-op: two triggers, and no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20af] Migration 084: refused by name without 064; onto a populated brain at the file before it — the relation kind, the write, the two triggers and the lineage kind, no row moved and a link still admitted; a relation written after it; a re-apply a no-op (SMD-1873)");
+{
+  const the084 = MIGRATIONS.find((f) => f.endsWith("_judged_relations.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "064" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the084 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 084 needs 042, 053, 061 and 064 (thought_facets, record_source_links, ob1_record_derivation, page_sections); this schema lacks them",
+    `084 on a schema stopped before 064 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the084 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const cap = async (content: string) => ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" } }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string }).id;
+  // A brain at 083: two thoughts, a link between them, their lineage rows.
+  const older = await cap("upgrade 084: the older note"), newer = await cap("upgrade 084: the newer note");
+  await sql`SELECT record_thought_source(${older}::uuid, 'linear', 'SMD-1', 'x', 'text/plain')`;
+  await sql`SELECT record_source_links(${newer}::uuid, 'linear', ${[{ relation: "relates_to", target: "SMD-1" }]}::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT
+      (SELECT json_agg(t ORDER BY t.id) FROM (SELECT id, content, metadata, updated_at::text AS u FROM thoughts) t) AS t,
+      (SELECT json_agg(f ORDER BY f.id) FROM (SELECT id, kind, payload, valid_until FROM thought_facets) f) AS f,
+      (SELECT json_agg(d ORDER BY d.id) FROM (SELECT id, artifact_kind, input_fingerprints FROM derivations) d) AS d`);
+  const before = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the084 });
+  const [made] = await sql`SELECT
+      to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)') IS NOT NULL AS fn,
+      (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('thoughts_close_relations', 'thought_facets_drop_relation_derivation')) AS trg,
+      (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS chk`;
+  assert(made?.fn === true && made?.trg === 2 && /'relation'/.test(String(made?.chk)), `the write, the two triggers, and relation among the lineage kinds (${JSON.stringify(made)})`);
+  assert((await rows()) === before, "…no thought, facet or lineage row moved");
+  const linked = await sql`SELECT record_source_links(${newer}::uuid, 'linear', ${[{ relation: "relates_to", target: "SMD-1" }, { relation: "blocks", target: "SMD-1" }]}::jsonb) AS r`;
+  assert((linked[0].r as { added: number }).added === 1, "the link kind still admits a link after the validator's re-issue");
+  const [{ r }] = await sql`SELECT record_thought_relation(${newer}::uuid, ${older}::uuid, 'evolves', 0.7, 'consolidate:t@p4', NULL, 'fo', 'fn', NULL) AS r`;
+  assert((r as { action: string }).action === "added", `a relation is written on the upgraded brain (${JSON.stringify(r)})`);
+  // A re-apply moves nothing.
+  const beforeReapply = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the084 });
+  const [{ trg }] = await sql`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname IN ('thoughts_close_relations', 'thought_facets_drop_relation_derivation')`;
+  assert(trg === 2 && (await rows()) === beforeReapply, "a re-apply of 084 is a no-op: two triggers, and no row moved");
+  await sql.close();
+}
+
+console.log("\n[20ag] Migration 085: refused by name without 074; onto a populated brain at the file before it — the restamp and the backfill's new body, no row and no audit row moved, a stamp a write key's re-capture kept before the upgrade left as it is; after it, a re-capture moves the stamp through the stores' path, a note written under 082 settles nothing, a backfill pass keeps the restamp, and an edit racing a restamp stays the writer by seq; a re-apply a no-op (SMD-2664)");
+{
+  const the085 = MIGRATIONS.find((f) => f.endsWith("_recapture_restamps_trust.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "074" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the085 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 085 needs 055, 060, 073 and 074 (ob1_append_thought_event, ob1_project_thought_event, ob1_actor_stamp, ob1_trust_rank); this schema lacks it",
+    `085 on a schema stopped before 074 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the085 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('hook-key', 'agent')`;
+  await sql`SELECT set_agent_kind('writer-key', 'operator')`;
+  // Agent ids, as every key the server resolves carries: 082's note is written for them.
+  const agent = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  await sql`SELECT set_agent_kind('other-key', 'operator')`;
+  const HOOK = { name: "hook-key", agent_id: await agent("a", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const WRITER = { name: "writer-key", agent_id: await agent("b", "writer-key", "write"), via: "open-brain" };
+  const OTHER = { name: "other-key", agent_id: await agent("c", "other-key", "write"), via: "open-brain" };
+  const cap = async (content: string, payload: Record<string, unknown>) =>
+    (await sql`SELECT upsert_thought(${content}::text, ${payload}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string; existed: boolean };
+  const marks = async (id: string) => {
+    const m = ((await sql`SELECT metadata AS m FROM thoughts WHERE id = ${id}::uuid`)[0] as { m: Record<string, unknown> }).m;
+    return `${m.actor_kind ?? "-"}/${m.actor_name ?? "-"}/${m.trust ?? "-"}`;
+  };
+  // A brain at 082: the hook's outside text, which the writer re-captured
+  // there — its stamp kept, the bug — and one the writer has not yet sent.
+  const kept = await cap("upgrade 085: the hook's text the writer re-captured before", { metadata: { source: "codex" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" });
+  await cap("upgrade 085: the hook's text the writer re-captured before", { metadata: { source: "mcp", project: "upgrade" }, actor: WRITER });
+  const [{ notedAt082 }] = await sql`SELECT ob1_note_recapture(${kept.id}::uuid, ${WRITER}::jsonb) AS "notedAt082"`;  // as an 082 server does after it
+  const later = await cap("upgrade 085: the hook's text the writer sends after", { metadata: { source: "codex" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" });
+  assert(notedAt082 === true && (await marks(kept.id)) === "agent/hook-key/ingested" && (await marks(later.id)) === "agent/hook-key/ingested", "[20af] setup: at 082 the writer's re-capture is noted and keeps the hook's lowered stamp");
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the085 });
+  const [made] = await sql`SELECT
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'ob1_restamp_recapture' AND prosrc LIKE '%ob1:recapture-restamps-capture-key%') AS fn,
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'backfill_thought_actors' AND prosrc LIKE '%a.diff ? ''restamped''%') AS bf`;
+  assert(made?.fn === 1 && made?.bf === 1, `the restamp with its sentinel, and the backfill reading a restamp (${JSON.stringify(made)})`);
+  assert((await rows()) === before && (await audits()) === auditBefore && (await marks(kept.id)) === "agent/hook-key/ingested", "…no row and no audit row moved: a stamp kept before the upgrade stays until the writer's next re-capture");
+  // After it, the stores' path: the capture, 082's note, then the restamp.
+  const again = await cap("upgrade 085: the hook's text the writer sends after", { metadata: { source: "mcp" }, actor: WRITER });
+  await sql`SELECT ob1_note_recapture(${again.id}::uuid, ${WRITER}::jsonb)`;
+  const [{ moved }] = await sql`SELECT ob1_restamp_recapture(${again.id}::uuid, ${again.fingerprint}::text, ${WRITER}::jsonb, NULL::text) AS moved`;
+  assert(again.existed === true && moved === true && (await marks(later.id)) === "operator/writer-key/operator", `a write key's re-capture after the upgrade moves the stamp to it (${moved}, ${await marks(later.id)})`);
+  const keptAgain = await cap("upgrade 085: the hook's text the writer re-captured before", { metadata: { source: "mcp" }, actor: OTHER });
+  await sql`SELECT ob1_note_recapture(${keptAgain.id}::uuid, ${OTHER}::jsonb)`;
+  const [{ keptMoved }] = await sql`SELECT ob1_restamp_recapture(${keptAgain.id}::uuid, ${keptAgain.fingerprint}::text, ${OTHER}::jsonb, NULL::text) AS "keptMoved"`;
+  assert(keptMoved === true && (await marks(kept.id)) === "operator/other-key/operator", `…and a stamp kept before the upgrade moves at the next re-capture by a key that can read — another key than the one 082 noted: an 082 note settles nothing (${keptMoved}, ${await marks(kept.id)})`);
+  const bf = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { differing: number };
+  assert(bf.differing === 0 && (await marks(later.id)) === "operator/writer-key/operator", `…and a backfill pass after it changes nothing (${JSON.stringify(bf)})`);
+  // An edit that began before a restamp and committed after it carries the
+  // earlier clock (created_at is the transaction's) and the later seq: the
+  // backfill reads the edit, not the restamp, as the writer of the text that
+  // stands (review pass 1, on two connections).
+  await sql`SELECT set_agent_kind('editor-key', 'agent')`;
+  const EDITOR = { name: "editor-key", via: "open-brain" };
+  const raced = await cap("upgrade 085: the hook's text an edit races a restamp on", { metadata: { source: "codex" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" });
+  const editConn = new SQL({ url: URL_, max: 1 });
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const clockFixed = new Promise<void>((r) => { started = r; });
+  const editDone = editConn.begin(async (tx) => {
+    await tx`SELECT now()`;  // the transaction's clock, fixed before the restamp
+    started();
+    await gate;
+    await tx`SELECT update_thought(p_id := ${raced.id}::uuid, p_content := ${"upgrade 085: the editor's text, written after the restamp"}::text, p_actor := ${EDITOR}::jsonb)`;
+  });
+  await clockFixed;
+  await Bun.sleep(20);  // a clock tick apart: created_at is microseconds
+  const reRaced = await cap("upgrade 085: the hook's text an edit races a restamp on", { metadata: { source: "mcp" }, actor: WRITER });
+  const [{ racedMoved }] = await sql`SELECT ob1_restamp_recapture(${reRaced.id}::uuid, ${reRaced.fingerprint}::text, ${WRITER}::jsonb, NULL::text) AS "racedMoved"`;
+  release();
+  await editDone;
+  await editConn.close();
+  const [order] = await sql`SELECT bool_and(r.created_at > e.created_at AND r.seq < e.seq) AS inverted FROM thought_audit r, thought_audit e
+     WHERE r.thought_id = ${raced.id}::uuid AND r.diff ? 'restamped' AND e.thought_id = ${raced.id}::uuid AND e.action = 'update' AND e.diff ? 'content'`;
+  assert(racedMoved === true && order?.inverted === true && (await marks(raced.id)) === "agent/editor-key/agent",
+    `setup: the restamp landed between the edit's start and its write — a later clock, an earlier seq — and the edit's stamp stands live (${racedMoved}, ${JSON.stringify(order)}, ${await marks(raced.id)})`);
+  const bfRaced = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { differing: number };
+  assert(bfRaced.differing === 0 && (await marks(raced.id)) === "agent/editor-key/agent", `…and a backfill pass reads the edit as the writer, by seq, changing nothing (${JSON.stringify(bfRaced)}, ${await marks(raced.id)})`);
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the085 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 085 is a no-op: no row or audit row moved");
   await sql.close();
 }
 

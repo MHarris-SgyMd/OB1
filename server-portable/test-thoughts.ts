@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -685,6 +685,17 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(JSON.stringify(proposalConfidence(jg("outdates", "newer", { verdict: { ...dist, covered: 0.4 } }))) === JSON.stringify({ confidence: 0.8, source: "stated" }),
          "…and so it is when the alternatives naming a verdict held under half the token's mass");
   assert(proposalConfidence(jg("outdates", "newer", { verdict: { ...dist, covered: 0.5 } })).source === "token", "…and not at exactly half");
+  // SMD-1873 PR 2: what a judgement records as a relation (084), and at what confidence.
+  assert(relationVerdict(jg("related", "unknown")) === "related" && relationVerdict(jg("evolves", "unknown")) === "evolves" && relationVerdict(jg("duplicate", "unknown")) === "duplicate",
+         "related, evolves and duplicate are relations");
+  assert(relationVerdict(jg("unrelated", "unknown")) === null && relationVerdict(jg("outdates", "newer")) === null && relationVerdict({ ...jg("related", "unknown"), malformed: true }) === null,
+         "an unrelated pair, an outdates (a proposal's) and a malformed answer record no relation — the pass closes the pair's");
+  assert(JSON.stringify(relationConfidence(jg("duplicate", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.25, mass: 0.55, source: "token" })
+         && JSON.stringify(relationConfidence(jg("related", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.2, mass: 0.55, source: "token" }),
+         "a relation stores the token probability of its own word, and the floor reads the three relation words' mass together — related 0.2 is a relation the model holds at 0.55 (review pass 1)");
+  assert(JSON.stringify(relationConfidence(jg("related", "unknown"))) === JSON.stringify({ confidence: 0.8, mass: 0.8, source: "stated" })
+         && relationConfidence(jg("related", "unknown", { verdict: { ...dist, covered: 0.4 } })).source === "stated",
+         "…else both are the number the model wrote, also under half the token's mass");
 
   // The display cleaner: control characters and ESC go, tab/newline/return stay.
   // ESC goes and the sequence's printable tail stays as text — "[2A" moves nothing without it.

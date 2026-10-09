@@ -309,6 +309,14 @@ const FUNCTIONS = [
   "ob1_note_recapture(uuid, jsonb)",
   "ob1_lapse_capture_pointers()",
   "ob1_check_capture_pointer()",
+  // 084 (SMD-1873): the judged relation's write and the two triggers'
+  // functions; the triggers go with thoughts and thought_facets, the indexes
+  // with thought_facets.
+  "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)",
+  "ob1_close_relations_to_deleted()",
+  "ob1_drop_relation_derivation()",
+  // 085 (SMD-2664): a re-capture at a higher trust moves the stamp.
+  "ob1_restamp_recapture(uuid, text, jsonb, text)",
 ];
 
 /**
