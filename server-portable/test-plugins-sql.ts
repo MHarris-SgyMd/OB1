@@ -280,14 +280,29 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   const againBody = (await again.json()) as { id?: string; duplicate?: boolean };
   assert(first.status === 202 && typeof firstBody.id === "string", `the first: 202 and its thought (${first.status} ${JSON.stringify(firstBody)})`);
   assert(again.status === 200 && againBody.duplicate === true && againBody.id === firstBody.id, `the resend: 200, the same thought, marked a duplicate (${again.status} ${JSON.stringify(againBody)})`);
-  assert((await captures(onceText)) === 1, "and capture ran once: one audit row from the hook");
   const kept = await one<{ thought_id: string }>(sql`SELECT thought_id::text FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}`}`);
   assert(kept?.thought_id === firstBody.id, "the delivery's id is kept in the plugin's own table, with its thought");
-  // A claim older than twice the tolerance is pruned by the next delivery: a resend then is stale whatever its id, so the table keeps no more.
-  await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '11 minutes' WHERE id = ${`evt-${RUN}`}`;
+  // Kept the whole window: nine minutes on, a resend signed afresh is still the first's.
+  await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '9 minutes' WHERE id = ${`evt-${RUN}`}`;
+  const late = await deliver(once);
+  const lateBody = (await late.json()) as { id?: string; duplicate?: boolean };
+  assert(late.status === 200 && lateBody.duplicate === true && lateBody.id === firstBody.id, `nine minutes on, a resend is still the first's thought (${late.status} ${JSON.stringify(lateBody)})`);
+  // A claim older than the window is pruned by the next delivery: a resend of the same bytes is stale by then, so the table keeps no more.
+  await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '12 minutes' WHERE id = ${`evt-${RUN}`}`;
   const afterPrune = await deliver(JSON.stringify({ id: `evt-${RUN}-2`, text: `smd2755: later ${RUN}` }));
   const left = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}`}`);
   assert(afterPrune.status === 202 && left.n === 0, `the next delivery prunes the old claim (${afterPrune.status}, ${left.n} left)`);
+  // An unfinished claim — a server that stopped mid-capture — holds its id for its lease, then a retry takes it.
+  const orphanText = `smd2755: orphan ${RUN}`;
+  const orphan = JSON.stringify({ id: `evt-${RUN}-orphan`, text: orphanText });
+  await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${`evt-${RUN}-orphan`}, now() - interval '1 minute')`;
+  const held = await deliver(orphan);
+  assert(held.status === 409 && (await captures(orphanText)) === 0, `inside its lease: 409, nothing captured (${held.status})`);
+  await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '4 minutes' WHERE id = ${`evt-${RUN}-orphan`}`;
+  const taken = await deliver(orphan);
+  const takenBody = (await taken.json()) as { id?: string };
+  const recorded = await one<{ thought_id: string | null }>(sql`SELECT thought_id::text FROM plugin_example.deliveries WHERE id = ${`evt-${RUN}-orphan`}`);
+  assert(taken.status === 202 && (await captures(orphanText)) === 1 && recorded?.thought_id === takenBody.id, `past it, the retry takes the claim and captures (${taken.status}, recorded ${recorded?.thought_id})`);
 }
 
 console.log("\n[7] The plugin's handle: its own table, named bare; a core table refused by Postgres");

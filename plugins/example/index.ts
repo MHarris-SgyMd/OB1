@@ -9,8 +9,17 @@ import { definePlugin, ok, operation, refuse, verifyTimestamped, z } from "../..
 const Note = z.object({ id: z.string(), thought_id: z.string(), note: z.string(), written_by: z.string(), created_at: z.string() });
 type NoteRow = { id: string; thought_id: string; note: string; written_by: string; created_at: Date | string };
 const asNote = (r: NoteRow) => ({ ...r, created_at: new Date(r.created_at).toISOString() });
-/** How far a delivery's timestamp may be from now, in seconds — and so how long its id is kept: twice it, after which a resend is refused as stale whatever its id. */
+/** How far a delivery's timestamp may be from now, in seconds. */
 const TOLERANCE_S = 300;
+/**
+ * How long a delivery's id is kept, in seconds: twice the tolerance, and a
+ * minute's margin for the gap between the signature's check and Postgres's
+ * clock — past it, the same bytes resent are refused as stale. A sender's own
+ * retry, signed afresh with the same id, is told apart only inside it.
+ */
+const KEEP_S = 2 * TOLERANCE_S + 60;
+/** How long a claim whose capture never finished — the server stopped mid-capture — holds its id, in seconds, before a retry may take it: longer than a capture whose model calls each run to OB1_LLM_TIMEOUT's default 120 s. A capture longer still may run twice, which costs model calls and changes no row (a re-capture keeps the thought). */
+const LEASE_S = 180;
 
 export default definePlugin({
   name: "example",
@@ -43,18 +52,27 @@ export default definePlugin({
         if (id !== undefined && (typeof id !== "string" || id.length < 1 || id.length > 200)) return { status: 400, body: { code: "BAD_ID", retryable: false } };
         const content = text;
         const capture = () => ctx.call("capture_thought", { content, source: "example-hook", trust: "ingested" });
+        // The core's refusal, as the sender reads it: one the core says is worth retrying is a 503 it will send again.
+        const refused = (refusal: { code: string; retryable: boolean }) =>
+          ({ status: refusal.retryable ? 503 : 422, body: { code: "CORE_REFUSED", retryable: refusal.retryable, refused: refusal.code } }) as const;
         if (id === undefined) {
           const captured = await capture();
-          if (!captured.ok) return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
+          if (!captured.ok) return refused(captured.refusal);
           return { status: 202, body: { id: captured.value.id } };
         }
         // Claimed before the capture, in a transaction of its own: the claim
         // is not held across the model calls, which would hold one of the
         // plugin's two connections for as long. A resend waits for the first
-        // claim to commit, then finds it — done, or still running.
+        // claim to commit, then finds it — done, or still running. A claim
+        // left unfinished past its lease (the server stopped mid-capture) is
+        // taken again, so the sender's retry is not refused until the prune.
         const claim = await ctx.db.tx(async (sql) => {
-          await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${2 * TOLERANCE_S} * interval '1 second'`;
-          const [mine] = await sql<{ id: string }>`INSERT INTO deliveries (id) VALUES (${id}) ON CONFLICT (id) DO NOTHING RETURNING id`;
+          await sql`DELETE FROM deliveries WHERE claimed_at < now() - ${KEEP_S} * interval '1 second'`;
+          const [mine] = await sql<{ id: string }>`
+            INSERT INTO deliveries (id) VALUES (${id})
+            ON CONFLICT (id) DO UPDATE SET claimed_at = now()
+             WHERE deliveries.thought_id IS NULL AND deliveries.claimed_at < now() - ${LEASE_S} * interval '1 second'
+            RETURNING id`;
           if (mine) return { claimed: true as const };
           const [held] = await sql<{ thought_id: string | null }>`SELECT thought_id FROM deliveries WHERE id = ${id}`;
           return { claimed: false as const, thoughtId: held?.thought_id ?? null };
@@ -65,21 +83,27 @@ export default definePlugin({
             : { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
         }
         // A capture that fails gives the claim back, so the sender's retry
-        // runs; one that cannot be given back lapses with the prune.
+        // runs; one that cannot be given back lapses with the lease.
         const release = () => ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${id} AND thought_id IS NULL`).catch(() => undefined);
         let captured;
         try {
           captured = await capture();
         } catch (err) {
+          // Thrown on, for the REST core's fault log; the sender is told FAILED, a 500 it retries.
           await release();
           throw err;
         }
         if (!captured.ok) {
           await release();
-          return { status: 422, body: { code: "CORE_REFUSED", retryable: false, refused: captured.refusal.code } };
+          return refused(captured.refusal);
         }
         const thoughtId = captured.value.id;
-        await ctx.db.tx((sql) => sql`UPDATE deliveries SET thought_id = ${thoughtId} WHERE id = ${id}`);
+        // Recorded whether or not the claim is still there (a capture longer
+        // than the prune's window); a record that fails leaves the claim to
+        // lapse, and the thought is captured all the same — the sender is told so.
+        await ctx.db
+          .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${id}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
+          .catch(() => undefined);
         return { status: 202, body: { id: thoughtId } };
       },
     },

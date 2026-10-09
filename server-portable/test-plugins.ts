@@ -587,14 +587,23 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // given back when the capture fails so the sender's retry runs; a resend of
   // a captured one runs nothing, and of one still running is told to retry.
   const claims = new Map<string, string | null>();
+  /** Unfinished claims past their lease, which the next claim of the id takes. */
+  const lapsed = new Set<string>();
+  let recordFails = false;
   const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ").trim();
-    const id = values.at(-1) as string;
+    const id = values[0] as string;
     if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve([]);
-    if (q.startsWith("INSERT INTO deliveries (id)")) return Promise.resolve(claims.has(id) ? [] : (claims.set(id, null), [{ id }]));
+    if (q.startsWith("INSERT INTO deliveries (id) VALUES (?) ON CONFLICT (id) DO UPDATE SET claimed_at = now() WHERE deliveries.thought_id IS NULL AND")) {
+      if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) return Promise.resolve((claims.set(id, null), [{ id }]));
+      return Promise.resolve([]);
+    }
     if (q.startsWith("SELECT thought_id FROM deliveries WHERE id =")) return Promise.resolve(claims.has(id) ? [{ thought_id: claims.get(id) }] : []);
     if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL")) return Promise.resolve((claims.get(id) === null && claims.delete(id), []));
-    if (q.startsWith("UPDATE deliveries SET thought_id = ? WHERE id =")) return Promise.resolve((claims.set(id, values[0] as string), []));
+    if (q.startsWith("INSERT INTO deliveries (id, thought_id) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET thought_id =")) {
+      if (recordFails) return Promise.reject(new Error("connection reset"));
+      return Promise.resolve((claims.set(id, values[1] as string), []));
+    }
     throw new Error(`the stand-in table has no answer for: ${q}`);
   };
   const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
@@ -625,6 +634,18 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await send("evt-4");
   const busy = (await r.json()) as { code?: string; retryable?: boolean };
   assert(r.status === 409 && busy.code === "IN_FLIGHT" && busy.retryable === true && captures() === 0, `a delivery whose first is still running: 409 IN_FLIGHT, retryable, nothing run (${r.status} ${JSON.stringify(busy)})`);
+  lapsed.add("evt-4");
+  r = await send("evt-4");
+  assert(r.status === 202 && captures() === 1 && claims.get("evt-4") === "t-retry", `one whose claim outlived its lease — the server stopped mid-capture — is taken and captured (${r.status}, ${captures()} captures)`);
+  recordFails = true;
+  r = await send("evt-5");
+  recordFails = false;
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === "t-retry", `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
+  answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
+  r = await send("evt-6");
+  const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
+  assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
+  answer = async () => coreOk({ thoughts: [] });
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
