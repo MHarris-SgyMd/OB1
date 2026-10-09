@@ -655,7 +655,7 @@ rather than loops; count on neither runtime to start those at boot. The
 servers can need one of them: with `OB1_JEV_BASE_URL` naming the `jev`
 service, their preflight fails ("The jev service is not running") until it
 runs, so after a reboot start it by hand, `compose --profile jev up -d jev`
-with the stack's `-f` files. Check 32
+with the stack's `-f` files (SMD-2834). Check 32
 of `scripts/check-fork-consistency.ts` holds every service's policy. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
 without their database. A canary (`canary.sh`) and the three-tier stack
