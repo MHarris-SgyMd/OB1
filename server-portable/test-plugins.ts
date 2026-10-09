@@ -140,6 +140,16 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   let noHost = "";
   try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p"); } catch (e) { noHost = (e as Error).message; }
   assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);
+  // That refusal is a plugin transaction's, not the store's start: a server on
+  // such a URL with the password set still starts and serves the core.
+  const { SqlStore } = await import("./store-sql.ts");
+  let store: InstanceType<typeof SqlStore> | null = null;
+  let built = "";
+  try { store = new SqlStore("postgres:///brain?host=/var/run/postgresql", { pluginPassword: "p" }); } catch (e) { built = (e as Error).message; }
+  let txSaid = "";
+  if (store) await store.pluginTx("example", async () => 1).catch((e: Error) => { txSaid = e.message; });
+  assert(store !== null && built === "" && /names no host/.test(txSaid), `the store builds; the plugin's transaction is refused, naming why (${built || txSaid})`);
+  await store?.close();
 }
 
 // ── A stub core: each operation answers what the case below asks of it ──────
@@ -221,7 +231,8 @@ console.log("\n[4] The operation over REST: the gate, the input held to its sche
   let r = await json(await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" }));
   assert(r.status === 200 && JSON.stringify(r.body) === '{"thoughts":[{"id":"t1","type":"idea","created_at":"2026-10-08T00:00:00.000Z"}]}', `a read key → 200 and the value its output schema holds, no content (${JSON.stringify(r.body)})`);
   assert(calls.length === 1 && calls[0].name === "listThoughts" && calls[0].principal.name === "r" && (calls[0].input as { limit: number }).limit === 5, "it ran list_thoughts as the caller, with the schema's default limit");
-  assert(lines.at(-1)?.startsWith("api GET /v1/plugins/example/recent 200 ") ?? false, `one request line, naming the operation's route (${lines.at(-1)})`);
+  const line = JSON.parse(lines.at(-1) ?? "{}");
+  assert(line.door === "api" && line.route === "/v1/plugins/example/recent" && line.tool === "example_recent" && line.agent === "r" && line.status === 200, `one request line, naming the operation's route and its tool (${lines.at(-1)})`);
   calls.length = 0;
   r = await json(await hit(enabled, "/v1/plugins/example/recent?limit=3", { key: "write-raw" }));
   assert(r.status === 200 && (calls[0].input as { limit: number }).limit === 3, "a write key → 200, a query field read as its number");
@@ -344,6 +355,8 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
   const app = appWith("probe-kit", [...PLUGINS, probe]);
   let r = await json(await hit(app, "/v1/plugins/probe-kit/items/a%20b?verbose=true", { key: "read-raw" }));
   assert(r.status === 200 && r.body.item_id === "a b" && r.body.verbose === true && (handed as { item_id: string }).item_id === "a b", `a path field decoded, a query boolean read (${JSON.stringify(r.body)})`);
+  const itemLine = JSON.parse(lines.at(-1) ?? "{}");
+  assert(itemLine.route === "/v1/plugins/probe-kit/items/:item_id" && itemLine.tool === "probe_kit_item", `the line names the route's template, its field spelled as a core route's, never the path given (${lines.at(-1)})`);
   r = await json(await hit(app, "/v1/plugins/probe-kit/items/%E0", { key: "read-raw" }));
   assert(r.status === 400 && r.body.code === "REFUSED_INPUT", "a path segment that does not decode → 400");
   r = await json(await hit(app, "/v1/plugins/probe-kit/items/x?item_id=y", { key: "read-raw" }));
@@ -360,7 +373,8 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
   assert(r.status === 409 && r.body.code === "TRY_AGAIN" && r.body.retryable === false && r.body.message === "later", `a refusal is never retryable, whatever the plugin's facts say (${JSON.stringify(r.body)})`);
   lines.length = 0;
   await hit(app, "/v1/plugins/probe-kit/nothing-here", { key: "read-raw" });
-  assert(lines.at(-1)?.startsWith("api GET - 404 ") ?? false, `a plugin path no operation takes logs as any unrouted request, not the wildcard (${lines.at(-1)})`);
+  const unrouted = JSON.parse(lines.at(-1) ?? "{}");
+  assert(unrouted.status === 404 && !("route" in unrouted) && !("tool" in unrouted), `a plugin path no operation takes logs as any unrouted request, not the wildcard (${lines.at(-1)})`);
 }
 
 console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for the keys whose scope reaches it");

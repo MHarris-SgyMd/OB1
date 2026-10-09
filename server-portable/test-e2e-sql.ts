@@ -2895,6 +2895,29 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   }
 }
 
+console.log("\n[19] A capture's request line names the tool, the key and the time, and holds none of the thought (SMD-1849)");
+{
+  const { useRequestLog } = await import("./telemetry.ts");
+  const said: string[] = [];
+  const previous = useRequestLog((l) => said.push(l));
+  const PLANTED = "omega: the words of a thought that must never reach a log line";
+  try {
+    await call("capture_thought", { content: PLANTED, metadata: { note: "planted-metadata-value" } });
+    await call("search_thoughts", { query: "planted-search-words" });
+    for (let i = 0; i < 50 && said.length < 2; i++) await Bun.sleep(20); // a stream's line is written as it ends
+  } finally {
+    useRequestLog(previous);
+  }
+  const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const captures = lines.filter((l) => l.tool === "capture_thought");
+  const captured = captures[0];
+  assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
+    `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
+  assert(lines.filter((l) => l.tool === "search_thoughts" && l.outcome === "ok").length === 1, "…and one for the search");
+  const all = said.join("\n");
+  for (const s of ["omega", "never reach", "planted-metadata-value", "planted-search-words", "e2e-key"]) assert(!all.includes(s), `no ${s} in any line`);
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 
