@@ -62,11 +62,10 @@
 --   * A text edited after its edge was judged: rebuild_derived (067) has no
 --     relation arm, so the edge stands until the pass judges the pair again.
 --     `consolidate.ts --list relations` flags it stale (its lineage
---     fingerprint no longer the text's).
+--     fingerprint no longer the text's). Until then rebuild_derived counts a
+--     relation's lineage row among the rows it keeps — its ELSE arm, whose
+--     word means a person's decision elsewhere.
 --   * A reader outside db/consolidate.ts: search, fetch and a read tool.
---     Until then rebuild_derived counts a relation's lineage row among the
---     rows it keeps — its ELSE arm, whose word means a person's decision
---     elsewhere.
 --   * A relation whose side is later superseded, or that a former judge key
 --     wrote: the candidate rule no longer pairs a superseded thought, and a
 --     new key re-judges only the pairs it reaches, so such a relation stands;

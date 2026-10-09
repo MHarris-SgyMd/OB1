@@ -886,16 +886,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
     if (await has084()) {
       const [r] = (await sql`
-        SELECT count(*) FILTER (WHERE payload->>'relation' = 'related')::int AS related,
-               count(*) FILTER (WHERE payload->>'relation' = 'evolves')::int AS evolves,
-               count(*) FILTER (WHERE payload->>'relation' = 'duplicate')::int AS duplicate,
-               count(*) FILTER (WHERE payload->>'judge_key' IS DISTINCT FROM ${JOB})::int AS other_key,
-               -- --list relations' EDITED SINCE JUDGED, counted (review pass 4).
-               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM derivations d JOIN thoughts o ON o.id = (f.payload->>'target')::uuid JOIN thoughts n ON n.id = f.thought_id
-                                               WHERE d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-                                                 AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
-                                                      OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2])))::int AS edited
-          FROM thought_facets f WHERE kind = 'relation' AND valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; other_key: number; edited: number }[];
+        SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
+               count(*) FILTER (WHERE f.payload->>'relation' = 'evolves')::int AS evolves,
+               count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate,
+               count(*) FILTER (WHERE f.payload->>'judge_key' IS DISTINCT FROM ${JOB})::int AS other_key,
+               -- --list relations' EDITED SINCE JUDGED, counted, over the listing's joins (review pass 4).
+               count(*) FILTER (WHERE d.id IS NOT NULL AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
+                                                            OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2]))::int AS edited
+          FROM thought_facets f
+          JOIN thoughts n ON n.id = f.thought_id
+          JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
+          LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; other_key: number; edited: number }[];
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
       out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them`);
       // A thought this key judged before 084 was applied has no relations, and
@@ -1001,16 +1003,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return `this role lacks ${what} — cd db && bun migrate.ts --url <owner's url> --grant ${g.role} --groups ${groups}${structure ? " (the structure group also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)" : ""}`;
   }
   let RELATIONS_OFF: string | null = await relationsOff();
-  let HAS_084 = RELATIONS_OFF === null;
   /** Whether relations were stored at any point of this run — the summary's counts are then real, beside what was counted only (review pass 4). */
-  let RELATIONS_EVER_ON = HAS_084;
+  let RELATIONS_EVER_ON = RELATIONS_OFF === null;
   /** A change in whether relations are stored, said once, whichever worker or poll sees it first. */
   function relationsNow(off: string | null, when: string): void {
     if (off === RELATIONS_OFF) return;
     out(off === null ? `  relations: stored ${when}` : `  relations: not stored ${when} — ${off}`);
     RELATIONS_OFF = off;
-    HAS_084 = off === null;
-    if (HAS_084) RELATIONS_EVER_ON = true;
+    if (off === null) RELATIONS_EVER_ON = true;
   }
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
@@ -1345,7 +1345,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // has none and none is due — record_thought_relation answers "none".
       let relation: string | null = null;
       const rv = relationVerdict(j);
-      if (HAS_084) {
+      if (RELATIONS_OFF === null) {
         const rs = relationConfidence(j);
         // The floor on the mass of the three relation words; the word's own probability is what the relation stores.
         const write = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
