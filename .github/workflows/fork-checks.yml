@@ -1772,7 +1772,7 @@ jobs:
           [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
           [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
 
-      # SMD-2038, SMD-2294. The canary's life beside this stack, in three `up`s.
+      # SMD-2038, SMD-2294. The canary's life beside this stack, in four `up`s.
       # canary.sh runs compose.yaml again as the project open-brain-canary:
       # its Postgres, a refresh from this stack's through tier.sh on both
       # networks, its server and REST core built from this checkout, then the
@@ -1789,7 +1789,10 @@ jobs:
       #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
       #   serves another model: the thought put on stable just before it
       #   reaches the canary, and the smoke fails on the 50% floor.
-      # - A third `up`, back on stable's origin: the canary's proxy is removed,
+      # - A third `up`, on the same port with a connector at its root: named
+      #   as on the deprecated root, not as one the canary no longer answers,
+      #   and the root answers 200 with a Deprecation header (SMD-2661).
+      # - A fourth `up`, back on stable's origin: the canary's proxy is removed,
       #   8011 is free, and a connector left at the old URL is named.
       # - Then teardown:
       #   - `down --volumes` is refused on a canary stamped working;
@@ -1852,6 +1855,16 @@ jobs:
           [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          # A connector at the root of the canary's own port is not lost: the
+          # proxy's legacy route still hands a POST there to the canary,
+          # deprecated, until v2.0.0 (SMD-2532), and `up` says so (SMD-2661).
+          FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --port 8011 --no-smoke | tee /tmp/canary-root.out
+          grep -F 'connector open-brain-canary points at http://127.0.0.1:8011/?…, the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --port 8011 --connect' /tmp/canary-root.out
+          if grep -F 'no longer answers' /tmp/canary-root.out; then echo "up called the canary's root URL one it no longer answers" >&2; exit 1; fi
+          root_h=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            http://127.0.0.1:8011/ | tr -d '\r')
+          { grep -q '^HTTP/[0-9.]* 200' <<<"$root_h" && grep -qi '^deprecation: ' <<<"$root_h"; } || { echo "the canary's root did not answer 200 with a Deprecation header: $(head -n 1 <<<"$root_h")" >&2; exit 1; }
           # Back on stable's origin, the way a canary stood up before SMD-2294
           # moves over: its own proxy goes, its port is free, and a connector
           # left at the old URL is named.
