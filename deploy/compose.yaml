@@ -16,11 +16,12 @@
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
 # is a working reference for what the pieces are once Supabase is gone.
 #
-# What the host can reach: only the proxy (and n8n, under --profile
-# orchestration), and only from the host itself; the authorization server
-# (--profile auth) publishes nothing. The proxy is the stack's one
-# origin: each service is a path on it (`/mcp` the server), not a port of its
-# own (SMD-1846). Every
+# What the host can reach: only the forwarder, in front of the proxy (and
+# n8n, under --profile orchestration), and only from the host itself; the
+# authorization server (--profile auth) publishes nothing. The proxy is the
+# stack's one origin: each service is a path on it (`/mcp` the server), not a
+# port of its own (SMD-1846), and it is on internal networks alone behind the
+# forwarder, which holds the port (SMD-2583). Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
@@ -331,6 +332,251 @@ x-proxy-routes: &proxy-routes |
           servers:
             - url: "http://auth.ob1.internal.:3000"
 
+# The forwarder's script (SMD-2583): the stack's published port, in front of
+# the proxy, which is on internal networks alone. Inline here, as the route
+# table is, so a release's compose.yaml carries it with nothing else to fetch;
+# check 28 (scripts/check-fork-consistency.ts, FORWARDER_SCRIPT) holds it byte
+# for byte, and CI runs its --self-check. It holds no dollar sign, which
+# compose would read as a variable.
+x-forwarder: &forwarder |
+  // The stack's published port (SMD-2583). The proxy is on internal networks alone, so a backend name
+  // nothing holds is never asked of the host's resolvers; this forwarder holds the port, on `edge`, and
+  // reaches the proxy on `front`, internal. Its own lookups reach the host's resolvers while the proxy
+  // is down, so it dials only an address inside the subnet of an interface no default route leaves by,
+  // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
+  // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
+  // this file, which compose would read as a variable, no exclamation mark, which check 27 refuses in
+  // compose.tiers.yaml (compose reads one as a YAML tag), and no number written with an underscore,
+  // which check 27 reads as YAML 1.1 would: the script is inline in both.
+  import net from "node:net";
+  import { lookup } from "node:dns/promises";
+  import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
+  import { readFileSync } from "node:fs";
+
+  const PROXY = "proxy.ob1.internal.";
+  const PORT = 8000;
+  const DEADLINE_MS = 5000;
+
+  const read = (path: string) => { try { return readFileSync(path, "utf8"); } catch { return ""; } };
+
+  /** The interfaces a default route leaves by, IPv4 and IPv6: never front's, which is internal. */
+  export function defaultRouteInterfaces(route4 = read("/proc/net/route"), route6 = read("/proc/net/ipv6_route")): Set<string> {
+    const out = new Set<string>();
+    for (const line of route4.split("\n").slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length > 7 && f[1] === "00000000" && f[7] === "00000000") out.add(f[0]);
+    }
+    for (const line of route6.split("\n")) {
+      const f = line.trim().split(/\s+/);
+      if (f.length > 9 && f[0] === "0".repeat(32) && f[1] === "00") out.add(f[9]);
+    }
+    return out;
+  }
+
+  const v4 = (a: string) => a.split(".").reduce((n, o) => n * 256n + BigInt(Number(o)), 0n);
+  function v6(a: string): bigint {
+    const [head, tail = ""] = a.split("::");
+    const parts = (s: string) => (s ? s.split(":") : []);
+    const h = parts(head), t = a.includes("::") ? parts(tail) : [];
+    const groups = [...h, ...Array(8 - h.length - t.length).fill("0"), ...t];
+    return groups.reduce((n, g) => n * 65536n + BigInt(parseInt(g || "0", 16)), 0n);
+  }
+  /** Whether ADDRESS lies inside CIDR, both of one family. */
+  export function inside(address: string, cidr: string): boolean {
+    const [base, len] = cidr.split("/");
+    const bits = Number(len);
+    if (net.isIPv4(address) && net.isIPv4(base)) return bits >= 0 && (v4(address) >> BigInt(32 - bits)) === (v4(base) >> BigInt(32 - bits));
+    if (net.isIPv6(address) && net.isIPv6(base) && address.includes("%") === false) return bits >= 0 && (v6(address) >> BigInt(128 - bits)) === (v6(base) >> BigInt(128 - bits));
+    return false;
+  }
+
+  /**
+   * Whether ADDRESS is one of CIDR's own: its network address, its first host (the engine's gateway, which
+   * Docker and podman both give a network, so the host's own listeners), or, for IPv4, its broadcast.
+   */
+  export function reserved(address: string, cidr: string): boolean {
+    const [base, len] = cidr.split("/");
+    const width = net.isIPv4(base) ? 32n : 128n;
+    const shift = width - BigInt(Number(len));
+    const n = net.isIPv4(base) ? v4(address) : v6(address);
+    const network = ((net.isIPv4(base) ? v4(base) : v6(base)) >> shift) << shift;
+    return n === network || n === network + 1n || (width === 32n && n === network + (1n << shift) - 1n);
+  }
+
+  /**
+   * The first of ADDRESSES inside the subnet of an interface that is neither loopback nor left by a default
+   * route (front), and none of: the forwarder's own addresses (it would dial itself, each hop asking again,
+   * measured in the thousands of sockets a second), the subnet's network, gateway and broadcast addresses
+   * (the gateway is the host, and answers on its own ports, measured), or a link-local address. None at all
+   * when no default route by an interface the forwarder has was read: then which interface is front is not
+   * known (review passes 1 and 2).
+   */
+  export function pick(addresses: string[], interfaces: Record<string, NetworkInterfaceInfo[] | undefined>, defaults: Set<string>): string | undefined {
+    // A default route counts only by an interface the forwarder has: a route with no device reads as `*`.
+    if ([...defaults].some((name) => name === "lo" === false && name in interfaces) === false) return undefined;
+    const own = new Set(Object.values(interfaces).flatMap((infos) => (infos ?? []).map((i) => i.address.toLowerCase())));
+    const subnets = Object.entries(interfaces).filter(([name]) => defaults.has(name) === false)
+      .flatMap(([, infos]) => (infos ?? []).filter((i) => i.internal === false && Boolean(i.cidr)).map((i) => i.cidr as string));
+    return addresses.find((a) => own.has(a.toLowerCase()) === false && /^fe[89ab]/i.test(a) === false
+      && subnets.some((c) => inside(a, c) && reserved(a, c) === false));
+  }
+
+  /** An address as the PROXY line names it: an IPv4-mapped IPv6 address as plain IPv4. */
+  const plain = (a?: string) => (a && a.startsWith("::ffff:") && net.isIPv4(a.slice(7)) ? a.slice(7) : a ?? "");
+  /** The PROXY protocol's v1 line for a client connection. */
+  export function proxyLine(s: { remoteAddress?: string; localAddress?: string; remotePort?: number; localPort?: number }): string {
+    const src = plain(s.remoteAddress), dst = plain(s.localAddress);
+    const family = net.isIPv4(src) && net.isIPv4(dst) ? "TCP4" : net.isIPv6(src) && net.isIPv6(dst) ? "TCP6" : "";
+    return family && s.remotePort && s.localPort ? ["PROXY", family, src, dst, s.remotePort, s.localPort].join(" ") + "\r\n" : "PROXY UNKNOWN\r\n";
+  }
+
+  /**
+   * One line per kind of refusal at most every 10 s, so a flood does not fill the log. Keyed by the kind,
+   * not the line, which may name addresses: a resolver rotating its answers would otherwise log each one
+   * and grow the map without end (review pass 2, measured).
+   */
+  type Kind = "unresolved" | "outside" | "slow" | "unreachable";
+  const warned = new Map<Kind, number>();
+  function note(kind: Kind, why: string) {
+    const at = warned.get(kind) ?? 0;
+    if (Date.now() - at > 10_000) { warned.set(kind, Date.now()); console.error("forwarder: " + why + "; connection closed"); }
+  }
+  function refuse(client: net.Socket, kind: Kind, why: string) {
+    note(kind, why);
+    client.destroy();
+  }
+  /** A deadline as a promise, and its timer, so the caller clears it however the race ends. */
+  function deadline(ms: number): { promise: Promise<never>; clear: () => void } {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const promise = new Promise<never>((_, no) => { timer = setTimeout(() => no(new Error("timeout")), ms); });
+    return { promise, clear: () => clearTimeout(timer) };
+  }
+
+  async function forward(client: net.Socket) {
+    client.pause();
+    client.on("error", () => client.destroy());
+    let found: string[] = [];
+    const limit = deadline(DEADLINE_MS);
+    try {
+      found = (await Promise.race([lookup(PROXY, { all: true }), limit.promise])).map((a) => a.address);
+    } catch { /* no answer: refused below */ } finally { limit.clear(); }
+    const target = pick(found, networkInterfaces(), defaultRouteInterfaces());
+    if (target === undefined) {
+      return found.length === 0
+        ? refuse(client, "unresolved", PROXY + " does not resolve (the proxy is down or still starting)")
+        : refuse(client, "outside", PROXY + " resolved only to addresses the forwarder does not dial (" + found.join(", ") + "): its own, or something outside the stack answering for it");
+    }
+    if (client.destroyed) return;
+    const up = net.connect({ host: target, port: PORT, allowHalfOpen: true });
+    const late = setTimeout(() => { up.destroy(); refuse(client, "slow", "the proxy at " + target + " did not answer in " + DEADLINE_MS / 1000 + " s"); }, DEADLINE_MS);
+    let connected = false;
+    up.once("connect", () => { connected = true; clearTimeout(late); });
+    up.once("close", () => clearTimeout(late));
+    up.once("error", (e: NodeJS.ErrnoException) => {
+      if (connected === false) note("unreachable", "the proxy at " + target + " could not be reached (" + (e.code ?? e.message) + ")");
+    });
+    join(client, up);
+  }
+
+  /**
+   * Joins CLIENT to UP, the connection to the proxy: once UP connects, the PROXY line, then each way piped,
+   * a half-close passed on. The proxy's reset, or a close before its end, ends both at once. Once the proxy
+   * has ended its side, what it sent is first flushed to the client, however slowly the client reads, up to
+   * DRAIN_MS (review pass 2: a client that had half-closed lost the tail of a large reply when the proxy's
+   * close destroyed it, measured); then the client has LINGER_MS to end its own side, since one that
+   * ignores the end would otherwise hold both sockets for good (review pass 1).
+   */
+  export function join(client: net.Socket, up: net.Socket, lingerMs = 10000, drainMs = 60000): void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = () => { clearTimeout(timer); up.destroy(); client.destroy(); };
+    const after = (ms: number) => { clearTimeout(timer); timer = setTimeout(done, ms); };
+    up.once("connect", () => {
+      up.write(proxyLine(client));
+      client.pipe(up);
+      up.pipe(client);
+      client.resume();
+    });
+    // Registered before the pipe's own end handler, which ends the client: so its finish is not missed.
+    up.once("end", () => { after(drainMs); client.once("finish", () => after(lingerMs)); });
+    up.on("error", done);
+    up.on("close", () => { if (up.readableEnded === false) done(); });
+    client.on("close", done);
+  }
+
+  /** join() between real sockets on loopback, its timers short: a stand-in proxy, then a client. */
+  async function joinCases(): Promise<[string, boolean][]> {
+    const listen = (server: net.Server) => new Promise<number>((ok) => server.listen(0, "127.0.0.1", () => ok((server.address() as net.AddressInfo).port)));
+    const via = async (proxy: (s: net.Socket) => void) => {
+      const stand = net.createServer({ allowHalfOpen: true }, proxy);
+      const standPort = await listen(stand);
+      const front = net.createServer({ allowHalfOpen: true }, (c) => { c.pause(); join(c, net.connect({ host: "127.0.0.1", port: standPort, allowHalfOpen: true }), 100, 2000); });
+      const port = await listen(front);
+      return { port, stop: () => { stand.close(); front.close(); } };
+    };
+    // A client that half-closes and reads slowly throughout, so the forwarder may still hold part of the
+    // reply when the proxy, having sent it all, closes: all of it arrives. Five times, since whether part is
+    // still held at the close is a race (a close that destroyed the client cut one run in three, measured).
+    const size = 16 * 1024 * 1024;
+    const big = await via((s) => { s.resume(); s.once("end", () => s.end(Buffer.alloc(size))); });
+    const got: number[] = [];
+    for (let run = 0; run < 5; run++) {
+      got.push(await new Promise<number>((ok) => {
+        let n = 0;
+        const c = net.connect({ host: "127.0.0.1", port: big.port, allowHalfOpen: true });
+        c.on("data", (d) => { n += d.length; c.pause(); setTimeout(() => c.resume(), 1); });
+        c.on("error", () => {});
+        c.on("close", () => ok(n));
+        c.end("request");
+      }));
+    }
+    big.stop();
+    // A client that never ends its side, after the proxy ended its own: let go once the linger is over, so
+    // its write after it is refused.
+    const ends = await via((s) => { s.once("data", () => s.end()); });
+    const freed = await new Promise<boolean>((ok) => {
+      const c = net.connect({ host: "127.0.0.1", port: ends.port, allowHalfOpen: true });
+      c.on("error", () => {});
+      c.on("close", () => ok(true));
+      setTimeout(() => c.write("more"), 400);
+      setTimeout(() => ok(false), 1500);
+    });
+    ends.stop();
+    return [
+      ["a reply after the client's half-close arrives whole, five times (" + got.join(", ") + " of " + size + " bytes)", got.every((n) => n === size)],
+      ["a client that never ends its side is let go after the linger", freed],
+    ];
+  }
+
+  if (process.argv.includes("--self-check")) {
+    const ifs = { lo: [{ address: "127.0.0.1", cidr: "127.0.0.1/8", internal: true }], eth0: [{ address: "10.89.9.2", cidr: "10.89.9.2/24", internal: false }], eth1: [{ address: "10.89.10.3", cidr: "10.89.10.3/24", internal: false }, { address: "fd00:a::3", cidr: "fd00:a::3/64", internal: false }] } as unknown as Record<string, NetworkInterfaceInfo[]>;
+    const route4 = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0109590A\t0003\t0\t0\t100\t00000000\t0\t0\t0\neth0\t0009590A\t00000000\t0001\t0\t0\t0\t00FFFFFF\neth1\t000A590A\t00000000\t0001\t0\t0\t0\t00FFFFFF";
+    const defaults = defaultRouteInterfaces(route4, "0".repeat(32) + " 00 " + "0".repeat(32) + " 00 " + "0".repeat(32) + " ffffffff 00000001 00000000 00200200 lo");
+    const cases: [string, boolean][] = [
+      ["the default route leaves by eth0 (and lo's unreachable route)", defaults.has("eth0") && defaults.has("eth1") === false],
+      ["the proxy's front address is taken", pick(["10.89.10.2"], ifs, defaults) === "10.89.10.2"],
+      ["an address on edge, the default route's network, is refused", pick(["10.89.9.7"], ifs, defaults) === undefined],
+      ["a public answer is refused", pick(["104.20.23.154"], ifs, defaults) === undefined],
+      ["loopback is refused", pick(["127.0.0.1"], ifs, defaults) === undefined],
+      ["the first front address of several is taken", pick(["104.20.23.154", "10.89.10.2"], ifs, defaults) === "10.89.10.2"],
+      ["an IPv6 front address is taken, another refused", pick(["fd00:a::2"], ifs, defaults) === "fd00:a::2" && pick(["fd00:b::2"], ifs, defaults) === undefined],
+      ["the forwarder's own front address is refused", pick(["10.89.10.3"], ifs, defaults) === undefined && pick(["FD00:A::3"], ifs, defaults) === undefined],
+      ["front's network, gateway and broadcast addresses are refused", ["10.89.10.0", "10.89.10.1", "10.89.10.255", "fd00:a::", "fd00:a::1"].every((a) => pick([a], ifs, defaults) === undefined)],
+      ["a link-local address is refused", pick(["fe80::1234"], { ...ifs, eth1: [...(ifs.eth1 ?? []), { address: "fe80::3", cidr: "fe80::3/64", internal: false } as NetworkInterfaceInfo] }, defaults) === undefined],
+      ["nothing is taken when no default route was read", pick(["10.89.10.2"], ifs, new Set()) === undefined && pick(["10.89.10.2"], ifs, new Set(["lo"])) === undefined],
+      ["a default route with no device (Iface *) is not one", pick(["10.89.10.2"], ifs, defaultRouteInterfaces(route4.split("\n")[0] + "\n*\t00000000\t00000000\t0201\t0\t0\t0\t00000000", "")) === undefined],
+      ["the loopback interface's subnet is not front's, though no route leaves by it", pick(["127.0.0.2"], ifs, new Set(["eth0"])) === undefined],
+      ["a v4 PROXY line, the mapped address plain", proxyLine({ remoteAddress: "::ffff:203.0.113.7", localAddress: "::ffff:10.89.9.2", remotePort: 51234, localPort: 8000 }) === "PROXY TCP4 203.0.113.7 10.89.9.2 51234 8000\r\n"],
+      ["a v6 PROXY line", proxyLine({ remoteAddress: "2001:db8::7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY TCP6 2001:db8::7 fd00::1 1 8000\r\n"],
+      ["mixed families are UNKNOWN", proxyLine({ remoteAddress: "203.0.113.7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY UNKNOWN\r\n"],
+      ...(await joinCases()),
+    ];
+    for (const [name, ok] of cases) console.log((ok ? "ok   " : "FAIL ") + name);
+    process.exit(cases.every(([, ok]) => ok) ? 0 : 1);
+  }
+
+  net.createServer({ allowHalfOpen: true }, (client) => { void forward(client); })
+    .listen(PORT, () => console.error("forwarder: listening on " + PORT + ", to " + PROXY + ":" + PORT + " on an internal network"));
+
 services:
   # Replaces: the Supabase-hosted Postgres.
   #
@@ -342,11 +588,15 @@ services:
   #
   # Memory: 014 seeds hnsw.scan_mem_multiplier = 8 on the database, so a
   # filtered search that reaches the HNSW walk may use work_mem x 8 (32 MB at
-  # the 4 MB default) per scan node, two per call, per connection — up to
-  # ~640 MB across the server's default pool of ten on top of shared_buffers.
-  # Thin filters never walk (they are answered exactly), so this is a ceiling
-  # for broad filters on large tables; lower the multiplier with ALTER DATABASE
-  # where memory is tighter than latency (deploy/.env.example has the form).
+  # the 4 MB default) per scan node, two per call, per connection — a ceiling
+  # across every pooled connection (server and api each hold OB1_PG_POOL, so
+  # twenty at the default), on top of shared_buffers. On SMD-1499's 64-dimension
+  # bench corpus 014's tuple cap bound first (ten broad filters grew 4-5 MiB in
+  # the bench, 51 MiB with fresh connections; deploy/.env.example). Thin
+  # filters never walk (they are answered exactly); lower the multiplier with
+  # ALTER DATABASE where memory is tighter than latency (deploy/.env.example has
+  # the form). Size shared_buffers to the HNSW indexes (preflight's "vector
+  # index memory" row says when, and deploy/.env.example how).
   #
   # No random_page_cost here. It was measured as the cost-model remedy for the
   # planner preferring a sequential scan over the HNSW index at the shipped
@@ -721,8 +971,9 @@ services:
       retries: 3
     logging: *logging
 
-  # The stack's one origin (SMD-1846): a reverse proxy, and the only service
-  # without a profile that publishes a port. Each service is a path on it —
+  # The stack's one origin (SMD-1846): a reverse proxy, reached through the
+  # forwarder below, which holds the stack's published port (SMD-2583). Each
+  # service is a path on it —
   # the routes are x-proxy-routes above — so a new one is a router, not a port
   # an operator picks, opens and hands a client separately. It does no
   # authentication: the key travels to the server untouched, in the header or
@@ -746,10 +997,20 @@ services:
     security_opt: ["no-new-privileges:true"]
     # Traefik's static configuration, from its environment so that the
     # healthcheck below — a second traefik process in this container — reads
-    # the same. No OB1_* knob here: nothing in it is the operator's to set
-    # but the address and port it publishes.
+    # the same. No OB1_* knob here: nothing in it is the operator's to set.
     environment:
       TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
+      # Each connection the forwarder hands on opens with the PROXY protocol's
+      # line naming the client, so the access log and X-Forwarded-For carry
+      # the client's address, not the forwarder's — which the authorization
+      # server's per-address limits read (OB1_AUTH_TRUSTED_PROXY=proxy;
+      # deploy/README.md, "Abuse limits"). Trusted from the private ranges:
+      # the line is optional from them (a caller on the mesh sends none,
+      # measured on v3.7.13), and anything that reaches this port is inside
+      # the stack — the forwarder on `front`, the mesh's servers and the
+      # authorization server — so it could name another address, which only
+      # those per-address limits read (SMD-2583, the maintainer's call).
+      TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
       # A header spelled with `_` or `.` (X_Brain_Key) is read by some
       # backends as the `-` header it aliases; deleted here, so a client
       # cannot supply one header twice under two spellings.
@@ -794,6 +1055,86 @@ services:
     # move together; CI holds them equal.
     labels:
       ob1.proxy-routes: *proxy-routes
+    # No `ports:`: the forwarder below holds the stack's published port. Two
+    # internal networks and no other (SMD-2583): `front`, where the forwarder
+    # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
+    # it reaches every backend — the MCP server as mcp.ob1.internal
+    # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
+    # authorization server as auth.ob1.internal, and another tier's MCP
+    # server, a compose project of its own that joins this mesh, as
+    # mcp.<tier>.ob1.internal (SMD-2294). It shares no network with Postgres,
+    # the model services, n8n or the workers, and has no route out.
+    networks:
+      front:
+        aliases: [proxy.ob1.internal]
+      mesh: {}
+    # No search domains. With the authorization server absent, a name that
+    # does not resolve on the networks would be tried again under each of the
+    # host's (a tailnet's, an ISP's, measured on podman), and whatever answered
+    # `auth.ob1.internal.<domain>` would be sent `/auth` traffic, a sign-in
+    # POST included (review: a decoy by that name got the password). With
+    # none, and the route's name written rooted (`auth.ob1.internal.`), the
+    # one lookup is the stack's own name under the reserved .internal TLD.
+    # An absent tier's name (mcp.canary.ob1.internal.) is written the same
+    # way, for the same reason, as is this stack's own server's while it is
+    # stopped or recreated. And that one lookup stays in the stack: an
+    # internal network forwards no name it does not hold to the host's
+    # resolvers (measured on podman 6), and this service is on internal
+    # networks alone (SMD-2583), so a resolver that answers *.ob1.internal
+    # itself is never asked.
+    dns_search: ["."]
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # Started after the server, so `up proxy` brings the brain, and
+    # `up forwarder`, which waits on the proxy, its port too; not held for
+    # the server's health: while the server is down or in preflight the proxy
+    # answers 502, and it answers again when the server does. It also means
+    # `up server` alone never starts the proxy: name both (deploy/README.md,
+    # "One origin"). The REST core too, so the documented `up -d --build
+    # server proxy forwarder` recreates it on the server's new image rather
+    # than leaving it on the old one (SMD-2284 review pass 1).
+    depends_on:
+      server:
+        condition: service_started
+      api:
+        condition: service_started
+    restart: unless-stopped
+    logging: *logging
+
+  # The stack's published port (SMD-2583): a TCP forwarder in front of the
+  # proxy, so the proxy can be on internal networks alone. Its script is
+  # x-forwarder above. It is on `edge`, where the port is published and
+  # nothing else is, and on `front`, where the proxy is. Per connection it
+  # looks the proxy up by its rooted name and dials only an address inside
+  # `front`'s subnet — an interface no default route leaves by — since its own
+  # lookup reaches the host's resolvers while the proxy is down, and a
+  # resolver answering that name would otherwise get every request, keys
+  # included (measured: a decoy answering as proxy.ob1.internal on `edge` was
+  # resolved, refused, and sent nothing). It sends the PROXY protocol's line
+  # with the client's address first, and then the bytes both ways, unread:
+  # it terminates nothing, and an event stream passes as it is written.
+  #
+  # Bun, pinned by digest: the multi-arch index 1.4.0-alpine resolved to,
+  # the image the stack's workers run.
+  forwarder:
+    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
+    # Nothing it needs is root's, as the proxy's: it listens on 8000 and
+    # writes only to stderr. Not read_only, for the proxy's reason: compose
+    # writes the inline script into the container's own filesystem.
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["bun", "/forwarder.ts"]
+    configs:
+      - source: forwarder
+        target: /forwarder.ts
+    # The script again, as a label nothing reads, so a changed script
+    # recreates the container, as the proxy's route table does.
+    labels:
+      ob1.forwarder: *forwarder
     ports:
       # Loopback unless SERVER_BIND says otherwise: the one published port of
       # the stack without its opt-in profiles. The knobs keep the server's
@@ -806,50 +1147,22 @@ services:
       # every request: the header is as visible as `?key=` over plain HTTP
       # (SMD-1844).
       - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
-    # `edge`, where the port is published (a container only on internal
-    # networks publishes none, measured on podman 6) and which nothing else
-    # joins, and `mesh`, where it reaches every backend: the MCP server as
-    # mcp.ob1.internal (SMD-2382), the REST core as api.ob1.internal
-    # (SMD-2284), the authorization server as auth.ob1.internal, and another
-    # tier's MCP server, a compose project of its own that joins this mesh, as
-    # mcp.<tier>.ob1.internal (SMD-2294). It shares no network with Postgres,
-    # the model services, n8n or the workers (SMD-2583).
-    networks: [edge, mesh]
-    # No search domains. With the authorization server absent, a name that
-    # does not resolve on the networks would be tried again under each of the
-    # host's (a tailnet's, an ISP's, measured on podman), and whatever answered
-    # `auth.ob1.internal.<domain>` would be sent `/auth` traffic, a sign-in
-    # POST included (review: a decoy by that name got the password). With
-    # none, and the route's name written rooted (`auth.ob1.internal.`), the
-    # one lookup is the stack's own name under the reserved .internal TLD.
-    # An absent tier's name (mcp.canary.ob1.internal.) is written the same
-    # way, for the same reason, as is this stack's own server's while it is
-    # stopped or recreated. That one lookup still reaches the host's
-    # resolvers, since `edge` forwards a name it does not hold (an internal
-    # network does not, measured): one that answers *.ob1.internal itself
-    # would get the route's requests, keys included, until the proxy is on
-    # internal networks alone, behind a forwarder that holds the published
-    # port (SMD-2583's second part; deploy/README.md, "One origin").
+    networks: [edge, front]
+    # No search domains, for the proxy's reason; its one name is written
+    # rooted besides.
     dns_search: ["."]
+    # Listening on 8000, read from the kernel's table rather than by a
+    # connection, which it would hand to the proxy.
     healthcheck:
-      test: ["CMD", "traefik", "healthcheck"]
+      test: ["CMD-SHELL", "grep -qE ':1F40 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"]
       interval: 5s
       timeout: 3s
       retries: 5
-    # Started after the server, so `up proxy` brings the brain; not held for
-    # the server's health: while the server is down or in preflight the proxy
-    # answers 502, and it answers again when the server does. The direction is
-    # what hands the port over on the first `up` after SMD-1846: compose
-    # recreates the old server, which held the port, before it creates this.
-    # The other way round, this would bind while the old server still held it.
-    # It also means `up server` alone never starts the proxy: name both
-    # (deploy/README.md, "One origin"). The REST core too, so the documented
-    # `up -d --build server proxy` recreates it on the server's new image
-    # rather than leaving it on the old one (SMD-2284 review pass 1).
+    # After the proxy, so `up forwarder` brings the brain, and the first `up`
+    # after SMD-2583 recreates the proxy, which held the port, before this
+    # binds it.
     depends_on:
-      server:
-        condition: service_started
-      api:
+      proxy:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -1536,7 +1849,11 @@ networks:
   #          the stack's own Ollama and Jev, which fetch their weights there
   #          and are called there by name.
   #   auth-egress  outward, the authorization server's alone.
-  #   edge   outward, the proxy's alone: where its port is published.
+  #   front  internal: the forwarder and the proxy alone, where the forwarder
+  #          reaches the proxy as proxy.ob1.internal.
+  #   edge   outward, the forwarder's alone: where the stack's port is
+  #          published. The proxy is on internal networks alone, so a name it
+  #          looks up that nothing holds never reaches the host's resolvers.
   # An internal network has no route out and does not forward a name it does
   # not hold to the host's resolvers (measured on podman 6); it also
   # publishes no port, so Postgres's, in compose.host-ports.yaml, comes with
@@ -1548,6 +1865,8 @@ networks:
   egress: {}
   auth-egress: {}
   edge: {}
+  front:
+    internal: true
 
 volumes:
   pgdata:
@@ -1560,3 +1879,6 @@ configs:
   # The proxy's route table, inline: x-proxy-routes at the top of this file.
   proxy-routes:
     content: *proxy-routes
+  # The forwarder's script, inline: x-forwarder above the services.
+  forwarder:
+    content: *forwarder

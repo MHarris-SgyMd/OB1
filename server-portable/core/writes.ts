@@ -11,7 +11,7 @@ import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
 import { decideCalls, type EgressSubject } from "../egress.ts";
-import { UUID_RE, type Citation, type ThoughtStore } from "../store.ts";
+import { UUID_RE, type ActorStamp, type Citation, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
 import { META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
@@ -568,4 +568,28 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id, detach
     ...(result.detached ? { detached: result.detached } : {}),
     ...(result.inactive ? { inactive: result.inactive } : {}),
   });
+}
+
+/** What the operator's reset did (086, SMD-2744): whether anything had settled the label, whether a moved label was put back, the declines that no longer count, and the label the row is left with. */
+export type StampReset = { id: string; reset: boolean; restored: boolean; movedBy: string | null; declines: number; declinedBy: string[]; stamp: ActorStamp; caller: string };
+export type StampResetCode = "NOT_FOUND" | "REFUSED_NOT_OPERATOR" | "REFUSED_NOT_CAPTURE_STAMP";
+
+export async function resetCaptureStamp(ctx: Ctx, principal: Principal, { id }: Input<"reset_capture_stamp">): Promise<Outcome<StampReset, StampResetCode>> {
+  // A string that is no uuid names no thought; the function's cast would
+  // raise it as a fault.
+  if (!UUID_RE.test(id)) return refuse({ code: "NOT_FOUND", retryable: false, id });
+  // Who may is the database's to say: the key's registry kind, which the
+  // server does not hold — the function refuses any key not classified
+  // operator, and names the caller in the event it appends.
+  const result = await (await ctx.store()).resetCaptureStamp({ id, actor: actorOf(ctx, principal) });
+  if (!result.ok) {
+    switch (result.error) {
+      case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
+      case "NOT_OPERATOR": return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind ?? null });
+      case "NOT_CAPTURE_STAMP": return refuse({ code: "REFUSED_NOT_CAPTURE_STAMP", retryable: false, id });
+    }
+  }
+  // No action-log row: 034's log is click-through relevance, and a reset is
+  // a ruling on a label, not a sign the caller found what it searched for.
+  return ok({ id, reset: result.reset, restored: result.restored, movedBy: result.movedBy, declines: result.declines, declinedBy: result.declinedBy, stamp: result.stamp, caller: principal.name });
 }

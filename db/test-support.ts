@@ -317,6 +317,8 @@ const FUNCTIONS = [
   "ob1_drop_relation_derivation()",
   // 085 (SMD-2664): a re-capture at a higher trust moves the stamp.
   "ob1_restamp_recapture(uuid, text, jsonb, text)",
+  // 086 (SMD-2744): the operator resets a settled or moved label.
+  "ob1_reset_capture_stamp(uuid, jsonb)",
 ];
 
 /**

@@ -291,7 +291,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
 ];
@@ -3439,6 +3439,54 @@ if (configFailed) {
         } catch (e) {
           add("filtered search", "warn", `could not verify: ${(e as Error).message}`,
               "The catalog reads behind this check need SELECT on pg_proc, pg_extension and pg_available_extensions.");
+        }
+
+        /**
+         * SMD-1499: the server sized for the table. `vector index memory`
+         * warns (a managed platform may not let the operator change the
+         * setting) when the valid HNSW indexes over thoughts and
+         * thought_chunks outgrow shared_buffers — found by access method, so
+         * 039's halfvec swap and any later rename read alike; an INVALID
+         * index the planner ignores is not counted, though a valid staging
+         * index built before 039 adopts it is. `filter bitmap memory` is
+         * information only, until SMD-1464 settles the plan mode the
+         * expensive bitmap depends on. db/config.mjs's memorySizing holds the
+         * arithmetic and memoryRows the wording.
+         */
+        try {
+          const { memorySizing, memoryRows } = await import("../db/config.mjs");
+          const [m] = await sql`
+            SELECT
+              (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
+                WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+              COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
+              current_setting('block_size')::int AS block,
+              pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
+              pg_size_bytes(current_setting('work_mem'))::bigint AS work,
+              to_regclass('thoughts') IS NOT NULL AS found`;
+          if (!m.found) {
+            // Sizes of nothing would read as fitting; say so instead.
+            const why = "thoughts does not resolve on this connection (the schema row says why), so there is nothing to size";
+            add("vector index memory", "skip", why);
+            add("filter bitmap memory", "skip", why);
+          } else {
+            const s = memorySizing({
+              hnswBytes: Number(m.hnsw),
+              sharedBuffersBytes: Number(m.shared),
+              heapBytes: Number(m.heap),
+              blockSize: Number(m.block),
+              workMemBytes: Number(m.work),
+            });
+            // The rows' wording is memoryRows', where test-schema holds every branch.
+            for (const row of memoryRows(s)) add(row.name, row.status, row.detail, row.fix);
+          }
+        } catch (e) {
+          // Both rows, so each direct check still prints exactly one.
+          const why = `could not verify: ${(e as Error).message}`;
+          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class and pg_am, and the shared_buffers and work_mem settings.";
+          add("vector index memory", "warn", why, reads);
+          add("filter bitmap memory", "warn", why, reads);
         }
 
         /**
