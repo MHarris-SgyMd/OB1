@@ -1728,6 +1728,44 @@ export const BITMAP_BYTES_PER_PAGE = 64;
 export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
 
 /**
+ * The valid HNSW indexes over thoughts and thought_chunks a vector search
+ * walks (SMD-2871), from preflight's catalog read: each index's name, table,
+ * bytes and pg_get_indexdef, the embedding column's width, and whether
+ * match_thoughts' body orders its walk by embedding::halfvec (null when it
+ * could not be read). 039's header has an operator on a large brain build
+ * `<table>_embedding_halfvec_idx` by hand, CONCURRENTLY, and then run 039,
+ * which adopts it under the shipped name and drops the vector index there
+ * (001's on thoughts, 007's on thought_chunks). In that window both are
+ * valid and the walk uses one, so the staging index is left out — but only
+ * in the state 039 adopts from and the walk reads: a body ordering by the
+ * vector column, an HNSW vector_cosine_ops index over the column under the
+ * shipped name, and the staging index of 039's own shape at the column's
+ * width. Anywhere else 039 would refuse the staging index (another shape),
+ * skip it (the shipped index already 039's), the body walks the staging
+ * index itself (it casts), or the walk has no vector index to use now (the
+ * shipped name missing, INVALID, partial or another operator class) and the
+ * staging index is what 039 puts under the name; so it is counted like any
+ * other index. `builds` names a table 039 would build its own index on, in its
+ * transaction, holding writers — the vector index under the shipped name
+ * and nothing under the staging one (where the staging name is taken by
+ * another shape, 039 refuses rather than builds) — which a remedy that has
+ * 039 applied says first.
+ */
+export function residentIndexes({ indexes, dim, bodyCasts }) {
+  const VECTOR = /USING hnsw \(embedding (\w+\.)?vector_cosine_ops\)( WITH \([^)]*\))?$/;
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::(\\w+\\.)?halfvec\\(${dim}\\)\\) (\\w+\\.)?halfvec_cosine_ops\\)$`);
+  const TABLES = ["thoughts", "thought_chunks"];
+  const staged = bodyCasts === false
+    ? indexes.filter((s) => s.name === `${s.table}_embedding_halfvec_idx` && HALF.test(s.def)
+        && indexes.some((x) => x.table === s.table && x.name === `${s.table}_embedding_idx` && VECTOR.test(x.def)))
+    : [];
+  const builds = TABLES.filter((t) => indexes.some((x) => x.table === t && x.name === `${t}_embedding_idx` && VECTOR.test(x.def))
+    && !indexes.some((x) => x.table === t && x.name === `${t}_embedding_halfvec_idx`));
+  const sum = (xs) => xs.reduce((t, x) => t + x.bytes, 0);
+  return { hnswBytes: sum(indexes) - sum(staged), stagedBytes: sum(staged), stagedCount: staged.length, stagedTables: staged.map((s) => s.table), builds };
+}
+
+/**
  * Sizing the server for the table (SMD-1499).
  *
  * - Resident, the warning: the HNSW indexes over thoughts and thought_chunks
@@ -1737,6 +1775,10 @@ export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
  *   cache before every run, ten connections got about a third of the
  *   throughput they got with the indexes in shared_buffers (SMD-1499's
  *   record). The recommendation is the indexes' size rounded up to 64 MB.
+ *   A staging index 039 is about to adopt (residentIndexes says which) is
+ *   not in hnswBytes but in stagedBytes and stagedTables: the walk uses the
+ *   vector index under the shipped name until 039 swaps the staging one in
+ *   (SMD-2871). `builds`, residentIndexes' too, shapes only the remedy.
  * - Bitmap, information only: a filter's matches are collected one entry per
  *   heap page (BITMAP_BYTES_PER_PAGE). On the custom plans match_thoughts
  *   runs, the bitmap a GIN-routed filter builds is the routing count's, under
@@ -1750,7 +1792,7 @@ export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
  * Pure: preflight reads the numbers and prints what this returns, and the
  * schema suite holds the arithmetic. Sizes in bytes.
  */
-export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
+export function memorySizing({ hnswBytes, stagedBytes = 0, stagedTables = [], builds = [], sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
   const MB = 1048576;
   const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
   const heapPages = Math.ceil(heapBytes / blockSize);
@@ -1758,7 +1800,7 @@ export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSi
   const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
   const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
   return {
-    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
+    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, stagedBytes, stagedCount: stagedTables.length, stagedTables, builds, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
     bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, wholeHeapBytes: heapPages * BITMAP_BYTES_PER_PAGE, haveBytes: workMemBytes },
   };
 }
@@ -1778,20 +1820,41 @@ export function bytesText(bytes) {
  * (a managed platform may not let the operator change the setting), with the
  * size to set and the way back if postgres then will not start; `filter
  * bitmap memory` is information only, always ok, and recommends nothing.
+ * `ledgerHas039` picks how a remedy has 039 applied (SMD-2871): a plain
+ * migrator run where the ledger does not record it (false), a re-apply where
+ * it does (true; the files are templates only the migrator fills in), and
+ * both where the ledger could not be read (null), as preflight's
+ * ledgerRemedy says it.
  */
-export function memoryRows(s) {
+export function memoryRows(s, { ledgerHas039 = false } = {}) {
   const r = s.resident;
   const b = s.bitmap;
   const n = (x) => x.toLocaleString("en-US");
+  // SMD-2871: said whenever one was left out, by name, so the size is never read as every index there is.
+  const names = (tables, suffix) => tables.map((t) => `${t}${suffix}`).join(" and ");
+  const many = r.stagedCount > 1;
+  const staged = r.stagedCount === 0 ? "" : `. Not counted: ${names(r.stagedTables, "_embedding_halfvec_idx")} (${bytesText(r.stagedBytes)}), ${many ? "staging indexes" : "a staging index"} 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use ${names(r.stagedTables, "_embedding_idx")} until 039 swaps ${many ? "the staging indexes" : "the staging index"} in. Run preflight again after 039`;
+  // The warning's remedy has 039 applied before sizing, the way the walk
+  // index row does: a table 039 would build on in its transaction staged
+  // first, then the migrator, as the ledger calls for.
+  const reapply = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
+  const apply = ledgerHas039 === true ? `Re-apply the recorded migrations: ${reapply}.`
+    : ledgerHas039 === null ? `This role could not read schema_migrations, so whether 039 is recorded is unknown: run \`bun db/migrate.ts\`, and if it applies nothing, re-apply the recorded migrations — ${reapply}.`
+    : "Apply 039: `bun db/migrate.ts`.";
+  const buildFirst = r.builds.length
+    ? `First, on a brain past a million rows, build ${names(r.builds, "_embedding_halfvec_idx")} CONCURRENTLY, as 039's header says; otherwise 039 builds ${r.builds.length > 1 ? "them" : "it"} inside its transaction, holding writers while it does. `
+    : "";
+  const adopts = r.stagedCount + r.builds.length === 1 ? "the staging index" : "the staging indexes";
+  const lead = r.stagedCount > 0 ? `${buildFirst}${apply} 039 adopts ${adopts}, which changes the size: run preflight again after 039 and size only if it still warns (the size below is for the indexes as they stand). ` : "";
   const resident = r.needBytes === 0
     ? { name: "vector index memory", status: "ok", detail: "no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold (the walk index check says whether one is missing)" }
     : r.fits
-    ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})` }
+    ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})${staged}` }
     : {
         name: "vector index memory",
         status: "warn",
-        detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
-        fix: `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
+        detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)${staged}`,
+        fix: `${lead}Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
       };
   let detail;
   if (b.heapPages === 0) {
