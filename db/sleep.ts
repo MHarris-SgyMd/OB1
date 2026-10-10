@@ -268,7 +268,7 @@ async function followersOutside(sql: SQL): Promise<string[]> {
  * are FOLLOWER_KEY's alphabet, so the DELETE it prints is safe to paste.
  */
 function outsideLine(outside: string[], dryRun: boolean): string {
-  return `  ${dryRun ? "followers running outside sleep, which do not yield to a live call" : "refused: followers are running outside sleep, and they do not yield to a live call"}: ${outside.join(", ")} — the workers profile's, or a --follow run by hand. The sleep and workers profiles are alternatives: stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, and take workers out of COMPOSE_PROFILES in deploy/.env), then delete their rows (DELETE FROM ob1_config WHERE key IN (${outside.map((k) => `'${k}'`).join(", ")})) so preflight does not ask for them back. A follower stopped cleanly marks its row ended at once; one killed past its grace leaves it fresh for up to three of its intervals`;
+  return `  ${dryRun ? "followers running outside sleep, which do not yield to a live call" : "refused: followers are running outside sleep, and they do not yield to a live call"}: ${outside.join(", ")} — the workers profile's, or a --follow run by hand. The sleep and workers profiles are alternatives: stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with; and take workers out of COMPOSE_PROFILES in deploy/.env), then delete their rows (DELETE FROM ob1_config WHERE key IN (${outside.map((k) => `'${k}'`).join(", ")})) so preflight does not ask for them back. A follower stopped cleanly marks its row ended at once; one killed past its grace leaves it fresh for up to three of its intervals`;
 }
 
 const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.round((now.getTime() - t.getTime()) / 1000))} s ago` : "none");
@@ -376,7 +376,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // alternatives.
   if (outside.length) {
     err(outsideLine(outside, opts.dryRun === true));
-    if (!opts.dryRun) return 2;
+    if (!opts.dryRun) {
+      // Under --follow the refusal is said on the row too, ended on a failure,
+      // so preflight's `sleep` row names the followers rather than reading a
+      // service the refusal keeps down as never run, or as one to start again
+      // (review pass 3).
+      if (FOLLOW) {
+        const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
+        once.watching?.(logState);
+        await once.end("failed");
+      }
+      return 2;
+    }
   }
 
   if (opts.dryRun) {
@@ -409,7 +420,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
-    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the passes go on`) })
+    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
   // What wakes it, on its own row: preflight's `sleep` row reads this, not its
   // own role's privileges (SMD-2678, review pass 1).

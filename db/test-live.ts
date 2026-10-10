@@ -10369,6 +10369,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const beside = await Promise.race([besideRun, Bun.sleep(20_000).then(() => -1)]);
     if (beside === -1) { acBeside.abort(); await besideRun; }
     const besideText = lines.join("\n");
+    // Refused under --follow, the row says so — ended on a failure, with what
+    // it read — so preflight names the followers keeping it down (review pass 3).
+    const refusedBeat = await beat();
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
     await sql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "stopped", ended: true })} WHERE key = 'heartbeat:extract:outside@p2'`;
     lines.length = 0;
     const endedDry = await sleepRun({ dryRun: true });
@@ -10407,10 +10411,11 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     if (earlyCode === -1) { acEarly.abort(); await earlyRun; }
     assert(earlyCode === 130 && lines.some((l) => /stopped before the pass began/.test(l)) && (await beat()) === null,
       `a stop during a start read ends it with 130 and stamps no row (exit ${earlyCode})`);
-    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText) && (await beat()) === null
+    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
+        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && refusedBeat.slept === undefined
         && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
         && endedDry === 0 && !/outside sleep/.test(endedDryText),
-      `a fresh follower outside refuses a run (2, no sleep, no row stamped), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${besideText.split("\n").find((l) => /outside sleep/.test(l))?.trim().slice(0, 120) ?? "no line"})`);
+      `a fresh follower outside refuses a run (2, no sleep, its row ended failed), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
 
     // The start's reads wait out a database not answering yet (57P03, the
     // server starting up), as the sleep's own reads do: the compose service

@@ -3471,11 +3471,27 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Killed while asleep: the sleep never ended, so the row says when it began.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(900), to: null } }), 600);
       assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep began 15 min ago;/.test(row((await run(LOG_ON)).out, "sleep")), "a scheduler gone stale mid-sleep says when that sleep began");
+
+      // Refused beside the workers' followers (review pass 3): the scheduler's
+      // row ended on a failure, a follower fresh — the fix is the choice of
+      // profile, not a restart that would refuse again…
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
+      const keptDown = await run(LOG_ON);
+      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a search or a write wakes it$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
+        `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
+      // …and a follower stopped for a scheduler running here is retired, not started again.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const retired = await run(LOG_ON);
+      assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
+        `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }
 
     // Each claim worker's restart, and a stale row with an alarm told its restart first.

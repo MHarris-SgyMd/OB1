@@ -2712,7 +2712,11 @@ refusal; one killed past its grace stays fresh for up to three intervals —
 stop starting them (take `workers` out of
 `COMPOSE_PROFILES` in `deploy/.env`, and out of any `--profile workers up`),
 and delete their `heartbeat:extract:…` and `heartbeat:consolidate:…` rows,
-or preflight's `workers` row asks for them back.
+or preflight's `workers` row asks for them back. Under `--follow` a refusal
+ends `heartbeat:sleep` on a failure, so preflight's `sleep` row names the
+followers keeping it down and asks for a choice of profile, rather than a
+restart that would refuse again; while the scheduler runs, the `workers` row
+asks for a stopped follower's row to be retired, not started again.
 
 **A database not answering at its start** is waited out, as one mid-sleep
 is (SMD-2599's schedule), so the service started beside a restarting Postgres

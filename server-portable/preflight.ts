@@ -4358,10 +4358,14 @@ if (configFailed) {
             if (wrong.length === 0) {
               add("workers", "ok", detail);
             } else {
+              // The sleep scheduler running here refuses beside a claim follower:
+              // one stopped for it is retired, not started again (review pass 3).
+              const sleepRuns = w.heartbeats.some((b) => b.worker === "sleep" && !b.stale && !b.ended);
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? "stopped" : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 return h.worker === "board-sync"
@@ -4444,9 +4448,16 @@ if (configFailed) {
                   : s && s.to
                     ? `awake, its passes waiting for the brain to go quiet — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}`
                     : "awake, its passes waiting for the brain to go quiet — no sleep yet";
-              const detail = `${heartbeatState(h)}; ${sleepWords}; ${wakes}`;
+              const down = h.stale || h.ended;
+              // A scheduler not running wakes for nothing: what would wake it is said as such.
+              const detail = `${heartbeatState(h)}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
               const fixes: string[] = [];
-              if (h.stale || h.ended) {
+              // Followers running here keep a scheduler down: it refuses beside
+              // them, so "start it again" alone would only refuse again (review pass 3).
+              const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
+              if (down && followers.length) {
+                fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (down) {
                 fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
               } else if (h.outcome === "failed") {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
