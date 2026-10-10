@@ -2034,6 +2034,11 @@ jobs:
           # first `down` below removes.
           docker network create --label com.docker.compose.project=open-brain-canary --label com.docker.compose.network=default open-brain-canary_default > /dev/null
           [ ! -e .env.canary.local ] || { echo ".env.canary.local exists before the canary's first up" >&2; exit 1; }
+          # SMD-2882: both of board-sync's Linear keys in stable's file, as
+          # dummies (nothing here runs board-sync), so the check below has a
+          # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
+          # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\n' >> .env
           ./canary.sh up --connect 2>&1 | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
@@ -2051,7 +2056,8 @@ jobs:
           export PG_STABLE PG_CANARY
           if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_API_KEY)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
           # The password through docker's environment, and grep's pattern from a
           # file, so neither is on a command line (review pass 3).

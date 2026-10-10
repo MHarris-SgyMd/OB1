@@ -266,8 +266,10 @@ canary_compose() {
 # What the canary's env file leaves out of stable's: its database password,
 # which is its own, and the secrets of the profiles the canary never runs
 # (the authorization server's, n8n's, the import runner's, the workers' key,
-# Linear's), in any letter case.
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_API_KEY'
+# board-sync's Linear keys), in any letter case. Linear's by prefix, as the
+# others: an exact LINEAR_API_KEY let SMD-2681's LINEAR_COMMENT_API_KEY, a key
+# that can comment, through to the canary's file (SMD-2882).
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift.
 CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY_STABLE_MESH'
