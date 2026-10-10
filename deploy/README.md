@@ -160,10 +160,11 @@ nothing is on compose's default network:
   authorization server, each called by its `*.ob1.internal` name; a tier of
   another project joins it under its own (`compose.canary.yaml`).
 - `data`, internal: Postgres, and only what connects to it — the migrator,
-  the two servers, board-sync, the workers, the import runner and its role's
-  one-shot. No other project joins it.
+  the two servers, board-sync, the workers, the sleep scheduler, the import
+  runner and its role's one-shot. No other project joins it.
 - `egress`, outward: whatever calls a model provider or a vendor (the two
-  servers, board-sync, the workers, the import runner, n8n), and the stack's
+  servers, board-sync, the workers, the sleep scheduler, the import runner,
+  n8n), and the stack's
   own Ollama and Jev, which fetch their weights there and are called there by
   name.
 - `auth-egress`, outward: the authorization server's alone.

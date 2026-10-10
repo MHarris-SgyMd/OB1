@@ -2796,7 +2796,7 @@ refuses to start without the key (exit 2). Elsewhere it needs the same: the serv
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
 another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
-`capture`, `worker` and `extraction` groups, `server` for the worker key) —
+`capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084) —
 with the opt-in `sleep` group as well for a search to wake it (below). It
 has no `--job`.
 
