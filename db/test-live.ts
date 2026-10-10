@@ -10362,6 +10362,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const besideDry = await sleepRun({ dryRun: true });
     const besideDryText = lines.join("\n");
     lines.length = 0;
+    // A scheduler that slept before: its last sleep is kept by the refusal's
+    // stamp, which writes the whole value (review pass 4).
+    const priorSlept = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", slept: priorSlept })})`;
     // Bounded: a run that does not refuse sleeps under --follow for ever (the
     // no-refusal mutant hung the suite for hours, SMD-1794's lesson again).
     const acBeside = new AbortController();
@@ -10411,11 +10415,22 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     if (earlyCode === -1) { acEarly.abort(); await earlyRun; }
     assert(earlyCode === 130 && lines.some((l) => /stopped before the pass began/.test(l)) && (await beat()) === null,
       `a stop during a start read ends it with 130 and stamps no row (exit ${earlyCode})`);
+    // …and wins over a follower those reads found: 130, no row, no refusal (review pass 4).
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    const acEarly2 = new AbortController();
+    const abortingSql2 = new Proxy(sql, { apply(t, self, args) { acEarly2.abort(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+    lines.length = 0;
+    const early2Run = sleepRun({ sql: abortingSql2, follow: true, signal: acEarly2.signal });
+    const early2Code = await Promise.race([early2Run, Bun.sleep(20_000).then(() => -1)]);
+    if (early2Code === -1) { acEarly2.abort(); await early2Run; }
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
+      `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
     assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
-        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && refusedBeat.slept === undefined
+        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
         && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
         && endedDry === 0 && !/outside sleep/.test(endedDryText),
-      `a fresh follower outside refuses a run (2, no sleep, its row ended failed), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
+      `a fresh follower outside refuses a run (2, no sleep, its row ended failed, its last sleep kept), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
 
     // The start's reads wait out a database not answering yet (57P03, the
     // server starting up), as the sleep's own reads do: the compose service

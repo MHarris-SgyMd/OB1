@@ -108,7 +108,9 @@
  * any of their heartbeats is fresh — at its start, and at every awake and
  * asleep poll, since a follower brought up beside it stamps only past its own
  * start probe — and --dry-run names them, each with how to stop them and
- * retire their rows (SMD-2678). Preflight's `sleep` row reads this heartbeat,
+ * retire their rows (SMD-2678). Under --follow a refusal, at the start too,
+ * ends the row on a failure, its last sleep kept, so preflight names the
+ * followers keeping it down. Preflight's `sleep` row reads this heartbeat,
  * with its `slept` mark and its `reads` word on the query log, and the compose
  * service (`--profile sleep`) runs `--follow`. The start's reads, like the
  * sleep's, wait out a database not answering yet.
@@ -133,7 +135,7 @@ import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { databaseUnavailable, outageWait, waitOut } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper } from "./pass-stamp.ts";
+import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -260,6 +262,18 @@ async function followersOutside(sql: SQL): Promise<string[]> {
   }).map((r) => r.key);
 }
 
+/** The `slept` mark heartbeat:sleep carries now, when of the shape: what a refusal's stamp keeps (review pass 4). */
+async function lastSlept(sql: SQL): Promise<SleepMark | null> {
+  const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`) as { value: string }[];
+  if (!r) return null;
+  try {
+    const s = (JSON.parse(r.value) as { slept?: { from?: unknown; to?: unknown } }).slept;
+    return s && typeof s.from === "string" && (s.to === null || typeof s.to === "string") ? { from: s.from, to: s.to } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The line naming followers outside the scheduler: the dry run's, or a run's
  * refusal — at its start, or found later in an awake or asleep poll (review
@@ -374,16 +388,27 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // beside them is no sleep: a run refuses (2) rather than start one, and the
   // dry run names them (SMD-2678). The workers and sleep profiles are
   // alternatives.
+  // A signal aborted during the start's reads — one that did not wait on an
+  // outage, where the wait returns 130 itself — is a stop before the run
+  // began, and wins over what the reads found, a follower included: 130 and
+  // no row, one rule (review passes 2 and 4).
+  if (opts.signal?.aborted && !opts.dryRun) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
   if (outside.length) {
     err(outsideLine(outside, opts.dryRun === true));
     if (!opts.dryRun) {
       // Under --follow the refusal is said on the row too, ended on a failure,
       // so preflight's `sleep` row names the followers rather than reading a
       // service the refusal keeps down as never run, or as one to start again
-      // (review pass 3).
+      // (review pass 3). The row's last sleep is carried over, since a stamp
+      // writes the whole value (review pass 4).
       if (FOLLOW) {
         const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
         once.watching?.(logState);
+        const last = await lastSlept(sql).catch(() => null);
+        if (last) once.slept?.(last);
         await once.end("failed");
       }
       return 2;
@@ -409,13 +434,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     return 0;
   }
 
-  // A signal aborted during the start's reads — one that did not wait on an
-  // outage, where the wait returns 130 itself — is a stop before the run began:
-  // 130 and no row, one rule (review pass 2).
-  if (opts.signal?.aborted) {
-    err(STOPPED_EARLY);
-    return 130;
-  }
 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.

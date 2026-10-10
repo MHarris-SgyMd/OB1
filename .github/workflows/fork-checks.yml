@@ -1209,6 +1209,12 @@ jobs:
           sleeper -e OB1_WORKER_KEY=not-a-key
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
           hold 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          # The refusal ends heartbeat:sleep on a failure, so preflight's sleep
+          # row names the followers keeping it down; then the row goes, leaving
+          # this stack's later steps the brain they had.
+          stamped="$(q "SELECT (value::jsonb->>'outcome') || ':' || (value::jsonb->>'ended') FROM ob1_config WHERE key = 'heartbeat:sleep'")"
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          [ "$stamped" = "failed:true" ] || { echo "--- expected heartbeat:sleep ended on a failure; got '$stamped' ---" >&2; exit 1; }
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own

@@ -1001,7 +1001,10 @@ lifts at once; one killed past its grace leaves its row fresh for up to three
 of its intervals (3 min), so delete the rows as the log says — needed anyway
 if you are retiring the profile, or preflight's `workers` row asks for them
 back. Four refusals in a row (its start and three restarts) use up the service's restarts, after which
-`up -d sleep` starts it again.
+`up -d sleep` starts it again. Each refusal ends `heartbeat:sleep` on a
+failure, so preflight's `sleep` row names the followers keeping it down and
+the two ways out: one profile or the other, each taken out of
+`COMPOSE_PROFILES` with its rows deleted.
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
