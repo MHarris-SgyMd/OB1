@@ -114,8 +114,8 @@ HOSTING
   (`host.containers.internal` on podman) where the VM forwards to the host's
   loopback — Docker Desktop, podman machine; on a Linux host that name is the
   bridge gateway, which a `127.0.0.1` publish does not answer, so put the
-  dashboard on the compose network and use `http://server:8000/mcp`, or set
-  `SERVER_BIND`.
+  dashboard on the stack's `egress` network (`open-brain_egress`) and use
+  `http://server:8000/mcp`, or set `SERVER_BIND`.
 
 The session cookie is marked `Secure` when the request's URL is HTTPS — Vercel
 and Netlify hand the app the browser's URL — and not on plain HTTP (`bun run

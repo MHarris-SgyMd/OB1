@@ -4614,8 +4614,8 @@ DATABASE_URL=… bun eval-thought-kinds.ts [--frozen]             # the report; 
 
 The brain is behind the compose network on the dogfood Mac (SMD-1844 closed the
 host port), so the label and score runs go through a container on
-`open-brain_default` with `--env-file deploy/.env` and the repo mounted
-read-only; `OB1_LLM_LOCAL=1` from that file lets the egress gate pass the text
+`open-brain_default` (since SMD-2583, `open-brain_data` and `open-brain_egress`)
+with `--env-file deploy/.env` and the repo mounted read-only; `OB1_LLM_LOCAL=1` from that file lets the egress gate pass the text
 to the host Ollama.
 
 ### Results, 2026-09-22
@@ -4766,7 +4766,8 @@ DATABASE_URL=… bun eval-calibration.ts    # the report over the live brain
 ```
 
 The dogfood brain is reached the way the section above describes (a container
-on the compose network with `--env-file deploy/.env`).
+on the stack's networks — `open-brain_data` and `open-brain_egress` since
+SMD-2583 — with `--env-file deploy/.env`).
 
 ### Results, 2026-09-22 (dogfood brain, 359 thoughts at the report; 348 at the census)
 
@@ -5218,7 +5219,8 @@ DATABASE_URL=… bun eval-projection-replay.ts --sample 21 --edit 10 --json out.
 ```
 
 The dogfood brain publishes no port (SMD-1844), so the run below went through
-`podman run --network open-brain_default --env-file deploy/.env` with the
+`podman run --network open-brain_default --env-file deploy/.env` (since
+SMD-2583, `--network open-brain_data --network open-brain_egress`) with the
 worktree mounted read-only, the URL built inside the container, host Ollama at
 `host.containers.internal` as the server dials it.
 
@@ -5777,7 +5779,7 @@ on the stack's network, the tier on the host (reached through the podman
 machine's `host.containers.internal`):
 
 ```sh
-podman run --rm --network open-brain_default --env-file deploy/.env \
+podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
   -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
   'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts'
@@ -5845,7 +5847,7 @@ pre-registration commit.
 
 ```sh
 mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
-podman run --rm --network open-brain_default --env-file deploy/.env \
+podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
   -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
   'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /cache/jev-gate.json'

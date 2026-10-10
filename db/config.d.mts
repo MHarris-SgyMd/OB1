@@ -313,6 +313,19 @@ export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Prom
 >;
 /** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
 export const BOUNDS_IN_FORCE_SQL: string;
+/** Bytes one exact heap page costs a TID bitmap (PostgreSQL 16 tidbitmap.c); past work_mem / this, a bitmap goes lossy. */
+export const BITMAP_BYTES_PER_PAGE: number;
+/** The least share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e, a floor: the boundary rises on heaps under 10 x v_exact pages and at larger match counts). */
+export const BITMAP_PAGE_SHARE_GATED: number;
+/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
+export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
+  resident: { fits: boolean; needBytes: number; haveBytes: number; recommend: string };
+  bitmap: { fits: boolean; heapPages: number; gated: boolean; bitmapPages: number; needBytes: number; wholeHeapBytes: number; haveBytes: number };
+};
+/** A byte count for a preflight line: kB, MB, or GB to one decimal. */
+export function bytesText(bytes: number): string;
+/** Preflight's two SMD-1499 rows from memorySizing's result: `vector index memory` (ok, or warn with the size and the way back) and `filter bitmap memory` (always ok, information only). */
+export function memoryRows(s: ReturnType<typeof memorySizing>): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */

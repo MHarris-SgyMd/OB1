@@ -8,11 +8,14 @@
 # services are reached by name and nothing is published for it.
 #
 #   # replay stable's logged searches on the canary deploy/canary.sh stood up:
-#   # both projects' networks, so by container name (each has a `postgres`)
-#   deploy/tier.sh --env-file ~/stack/deploy/.env --network open-brain_default,open-brain-canary_default \
+#   # both projects' database networks, so by container name (each has a
+#   # `postgres`), and stable's egress, for the model the replay embeds with;
+#   # the canary's own env file for --to and the settings, stable's for --from
+#   deploy/tier.sh --env-file ~/stack/deploy/.env.canary.local --from-env-file ~/stack/deploy/.env \
+#     --network open-brain_data,open-brain-canary_data,open-brain_egress \
 #     --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
-#   # the three-tier stack's own network and services
-#   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
+#   # the three-tier stack's own database network and services
+#   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
 #
 # (deploy/canary.sh runs the canary's --refresh itself; deploy/README.md,
 # "Refreshing a tier", says what a --diff replays and what it skips.)
@@ -24,13 +27,22 @@
 # tier.ts unchanged (db/README.md has its verbs).
 #
 # Flags of this wrapper's own, all optional:
-#   --network NAME   the stack's network (default open-brain_default, deploy/compose.yaml's);
+#   --network NAME   the stack's networks (default open-brain_data,open-brain_egress,
+#                    deploy/compose.yaml's: Postgres is on `data`, internal,
+#                    and a --replay or --diff embeds through the model
+#                    provider on `egress`; SMD-2583. A --refresh needs `data`
+#                    alone, and a stack from before SMD-2583 has one network,
+#                    <project>_default);
 #                    NAME,NAME joins more than one, for a --from and a --to that
 #                    share none (deploy/canary.sh's two projects, SMD-2038) —
 #                    address them by container name then, since each network
 #                    may have a `postgres` of its own
 #   --env-file PATH  the running stack's env file (default deploy/.env beside this
 #                    script — which a branch worktree does not have: it is gitignored)
+#   --from-env-file PATH  the env file whose POSTGRES_PASSWORD builds a short-form
+#                    --from's URL, when --from is another stack's with a password
+#                    of its own (deploy/canary.sh names stable's, SMD-2583);
+#                    nothing else is read from it. Unset, --env-file's
 #   --runtime CLI    docker or podman (default: docker when on PATH, else podman)
 #
 # The environment is compose's: `compose config --environment` reads the env
@@ -88,8 +100,9 @@ usage() {
   exit 2
 }
 
-NETWORK=open-brain_default
+NETWORK=open-brain_data,open-brain_egress
 ENV_FILE="$HERE/.env"
+FROM_ENV_FILE=""
 RUNTIME=""
 FROM=""
 TO=""
@@ -97,13 +110,14 @@ SEEN=" "
 PASS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --network|--env-file|--runtime|--from|--to)
+    --network|--env-file|--from-env-file|--runtime|--from|--to)
       [ $# -ge 2 ] && [ "${2#--}" = "$2" ] || { echo "$1 takes a value." >&2; exit 2; }
       case "$SEEN" in *" $1 "*) echo "$1 given twice." >&2; exit 2 ;; esac
       SEEN="$SEEN$1 "
       case "$1" in
         --network) NETWORK="$2" ;;
         --env-file) ENV_FILE="$2" ;;
+        --from-env-file) FROM_ENV_FILE="$2" ;;
         --runtime) RUNTIME="$2" ;;
         --from) FROM="$2" ;;
         --to) TO="$2" ;;
@@ -115,6 +129,16 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$FROM" ] && [ -n "$TO" ] || { echo "tier.sh needs --from and --to (HOST[:PORT][/DB] on the network, or a postgres:// URL)." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
+case "$SEEN" in *" --from-env-file "*)
+  # An empty value would read as unset, and --from would quietly take
+  # --env-file's password; and a password in the shell wins over both
+  # files in compose's reading, so the two databases would share it (review
+  # pass 1).
+  [ -n "$FROM_ENV_FILE" ] || { echo "--from-env-file takes a file." >&2; exit 2; }
+  [ -f "$FROM_ENV_FILE" ] || { echo "no env file at $FROM_ENV_FILE (--from-env-file)." >&2; exit 2; }
+  [ -z "${POSTGRES_PASSWORD+set}" ] || { echo "POSTGRES_PASSWORD is set in the shell, where it wins over both env files and would give --from and --to one password: unset it to use --from-env-file." >&2; exit 2; }
+  ;;
+esac
 
 if [ -z "$RUNTIME" ]; then
   if command -v docker >/dev/null 2>&1; then RUNTIME=docker
@@ -123,8 +147,8 @@ if [ -z "$RUNTIME" ]; then
   fi
 fi
 
-# Before anything is built: a mistyped network (open-brain_default against
-# open-brain-tiers_default) is a usage error, not the runtime's 125 at the end.
+# Before anything is built: a mistyped network (open-brain_data against
+# open-brain-tiers_data) is a usage error, not the runtime's 125 at the end.
 case "$NETWORK" in
   ""|,*|*,|*,,*) echo "--network has an empty name: '$NETWORK'" >&2; exit 2 ;;
   *[[:space:]]*) echo "--network takes NAME[,NAME…] with no spaces: '$NETWORK'" >&2; exit 2 ;;
@@ -149,20 +173,29 @@ trap 'rm -f "$TMP_ENV" "$COMPOSE_ERR_FILE"; [ -z "$CID" ] || "$RUNTIME" rm -f "$
 # child that did not die of the signal (the buildx probe below, say), and a
 # caller must not read an interrupted run as done.
 trap 'exit 130' INT
+# …and so are a hangup and a TERM, so the EXIT trap above runs: bash 5 skipped
+# it on a hangup to the process group (a closed terminal) in deploy/canary.sh's
+# measurement, which would leave the container, whose environment holds both
+# databases' URLs, and the env file (SMD-2583 review pass 5).
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 
 # The environment as compose builds it for the stack: an empty project, the
 # file, the shell. stderr apart, since a delegating `podman compose` prints a
 # banner there even when it succeeds. The runtime's compose first, then the
 # other's; the first failure is the one reported.
-RESOLVED=""
-COMPOSE_ERR=""
-for c in "$RUNTIME" docker podman; do
-  command -v "$c" >/dev/null 2>&1 || continue
-  if RESOLVED="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$ENV_FILE" -f - config --environment 2>"$COMPOSE_ERR_FILE")"; then break; fi
-  [ -n "$COMPOSE_ERR" ] || COMPOSE_ERR="$c compose said: $(cat "$COMPOSE_ERR_FILE")"
-  RESOLVED=""
-done
-[ -n "$RESOLVED" ] || { printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment".\n%s\n' "$ENV_FILE" "$COMPOSE_ERR" >&2; exit 2; }
+# Called as an assignment, so its exit 2 ends the script under set -e.
+resolve_env() {
+  local c out err=""
+  for c in "$RUNTIME" docker podman; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    if out="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$1" -f - config --environment 2>"$COMPOSE_ERR_FILE")" && [ -n "$out" ]; then printf '%s\n' "$out"; return; fi
+    [ -n "$err" ] || err="$c compose said: $(cat "$COMPOSE_ERR_FILE")"
+  done
+  printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment".\n%s\n' "$1" "$err" >&2
+  exit 2
+}
+RESOLVED="$(resolve_env "$ENV_FILE")"
 
 # What is handed on, one NAME=value line each, value as compose resolved it (a
 # runtime's --env-file takes such a line literally). The wrapper's own variables
@@ -186,6 +219,14 @@ while IFS= read -r line; do
   [ "$name" = POSTGRES_PASSWORD ] && POSTGRES_PASSWORD="${line#*=}"
 done <<< "$RESOLVED"
 
+# The --from database's password: --from-env-file's, read the same way, when
+# --from is another stack's with a password of its own (deploy/canary.sh's
+# stable, SMD-2583); only that one value is taken from the file.
+FROM_PASSWORD="$POSTGRES_PASSWORD"
+if [ -n "$FROM_ENV_FILE" ]; then
+  FROM_PASSWORD="$(resolve_env "$FROM_ENV_FILE" | sed -n 's/^POSTGRES_PASSWORD=//p' | head -n 1)"
+fi
+
 # Percent-encode for the userinfo part of a URL: a password holding @, / or :
 # would otherwise end the userinfo early and name another host.
 urlencode() {
@@ -204,20 +245,21 @@ urlencode() {
 
 is_url() { case "$1" in postgres://*|postgresql://*) return 0 ;; esac; return 1; }
 
-# HOST[:PORT][/DB] → postgres://postgres:…@HOST:PORT/DB; a URL as given. Called
-# as an assignment, so its exit 2 ends the script under set -e.
+# HOST[:PORT][/DB] PASSWORD FILE → postgres://postgres:…@HOST:PORT/DB, FILE
+# named when PASSWORD is empty; a URL as given. Called as an assignment, so its
+# exit 2 ends the script under set -e.
 to_url() {
   if is_url "$1"; then printf '%s' "$1"; return; fi
-  [ -n "$POSTGRES_PASSWORD" ] || { echo "POSTGRES_PASSWORD is not set in $ENV_FILE or the environment — needed to build the URL for $1." >&2; exit 2; }
+  [ -n "$2" ] || { echo "POSTGRES_PASSWORD is not set in $3 or the environment — needed to build the URL for $1." >&2; exit 2; }
   local hostport="${1%%/*}" db="openbrain"
   [ "$hostport" = "$1" ] || db="${1#*/}"
   [ -n "$hostport" ] && [ -n "$db" ] || { echo "not HOST[:PORT][/DB]: $1" >&2; exit 2; }
   case "$hostport" in *:*) ;; *) hostport="$hostport:5432" ;; esac
-  printf 'postgres://postgres:%s@%s/%s' "$(urlencode "$POSTGRES_PASSWORD")" "$hostport" "$db"
+  printf 'postgres://postgres:%s@%s/%s' "$(urlencode "$2")" "$hostport" "$db"
 }
 
-FROM_URL="$(to_url "$FROM")"
-TO_URL="$(to_url "$TO")"
+FROM_URL="$(to_url "$FROM" "$FROM_PASSWORD" "${FROM_ENV_FILE:-$ENV_FILE}")"
+TO_URL="$(to_url "$TO" "$POSTGRES_PASSWORD" "$ENV_FILE")"
 {
   printf 'TIER_FROM_URL=%s\n' "$FROM_URL"
   printf 'TIER_TO_URL=%s\n' "$TO_URL"

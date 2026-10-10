@@ -16,7 +16,10 @@
  * checkpoint before it is still posting steps aside for it (SMD-2035); a provenance refusal is retried
  * without provenance; a dead endpoint keeps the payload for a later run; the
  * printed hook carries no key; --check tells a capture key from a wider one,
- * and warns on a url the proxy's legacy route answers (SMD-2686).
+ * and warns on a url the proxy's legacy route answers (SMD-2686); the url's
+ * slash goes on its path, a `?key=` on it is refused, every url printed has
+ * its query values masked, and a config that does not parse is named without
+ * quoting it (SMD-2743).
  */
 
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync } from "node:fs";
@@ -39,7 +42,7 @@ delete process.env.OB1_CAPTURE_KEY;
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
-  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt,
+  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -94,6 +97,7 @@ const fake = Bun.serve({
     if (new URL(req.url).pathname === "/busy") return new Response("Too Many Requests", { status: 429 });
     if (new URL(req.url).pathname === "/login") return new Response("<html><body>Sign in</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });
     if (new URL(req.url).pathname === "/moved") return new Response("", { status: 301, headers: { Location: `${new URL(req.url).origin}/login` } });
+    if (new URL(req.url).pathname === "/moved-q") return new Response("", { status: 307, headers: { Location: "/mcp?key=SEKRET-LOC&v=2" } }); // a front that redirects with the key in the query, relative
     if (new URL(req.url).pathname === "/front-401") return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } }), { status: 401, headers: { "Content-Type": "application/json" } });
     const body = await req.json();
     const envelope = (payload) => ({ jsonrpc: "2.0", id: body.id, ...payload });
@@ -1107,6 +1111,13 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const front = prepare({ session_id: "s-front", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [fo2] = await postPending({ url: `${URL_}front-401`, key: "cap-key" }, front.payloadPath);
   assert(!fo2.ok && fo2.dead && /JSON-RPC -32001/.test(fo2.error) && !/check the url/.test(fo2.error), `a 4xx carrying a JSON-RPC envelope is judged by the envelope: a bad key, not a bad url (${fo2.error.slice(0, 50)})`);
+  // A url an error names is printed with its query values masked: one may be a credential, and the error lands in the log (SMD-2743).
+  const maskedQ = prepare({ session_id: "s-masked-q", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  const [qo] = await postPending({ url: `${URL_}not-the-endpoint?tok=SEKRET-Q`, key: "cap-key" }, maskedQ.payloadPath);
+  assert(!qo.ok && qo.dead && qo.error.includes(`HTTP 405 from ${URL_}not-the-endpoint?tok=… — `) && !qo.error.includes("SEKRET"), `the url in a wrong-url error is named with its query value masked (${qo.error.slice(0, 70)})`);
+  const movedQ = prepare({ session_id: "s-moved-q", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
+  const [mq] = await postPending({ url: `${URL_}moved-q`, key: "cap-key" }, movedQ.payloadPath);
+  assert(!mq.ok && mq.dead && mq.error.includes(`HTTP 307 redirect to ${URL_}mcp?key=…&v=… from `) && !mq.error.includes("SEKRET"), `…and so is a redirect's target, resolved against the url when relative (${mq.error.slice(0, 70)})`);
   // A position the server names past the list (a server and a client disagreeing) falls to the whole-list drop in one retry, not five identical calls.
   const beforePast = received.length;
   const r6 = await postCapture(cfg, { text: "[[refuse-derived-at:5]] summary with two sources", harness: "codex", derived_from: [uuid(73), uuid(74)] });
@@ -2167,8 +2178,10 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
-  // The proxy's legacy root route: the fake's answers, each marked deprecated (SMD-2686).
+  // The proxy's legacy root route: the fake's answers, each marked deprecated (SMD-2686). It keeps the last url asked for.
+  let legacyAsked = "";
   const legacy = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    legacyAsked = req.url;
     const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
     return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200" } });
   } });
@@ -2180,7 +2193,61 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const onEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: `${LEGACY}sub` } });
   assert(onEnv.code === 0 && onEnv.err.includes(`set the url to its /mcp in OB1_BRAIN_URL (`), `…a url off the root is told its /mcp, and one from OB1_BRAIN_URL names the variable, not the file (${onEnv.err.trim().slice(0, 120)})`);
   assert(!/deprecated/.test(ok.err) && !/deprecated/.test(wide.err), "…and no such warning where the answer carries no Deprecation header");
+  // A query on the url: the warning names the url and suggests its /mcp with the query's names kept and its values masked; the request itself carries the query unmangled (SMD-2743: it went as `?tenant=<value>/`).
+  writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}?tenant=SEKRET-Q`, key: "cap-key" }), { mode: 0o600 });
+  const onRootQ = await spawnScript(["--check"]);
+  assert(onRootQ.code === 0 && onRootQ.out.includes(`ok: ${LEGACY}?tenant=… answers`) && onRootQ.err.includes(`warning: ${LEGACY}?tenant=… answered through`) && onRootQ.err.includes(`set the url to ${LEGACY}mcp?tenant=… in ${CONFIG} (`) && !(onRootQ.out + onRootQ.err).includes("SEKRET"),
+    `…a url with a query is named, and its /mcp suggested, with the query's names kept and its value masked (SMD-2743;${onRootQ.err.trim().slice(0, 120)})`);
+  assert(legacyAsked === `${LEGACY}?tenant=SEKRET-Q`, `…and the request goes to that url, its query value unmangled (${shownUrl(legacyAsked)}${legacyAsked.endsWith("/") ? ", a slash after the query" : ""})`);
   legacy.stop(true);
+  // The slash goes on the path, never after the query (SMD-2743); a url that is not absolute http(s) is refused at load, not fetched every run.
+  assert(endpointOf("http://h:8010/mcp?x=1", "f") === "http://h:8010/mcp/?x=1" && endpointOf("http://h:8010", "f") === "http://h:8010/" && endpointOf("https://h/mcp//#top", "f") === "https://h/mcp/",
+    `endpointOf puts one slash on the path and keeps the query as given (${endpointOf("http://h:8010/mcp?x=1", "f")})`);
+  const used = (raw) => { try { return endpointOf(raw, "f"); } catch (e) { return `refused: ${e.message}`; } };
+  assert(used("localhost:8010/mcp") === "http://localhost:8010/mcp/" && used(" 127.0.0.1:8010/mcp\n") === "http://127.0.0.1:8010/mcp/",
+    `…reads a url with no scheme:// as http, as Bun's fetch read localhost:8010/mcp before (review pass 2: refusing it stopped a config that captured; ${used("localhost:8010/mcp")})`);
+  assert(/the url in f is not an http\(s\) URL/.test(thrown(() => endpointOf("ws://h/mcp", "f"))) && /not an http\(s\) URL/.test(thrown(() => endpointOf("file:///tmp/x", "f"))) && /not an http\(s\) URL/.test(thrown(() => endpointOf("http://h:99999/mcp", "f"))),
+    "…and refuses another scheme, or a url that does not parse, naming its source and not its text");
+  assert(shownUrl("http://u:pw@h:8010/mcp/?key=a&x=b&x=c") === "http://h:8010/mcp/?key=…&x=…" && shownUrl("not a url") === "(a url that does not parse)",
+    `shownUrl drops the userinfo and masks each query value (${shownUrl("http://u:pw@h:8010/mcp/?key=a&x=b&x=c")})`);
+  assert(shownUrl("myapp://cb/done?code=a", URL_) === "myapp://cb/done?code=…" && shownUrl("mailto:a@b?subject=x") === "mailto:a@b?subject=…",
+    `…and names a scheme other than http(s) by its scheme and host, not as "null" (review pass 1; ${shownUrl("myapp://cb/done?code=a", URL_)})`);
+  // A ?key= on the url is refused at load and never echoed: --check, OB1_BRAIN_URL, and a hook run's log (SMD-2743).
+  writeFileSync(CONFIG, JSON.stringify({ url: `${URL_}mcp?key=SEKRET-URL-KEY`, key: "cap-key" }), { mode: 0o600 });
+  const keyed = await spawnScript(["--check"]);
+  assert(keyed.code === 2 && keyed.err.includes(`the url in ${CONFIG} carries a key (?key=)`) && /from "key" \(or "key_file"\)/.test(keyed.err) && !(keyed.out + keyed.err).includes("SEKRET"),
+    `--check on a url carrying ?key=: exit 2, where the key goes, the key not echoed (${keyed.err.trim().slice(0, 100)})`);
+  const keyedEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: `${URL_}?key=SEKRET-URL-KEY` } });
+  assert(keyedEnv.code === 2 && keyedEnv.err.includes("the url in OB1_BRAIN_URL carries a key") && !(keyedEnv.out + keyedEnv.err).includes("SEKRET"), "…one from OB1_BRAIN_URL names the variable");
+  writeFileSync(CONFIG, JSON.stringify({ url: `${URL_}mcp?key=SEKRET-URL-KEY` }), { mode: 0o600 });
+  const keyedRun = await runHook({ session_id: "s-keyed-url", transcript_path: CLAUDE_T, hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  const hookLog = existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "";
+  assert(keyedRun.code === 1 && /carries a key \(\?key=\)/.test(keyedRun.err) && !/no endpoint or key/.test(keyedRun.err) && /error: the url in .* carries a key/.test(hookLog) && !(keyedRun.out + keyedRun.err + hookLog).includes("SEKRET") && !readdirSync(join(STATE, "pending")).some((f) => /-s-keyed-url\.json$/.test(f)),
+    `a hook run with a connector url pasted whole (its ?key=, no "key"): exit 1, told where the key goes, not told the config is missing; the log has the refusal and not the key; nothing queued (${keyedRun.err.trim().slice(0, 90)})`);
+  const keyedPost = await spawnScript(["--post"]);
+  assert(keyedPost.code === 2 && /carries a key \(\?key=\)/.test(keyedPost.err) && !(keyedPost.out + keyedPost.err).includes("SEKRET"), `…and --post refuses it with exit 2, as it refuses a missing config (review pass 1; exit ${keyedPost.code})`);
+  writeFileSync(CONFIG, JSON.stringify({ url: URL_.replace("http://", ""), key: "cap-key" }), { mode: 0o600 });
+  const noScheme = await spawnScript(["--check"]);
+  writeFileSync(CONFIG, JSON.stringify({ url: URL_.replace("http://", "ftp://"), key: "cap-key" }), { mode: 0o600 });
+  const ftp = await spawnScript(["--check"]);
+  assert(noScheme.code === 0 && noScheme.out.includes(`ok: ${URL_} answers`) && ftp.code === 2 && ftp.err.includes(`the url in ${CONFIG} is not an http(s) URL`),
+    `through a real load: a url with no scheme:// answers as http, and one with another scheme is refused, exit 2 (review passes 1 and 2; ${(noScheme.out + ftp.err).trim().slice(0, 90)})`);
+  // A config the parser stops on at an unquoted key: the parser's message would quote it (review pass 1).
+  writeFileSync(CONFIG, `{"url": "${URL_}", "key": SEKRETbarekey123}`, { mode: 0o600 });
+  const badJson = await runHook({ session_id: "s-bad-json", transcript_path: CLAUDE_T, hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  const badCheck = await spawnScript(["--check"]);
+  const badLog = existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "";
+  assert(badJson.code === 1 && badCheck.code === 2 && badCheck.err.includes(`${CONFIG} is not valid JSON`) && /is not valid JSON/.test(badLog) && !(badJson.out + badJson.err + badCheck.out + badCheck.err + badLog).includes("SEKRET"),
+    `a config that is not JSON is named, and the token the parser stopped at, an unquoted key, is in neither stream nor the log (review pass 1; ${badCheck.err.trim().slice(0, 90)})`);
+  // A BOM is read past; an empty file and JSON that is not an object are each named, not a TypeError off `cfg.url` (review pass 2).
+  writeFileSync(CONFIG, `\uFEFF${JSON.stringify({ url: URL_, key: "cap-key" })}`, { mode: 0o600 });
+  const bom = await spawnScript(["--check"]);
+  writeFileSync(CONFIG, " \n", { mode: 0o600 });
+  const empty = await spawnScript(["--check"]);
+  writeFileSync(CONFIG, "null", { mode: 0o600 });
+  const nul = await spawnScript(["--check"]);
+  assert(bom.code === 0 && /capture_thought alone/.test(bom.out) && empty.code === 2 && empty.err.includes(`${CONFIG} is empty`) && nul.code === 2 && nul.err.includes(`${CONFIG} is JSON but not an object`) && !/TypeError|evaluating/.test(nul.err),
+    `a config with a BOM loads; an empty one and a JSON null are each named, exit 2 (review pass 2; ${(empty.err + nul.err).trim().slice(0, 100)})`);
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");

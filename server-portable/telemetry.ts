@@ -1,5 +1,5 @@
 // What the servers say about their requests (SMD-1849): one JSON line per
-// request to the MCP server's endpoint and per request to the REST core,
+// request, on every route of both servers (the keyless liveness probe aside),
 // built here and nowhere else, so what may be said is decided once.
 //
 // The brain is personal data, and a connector carries its key in `?key=`; so a
@@ -33,15 +33,21 @@ export type Door = "mcp" | "api";
  *   request (a 4xx, or a 5xx of its own), the SDK its input, the key's scope
  *   does not register the tool, or it was sent as a notification (no `id`),
  *   which the transport answers 202 and never runs;
- * - `abandoned`: the client left before the MCP server's response was
- *   complete, or before the REST core handed its answer over — the call
+ * - `abandoned`: the client left before a stream ended (an MCP answer, either
+ *   job stream) or before any other answer was handed over — the call
  *   itself runs on to its end, which this line does not say;
- * - `cut`: the server's stop closed it;
- * - `stalled`: still running at the keepalive's ceiling (sse.ts); the line is
- *   written then, and the call's own end writes none.
+ * - `cut`: the server's stop closed it while its client was still there, on
+ *   either server (one already gone is `abandoned`);
+ * - `stalled`: a stream still running at the keepalive's ceiling (sse.ts);
+ *   the line is written then, and its own end writes none.
  * A batch's line says its worst call's: error, then refused, unrun, ok. Any
- * other request — an `initialize`, a `tools/list`, every REST request — says
- * its answer's (outcomeOf), or `abandoned`.
+ * other request — an `initialize`, a `tools/list`, a mirror, every REST
+ * request — says its answer's (outcomeOf), unless the middleware or the
+ * handler says otherwise: a keyed mirror that shows a caller nothing is
+ * `refused` (the handler's RequestTrace.outcome: for a key missing, wrong or
+ * out of scope, and for one the registry did not clear, with REVOKED or BUSY
+ * where it said which), and a mirror's fault answered 200 is `error`; or
+ * `abandoned`, `cut` or, for a job stream, `stalled`.
  */
 export type RequestOutcome = "ok" | "refused" | "error" | "unrun" | "abandoned" | "cut" | "stalled";
 
@@ -64,11 +70,11 @@ export interface RequestRecord {
   door: Door;
   /** The HTTP method. */
   method: string;
-  /** The REST core's route template (`/v1/thoughts/:id`), never the path it was given. */
+  /** The route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/jobs/:id/stream`). */
   route?: string;
   /** The MCP server's JSON-RPC method (`tools/call`), or `batch` for a body of several messages. */
   rpc?: string;
-  /** The tool: an MCP tool call's, or the operation a REST route runs. */
+  /** The tool: an MCP tool call's, the operation a REST route runs, or the tool a mirror mirrors. */
   tool?: string;
   /** The configured name of the key that authenticated — never the key. */
   agent?: string;
@@ -76,9 +82,9 @@ export interface RequestRecord {
   outcome?: RequestOutcome;
   /** A refusal's or a fault's code (`NOT_FOUND`, `FAILED`), the MCP server's from the tool's reply or the key, the REST core's from its error answer. */
   code?: string;
-  /** Milliseconds from the request's arrival to its end: an MCP stream's end; the REST core's answer, whose job stream is timed to its opening, not its end. */
+  /** Milliseconds from the request's arrival to its end: a stream's end (an MCP answer, a job stream); any other answer's handing over. */
   ms: number;
-  /** The bytes of the answer's body, where the server counted them (an MCP stream). */
+  /** The bytes of the answer's body, where the server counted them: a stream's (an MCP answer, either job stream). */
   bytes?: number;
 }
 
@@ -102,7 +108,7 @@ export function knowTools(names: Iterable<string>): void {
   for (const name of names) PLUGIN_TOOLS.add(name);
 }
 const OUTCOMES: ReadonlySet<string> = new Set<RequestOutcome>(["ok", "refused", "error", "unrun", "abandoned", "cut", "stalled"]);
-/** A route template: the REST core's own path pattern, segments of letters, digits, `_`, `-`, `.` and `:name`. */
+/** A route template — the REST core's path pattern, or an MCP server mirror's — segments of letters, digits, `_`, `-`, `.` and `:name`. */
 const ROUTE = /^(?:\/[A-Za-z0-9_.:-]+)+$|^\/$/;
 /** A refusal's or a fault's code: the core's enum spelling. */
 const CODE = /^[A-Z][A-Z0-9_]{0,47}$/;
@@ -149,4 +155,146 @@ export function useRequestLog(next: (line: string) => void): (line: string) => v
   const previous = sink;
   sink = next;
   return previous;
+}
+
+/** What a request's record is told on its way: every RequestRecord field but the door, the method and the time, which the record keeps itself. */
+export type RequestFields = Partial<Omit<RequestRecord, "door" | "method" | "ms">>;
+
+/** The records not yet ended, so the stop can end each (cutOpenRequests). */
+const OPEN = new Set<RequestTrace>();
+/** Each request's record, by the Request object both a server's middleware and its handlers hold. */
+const RECORDS = new WeakMap<Request, RequestTrace>();
+
+/**
+ * One request, from its arrival to its line (SMD-1849 PR 2a): the one record
+ * a server's first middleware makes for every request it is handed, filled
+ * in by the handler that serves it — the route, the tool, the key's name —
+ * and ended exactly once, where the request ends. The middleware ends it when
+ * the handler returns; a handler whose answer outlives it (a stream) marks it
+ * `deferred` and ends it itself, at the stream's end. A second `end` does
+ * nothing, so every request has one line and no more. PR 2b's span reads the
+ * same record.
+ */
+export class RequestTrace {
+  /** When the request arrived (performance.now()). */
+  readonly started = performance.now();
+  route?: string;
+  rpc?: string;
+  tool?: string;
+  agent?: string;
+  /** The answer's status, once there is one (0 before). */
+  status = 0;
+  /**
+   * How the request ended, when its handler knows better than the answer's
+   * status says — a keyed mirror whose key the registry did not clear answers
+   * `ok`, a 200, and is `refused` — with its code; the middleware takes these
+   * over the status's.
+   */
+  outcome?: RequestOutcome;
+  code?: string;
+  /** Set by a handler whose answer outlives it: the middleware leaves the end to it. */
+  deferred = false;
+  private done = false;
+
+  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal?: AbortSignal) {
+    OPEN.add(this);
+  }
+
+  /** Whether the client is gone: its request's signal aborted. */
+  get clientGone(): boolean {
+    return this.signal?.aborted === true;
+  }
+
+  /** Whether the line is written. */
+  get ended(): boolean {
+    return this.done;
+  }
+
+  /**
+   * Writes the line, once, with what the record holds and what `fields` adds;
+   * later calls do nothing. `at` is when the request ended (performance.now()),
+   * now unless the caller noted it before work of its own — the middleware's
+   * read of an error answer's code — so `ms` is the request's time, not the log's.
+   */
+  end(fields: RequestFields = {}, at: number = performance.now()): void {
+    if (this.done) return;
+    this.done = true;
+    OPEN.delete(this);
+    const { route, rpc, tool, agent, status, outcome, code } = this;
+    this.write({ door: this.door, method: this.method, route, rpc, tool, agent, status, outcome, code, ...fields, ms: at - this.started });
+  }
+}
+
+/** A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest unless a suite says). */
+export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest): RequestTrace {
+  const trace = new RequestTrace(door, req.method, write, req.signal);
+  RECORDS.set(req, trace);
+  return trace;
+}
+
+/**
+ * How many records are open: a request in flight, or one whose end never
+ * came — the suites hold it to where it started once their requests are done.
+ */
+export function openRequestCount(): number {
+  return OPEN.size;
+}
+
+/** The record the middleware made for this request, if one did. */
+export function traceOf(req: Request): RequestTrace | undefined {
+  return RECORDS.get(req);
+}
+
+/** What a stream's keepalive (sse.ts withSseKeepalive) is handed to end a record with. */
+export type StreamEnds = { onEnd: (bytes?: number) => void; onStall: () => void; onCancel: () => void };
+
+/**
+ * Ties a request's record to the event stream that answers it, for a handler
+ * whose answer outlives it (a job stream): the record is deferred — the
+ * middleware leaves it — and ended where the stream ends, whichever comes
+ * first: `ok` with its bytes when the stream closes, `stalled` at the
+ * keepalive's ceiling, or `abandoned` when the client is gone — already gone
+ * as the handler gets here (a listener added to an aborted signal never
+ * fires, so that is checked by hand), gone later (the signal), or the body
+ * let go of with no abort (sse.ts's onCancel, how a runtime that never aborts
+ * the signal says it).
+ */
+export function endsWithStream(trace: RequestTrace, signal: AbortSignal): StreamEnds {
+  trace.deferred = true;
+  trace.status = 200;
+  const gone = () => trace.end({ outcome: "abandoned" });
+  if (signal.aborted) gone();
+  else signal.addEventListener("abort", gone, { once: true });
+  return {
+    onEnd: (bytes) => trace.end({ outcome: "ok", bytes }),
+    onStall: () => trace.end({ outcome: "stalled" }),
+    onCancel: gone,
+  };
+}
+
+/**
+ * Ends every record still open as `cut`: the stop's, when it closes what is
+ * still in flight at its bound and the process exits next. Each keeps the
+ * status its answer had, or 0 where there was none yet. One whose client was
+ * already gone is `abandoned`, as the middleware would have said had its
+ * handler returned first.
+ */
+export function cutOpenRequests(): void {
+  for (const trace of [...OPEN]) trace.end({ outcome: trace.clientGone ? "abandoned" : "cut" });
+}
+
+/**
+ * An error answer's code, for its line, where its JSON carries one: every
+ * REST core 4xx and 5xx (`refuse`, a refusal's value, `failure`), and the
+ * MCP server's worker actions' refusals (its /jobs 404 says only `not
+ * found`, and has none), read from a copy so the answer
+ * itself is untouched. A success, or a body that is not JSON or carries no
+ * code, gives none; requestLine holds what it gives to the enum spelling. A
+ * refused HEAD's line has its GET's code: Hono answers a HEAD as its GET and
+ * drops the body after the middleware has read it.
+ */
+export async function errorCode(res: Response): Promise<string | undefined> {
+  if (res.status < 400 || !/^application\/json\b/i.test(res.headers.get("content-type") ?? "")) return undefined;
+  const body = await res.clone().json().catch(() => null) as { code?: unknown } | null;
+  return typeof body?.code === "string" ? body.code : undefined;
 }

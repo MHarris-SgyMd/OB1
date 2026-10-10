@@ -163,13 +163,26 @@ best-effort. When `query_log` is present the check names it and whether
 `OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
-cites a returned id logs no cite row there (SMD-1719). Over PostgREST every
+cites a returned id logs no cite row there (SMD-1719). `vector index memory` and
+`filter bitmap memory` (SMD-1499): the server sized for the table. The first
+is a warning, since a managed platform may not let the operator change the
+setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
+`shared_buffers`, with the size to set and the statement that sets it. The OS
+page cache serves a walk too, but measured at ten million rows it gave ten
+connections about a third of the throughput. The second is information only:
+the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
+under 037's gate, at least 1 − 1/e of them for a filter at its boundary above it, more on a heap under ten times v_exact pages)
+against `work_mem`, and a generic-plan walk's over the whole heap. A lossy
+routing count costs little under its LIMIT, and whether `match_thoughts` takes
+a generic plan is SMD-1464's to settle, so it recommends nothing.
+`db/config.mjs`'s `memorySizing` holds the arithmetic.
+Over PostgREST every
 direct-connection check — this one included — prints a row: six are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid
 search`, `search signatures`, `edit signature`, `delete signature`), five say
-what catalog fact they would have read, and the sixteen catalog-only ones say
+what catalog fact they would have read, and the catalog-only ones say
 they have no PostgREST form (change 97's first review pass; before it those
-sixteen printed nothing on that path).
+printed nothing on that path).
 
 ## Choosing a data layer
 
@@ -369,6 +382,8 @@ Brain embedding: qwen3-embedding:4b @ 1024
 Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
 Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
+Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
+Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
@@ -396,6 +411,25 @@ worker's heartbeat (SMD-2261): alive, running a pass, stopped, or stale past
 three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
+`Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
+pass's findings show without a query. `Proposals` is the queue a reviewer works:
+how many are pending, how long ago the oldest was judged (a pass that re-judges
+a stale proposal restarts it), how many pair two tickets the board does not link
+— filed under two different tickets, `metadata.ticket` else `metadata.issue`,
+with no active Linear link between them now (079's `child_of`, `blocks`,
+`blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
+after a verdict takes the pair out; not counted before 079 — and the stale
+ones; `none pending` when there is none.
+`consolidate.ts --list` and the `list_supersession_proposals` tool list them,
+and preflight's `proposals` row warns once the oldest has waited past
+`OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
+(084) by word, with their board pairs counted the same way; nothing waits on
+one, so nothing warns (`consolidate.ts --list relations` shows them); `none
+standing` when there is none, `none — migration 084 is not applied` before 084.
+A board count counts rows — proposals, relation facets — not distinct pairs of
+tickets: five proposals between two tickets' thoughts count five, and a pair
+can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
+answer and `no table` before its table's migration.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
@@ -403,7 +437,13 @@ token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
 `ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
 database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
-heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261) or
+heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
+`proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
+relations as `relations`, `{ related, evolves, duplicate, boardPairs }`, each
+null when not read or absent; each `boardPairs` is a read of its own, last,
+null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
+did not answer, null with no entry before 079 (or when its field was not read),
+and 0, not read, when there is nothing to count, SMD-2680) or
 `{ "error": … }` when it cannot answer. Beside the record, `oauth` is the
 server's own view of its public origin (SMD-2382): `{ configured, origin,
 advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers within 2.5 s
@@ -411,7 +451,10 @@ advertised }`, which `deploy/smoke.sh` compares with what reaches it. It answers
 process is serving. A database that refuses at once is `database.error`; one
 that never answers (a dropped route) leaves the agent registry unanswered too,
 and the body is then the literal `ok`, as for a key the server cannot vouch for
-(below); tables locked by a migration cost their lock waits. The
+(below); tables locked by a migration cost their lock waits — one per table:
+once a read of one table alone is refused its lock (on the table or one of its
+indexes), a later read that touches it is named in `unread` as not tried rather
+than waiting again. The
 read is one transaction whose statements are capped at 800 ms and whose lock
 waits at 300 ms (never above a stricter setting the role already has), a read
 that does not answer is named in `unread` with its reason (`refused`,
@@ -519,6 +562,43 @@ gated by a **write** key (stricter than the read routes; a read/capture/no key g
 bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
 answers that it needs the SQL store.
 
+## The operator's label reset (SMD-2744)
+
+**`reset_capture_stamp(id)`** is a **write-scoped** tool for the operator alone: the key
+must be one the registry classifies `operator` (`set_agent_kind`), and the database
+decides that, since the server does not hold a key's kind — so every write key sees the
+tool, and any write key the operator has not classified `operator` is refused
+(`REFUSED_NOT_OPERATOR`, 403 over REST). A read or capture key does not see it.
+
+It undoes migration 085's one move on a capture-only key's label (SMD-2664). There, the
+first classified key that can read to re-capture the text either moves the label to
+itself or records a decline that settles the row against every other key — and a label
+settled or moved by the wrong key, or by a name-only decline written while the registry
+lookup failed, had no way back that kept the thought. The reset (migration 086's
+`ob1_reset_capture_stamp`) clears the declines and the restamp since the row's last
+reset, puts the capture-only key's label back where a restamp moved it — derived from
+its capture as the backfill derives it, so a key demoted since comes back down and a
+pass after finds nothing to change — names the keys whose move or declines it undid
+(the operator's own included), and records one event in the operator's name. The next
+re-capture by a key that can read is then weighed again, so the operator re-captures
+the text straight after, exactly as stored (`fetch` shows an outside text under a
+notice line that is not part of it; REST `GET /v1/thoughts/{id}` gives the content
+alone). The reply gives the ways on by the trust the row is left at: plainly, the
+label moves to the operator's key at trust operator; with `trust: "ingested"`, a label
+at `ingested` or `agent` stays as it is and the row is settled against every other key
+(not the operator's own: its later plain re-capture still moves it) — at `ingested`, the
+way to keep outside text that another key lifted labelled as outside text — while a
+label with no trust moves to the operator's key at `ingested`; a label at `operator` no
+re-capture moves, and the reply asks for none. A thought whose label is not
+a capture-only key's — another key's capture, or one from before the scope mark — is
+refused (`REFUSED_NOT_CAPTURE_STAMP`, 409), and so is one whose text changed since,
+once something settled it; one with nothing to reset is left as it is, and the reply
+says so. Over MCP, a key that is not the operator's is refused by name and kind — an
+unclassified one given the `set_agent_kind` line that would classify it, a classified
+one told to use the operator's own key — and a database before 086 is named in the
+fault; the REST core answers the code and its status. `thought_changes` reads the event
+as "reset by <key>", and a decline's line names the reset as the way out.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
@@ -529,9 +609,9 @@ MCP tools do rather than a copy of it:
   the manifest's names (`tools.ts`). `core/reads.ts` holds the read operations, each a
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
-  `core/writes.ts` holds `capture_thought`, `update_thought` and `delete_thought`: the
-  shapes, a capture-only key's trimmed provenance and owned pointers, the egress gate,
-  the model calls, the write and its cites. `core/workers.ts` holds the worker actions
+  `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought` and
+  `reset_capture_stamp`: the shapes, a capture-only key's trimmed provenance and owned
+  pointers, the egress gate, the model calls, the write and its cites. `core/workers.ts` holds the worker actions
   (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
   POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each
   returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
@@ -549,9 +629,10 @@ MCP tools do rather than a copy of it:
   stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
   stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
   REST core (SMD-2284) can build on them rather than on a copy.
-- **`telemetry.ts`** — the one JSON line written per request to the MCP endpoint and
-  per request to the REST core (SMD-1849):
-  its keys an allow-list, each value held to its rule as the line is written, so no
+- **`telemetry.ts`** — the one JSON line written per request, on every route of both
+  servers but the keyless liveness probe (SMD-1849), from one per-request record
+  each server's first middleware makes (notFound, for a path that middleware
+  never sees): its keys an allow-list, each value held to its rule as the line is written, so no
   URL, key, argument or thought text reaches it (`deploy/README.md`, "What the
   servers log").
 
@@ -626,7 +707,8 @@ stripped (`X-Forwarded-Prefix`).
 
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
-  /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST /v1/search` (and `/keyword`,
+  /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
+  /v1/thoughts/{id}/reset-capture-stamp`, `POST /v1/search` (and `/keyword`,
   `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
@@ -706,15 +788,15 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 859 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
-bun test-auth.ts          # 187 — scoped, hashed, named keys
-bun test-rest.ts          # 315 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 120 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, and the GUI's registry at GET /v1/plugins
+bun test-server.ts        # 919 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
+bun test-auth.ts          # 190 — scoped, hashed, named keys
+bun test-rest.ts          # 332 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
+bun test-plugins.ts       # 249 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals
 bun run test:local        # 202 — fully local provider, no credential
-bun run test:sql          # 237 — store conformance, real Postgres in a container
-bun run test:e2e          # 524 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 154 — the REST core beside the MCP server on one database: every operation through both
-../db/with-postgres.sh bun test-plugins-sql.ts  # 80 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, preflight's row
+bun run test:sql          # 253 — store conformance, real Postgres in a container
+bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 160 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

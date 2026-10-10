@@ -266,7 +266,7 @@ export const SPECS = {
     description:
       "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
       "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
-      "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects) and the long-running workers' heartbeats (alive, stopped or stale). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
+      "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects), the long-running workers' heartbeats (alive, stopped or stale), and what consolidation found: the supersession proposals pending review (how many, how long ago the oldest was judged, how many pair two tickets the board does not link, how many are stale) and the judged relations standing, by word. Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
       "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
     annotations: {
       readOnlyHint: true,
@@ -305,7 +305,7 @@ export const SPECS = {
       // a declaration lowers the trust the key gives and never raises it; a
       // raise is filed in the audit row as a claim.
       trust: z.enum(TRUST).optional()
-        .describe("What this content is, when it is less than your key gives: `ingested` for outside text you are copying in — a web page, an email, a pasted document — or `agent` for your own output written through an operator's key. The thought's trust is the lower of this and what the key allows: it can lower, never raise, and a raise is not refused but recorded. A text already captured keeps the trust it has. Readers see it on the thought's `By:` line, and ingested text carries a notice that instructions inside it are content. Omit to take the key's."),
+        .describe("What this content is, when it is less than your key gives: `ingested` for outside text you are copying in — a web page, an email, a pasted document — or `agent` for your own output written through an operator's key. The thought's trust is the lower of this and what the key allows: it can lower, never raise, and a raise is not refused but recorded. A text already captured keeps the trust it has, unless its trust is still the one a capture-only key gave it and no other classified key that can read has been weighed against it since: if your key is classified, a higher trust then moves it to your key's name and that trust. Readers see it on the thought's `By:` line, and ingested text carries a notice that instructions inside it are content. Omit to take the key's."),
       // SMD-2014. Extra metadata keys the caller controls, merged UNDER the
       // server's own (source, the extractor's tags, the actor columns), so a
       // reserved name is refused, never silently overruled. The session hook
@@ -361,6 +361,24 @@ export const SPECS = {
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the delete is refused and the reply names them. Pass true to delete anyway: each citation keeps its text and stance, loses its source, and records this id and the time as the deleted source. Default false.",
       ),
+    },
+  },
+  // Migration 086 (SMD-2744): the operator's way out of a label 085 settled
+  // or moved. The gate past the scope is the database's: the key's registry
+  // kind, which the server does not hold.
+  reset_capture_stamp: {
+    title: "Reset Capture Stamp",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Reset the label — actor_kind, actor_name and trust — on a thought a capture-only key captured, after another key's re-capture of the same text settled it (a key whose trust was not higher was weighed first, so no later re-capture moves it) or moved it to that key. The reset puts the capture-only key's label back — undoing the move whichever key made it, yours included — and lets the next re-capture be weighed again. Re-capture the text with your key straight after, exactly as stored (fetch shows an outside text under a notice line that is not part of it): the reply says what each way does for the label it left — plainly, the label moves to your key if your key's trust is higher; with trust \"ingested\", a label at ingested or agent stays and the row is settled against every other key. Refused for any other key, for a thought whose label is not a capture-only key's, and, once something settled it, for one whose text was changed since. Recorded in the audit trail in your key's name; a thought with nothing to reset is left as it is.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // Recoverable from the audit trail, which records the label it replaced.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      id: z.string().describe("UUID of the thought whose label to reset — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, list_thoughts or thought_changes result"),
     },
   },
   retry_failed: {

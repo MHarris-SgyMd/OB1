@@ -2055,6 +2055,138 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     assert(scopeOf(merged.s) === "capture" && scopeOf(ws) === null, `…the capture key's capture row says its scope, the write key's says none (${JSON.stringify(marks)})`);
   }
 
+  // [13f] SMD-2664's repro: the capture key, classified agent, labels a text
+  // outside text; the operator's key captures the same text after it. The
+  // row's stamp moves to the operator (migration 085): it is found under
+  // min_trust agent and carries no outside-text notice.
+  {
+    await sql`SELECT set_agent_kind('session-hook', 'agent')`;
+    await sql`SELECT set_agent_kind('op-key', 'operator')`;
+    const K = captureAs(CAPTURE_KEY);
+    const T = "[13f] smd2664probe a page the hook labels outside text and the operator sends too";
+    const kept = await K({ content: T, trust: "ingested" });
+    assert(kept.result?.isError !== true, `[13f] setup: the capture key captures the text as outside text (${textOf(kept).split("\n")[0].slice(0, 80)})`);
+    const control = idIn(await call("capture_thought", { content: "[13f] smd2664probe the operator's own note" }, "op-raw"));
+    const stampOf = async () => (await sql`SELECT id::text AS id, metadata->>'actor_kind' AS kind, metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE content = ${T}`)[0] as { id: string; kind: string; name: string; trust: string };
+    const before = await stampOf();
+    const hidden = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    assert(`${before.kind}/${before.name}/${before.trust}` === "agent/session-hook/ingested" && !hidden.includes(before.id) && hidden.includes(control!),
+      `before the writer's capture the row is the capture key's outside text, and min_trust agent leaves it out (${before.kind}/${before.name}/${before.trust})`);
+    const landed = idIn(await call("capture_thought", { content: T, metadata: { project: "smd-2664" } }, "op-raw"));
+    const after = await stampOf();
+    assert(landed === before.id && `${after.kind}/${after.name}/${after.trust}` === "operator/op-key/operator",
+      `the operator's capture of the same text lands on the row and moves its stamp to the operator (${after.kind}/${after.name}/${after.trust})`);
+    const [ev] = await sql`SELECT actor_name, trust FROM thought_audit WHERE thought_id = ${before.id}::uuid AND diff ? 'restamped'`;
+    assert(ev?.actor_name === "op-key" && ev?.trust === "operator", `…recorded as a restamp event in the operator's name (${JSON.stringify(ev)})`);
+    const shown = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    const block = shown.split("--- Result ").find((b) => b.includes(T)) ?? "";
+    assert(shown.includes(before.id) && shown.includes(control!) && block.includes("By: op-key (operator) · trust operator\n") && !block.includes(INGESTED_NOTICE),
+      `…so min_trust agent finds it beside the control, labelled the operator's and without the outside-text notice (${block.replace(/\n/g, " ⏎ ").slice(0, 200)})`);
+    // The capture key sending it again keeps the row (080): the stamp stays the operator's.
+    await K({ content: T, trust: "ingested" });
+    const again = await stampOf();
+    assert(`${again.kind}/${again.name}/${again.trust}` === "operator/op-key/operator", `the capture key's re-capture after it moves nothing — 080's keep: the store never calls the restamp for it (${again.kind}/${again.name}/${again.trust})`);
+    // Only a capture-only key's stamp yields: the operator's own outside-text
+    // label stands when an agent key sends the same text (review pass 1).
+    await sql`SELECT set_agent_kind('bot-key', 'agent')`;
+    const OWN = "[13f] smd2664probe a page the operator labels outside text itself";
+    const own = idIn(await call("capture_thought", { content: OWN, trust: "ingested" }, "op-raw"));
+    const resent = idIn(await call("capture_thought", { content: OWN }, "bot-raw"));
+    const [ownStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${own}::uuid`;
+    const stillHidden = await call("search_thoughts_keyword", { query: "smd2664probe", min_trust: "agent" }, "op-raw");
+    assert(resent === own && ownStamp?.name === "op-key" && ownStamp?.trust === "ingested" && !stillHidden.includes(own!),
+      `…the operator's own ingested label stands when an agent key re-sends the text, and min_trust agent still leaves it out (${JSON.stringify(ownStamp)})`);
+    // The first key that can read settles the capture key's row: the
+    // operator's equal re-capture of the hook's outside text leaves it, and an
+    // agent key re-sending it after moves nothing (review pass 2).
+    const SETTLED = "[13f] smd2664probe a page the hook and then the operator label outside text";
+    await K({ content: SETTLED, trust: "ingested" });
+    const settled = idIn(await call("capture_thought", { content: SETTLED, trust: "ingested" }, "op-raw"));
+    const botLanded = idIn(await call("capture_thought", { content: SETTLED }, "bot-raw"));
+    const [settledStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${settled}::uuid`;
+    assert(botLanded === settled && settledStamp?.name === "session-hook" && settledStamp?.trust === "ingested",
+      `…and once the operator's equal re-capture settled the hook's row, an agent key's re-send after it lands there and moves nothing (${JSON.stringify(settledStamp)})`);
+    // A key nobody classified can never move the stamp, so its landing first
+    // settles nothing — 082 notes it, which is not what settles (review pass 3).
+    const UNCLASSIFIED = "[13f] smd2664probe a page the hook labels and an unclassified key re-sends first";
+    await K({ content: UNCLASSIFIED, trust: "ingested" });
+    const uncLanded = idIn(await call("capture_thought", { content: UNCLASSIFIED }));  // the legacy key, which no one classifies
+    const opLanded = idIn(await call("capture_thought", { content: UNCLASSIFIED }, "op-raw"));
+    const [uncStamp] = await sql`SELECT metadata->>'actor_name' AS name, metadata->>'trust' AS trust,
+        (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${uncLanded}::uuid AND diff ? 'recaptured') AS notes FROM thoughts WHERE id = ${uncLanded}::uuid`;
+    assert(opLanded === uncLanded && uncStamp?.notes === 1 && uncStamp?.name === "op-key" && uncStamp?.trust === "operator",
+      `…an unclassified key landing first (noted by 082) settles nothing: the operator after it moves the stamp (${JSON.stringify(uncStamp)})`);
+  }
+
+  // [13g] SMD-2744's way out (migration 086): the hook's outside text that an
+  // agent key re-sent first, at its equal trust, is settled — the operator's
+  // re-capture moves nothing. A key that is not the operator is refused the
+  // reset, and a capture-only key never sees the tool. The operator's key
+  // resets it, in its own name, and its re-capture then moves the label.
+  {
+    const K = captureAs(CAPTURE_KEY);
+    const T = "[13g] smd2744probe a page the hook labels outside text and an agent re-sends first";
+    await K({ content: T, trust: "ingested" });
+    const row = idIn(await call("capture_thought", { content: T, trust: "ingested" }, "bot-raw"));
+    const stampOf = async () => {
+      const [m] = await sql`SELECT metadata->>'actor_kind' AS kind, metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${row}::uuid`;
+      return `${m?.kind}/${m?.name}/${m?.trust}`;
+    };
+    assert(idIn(await call("capture_thought", { content: T }, "op-raw")) === row && (await stampOf()) === "agent/session-hook/ingested",
+      `[13g] setup: the agent key's equal re-capture settled the hook's row, and the operator's re-capture lands there and moves nothing (${await stampOf()})`);
+    const listed = textOf(await rpc("tools/list", {}));
+    const refusedAs = async (key: string) => { try { await call("reset_capture_stamp", { id: row }, key); return "accepted"; } catch (e) { return (e as Error).message; } };
+    const agentTry = await refusedAs("bot-raw");
+    const legacyTry = await refusedAs("e2e-key");
+    assert(!listed.includes("reset_capture_stamp") && /only a key the operator classified `operator`/.test(agentTry) && /only a key the operator classified `operator`/.test(legacyTry) && (await stampOf()) === "agent/session-hook/ingested",
+      `a capture-only key is not offered the reset; an agent key and an unclassified write key are refused it, and nothing moves (${agentTry.slice(0, 90)})`);
+    assert(/This key, bot-key, is classified agent: use the operator's own key — classifying this one operator would raise the trust of everything it writes\./.test(agentTry)
+        && /This key, MCP_ACCESS_KEY, is unclassified\. If it is the operator's own, classify it: SELECT set_agent_kind\('MCP_ACCESS_KEY', 'operator'\)/.test(legacyTry),
+      `…each refusal naming the key and what it is: an agent key told to use the operator's own, an unclassified one given its line (${agentTry.slice(0, 120)} | ${legacyTry.slice(0, 160)})`);
+    /** The whole reply, as op-key: the text and the structured content (review pass 1: nothing pinned the latter). */
+    const asOperator = async (args: Record<string, unknown>) => {
+      const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "reset_capture_stamp", arguments: args } }) });
+      const t = await r.text();
+      const body = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+      return { text: textOf(body), sc: (body.result?.structuredContent ?? {}) as Record<string, unknown>, isError: body.result?.isError === true };
+    };
+    const [{ at }] = await sql`SELECT now()::text AS at`;
+    const reply = await asOperator({ id: row });
+    const done = reply.text;
+    const [ev] = await sql`SELECT a.actor_name, a.actor_kind, a.canonical_agent_id::text = g.canonical_agent_id::text AS own_id FROM thought_audit a, ob1_agents g
+       WHERE a.thought_id = ${row}::uuid AND a.diff ? 'restamp_reset' AND g.label = 'op-key'`;
+    assert(/^Reset [0-9a-f-]{36}: 1 decline \(by bot-key\) no longer counts\. Its label: session-hook — kind agent, trust ingested\./.test(done)
+        && /Re-capture the text with your key now, exactly as stored — fetch shows this outside text under a notice line that is not part of it/.test(done)
+        && /- plainly: the label moves to your key at trust operator — the outside-text notice goes, and min_trust searches include it\./.test(done)
+        && /- with trust "ingested": the label stays as it is, outside text, and the row is settled against every other key/.test(done)
+        && ev?.actor_name === "op-key" && ev?.actor_kind === "operator" && ev?.own_id === true,
+      `the operator's key resets it, the reply saying what it cleared and both ways on, the event in its name and agent id (${done.split("\n")[0]}; ${JSON.stringify(ev)})`);
+    assert(JSON.stringify(reply.sc) === JSON.stringify({ id: row, reset: true, restored: false, declines: 1, actorKind: "agent", trust: "ingested", text: done }),
+      `…and its structured content is the reset's values, the key's name left out (${JSON.stringify(reply.sc).slice(0, 160)})`);
+    const idle = await asOperator({ id: row });
+    assert(!idle.isError && /^Nothing to reset on [0-9a-f-]{36}: no re-capture has settled or moved its label since its capture or its last reset \(a re-capture is weighed only while the text is the one captured\)\. Its label: session-hook — kind agent, trust ingested\.$/.test(idle.text) && idle.sc.reset === false,
+      `a second reset at once has nothing to reset, and says so (${idle.text.slice(0, 80)})`);
+    assert(idIn(await call("capture_thought", { content: T }, "op-raw")) === row && (await stampOf()) === "operator/op-key/operator",
+      `…and the operator's re-capture then moves the label to it (${await stampOf()})`);
+    const feed = await call("thought_changes", { since: new Date(String(at)).toISOString(), agent: "op-key", actions: ["update"] }, "op-raw");
+    assert(new RegExp(`reset by op-key \\(operator\\) — ID: ${row}\\n   the capture-only key's label unsettled: the next re-capture by a classified key`).test(feed),
+      `thought_changes reads the reset as the operator's (${(feed.split("\n").find((l) => l.includes("reset by")) ?? "").slice(0, 120)})`);
+    // A label an agent's re-capture moved: the reply names the key whose move it undid.
+    const MOVED = "[13g] smd2744probe a page the hook labels outside text and an agent lifts";
+    await K({ content: MOVED, trust: "ingested" });
+    const moved = idIn(await call("capture_thought", { content: MOVED }, "bot-raw"));
+    const back = await asOperator({ id: moved });
+    assert(/^Reset [0-9a-f-]{36}: the label bot-key's re-capture moved is back to the capture-only key's\. Its label: session-hook — kind agent, trust ingested\./.test(back.text) && back.sc.restored === true,
+      `a moved label is put back, the reply naming the key whose move it undid (${back.text.split("\n")[0]})`);
+    // The operator's own row, and no row: refused by name, through the tool.
+    const own = idIn(await call("capture_thought", { content: "[13g] smd2744probe the operator's own note" }, "op-raw"));
+    const notCapture = await asOperator({ id: own });
+    const missing = await asOperator({ id: "00000000-0000-4000-8000-0000000013a7" });
+    assert(notCapture.isError && notCapture.sc.code === "REFUSED_NOT_CAPTURE_STAMP" && /label is not one a reset can put back/.test(notCapture.text)
+        && missing.isError && missing.sc.code === "NOT_FOUND",
+      `the operator's own row is refused NOT_CAPTURE_STAMP, a missing id NOT_FOUND (${notCapture.sc.code}, ${missing.sc.code})`);
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).
@@ -2198,6 +2330,142 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   const past = await alone(later.w);
   assert(past === null, `an instant an hour and a quarter ahead by the database's clock is passed over (${past})`);
   await sql`UPDATE thoughts SET metadata = metadata - 'linear_updated_at' WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+
+  // What consolidation found (SMD-2680): the proposal queue and the standing
+  // relations, each against a count taken here row by row. Five thoughts,
+  // three tickets: t0 and t1 two ticket rows (`issue`), t2 a second row of
+  // t1's ticket, t3 no ticket, t4 a dated section of a third ticket (`ticket`
+  // alone, as the Linear adapter writes it). Pending: t0–t1 and t2–t4 (board
+  // pairs), t1–t2 (one ticket), t3–t0 (one side no ticket); stale: t0–t4;
+  // rejected: t1–t4. Standing relations: t1→t0 and t4→t1 related (board
+  // pairs), t2→t1 evolves (one ticket), t3→t0 duplicate; t4→t0 related,
+  // closed. Then Linear links t0's ticket to t1's: those pairs leave the
+  // board count, by 079's rule read now.
+  {
+    assert(db.proposals && db.proposals.pending === 0 && db.proposals.oldestPendingS === null && db.relations && db.relations.related === 0,
+      `with nothing judged the queue and the relations are there, empty (${JSON.stringify(db.proposals)}, ${JSON.stringify(db.relations)})`);
+    const t = ids.slice(0, 5);
+    const issues = ["SMD-7001", "SMD-7002", "SMD-7002", null, null];
+    // The corpus files some thoughts under a ticket already: kept, cleared, put back after.
+    const had = (await sql`SELECT id::text AS id, jsonb_strip_nulls(jsonb_build_object('issue', metadata->'issue', 'ticket', metadata->'ticket')) AS keys
+                             FROM thoughts WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND (metadata ? 'issue' OR metadata ? 'ticket')`) as { id: string; keys: unknown }[];
+    await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    for (const [i, issue] of issues.entries()) if (issue) await sql`UPDATE thoughts SET metadata = metadata || ${{ issue }}::jsonb WHERE id = ${t[i]}::uuid`;
+    await sql`UPDATE thoughts SET metadata = metadata || ${{ ticket: "SMD-7003" }}::jsonb WHERE id = ${t[4]}::uuid`;
+    const propose = async (older: string, newer: string) => {
+      await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, 'e2e', 0.9, 'consolidate:e2e@p4', NULL)`;
+      return (await sql`SELECT id FROM supersession_proposals WHERE older_id = ${older}::uuid AND newer_id = ${newer}::uuid`)[0].id as string;
+    };
+    await propose(t[0], t[1]);
+    await propose(t[1], t[2]);
+    await propose(t[2], t[4]);
+    const oldest = await propose(t[3], t[0]);
+    await sql`UPDATE supersession_proposals SET judged_at = now() - interval '5 days' WHERE id = ${oldest}::uuid`;
+    const stale = await propose(t[0], t[4]);
+    await sql`UPDATE supersession_proposals SET status = 'stale', judged_at = now() - interval '40 days' WHERE id = ${stale}::uuid`;
+    const rejected = await propose(t[1], t[4]);
+    await sql`SELECT review_supersession_proposal(${rejected}::uuid, 'reject', 'e2e', NULL, NULL)`;
+    const relate = (newer: string, older: string, word: string) =>
+      sql`SELECT record_thought_relation(${newer}::uuid, ${older}::uuid, ${word}, 0.7, 'consolidate:e2e@p4', NULL, 'a', 'b', NULL)`;
+    await relate(t[1], t[0], "related");
+    await relate(t[4], t[1], "related");
+    await relate(t[2], t[1], "evolves");
+    await relate(t[3], t[0], "duplicate");
+    await relate(t[4], t[0], "related");
+    await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND thought_id = ${t[4]}::uuid AND payload->>'target' = ${t[0]}`;
+
+    // The count by hand: every row read, the rule applied here.
+    // A ticket is metadata.ticket, else metadata.issue; whether Linear links
+    // two is 079's own predicate, asked per pair.
+    const ticketOf = new Map((await sql`SELECT id::text AS id, coalesce(metadata->>'ticket', metadata->>'issue') AS k FROM thoughts`).map((r: { id: string; k: string | null }) => [r.id, r.k]));
+    let linkedPairs = new Set<string>();
+    const readLinks = async () => {
+      linkedPairs = new Set((await sql`SELECT a.id::text AS a, b.id::text AS b FROM thoughts a, thoughts b
+                                         WHERE a.id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND b.id = ANY(${sql.array(t, "TEXT")}::uuid[]) AND consolidation_tickets_linked(a.metadata, b.metadata)`)
+        .map((r: { a: string; b: string }) => `${r.a}|${r.b}`));
+    };
+    await readLinks();
+    const boardPair = (a: string, b: string) => ticketOf.get(a) != null && ticketOf.get(b) != null && ticketOf.get(a) !== ticketOf.get(b) && !linkedPairs.has(`${a}|${b}`);
+    const rows = await sql`SELECT older_id::text AS o, newer_id::text AS n, status, extract(epoch FROM now() - judged_at)::float8 AS age FROM supersession_proposals`;
+    const before = (await health("e2e-key") as Record<string, any>).database ?? {};
+    const pend = rows.filter((r: { status: string }) => r.status === "pending");
+    const want = {
+      pending: pend.length,
+      stale: rows.filter((r: { status: string }) => r.status === "stale").length,
+      oldest: Math.max(...pend.map((r: { age: number }) => r.age)),
+      board: pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length,
+    };
+    const facets = (await sql`SELECT thought_id::text AS h, payload, valid_until FROM thought_facets WHERE kind = 'relation'`).filter((f: { valid_until: unknown }) => f.valid_until === null);
+    const byWord = (w: string) => facets.filter((f: { payload: { relation: string } }) => f.payload.relation === w).length;
+    const wantRel = { related: byWord("related"), evolves: byWord("evolves"), duplicate: byWord("duplicate"), boardPairs: facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length };
+    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.boardPairs === 2,
+      `the fixture is what the comment says (${JSON.stringify(want)}, ${JSON.stringify(wantRel)})`);
+    assert(before.proposals?.boardPairs === want.board && before.relations?.boardPairs === wantRel.boardPairs,
+      `before any link, a ticket row and another ticket's section count as a board pair (${before.proposals?.boardPairs}, ${before.relations?.boardPairs})`);
+    // Linear links t0's ticket to t1's after the verdicts: nothing moves the
+    // rows, and the count reads the link now.
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[0]}::uuid, 'link', ${{ relation: "relates_to", system: "linear", target: "SMD-7002" }}::jsonb)`;
+    await readLinks();
+    want.board = pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length;
+    wantRel.boardPairs = facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length;
+    assert(want.board === 1 && wantRel.boardPairs === 1, `…the link takes t0–t1 out of both counts by hand (${want.board}, ${wantRel.boardPairs})`);
+
+    const found = (await health("e2e-key") as Record<string, any>).database ?? {};
+    const q = found.proposals ?? {};
+    assert(q.pending === want.pending && q.stale === want.stale && q.boardPairs === want.board && Math.abs(q.oldestPendingS - want.oldest) <= 2 && q.oldestPendingS >= 5 * 86400,
+      `keyed /health's proposals are the queue counted by hand: pending, stale, the oldest's age, the board pairs — not one ticket's two rows, not a row with no ticket, not a stale or rejected row (${JSON.stringify(q)} vs ${JSON.stringify(want)})`);
+    assert(JSON.stringify(found.relations) === JSON.stringify(wantRel),
+      `…and its relations the standing ones by word, the closed one not counted, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
+    assert(Object.keys(found.unread ?? {}).length === 0, `every read answered (${JSON.stringify(found.unread)})`);
+    const table = await call("brain_info");
+    const pRow = table.split("\n").find((l) => l.startsWith("Proposals"));
+    const rRow = table.split("\n").find((l) => l.startsWith("Relations"));
+    assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\)$/.test(rRow ?? ""),
+      `the tool's table carries the same counts (${pRow} / ${rRow})`);
+
+    // A server role granted capture and server — no worker group — reads the
+    // queue: the server group's SELECT on supersession_proposals (SMD-2680).
+    const { grantStatements } = await import("../db/config.mjs");
+    await sql.unsafe(`DROP ROLE IF EXISTS e2e_server_only`);
+    await sql.unsafe(`CREATE ROLE e2e_server_only LOGIN PASSWORD 'server'`);
+    await sql.unsafe(`GRANT USAGE ON SCHEMA public TO e2e_server_only`);
+    for (const st of grantStatements("e2e_server_only", { groups: ["capture", "server"] })) await sql.unsafe(st);
+    const asServer = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//e2e_server_only:server@"), max: 1 });
+    try {
+      const f = await (await import("./brain-info.ts")).readDatabaseFacts(asServer);
+      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread),
+        `a role granted capture and server alone reads the queue and the relations (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
+    } finally {
+      await asServer.close();
+      await sql.unsafe(`DROP OWNED BY e2e_server_only`);
+      await sql.unsafe(`DROP ROLE e2e_server_only`);
+    }
+
+    // Taken back with their lineage rows, so the corpus is as it was.
+    const made = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])
+                            UNION ALL SELECT id::text FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`).map((r: { id: string }) => r.id);
+    await sql`DELETE FROM derivations WHERE artifact_id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+    // Linear marks t4's ticket a duplicate of t2's: 079 leaves duplicate_of
+    // to the judge, but the board relates the two, so t2–t4 and t4→t1 leave
+    // both counts (review pass 2).
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[4]}::uuid, 'link', ${{ relation: "duplicate_of", system: "linear", target: "SMD-7002" }}::jsonb)`;
+    const dup = (await health("e2e-key") as Record<string, any>).database ?? {};
+    assert(dup.proposals?.boardPairs === 0 && dup.relations?.boardPairs === 0 && dup.proposals?.pending === want.pending,
+      `a pair Linear marks duplicate is not one the board does not link (${dup.proposals?.boardPairs}, ${dup.relations?.boardPairs})`);
+    // The other way round — t2's ticket marked the duplicate — holds each
+    // read's other direction (review pass 3).
+    await sql`DELETE FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[4]}::uuid AND payload->>'target' = 'SMD-7002'`;
+    await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[2]}::uuid, 'link', ${{ relation: "duplicate_of", system: "linear", target: "SMD-7003" }}::jsonb)`;
+    const dupBack = (await health("e2e-key") as Record<string, any>).database ?? {};
+    assert(dupBack.proposals?.boardPairs === 0 && dupBack.relations?.boardPairs === 0,
+      `…whichever ticket Linear marks the duplicate (${dupBack.proposals?.boardPairs}, ${dupBack.relations?.boardPairs})`);
+
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    await sql`DELETE FROM thought_facets WHERE kind = 'link' AND ((thought_id = ${t[0]}::uuid AND payload->>'target' = 'SMD-7002') OR (thought_id = ${t[2]}::uuid AND payload->>'target' = 'SMD-7003'))`;
+    await sql`DELETE FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`;
+    await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
+    for (const h of had) await sql`UPDATE thoughts SET metadata = metadata || ${h.keys}::jsonb WHERE id = ${h.id}::uuid`;
+  }
 
   // The workers' heartbeats (SMD-2261, db/pass-stamp.ts): none stamped here,
   // then a board-sync row a stopped worker left twenty minutes ago — stale
@@ -2367,6 +2635,18 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       assert(locked && d.counts?.ob1_entities === truth.entities && d.highestMigration === treeLast - 1 && d.pgvector?.version === truth.vec && took < 2500,
         `three locked tables are three timed-out counts and the rest answer, in ${Math.round(took)} ms (${JSON.stringify(d.unread)})`);
       assert(waiting === 1 && bodies.every((b) => JSON.stringify(b) === JSON.stringify(bodies[0])), `ten concurrent probes share one read: at most ${waiting} backend(s) waiting on the lock, one body`);
+      // The reads that touch a refused table are not tried: one lock wait per
+      // table, not one per read — three here, where six reads touch the three
+      // (SMD-2680: the board-sync watermark, which reads thoughts alone, and
+      // the two board-pair counts, which join it). The queue and the relations stand.
+      // A board count with nothing to count reads 0 with no entry, lock or not
+      // (review pass 5): this corpus holds no proposal and no relation here.
+      const notTried = (f: string) => d.unread?.[f]?.reason === "timeout" && /^not tried — a lock on thoughts \(the table or one of its indexes\) was refused to an earlier read here/.test(d.unread[f].message);
+      const relTotal = (d.relations?.related ?? 0) + (d.relations?.evolves ?? 0) + (d.relations?.duplicate ?? 0);
+      const boardOk = (f: string, total: number, parent: { boardPairs?: unknown } | undefined) => total === 0 ? !(f in (d.unread ?? {})) && parent?.boardPairs === 0 : notTried(f);
+      assert(notTried("boardSync") && boardOk("proposals.boardPairs", d.proposals?.pending ?? -1, d.proposals) && boardOk("relations.boardPairs", relTotal, d.relations) && took < 1500
+          && typeof d.proposals?.pending === "number" && typeof d.relations?.related === "number",
+        `…the reads touching thoughts after its count are not tried — a board count with nothing to count reads 0 — so the probe pays three lock waits (${JSON.stringify(d.proposals)}, ${JSON.stringify(d.relations)}, ${JSON.stringify(Object.keys(d.unread ?? {}))}; ${Math.round(took)} ms)`);
 
       // A probe while the tool's read is in flight has a read of its own, at
       // the health ceilings (review pass 3: keyed by deadline alone, a shared

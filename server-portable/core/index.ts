@@ -8,6 +8,7 @@ import { createContext, type CoreDeps, type Ctx } from "./context.ts";
 import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
+import { resolveJevConfig } from "../jev.ts";
 import type { PluginSql } from "../store.ts";
 
 export type { CoreDeps, CoreEnv, Ctx } from "./context.ts";
@@ -15,7 +16,7 @@ export type { Outcome, Refusal, RefusalCode, Failure } from "./refusal.ts";
 export { failure } from "./refusal.ts";
 export { SPECS, type Input, type ToolSpec } from "./schemas.ts";
 export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from "./calls.ts";
-export { loadPlugins, runOperation, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
+export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
@@ -38,6 +39,7 @@ export function createCore(deps: CoreDeps) {
     capture: bind(ctx, writes.capture),
     updateThought: bind(ctx, writes.updateThought),
     deleteThought: bind(ctx, writes.deleteThought),
+    resetCaptureStamp: bind(ctx, writes.resetCaptureStamp),
     retryFailed: bind(ctx, workers.retryFailed),
     releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
     runWorker: bind(ctx, workers.runWorker),
@@ -51,6 +53,8 @@ export function createCore(deps: CoreDeps) {
       if (!store.pluginTx) throw new Error(`a plugin's tables need the SQL store; this brain runs the ${store.kind} store`);
       return store.pluginTx(plugin, fn);
     },
+    /** The longest one capture's model calls may run under this brain's settings, in seconds: what a webhook's id lease is sized from (SMD-2768). */
+    captureSeconds: (): number => writes.captureCallSeconds(ctx.embedConfig(), resolveJevConfig(ctx.env())),
   };
 }
 

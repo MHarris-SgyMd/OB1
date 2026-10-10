@@ -1,6 +1,6 @@
 {
   "name": "Example Plugin",
-  "description": "The plugin template: a read operation over the core (the newest thoughts' ids, types and capture times, as the caller), a notes table of its own with an operation to pin a note to a thought and one to list them, and a Notes page for the operator GUI's nav.",
+  "description": "The plugin template: a read operation over the core (the newest thoughts' ids, types and capture times, as the caller), a notes table of its own with an operation to pin a note to a thought and one to list them, a Notes page for the operator GUI's nav, and a signed webhook that captures its text as a thought.",
   "category": "plugins",
   "author": {
     "name": "Michael Harris",

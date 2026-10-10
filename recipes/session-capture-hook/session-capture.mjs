@@ -82,6 +82,10 @@ const SELF = fileURLToPath(import.meta.url);
 const HOME = homedir();
 export const CONFIG_PATH = process.env.OB1_SESSION_CAPTURE_CONFIG
   || join(process.env.XDG_CONFIG_HOME || join(HOME, ".config"), "open-brain", "session-capture.json");
+/** The config's shape, as the messages that ask for it write it. */
+const CONFIG_SHAPE = '{"url": "http://127.0.0.1:8010/mcp", "key": "<capture key>"}';
+/** Where the url came from, as a message names it: the variable wins over the file, as loadConfig reads them. */
+const urlSource = () => (process.env.OB1_BRAIN_URL ? "OB1_BRAIN_URL" : CONFIG_PATH);
 export const STATE_DIR = process.env.OB1_SESSION_CAPTURE_STATE
   || join(process.env.XDG_STATE_HOME || join(HOME, ".local", "state"), "open-brain", "session-capture");
 const LOG_PATH = () => join(STATE_DIR, "log");
@@ -305,6 +309,41 @@ function writeState(sessionId, state) {
 // ── Config ───────────────────────────────────────────────────────────────────
 
 /**
+ * The endpoint as the hook uses it: an http(s) URL with one trailing
+ * slash on its PATH, its query kept as given (SMD-2743: the slash went on the
+ * end of the string, so `/mcp?x=1` became `/mcp?x=1/`). A `?key=` is refused
+ * unechoed: the key goes in the config's `key`, sent as a header, and a url is
+ * printed. `where` names the url's source. One with no `scheme://` is read as
+ * http, as Bun's fetch read `localhost:8010/mcp` before this parsed it (review
+ * pass 2: refusing it stopped a config that captured).
+ */
+export function endpointOf(raw, where) {
+  const s = String(raw).trim();
+  let u = null;
+  try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`); } catch { /* refused below */ }
+  if (!u || !/^https?:$/.test(u.protocol)) throw new Error(`the url in ${where} is not an http(s) URL — write it as http://127.0.0.1:8010/mcp`);
+  if (u.searchParams.has("key")) throw new Error(`the url in ${where} carries a key (?key=) — the hook sends its key as a header, from "key" (or "key_file") in ${CONFIG_PATH} or OB1_CAPTURE_KEY; put it there and take ?key= off the url`);
+  u.pathname = u.pathname.replace(/\/*$/, "/");
+  u.hash = "";
+  return u.href;
+}
+
+/**
+ * A url as the hook prints it: origin and path, every query value masked, the
+ * way the server's own logs drop query strings (SMD-1849). A value there may
+ * be a credential, and what is printed lands in a terminal or the log
+ * (SMD-2743). `base` resolves a relative one, a redirect's Location. Scheme
+ * and host rather than `origin`, which is "null" for a scheme not http(s).
+ */
+export function shownUrl(url, base) {
+  try {
+    const u = new URL(url, base);
+    const q = [...new Set(u.searchParams.keys())].map((k) => `${encodeURIComponent(k)}=…`).join("&");
+    return `${u.host ? `${u.protocol}//${u.host}` : u.protocol}${u.pathname}${q ? `?${q}` : ""}`;
+  } catch { return "(a url that does not parse)"; }
+}
+
+/**
  * The endpoint and the key. From the config file (the shipped shape), or from
  * OB1_BRAIN_URL / OB1_CAPTURE_KEY in the environment (a test, a container). The
  * key never appears in a hook's command line, where it would sit in a settings
@@ -313,7 +352,13 @@ function writeState(sessionId, state) {
 export function loadConfig() {
   let cfg = {};
   if (existsSync(CONFIG_PATH)) {
-    try { cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8")); } catch (e) { throw new Error(`${CONFIG_PATH} is not JSON: ${e.message}`); }
+    // A BOM, which a Windows editor writes, is not the config's. The parser's
+    // own message is not passed on: it quotes the token it stopped at, and an
+    // unquoted key is that token (SMD-2743 review).
+    const text = readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "");
+    if (!text.trim()) throw new Error(`${CONFIG_PATH} is empty — write it as ${CONFIG_SHAPE}`);
+    try { cfg = JSON.parse(text); } catch { throw new Error(`${CONFIG_PATH} is not valid JSON — check its quotes and commas, and that it has no comments (the parser's message is not shown: it can quote the key)`); }
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error(`${CONFIG_PATH} is JSON but not an object — write it as ${CONFIG_SHAPE}`);
     try {
       const mode = statSync(CONFIG_PATH).mode & 0o077;
       if (mode !== 0 && process.platform !== "win32") console.error(`session-capture: ${CONFIG_PATH} is readable by others — chmod 600 it`);
@@ -322,8 +367,11 @@ export function loadConfig() {
   const url = process.env.OB1_BRAIN_URL || cfg.url;
   let key = process.env.OB1_CAPTURE_KEY || cfg.key;
   if (!key && cfg.key_file) key = readFileSync(cfg.key_file, "utf8").trim();
-  if (!url || !key) {
-    throw new Error(`no endpoint or key — write ${CONFIG_PATH} as {"url": "http://127.0.0.1:8010/mcp", "key": "<capture key>"} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
+  // Before the missing-key error: a connector URL pasted with its ?key= and no
+  // `key` is told where the key goes, not to write a url it already has.
+  const endpoint = url ? endpointOf(url, urlSource()) : undefined;
+  if (!endpoint || !key) {
+    throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
   }
   // The opt-in model summary (SMD-2014). Off unless `summary` is "model"; then a
   // local model rewrites the derived summary into what was decided. The endpoint
@@ -362,7 +410,7 @@ export function loadConfig() {
   const modelTimeoutMax = CLAIM_MAX_AGE_MS - 6 * POST_TIMEOUT_MS - 30_000;
   const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? Math.min(modelTimeoutRaw, modelTimeoutMax) : undefined;
   return {
-    url: String(url).replace(/\/*$/, "/"), key: String(key),
+    url: endpoint, key: String(key),
     summary,
     // The base the OpenAI path hangs off: trailing slashes stripped, and a
     // trailing `/chat/completions` a user pasted from a full endpoint removed,
@@ -1375,7 +1423,9 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
     // reads it off the config to say the url must move to /mcp (SMD-2686).
     const deprecation = r.headers.get("deprecation");
     if (deprecation) cfg.deprecation = deprecation;
-    const wrongUrl = (what) => new CaptureError("refused", `${what} from ${cfg.url} — not the MCP endpoint, or a proxy in front of it; check the url in ${CONFIG_PATH}`);
+    // Every url this prints is masked (SMD-2743): a message lands in the log.
+    const at = shownUrl(cfg.url);
+    const wrongUrl = (what) => new CaptureError("refused", `${what} from ${at} — not the MCP endpoint, or a proxy in front of it; check the url in ${CONFIG_PATH}`);
     // The server answers inside a 200 — a 4xx is a proxy, a login page, or a
     // URL that is not the endpoint: said once and given up, not retried five
     // times as a transient (fifth review pass). A 5xx is the server or its
@@ -1383,15 +1433,15 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
     // patience. A 4xx that carries a JSON-RPC envelope is judged by the
     // envelope — a front mirroring -32001 onto HTTP 401 is a bad KEY, not a
     // bad url (sixth review pass).
-    if (r.status >= 300 && r.status < 400) throw wrongUrl(`HTTP ${r.status} redirect to ${r.headers.get("location") ?? "?"}`);
-    if (r.status === 408 || r.status === 429) throw new CaptureError("failed", `HTTP ${r.status} from ${cfg.url} — the endpoint asks for patience`);
+    if (r.status >= 300 && r.status < 400) throw wrongUrl(`HTTP ${r.status} redirect to ${r.headers.has("location") ? shownUrl(r.headers.get("location"), cfg.url) : "?"}`);
+    if (r.status === 408 || r.status === 429) throw new CaptureError("failed", `HTTP ${r.status} from ${at} — the endpoint asks for patience`);
     if (r.status >= 400 && r.status < 500) {
       let inner = null;
       try { inner = parseRpcBody(text, id); } catch { /* no envelope: a page */ }
       if (inner?.error) throw new Error(`JSON-RPC ${inner.error.code ?? ""}: ${inner.error.message ?? "error"}`.trim());
       throw wrongUrl(`HTTP ${r.status}`);
     }
-    if (r.status >= 500) throw new CaptureError("failed", `HTTP ${r.status} from ${cfg.url}`);
+    if (r.status >= 500) throw new CaptureError("failed", `HTTP ${r.status} from ${at}`);
     if (/text\/html/i.test(r.headers.get("content-type") ?? "") && !text.trimStart().startsWith("{")) throw wrongUrl("an HTML page");
     const body = parseRpcBody(text, id);
     if (body.error) throw new Error(`JSON-RPC ${body.error.code ?? ""}: ${body.error.message ?? "error"}`.trim());
@@ -2329,7 +2379,7 @@ export async function main(argv) {
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
     let tools;
-    try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${cfg.url} did not answer tools/list — ${e.message}`); return 1; }
+    try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
     // The summary mode, and whether a configured model would run — read from the
     // config, the model endpoint not called (SMD-2014).
     if (cfg.summary === "model") console.log(modelStatusLine(cfg));
@@ -2337,10 +2387,11 @@ export async function main(argv) {
     // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
     if (cfg.deprecation) {
       let to = "its /mcp";
-      try { const u = new URL(cfg.url); if (u.pathname === "/") to = `${u.origin}/mcp${u.search}`; } catch { /* fetch took it, so it parses */ }
-      console.error(`warning: ${cfg.url} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${process.env.OB1_BRAIN_URL ? "OB1_BRAIN_URL" : CONFIG_PATH} (deploy/README.md, "Moving a client to /mcp")`);
+      const u = new URL(cfg.url); // endpointOf made it, so it parses
+      if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);
+      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${urlSource()} (deploy/README.md, "Moving a client to /mcp")`);
     }
-    if (tools.join() === "capture_thought") { console.log(`ok: ${cfg.url} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
+    if (tools.join() === "capture_thought") { console.log(`ok: ${shownUrl(cfg.url)} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
     return 0;

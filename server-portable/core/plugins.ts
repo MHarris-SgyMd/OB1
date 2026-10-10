@@ -12,8 +12,9 @@ import { PLUGIN_NAME_RE } from "../../db/config.mjs";
 import { PLUGINS } from "../../plugins/registry.ts";
 import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
-import type { GuiPage, Method, PluginContext, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
+import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
+import { failure } from "./refusal.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -25,6 +26,10 @@ const PLUGIN_NAME = PLUGIN_NAME_RE;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
+/** A webhook's name: one path segment of lower-case words and hyphens. */
+const HOOK_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** The statuses a webhook may answer its sender with. */
+const HOOK_STATUSES = new Set([200, 202, 204, 400, 401, 403, 404, 409, 413, 422, 503]);
 /** A GUI page's path under the plugin's: `/` and segments of lower-case words and hyphens. */
 const GUI_PATH = /^(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
 /** A refusal's code: upper-case words joined by underscores, as the core's are. */
@@ -54,7 +59,10 @@ export type LoadedOp = {
   handler: PluginOperation["handler"];
 };
 
-export type LoadedPlugin = { name: string; title: string; description: string; operations: LoadedOp[]; pages: GuiPage[] };
+export type LoadedPlugin = { name: string; title: string; description: string; operations: LoadedOp[]; pages: GuiPage[]; hooks: LoadedHook[] };
+
+/** An enabled plugin's webhook, as the REST core serves it. */
+export type LoadedHook = { plugin: string; name: string; path: string; description: string; handler: PluginHook["handler"] };
 
 /** An operation's tool name: `<plugin>_<key>`, the plugin's hyphens read as `_` so the name is one word to a client. */
 export const toolNameOf = (plugin: string, key: string): string => `${plugin.replace(/-/g, "_")}_${key}`;
@@ -132,6 +140,14 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
       }
       if (typeof op.handler !== "function") problems.push(`${where}: no handler`);
     }
+    // Its webhooks: a name that is one path segment, a description, a handler.
+    for (const [name, hook] of Object.entries(m.hooks ?? {})) {
+      const where = `${at} hook ${JSON.stringify(name)}`;
+      if (!HOOK_NAME.test(name)) problems.push(`${where}: a hook's name is lower-case words joined by single hyphens`);
+      if (!hook || typeof hook !== "object") { problems.push(`${where}: a hook is { description, handler }`); continue; }
+      if (!hook.description?.trim()) problems.push(`${where}: a description is required`);
+      if (typeof hook.handler !== "function") problems.push(`${where}: no handler`);
+    }
     // Its GUI pages: each a path of plain segments under the plugin's, once, with a label a nav entry can show.
     const pages = new Set<string>();
     for (const page of m.gui?.pages ?? []) {
@@ -166,6 +182,7 @@ export function loadPlugins(raw: string | undefined, registry: readonly PluginMa
     title: m.title,
     description: m.description,
     pages: (m.gui?.pages ?? []).map((p) => ({ path: p.path, label: p.label })),
+    hooks: Object.entries(m.hooks ?? {}).map(([name, hook]) => ({ plugin: m.name, name, path: `/hooks/${m.name}/${name}`, description: hook.description, handler: hook.handler })),
     operations: Object.entries(m.operations).map(([key, op]) => ({
       plugin: m.name,
       key,
@@ -239,3 +256,134 @@ export async function runOperation(op: LoadedOp, deps: OpDeps, input: unknown): 
   if (!again.success) throw new Error(`${op.tool} answered a value its output schema changes into one it refuses: ${refused(again.error)}`);
   return { ok: true, value: value.data };
 }
+
+/**
+ * The webhooks the REST core serves (SMD-2310): those of the plugins OB1_HOOKS
+ * names, each also enabled in OB1_PLUGINS — a plugin's operations can be on
+ * with its inbound endpoint off, never the other way. Throws, naming it, on a
+ * name that is no enabled plugin or one with no hook, as loadPlugins does on
+ * OB1_PLUGINS: the server does not start on it.
+ */
+export function enabledHooks(enabled: readonly LoadedPlugin[], raw: string | undefined): LoadedHook[] {
+  const names = pluginNames(raw);
+  const byName = new Map(enabled.map((p) => [p.name, p]));
+  const bad = names.filter((n) => !byName.get(n)?.hooks.length);
+  if (bad.length) throw new Error(`OB1_HOOKS names ${bad.map((n) => JSON.stringify(n)).join(", ")}, which ${bad.length === 1 ? "is" : "are"} no enabled plugin with a webhook (OB1_PLUGINS: ${enabled.map((p) => p.name).join(", ") || "none"})`);
+  return enabled.filter((p) => names.includes(p.name)).flatMap((p) => p.hooks);
+}
+
+/**
+ * The secrets OB1_HOOK_SECRETS gives the plugins' webhooks: `plugin=secret`
+ * pairs separated by spaces, the first `=` the separator (a secret may hold
+ * one). A pair with no `=`, an empty name or secret, or a name given twice is
+ * refused, naming the pair's position and never its text.
+ */
+export function hookSecrets(raw: string | undefined): { secrets: Map<string, string>; problem: string | null } {
+  const secrets = new Map<string, string>();
+  const pairs = (raw ?? "").split(/\s+/).filter(Boolean);
+  for (const [i, pair] of pairs.entries()) {
+    const at = pair.indexOf("=");
+    const name = at > 0 ? pair.slice(0, at) : "";
+    const secret = at > 0 ? pair.slice(at + 1) : "";
+    if (!name || !secret || !PLUGIN_NAME_RE.test(name)) return { secrets: new Map(), problem: `OB1_HOOK_SECRETS' entry ${i + 1} is not plugin=secret` };
+    if (secrets.has(name)) return { secrets: new Map(), problem: `OB1_HOOK_SECRETS names ${JSON.stringify(name)} twice` };
+    secrets.set(name, secret);
+  }
+  return { secrets, problem: null };
+}
+
+/** The caller a webhook runs as: `hook:<plugin>`, capture scope alone, no key behind it. */
+export function hookPrincipal(plugin: string): Principal {
+  return { name: `hook:${plugin}`, scope: "capture", keyHash: "" } as Principal;
+}
+
+/**
+ * One delivery to an enabled webhook: the handler's answer, held to a status a
+ * sender reads and a JSON object body. A handler that answers otherwise is
+ * the plugin's fault, thrown. Work it defers (SMD-2767) starts once that
+ * answer has been held — its body serialised, so nothing after this fails it
+ * — on the event loop's next turn, under `track` so the stop waits for it,
+ * its failure handed to `deferredFault` as one bounded message. A handler
+ * that throws, or answers what is refused, starts none of it, so its
+ * sender's retry of the 500 does not run it twice; each deferral's
+ * `discarded` runs instead, to undo what the handler did for it (onceById's
+ * claim, given back) — awaited, within DISCARD_WAIT_MS, before the fault is
+ * thrown, so the sender's retry of the 500 finds it undone. The answer is
+ * returned as it was held — its status read once, its body as the JSON text
+ * checked — for the route to write, so nothing read again can fail it after
+ * its work has started.
+ */
+export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"]; deferredFault?: (message: string) => void }, request: HookRequest): Promise<HookReply> {
+  const ctx = contextFor(hook.plugin, { core: deps.core, principal: hookPrincipal(hook.plugin), track: deps.track });
+  // The core's settings as this delivery finds them, read only by a hook that asks.
+  const core = deps.core;
+  const deferredFault = deps.deferredFault ?? ((message: string) => console.error(`hook ${hook.path} deferred fault: ${message}`));
+  const start = (work: () => Promise<unknown>, what: "work" | "discard" = "work"): Promise<void> => {
+    // The next turn, not a microtask: one queued now would run before the
+    // answer is written, and work that spins before its first await would
+    // hold the sender's 2xx (review pass 1, measured on Bun 1.4.0). What the
+    // socket takes at once is written by then; a large answer's tail may
+    // still wait on work that spins (review pass 2).
+    const run = () =>
+      new Promise<void>((resolve) => setImmediate(resolve))
+        .then(work)
+        .then(
+          () => undefined,
+          (err) => {
+            // Never a rejection: one left unhandled stops the process, and with it every client.
+            try {
+              deferredFault(`${what === "discard" ? "discard: " : ""}${String(failure(err).message).replace(/\s+/g, " ")}`.slice(0, 300));
+            } catch {
+              // A log that throws loses the line, not the server.
+            }
+          },
+        );
+    // Counted from now, so the stop finds no gap between the request and its work.
+    return deps.track ? deps.track(run) : run();
+  };
+  // Held until the answer is: a handler that fails defers nothing, and runs each deferral's `discarded` instead.
+  const pending: { work: () => Promise<unknown>; discarded?: () => Promise<unknown> }[] = [];
+  let outcome: "held" | "answered" | "failed" = "held";
+  const defer = (work: () => Promise<unknown>, discarded?: () => Promise<unknown>) => {
+    // A function, so the work starts under the tracker and a throw before its first await is caught too.
+    if (typeof work !== "function" || (discarded !== undefined && typeof discarded !== "function")) throw new Error(`${hook.path}: ctx.defer takes functions that start the work`);
+    if (outcome === "held") pending.push({ work, discarded });
+    else if (outcome === "answered") void start(work);
+    // Deferred after its handler failed (a timer it left): never its work.
+    else if (discarded) void start(discarded, "discard");
+  };
+  let reply: HookReply;
+  try {
+    const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret, get captureSeconds() { return core.captureSeconds(); }, defer }, request);
+    // Each read once: what is checked is what is written (review pass 3).
+    const status = answer?.status;
+    const body = answer?.body;
+    if (!answer || !HOOK_STATUSES.has(status)) throw new Error(`${hook.path} answered status ${status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);
+    if (body !== undefined && (body === null || typeof body !== "object" || Array.isArray(body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
+    // Serialised here, so a body JSON cannot write (a BigInt, a cycle) is this
+    // hook's fault before its work starts, not the route's after (review pass 2).
+    const text = status === 204 ? null : (body === undefined ? undefined : JSON.stringify(body)) ?? "{}";
+    // The text, not the object: a toJSON that answers a string or null passes the object's check (review pass 4).
+    if (text !== null && !text.startsWith("{")) throw new Error(`${hook.path} answered a body that is not a JSON object`);
+    reply = { status, body, text };
+  } catch (err) {
+    outcome = "failed";
+    const undo = pending.splice(0).flatMap(({ discarded }) => (discarded ? [start(discarded, "discard")] : []));
+    // Before the 500, so a retry sent the moment it arrives finds the claim given back (review pass 3); bounded, so a store that hangs cannot hold it.
+    if (undo.length) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.all(undo), new Promise<void>((resolve) => { timer = setTimeout(resolve, DISCARD_WAIT_MS); })]);
+      clearTimeout(timer);
+    }
+    throw err;
+  }
+  outcome = "answered";
+  for (const { work } of pending.splice(0)) void start(work);
+  return reply;
+}
+
+/** How long a failed handler's 500 waits for its deferrals' discards: a claim's release is one short transaction. */
+export const DISCARD_WAIT_MS = 5_000;
+
+/** A webhook's answer as runHook held it: the status, the body, and the body as the JSON text the route writes (null for a 204). */
+export type HookReply = { status: HookAnswer["status"]; body?: Record<string, unknown>; text: string | null };

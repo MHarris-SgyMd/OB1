@@ -29,12 +29,12 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
-import { ago, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ago, deniedObject, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
-import { pluginNames, pluginProblem } from "./core/plugins.ts";
+import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
@@ -273,6 +273,17 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
   };
 }
 
+/** How long a pending proposal may wait before the proposals row warns, in days (SMD-2680). */
+const PROPOSALS_WARN_DAYS = 7;
+
+/** OB1_PROPOSALS_WARN_DAYS read: whole days, 1 to 3650; the default when unset, and when not that, with the reason. */
+function proposalsWarnDays(raw: string | undefined): { days: number; problem?: string } {
+  if (raw === undefined || raw === "") return { days: PROPOSALS_WARN_DAYS };
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isInteger(n) && n >= 1 && n <= 3650) return { days: n };
+  return { days: PROPOSALS_WARN_DAYS, problem: `OB1_PROPOSALS_WARN_DAYS is ${JSON.stringify(raw.slice(0, 40))}, not whole days from 1 to 3650` };
+}
+
 // Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -280,9 +291,9 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -899,6 +910,32 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
     add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
         "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
+  // The webhooks (SMD-2310): OB1_HOOKS names enabled plugins with a webhook,
+  // OB1_HOOK_SECRETS is well formed — the server does not start otherwise —
+  // and a served plugin with no secret is said: its handler has nothing to
+  // verify a delivery against, and the example's refuses every one.
+  if (!problem && (env.OB1_HOOKS || env.OB1_HOOK_SECRETS)) {
+    const { secrets, problem: secretProblem } = hookSecrets(env.OB1_HOOK_SECRETS);
+    let hookProblem: string | null = secretProblem;
+    let served: string[] = [];
+    if (!hookProblem) {
+      try {
+        served = [...new Set(enabledHooks(loadPlugins(env.OB1_PLUGINS), env.OB1_HOOKS).map((h) => h.plugin))];
+      } catch (e) {
+        hookProblem = (e as Error).message;
+      }
+    }
+    if (hookProblem) add("plugin webhooks", "fail", hookProblem, "Name plugins enabled in OB1_PLUGINS that have webhooks in OB1_HOOKS, and give OB1_HOOK_SECRETS as plugin=secret pairs separated by spaces");
+    else {
+      const unsecret = served.filter((n) => !secrets.has(n));
+      const stray = [...secrets.keys()].filter((n) => !served.includes(n));
+      if (unsecret.length || stray.length)
+        add("plugin webhooks", "warn",
+            `${served.join(", ") || "none"} served${unsecret.length ? `; no secret for ${unsecret.join(", ")}` : ""}${stray.length ? `; a secret for ${stray.join(", ")}, which OB1_HOOKS does not serve` : ""}`,
+            "Give each served plugin a secret in OB1_HOOK_SECRETS (openssl rand -hex 32), and the sender the same one");
+      else add("plugin webhooks", "ok", `${served.join(", ")} served at /hooks/<plugin>/<name>, each with its secret — public only with deploy/compose.hooks-public.yaml`);
+    }
+  }
 }
 
 // ── Public origin ────────────────────────────────────────────────────────────
@@ -2482,7 +2519,7 @@ if (configFailed) {
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2507,6 +2544,11 @@ if (configFailed) {
                    lp_s AS (SELECT p.id, p.older_id, p.newer_id FROM public.supersession_proposals p WHERE p.status IN ('pending', 'stale') LIMIT ${BOUND}),
                    lp AS (SELECT s.id FROM lp_s s JOIN public.thoughts n ON n.id = s.newer_id JOIN public.thoughts o ON o.id = s.older_id
                            WHERE COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)),
+                   -- 084 (SMD-1873): an active judged relation and its lineage row. A brain before 084 holds no relation facet, so
+                   -- the CTE reads nothing there; a closed relation is history, its row kept or not.
+                   re_s AS (SELECT id FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
+                   re AS (SELECT s.id FROM re_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2526,7 +2568,9 @@ if (configFailed) {
                                  (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
                             FROM public.derivations d LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
-                           WHERE d.artifact_kind <> 'proposal'
+                           -- 084: a relation, like a proposal, is the consolidation pass's to judge again, not rebuild_derived's
+                           -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
+                           WHERE d.artifact_kind NOT IN ('proposal', 'relation')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2539,6 +2583,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM en) AS entities,  (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM en LIMIT 3) s) AS entity_ids,
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
+                     (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2551,7 +2596,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
-                     (SELECT count(*)::int FROM lp_s) AS lp_read`)) as Census[];
+                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2561,18 +2606,21 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
             if (Number(c.entities)) missing.push(`${n(c.entities)} extraction(s) (${(c.entity_ids ?? []).join(", ")})`);
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
             if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
+            if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
             // knows no section).
-            const sectionRemedy = Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "";
+            const sectionRemedy = (Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "")
+              // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
+              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -3394,6 +3442,54 @@ if (configFailed) {
         }
 
         /**
+         * SMD-1499: the server sized for the table. `vector index memory`
+         * warns (a managed platform may not let the operator change the
+         * setting) when the valid HNSW indexes over thoughts and
+         * thought_chunks outgrow shared_buffers — found by access method, so
+         * 039's halfvec swap and any later rename read alike; an INVALID
+         * index the planner ignores is not counted, though a valid staging
+         * index built before 039 adopts it is. `filter bitmap memory` is
+         * information only, until SMD-1464 settles the plan mode the
+         * expensive bitmap depends on. db/config.mjs's memorySizing holds the
+         * arithmetic and memoryRows the wording.
+         */
+        try {
+          const { memorySizing, memoryRows } = await import("../db/config.mjs");
+          const [m] = await sql`
+            SELECT
+              (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
+                WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+              COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
+              current_setting('block_size')::int AS block,
+              pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
+              pg_size_bytes(current_setting('work_mem'))::bigint AS work,
+              to_regclass('thoughts') IS NOT NULL AS found`;
+          if (!m.found) {
+            // Sizes of nothing would read as fitting; say so instead.
+            const why = "thoughts does not resolve on this connection (the schema row says why), so there is nothing to size";
+            add("vector index memory", "skip", why);
+            add("filter bitmap memory", "skip", why);
+          } else {
+            const s = memorySizing({
+              hnswBytes: Number(m.hnsw),
+              sharedBuffersBytes: Number(m.shared),
+              heapBytes: Number(m.heap),
+              blockSize: Number(m.block),
+              workMemBytes: Number(m.work),
+            });
+            // The rows' wording is memoryRows', where test-schema holds every branch.
+            for (const row of memoryRows(s)) add(row.name, row.status, row.detail, row.fix);
+          }
+        } catch (e) {
+          // Both rows, so each direct check still prints exactly one.
+          const why = `could not verify: ${(e as Error).message}`;
+          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class and pg_am, and the shared_buffers and work_mem settings.";
+          add("vector index memory", "warn", why, reads);
+          add("filter bitmap memory", "warn", why, reads);
+        }
+
+        /**
          * Migration 019: `SET enable_seqscan = off` on match_thoughts. At the
          * shipped width a vector is TOASTed and the planner's seq-scan estimate
          * never counts the detoast reads, so on brains up to some tens of
@@ -4002,7 +4098,7 @@ if (configFailed) {
         }
 
         /**
-         * An unfinished consolidation pass, and the review queue (SMD-1294).
+         * An unfinished consolidation pass (SMD-1294).
          * db/consolidate.ts is the third consumer of the claim table, under
          * keys with the consolidate: prefix (one per judge model and prompt
          * version), and its product is migration 029's proposal table. The
@@ -4010,10 +4106,8 @@ if (configFailed) {
          * row under its key is pending, leased or failed — read from the same
          * counts; "not yet in the pool" is the worker's own pool rule, the
          * thoughts WITH entities and no row under the key, since a thought
-         * without entities has no candidates and is not pooled. Pending
-         * proposals are not a defect — the pass proposes and a reviewer
-         * decides — so they ride the ok line as a count with the command that
-         * lists them, and appear on the warn line too while a pass is open.
+         * without entities has no candidates and is not pooled. The queue a
+         * pass leaves for a reviewer is the proposals row's, below (SMD-2680).
          */
         try {
           const { CONSOLIDATE_KEY_PREFIX, formatPassCounts, passUnfinished } = await import("../db/config.mjs");
@@ -4038,16 +4132,6 @@ if (configFailed) {
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               ({ work_type: string; status: string; c: number; thoughts: number } & LeaseRow)[];
             const leases = leasesByKey(rows);
-            // 063 (SMD-1732): a stale row is a pending verdict whose texts
-            // moved; 067 (SMD-2297): the next pass replaces one it finds in
-            // conflict again and settles one it does not — said here, since
-            // no other row counts them (063's third review pass, cold read);
-            // the reviewer's --list shows them, and may decide one sooner.
-            const [{ pending: queued, stale: staleQueued }] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM supersession_proposals`;
-            const queue = [
-              Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "",
-              Number(staleQueued) > 0 ? `${staleQueued} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not) — cd db && bun consolidate.ts --url $DATABASE_URL --list stale` : "",
-            ].filter(Boolean).join("; ");
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
               const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
@@ -4094,7 +4178,7 @@ if (configFailed) {
               // workers-profile row (SMD-1794 review pass 3).
               if (beat && !follower && l.live > 0 && !sleeping?.running) {
                 add("consolidate pass", "warn",
-                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC${queue ? `; ${queue}` : ""}`,
+                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC`,
                     `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
                 continue;
               }
@@ -4102,7 +4186,7 @@ if (configFailed) {
                 const followerWords = follower
                   ? `a follower is running this key (stamped ${ago(follower.ageS)} ago): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
                   : "";
-                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`, queue ? `; ${queue}` : "");
+                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("consolidate pass", r.status, r.detail, r.fix);
                 continue;
               }
@@ -4118,10 +4202,10 @@ if (configFailed) {
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
-                  add("consolidate pass", "warn", `${words}, and its last pass failed${queue ? `; ${queue}` : ""}`,
+                  add("consolidate pass", "warn", `${words}, and its last pass failed`,
                       `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
                 } else {
-                  const r = runningRow(key, c, words, queue ? `; ${queue}` : "");
+                  const r = runningRow(key, c, words);
                   add("consolidate pass", r.status, r.detail, r.fix);
                 }
                 continue;
@@ -4133,16 +4217,73 @@ if (configFailed) {
               const stoppedFollower = facts.workers?.heartbeats.some((h) => h.worker === "consolidate" && h.job === key);
               const failedNote = c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : "";
               add("consolidate pass", "warn",
-                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}${queue ? `; ${queue}` : ""}`,
+                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a consolidation pass under this key stopped before it finished"}`,
                   `${l.expired > 0 ? reclaim(key) : ""}${stoppedFollower
                     ? `Its follower is not running: start it again as the workers row says${failedNote}; it finishes the pass.`
                     : `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${failedNote}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`}`);
             }
-            if (unfinished === 0) add("consolidate pass", "ok", `none unfinished${queue ? `; ${queue}` : ""}`);
+            if (unfinished === 0) add("consolidate pass", "ok", `none unfinished`);
           }
         } catch (e) {
           add("consolidate pass", "warn", `could not verify: ${(e as Error).message}`,
-              "The check reads thought_work_claims, consolidation_pool() and supersession_proposals.");
+              "The check reads thought_work_claims and consolidation_pool().");
+        }
+
+        // The review queue (SMD-2680): what consolidation proposed and nobody
+        // has decided, from the record's own read (brain-info.ts), so this row,
+        // brain_info and keyed /health say one thing. A backlog, not a broken
+        // brain: it warns once the oldest pending row has waited past the
+        // threshold, and never fails. Relations are not here — nothing waits
+        // on one.
+        {
+          const p = facts.proposals;
+          const knob = proposalsWarnDays(env.OB1_PROPOSALS_WARN_DAYS);
+          if (p === null) {
+            const u = facts.unread.proposals;
+            if (!u) add("proposals", "skip", "no supersession_proposals — migration 029 is not applied.");
+            // The queue's read touches supersession_proposals alone.
+            else if (u.reason === "refused")
+              add("proposals", "warn", `could not verify: ${u.message}`,
+                  "Grant the server's role SELECT on supersession_proposals — the server group's row (SMD-2680): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).");
+            else if (u.reason === "invisible")
+              add("proposals", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
+            else add("proposals", "warn", `could not verify: ${u.message}`,
+                     u.reason === "timeout"
+                       ? "A migration or a long transaction may hold supersession_proposals, or the scan outran the statement cap; run preflight again once it has finished."
+                       : "The check reads supersession_proposals; the message says why it failed.");
+          } else {
+            // The board pairs are a read of their own (review pass 2): one
+            // that did not answer is said, never shown as none (review pass
+            // 3), and a refusal — the function's EXECUTE, or a table 079's
+            // predicate reads — warns with its grant.
+            const bu = facts.unread["proposals.boardPairs"];
+            const denied = bu?.reason === "refused" ? deniedObject(bu.message) : null;
+            const boardFix = bu?.reason !== "refused" ? null
+              : denied?.kind === "function"
+                ? `GRANT EXECUTE ON FUNCTION ${denied.name}(jsonb, jsonb) TO <the server's role>; — PUBLIC holds it unless a REVOKE took it (079).`
+                : `Grant the server's role SELECT on ${denied?.name ?? "thoughts and thought_facets"} — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).`;
+            const board = bu
+              ? `; board pairs not counted (${bu.reason === "refused" ? bu.message : bu.reason === "timeout" ? "not read in time" : bu.reason === "deadline" ? "not read before the deadline" : bu.message})`
+              : p.boardPairs ? `; ${p.boardPairs} pair two tickets the board does not link` : "";
+            const stale = p.stale ? `; ${p.stale} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not)` : "";
+            const words = p.pending === 0
+              ? `none pending${stale}`
+              : `${p.pending} pending review, the oldest judged ${p.oldestPendingS === null ? "at an unknown time" : `${ago(p.oldestPendingS)} ago`}${board}${stale}`;
+            const old = p.pending > 0 && p.oldestPendingS !== null && p.oldestPendingS > knob.days * 86400;
+            const review = `cd db && bun consolidate.ts --url $DATABASE_URL --list${p.stale ? " (--list stale for the stale ones)" : ""}, or the list_supersession_proposals tool, then --accept or --reject each`;
+            // A knob that is not whole days and a refused board count warn on
+            // their own; an old queue still says so beside them, with its remedy.
+            const backlog = `A backlog, not a fault: review them — ${review}. OB1_PROPOSALS_WARN_DAYS (${knob.days}) sets how long after its verdict a proposal may wait before this row warns; a pass that re-judges a stale proposal restarts its clock.`;
+            const knobFix = knob.problem ? `Set OB1_PROPOSALS_WARN_DAYS to whole days, 1 to 3650, or unset it for ${PROPOSALS_WARN_DAYS}.` : null;
+            // The remedies in the detail's order: the board, the backlog, the knob (review pass 4).
+            const fixes = [boardFix, old ? backlog : null, knobFix].filter((f): f is string => f !== null);
+            const detail = `${words}${old ? ` — unreviewed past ${knob.days} day(s)` : ""}${knob.problem ? `${old ? ";" : " —"} ${knob.problem}, so ${PROPOSALS_WARN_DAYS} days are used` : ""}`;
+            if (fixes.length) add("proposals", "warn", detail, fixes.join(" "));
+            // Stale alone: the next pass settles them, and --list stale shows each with the decision it takes (review pass 5).
+            else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
+              : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
+              : words);
+          }
         }
 
         // The ledger's highest migration against the tree this server was built

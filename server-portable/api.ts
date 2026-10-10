@@ -6,12 +6,13 @@
 // reached as api.ob1.internal on the mesh, and at /api only where the operator
 // names deploy/compose.api-public.yaml.
 
-import { agents, closeStore, db, env, initEnv, plugins, serveHere } from "./root.ts";
+import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { routable } from "./auth.ts";
 import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
+import { cutOpenRequests } from "./telemetry.ts";
 
 /**
  * The door a write through this server names in its actor (`via`), which
@@ -32,6 +33,7 @@ export const app = createRestApp({
   resolve: (principal) => agents().resolve(db(), principal),
   track: calls.track,
   plugins,
+  hooks,
 });
 
 // Stopping on SIGTERM, what is in flight finished (SMD-2250), as the MCP
@@ -52,6 +54,10 @@ if (SERVES_ON_BUN) {
     calls,
     close: closeStore,
     onCut: () => {
+      // Every request still in flight gets its line — `cut`, or `abandoned`
+      // for a client already gone — before the process exits — the middleware would write it after the handler, and
+      // the exit comes first (SMD-1849).
+      cutOpenRequests();
       const lost = markRunningLost();
       if (lost > 0) console.warn(`stop cut ${lost} running job${lost === 1 ? "" : "s"}: marked lost (SMD-2273)`);
     },

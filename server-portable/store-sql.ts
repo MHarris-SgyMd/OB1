@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -38,6 +38,7 @@ import type {
   Derivative,
   ListFilters,
   DeleteResult,
+  ResetStampResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
@@ -658,7 +659,7 @@ export class SqlStore implements ThoughtStore {
             ${opts.embedding ? toVector(opts.embedding) : null}::vector
           ) AS r`;
 
-    const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;
+    const r = rows[0]?.r as { id?: string; fingerprint?: unknown; existed?: unknown; supersedes?: unknown } | undefined;
     const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
     // 082: a key that can read landed on a row that already held the text —
@@ -671,6 +672,17 @@ export class SqlStore implements ThoughtStore {
     if (r?.existed === true && opts.recapture !== "keep") {
       try {
         await this.sql`SELECT ob1_note_recapture(${id}::uuid, ${actorPayload(opts.actor)}::jsonb)`;
+      } catch (e) {
+        if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
+      }
+    }
+    // 085: and when the row's stamp is still a capture-only key's, at a trust
+    // above it, the stamp moves to this key (SMD-2664) — the trust this write
+    // declares, checked against the text it captured. Made the way the note
+    // is made, and after it, so a restamp that fails never holds up the note.
+    if (r?.existed === true && opts.recapture !== "keep") {
+      try {
+        await this.sql`SELECT ob1_restamp_recapture(${id}::uuid, ${typeof r.fingerprint === "string" ? r.fingerprint : null}::text, ${actorPayload(opts.actor)}::jsonb, ${opts.event?.trust ?? null}::text)`;
       } catch (e) {
         if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
       }
@@ -730,6 +742,13 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
+  }
+
+  async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
+    // 086: one statement, as the note and the restamp are made; the function
+    // decides who may, and names the actor in the event it appends.
+    const rows = await this.sql`SELECT ob1_reset_capture_stamp(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseResetStamp(rows[0]?.r);
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {

@@ -23,6 +23,9 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${POSTGRES_PASSWORD}
       ORCH_DB_PASSWORD: ${ORCH_DB_PASSWORD}
+    # The brain's Postgres is on compose.yaml's internal `data` network alone
+    # (SMD-2583).
+    networks: [data]
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -54,6 +57,9 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:8090:8000"
+    # Its database on the brain's Postgres, on `data`; the brain's server
+    # (`server:8000`) and its own port on `egress`, as n8n's (SMD-2583).
+    networks: [data, egress]
     environment:
       DATABASE_URL: postgres://orch:${ORCH_DB_PASSWORD}@postgres:5432/orchestration?sslmode=disable
       BASE_URL: http://127.0.0.1:8090

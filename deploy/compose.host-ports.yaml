@@ -22,9 +22,20 @@
 # entry only with `--profile jev` (the typed-decision tier, SMD-2050 — a spike
 # run from a checkout then sets OB1_JEV_BASE_URL=http://127.0.0.1:8020);
 # without its profile a service does not exist and its entry is inert.
+#
+# Postgres's other network, `postgres-port`: compose.yaml puts it on the
+# internal `data` network alone, and a container on internal networks alone
+# publishes no port (measured on podman 6). This one is outward and holds
+# Postgres alone, so the port publishes and no other service gains a way to
+# it but the host's own: the published port is the host's, and a container
+# that reaches the host (one on `egress`, by the host alias) reaches it there
+# too, as it reaches every port this file publishes (measured on podman 6:
+# `postgres` by name and its addresses time out from `egress`, the host
+# alias's port answers; SMD-2583). Ollama and Jev are on `egress` already.
 
 services:
   postgres:
+    networks: [postgres-port]
     ports:
       - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
 
@@ -35,3 +46,6 @@ services:
   jev:
     ports:
       - "${JEV_BIND:-127.0.0.1}:${JEV_PORT:-8020}:8020"
+
+networks:
+  postgres-port: {}
