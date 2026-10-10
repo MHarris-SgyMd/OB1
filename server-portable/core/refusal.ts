@@ -18,7 +18,7 @@ import type { Citation } from "../store.ts";
  */
 export type Refusal =
   // The read tools.
-  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought: no such thought; job_status: no such job for this key
+  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
@@ -40,6 +40,9 @@ export type Refusal =
   | { code: "REFUSED_WOULD_CYCLE"; retryable: false; id: string }     // the supersedes pointer would close a loop
   | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
   | { code: "REFUSED"; retryable: false; error: string }              // a refusal the store named that this server does not know
+  // reset_capture_stamp (086, SMD-2744).
+  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
+  | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
   // The worker actions (SMD-2132, SMD-2272).
   | { code: "REFUSED_EMPTY_WORK_TYPE"; retryable: false }            // a work_type required, or given but blank
   | { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER"; retryable: false }    // release_stale_leases' include_live without a worker_id
@@ -97,6 +100,10 @@ const FACTS: Facts = {
   REFUSED_WOULD_CYCLE: none,
   REFUSED_CITED: (r) => (r.citedBy !== undefined ? { citedBy: r.citedBy } : {}),
   REFUSED: none,
+  // The key's own name and kind are in the text, not here: a name is the
+  // env's, not a token, and the kind is the registry's word about the key.
+  REFUSED_NOT_OPERATOR: none,
+  REFUSED_NOT_CAPTURE_STAMP: none,
   REFUSED_EMPTY_WORK_TYPE: none,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: none,
   RUN_WORKER_DRAIN_NOT_AVAILABLE: none,

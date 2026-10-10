@@ -414,7 +414,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 
 </details>
 
-✅ **Done when:** You can start a conversation in your AI client and it has access to Open Brain tools — twelve for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), nine for a read key. Two of them, `search` and `fetch`, are ChatGPT-shaped compatibility tools every client sees.
+✅ **Done when:** You can start a conversation in your AI client and it has access to Open Brain tools — twenty-one for a write key (`search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `update_thought`, `delete_thought` and more), fourteen for a read key (`server-portable/tools.ts` lists them). Two of them, `search` and `fetch`, are ChatGPT-shaped compatibility tools every client sees.
 
 ---
 
