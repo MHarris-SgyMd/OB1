@@ -368,7 +368,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // may be restarting, and an exit here would spend one of its three restarts
   // (SMD-2678). A stop during the wait ends the run as a stop before it began.
   const startSaid = { down: false };
-  const atStart = <T>(read: () => Promise<T>) => readThrough(sql, read, opts.signal ?? new AbortController().signal, startSaid, out, err);
+  /** The CLI passes no signal (its handlers come after these reads): a wait then ends only with the database. */
+  const startWake = opts.signal ?? new AbortController().signal;
+  const atStart = <T>(read: () => Promise<T>) => readThrough(sql, read, startWake, startSaid, out, err);
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
@@ -710,17 +712,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     }
   };
 
+  /** A follower found outside, awake or asleep: the start's refusal, now, the row ended on a failure. */
+  const refuseOutside = async (): Promise<number> => {
+    err(outsideLine(foreign, false));
+    await stamper.end("failed", malformed ?? undefined);
+    return 2;
+  };
+
   try {
     /** Refusals in a row, reset by a sleep that ends without one: the next is tried on SMD-2599's outage schedule. */
     let refusals = 0;
     for (;;) {
       const since = await awaitQuiet();
-      // A follower found outside, awake or asleep: the start's refusal, now.
-      const refuseOutside = async (): Promise<number> => {
-        err(outsideLine(foreign, false));
-        await stamper.end("failed", malformed ?? undefined);
-        return 2;
-      };
       if (foreign.length && !stopping) return refuseOutside();
       // A stop during the last read: no pass is started for it.
       if (since === null || stopping) break;

@@ -10512,6 +10512,20 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   const lines: string[] = [];
   const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
     runSleep({ url: URL_!, env, quiet: 1, poll: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
+  /**
+   * A run's exit code, or -1 when it has not returned in 20 s — then stopped
+   * and awaited, so a regression that never returns fails its assertion
+   * rather than hanging the suite (the no-refusal mutant hung it for hours,
+   * SMD-2678 review pass 1).
+   */
+  const bounded = async (run: Promise<number>, ac: AbortController): Promise<number> => {
+    const code = await Promise.race([run, Bun.sleep(20_000).then(() => -1)]);
+    if (code === -1) { ac.abort(); await run; }
+    return code;
+  };
+  /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
+  const around = (before: () => void): SQL =>
+    new Proxy(sql, { apply(t, self, args) { before(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
@@ -10547,12 +10561,9 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // stamp, which writes the whole value (review pass 4).
     const priorSlept = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
     await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", slept: priorSlept })})`;
-    // Bounded: a run that does not refuse sleeps under --follow for ever (the
-    // no-refusal mutant hung the suite for hours, SMD-1794's lesson again).
+    // Bounded: a run that does not refuse sleeps under --follow for ever.
     const acBeside = new AbortController();
-    const besideRun = sleepRun({ follow: true, signal: acBeside.signal });
-    const beside = await Promise.race([besideRun, Bun.sleep(20_000).then(() => -1)]);
-    if (beside === -1) { acBeside.abort(); await besideRun; }
+    const beside = await bounded(sleepRun({ follow: true, signal: acBeside.signal }), acBeside);
     const besideText = lines.join("\n");
     // Refused under --follow, the row says so — ended on a failure, with what
     // it read — so preflight names the followers keeping it down (review pass 3).
@@ -10589,21 +10600,15 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // A signal aborted during a start read that waits on no outage is a stop
     // before the run began, as one before run() is: 130 and no row (review pass 2).
     const acEarly = new AbortController();
-    const abortingSql = new Proxy(sql, { apply(t, self, args) { acEarly.abort(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
     lines.length = 0;
-    const earlyRun = sleepRun({ sql: abortingSql, follow: true, signal: acEarly.signal });
-    const earlyCode = await Promise.race([earlyRun, Bun.sleep(20_000).then(() => -1)]);
-    if (earlyCode === -1) { acEarly.abort(); await earlyRun; }
+    const earlyCode = await bounded(sleepRun({ sql: around(() => acEarly.abort()), follow: true, signal: acEarly.signal }), acEarly);
     assert(earlyCode === 130 && lines.some((l) => /stopped before the pass began/.test(l)) && (await beat()) === null,
       `a stop during a start read ends it with 130 and stamps no row (exit ${earlyCode})`);
     // …and wins over a follower those reads found: 130, no row, no refusal (review pass 4).
     await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
     const acEarly2 = new AbortController();
-    const abortingSql2 = new Proxy(sql, { apply(t, self, args) { acEarly2.abort(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
     lines.length = 0;
-    const early2Run = sleepRun({ sql: abortingSql2, follow: true, signal: acEarly2.signal });
-    const early2Code = await Promise.race([early2Run, Bun.sleep(20_000).then(() => -1)]);
-    if (early2Code === -1) { acEarly2.abort(); await early2Run; }
+    const early2Code = await bounded(sleepRun({ sql: around(() => acEarly2.abort()), follow: true, signal: acEarly2.signal }), acEarly2);
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
     assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
       `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
@@ -10621,7 +10626,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     /** The suite's client, whose first `n` statements fail as a database starting up. */
     const failing = (n: number) => {
       let left = n;
-      return new Proxy(sql, { apply(t, self, args) { if (left-- > 0) throw startingUp(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+      return around(() => { if (left-- > 0) throw startingUp(); });
     };
     lines.length = 0;
     const waited = await sleepRun({ sql: failing(1), dryRun: true });
@@ -10848,9 +10853,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
     // A sleep that ran resets the schedule: the next refusal waits 5 s again.
-    missing = true;
+    // The model goes only once the capture has woken the recovered sleep, so
+    // that sleep ends as one that ran: flipped before, consolidation joining
+    // it could meet the 404 at its own start, a refusal retried on the same
+    // schedule — a race this lost under load (SMD-2678's tidy). The flip lands
+    // within the 1 s quiet before the next sleep (pollUntil reads every 250 ms).
     const at2 = lines.length;
     await capture("A note that wakes it before the model goes again.", "op-sleep", 0, 5);
+    await pollUntil(async () => {
+      const woke = lines.slice(at2).some((l) => /awake: a live write/.test(l));
+      if (woke) missing = true;
+      return woke;
+    }, 20_000);
     const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
     const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
     missing = false;
@@ -10919,11 +10933,6 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // with the passes hard-stopped first, the lease returned (review pass 1).
     const outsideRow = () => sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
                                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
-    const bounded = async (run: Promise<number>, ac: AbortController) => {
-      const code = await Promise.race([run, Bun.sleep(20_000).then(() => -1)]);
-      if (code === -1) { ac.abort(); await run; }
-      return code;
-    };
     try {
       lines.length = 0;
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
