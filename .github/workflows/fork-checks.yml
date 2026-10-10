@@ -556,6 +556,11 @@ jobs:
       - name: Worker bootstrap (egress, no database)
         working-directory: db
         run: bun test-worker-bootstrap.ts
+      # SMD-2681: the findings poster's grouping, comment, marker read-back,
+      # cap and egress subject. No database, no Linear.
+      - name: Board findings (no database)
+        working-directory: db
+        run: bun test-board-findings.ts
 
   db-live:
     name: Schema against real Postgres

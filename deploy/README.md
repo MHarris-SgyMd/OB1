@@ -917,6 +917,20 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+**Telling the board what consolidation found** (SMD-2681). Set
+`LINEAR_COMMENT_API_KEY` in `deploy/.env` — a Linear key of its own that can
+comment, not `LINEAR_API_KEY` — and, under the default egress policy, add
+`type:board-finding` to `OB1_EGRESS_ALLOW`.
+Each pass then ends by posting a consolidation finding between two tickets the
+board does not link (a pending `outdates` proposal, or a standing `related`,
+`evolves` or `duplicate` relation) as one comment on the newer ticket: what the
+judge found and how to act on it. It proposes only, never adding a link or
+moving a status. At most `OB1_FINDINGS_POST_CAP` (5) comments go out in any 24
+hours, and a ticket pair is told once per finding word. Without the term the
+start-up log says the step is off; `bun db/board-findings.ts --url … --dry-run`
+prints what it would post. `db/README.md`, "What it tells the board", has the
+rules.
+
 ## Extraction and consolidation as services
 
 Once extraction has run on a brain, each capture is queued for it as it

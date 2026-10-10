@@ -875,6 +875,13 @@ services:
   # fetches issues) and OB1_LINEAR_INITIATIVE. The egress gate applies to its
   # embed and tag calls as to a capture's: with the provider on the host,
   # deploy/.env carries OB1_LLM_LOCAL=1 or every ticket lands without a vector.
+  #
+  # With LINEAR_COMMENT_API_KEY set — a key of its own that can comment, never
+  # LINEAR_API_KEY — each pass ends by posting a consolidation finding between
+  # two tickets the board does not link as one comment on the newer ticket, at
+  # most OB1_FINDINGS_POST_CAP (5) a day and only where the egress gate allows
+  # it — under the default deny, OB1_EGRESS_ALLOW=type:board-finding
+  # (db/board-findings.ts, SMD-2681). It comments only.
   board-sync:
     image: oven/bun:1.4.0-alpine
     profiles: ["board-sync"]
@@ -896,6 +903,8 @@ services:
       LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
+      LINEAR_COMMENT_API_KEY: ${LINEAR_COMMENT_API_KEY:-}
+      OB1_FINDINGS_POST_CAP: ${OB1_FINDINGS_POST_CAP:-}
     command: ["bun", "db/sync-linear.ts", "--loop"]
     # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.

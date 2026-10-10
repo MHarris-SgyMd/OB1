@@ -20,14 +20,22 @@ export const LINEAR_API = "https://api.linear.app/graphql";
 export type GqlResult<T> = { data: T | null; errors: { message: string; path?: (string | number)[] }[] };
 export type Gql = <T>(query: string, variables?: Record<string, unknown>) => Promise<GqlResult<T>>;
 
-/** A client over one key. Personal API keys (`lin_api_…`) go in Authorization raw; OAuth tokens take Bearer. */
-export function linearClient(key: string, fetchImpl: typeof fetch = fetch): Gql {
+/**
+ * A client over one key. Personal API keys (`lin_api_…`) go in Authorization
+ * raw; OAuth tokens take Bearer. `url` is the endpoint (a test's stub; Linear's
+ * otherwise), and `timeoutMs` bounds each request — db/board-findings.ts posts
+ * inside the transaction that records the post, which a hung request would
+ * hold open (SMD-2681); left out, a request waits as long as fetch does.
+ */
+export function linearClient(key: string, fetchImpl: typeof fetch = fetch, opts: { url?: string; timeoutMs?: number } = {}): Gql {
   const auth = key.startsWith("lin_api_") ? key : `Bearer ${key}`;
+  const url = opts.url ?? LINEAR_API;
   return async <T>(query: string, variables: Record<string, unknown> = {}): Promise<GqlResult<T>> => {
-    const res = await fetchImpl(LINEAR_API, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { Authorization: auth, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
+      ...(opts.timeoutMs !== undefined ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
     });
     if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
     const json = (await res.json()) as { data?: T | null; errors?: { message: string; path?: (string | number)[] }[] };

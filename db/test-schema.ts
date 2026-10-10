@@ -12903,6 +12903,40 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
+console.log("\n[76] Migration 086: board_findings_posted — one row per ticket pair and word, the pair in order, the ticket commented on one of the two, a word and an origin from their lists, at least one finding named; the cap's index; a re-apply a no-op (SMD-2681)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'board_findings_posted' ORDER BY ordinal_position`))
+    .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
+  assert(cols === "ticket_a:text ticket_b:text word:text posted_on:text origin:text comment_id:text? finding_ids:ARRAY posted_at:timestamp with time zone",
+    `the table's columns, only comment_id nullable (${cols})`);
+  const pk = (await one<{ k: string }>(`SELECT string_agg(a.attname, ',' ORDER BY k.i) AS k FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(n, i) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n WHERE c.conrelid = 'board_findings_posted'::regclass AND c.contype = 'p'`)).k;
+  assert(pk === "ticket_a,ticket_b,word", `the key is the pair and the word, not a finding's id (${pk})`);
+  const idx = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'board_findings_posted_at_idx'`))?.d ?? "";
+  assert(/\(posted_at\) WHERE \(origin = 'posted'::text\)/.test(idx), `the cap's index: posted_at over the rows this brain posted (${idx})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["board_findings_posted"])).c ?? "";
+  assert(/Migration 086 \/ SMD-2681/.test(tc) && /never updated or deleted/.test(tc), "the table's comment names 086, the ticket, and that a row is only inserted");
+
+  const ins = (a: string, b: string, word: string, on: string, origin: string, ids = "{00000000-0000-0000-0000-000000000001}") =>
+    db.query(`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, finding_ids) VALUES ($1, $2, $3, $4, $5, $6::uuid[])`, [a, b, word, on, origin, ids])
+      .then(() => "ok", (e: Error) => e.message);
+  assert((await ins("SMD-1", "SMD-2", "related", "SMD-2", "posted")) === "ok", "a row: two tickets in order, a word, the newer ticket, posted");
+  assert((await ins("SMD-1", "SMD-2", "outdates", "SMD-1", "found")) === "ok", "…another word for the same pair is another row; found is an origin");
+  assert(/duplicate key/.test(await ins("SMD-1", "SMD-2", "related", "SMD-1", "posted")), "the same pair and word twice is refused: posted once");
+  assert(/board_findings_posted_pair_ordered/.test(await ins("SMD-2", "SMD-1", "evolves", "SMD-2", "posted")), "a pair out of order is refused, so one pair has one spelling");
+  assert(/board_findings_posted_pair_ordered/.test(await ins("SMD-3", "SMD-3", "evolves", "SMD-3", "posted")), "…and two rows of one ticket are no pair");
+  assert(/board_findings_posted_word/.test(await ins("SMD-1", "SMD-3", "supersedes", "SMD-3", "posted")), "a word outside the four is refused");
+  assert(/board_findings_posted_on_the_pair/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-9", "posted")), "a comment on a ticket outside the pair is refused");
+  assert(/board_findings_posted_origin/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-3", "sent")), "an origin outside posted and found is refused");
+  assert(/board_findings_posted_names_a_finding/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-3", "posted", "{}")), "a row naming no finding is refused");
+
+  const before = JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`));
+  await reapply("086");
+  assert(JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`)) === before, "086 re-applied: the rows stand");
+  await db.exec(`DELETE FROM board_findings_posted WHERE true`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

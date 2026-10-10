@@ -2152,6 +2152,13 @@ export const ROLE_GRANTS = Object.freeze({
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
+    // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
+    // it posted: read for the cap and "not posted again", inserted after Linear
+    // answers. Never updated or deleted — a failed post rolls the claim back.
+    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT", "INSERT"]),             since: "086" }),
+    // …and reads the proposal queue it posts from (review pass 2: through the
+    // server group it also took UPDATE on ob1_agent_keys, for one SELECT).
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),                     since: "029" }),
   ]),
   // The opt-in query log (034, SMD-1295): the server writes one row per search
   // and one per follow-up touch, but ONLY when OB1_QUERY_LOG=on. INSERT is all
