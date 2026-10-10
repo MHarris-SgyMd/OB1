@@ -523,15 +523,23 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     for (const [k, v] of queryOf(c.req.url)) query[k] = v;
     let answer;
     try {
-      answer = await runHook(hook, { core: deps.core, secret, track: deps.track }, { headers, query, body, text: new TextDecoder().decode(body) });
+      answer = await runHook(hook, {
+        core: deps.core,
+        secret,
+        track: deps.track,
+        // Work the handler deferred: its failure the same one line as a fault — after the answer for its work, before the 500 for a failed handler's discards.
+        deferredFault: (message) => faultLog(`api hook ${hook.path} deferred fault: ${message}`),
+      }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
       // The sender is anonymous: it is told FAILED and nothing of why; the
       // operator's stderr has the message, one line, bounded.
       faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
       return c.json({ code: "FAILED", retryable: false }, 500);
     }
-    if (answer.status === 204) return c.body(null, 204);
-    return c.json(answer.body ?? {}, answer.status);
+    const { status, text } = answer;
+    if (status === 204 || text === null) return c.body(null, 204);
+    // The JSON text runHook checked before the work started, not the body read again (review pass 3).
+    return c.body(text, status, { "content-type": "application/json" });
   });
 
   // A path a route serves, sent with another method, is a 405 naming the
