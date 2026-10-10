@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2689 assertions: 2689 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-six (86) migrations applied, and
+`bun test-schema.ts` prints `2705 assertions: 2705 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1341,6 +1341,17 @@ again. It refuses to apply without 046 or 085. test-schema [77],
 test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
 test-e2e-sql [13g].
 
+Migration 087 adds `board_findings_posted`, what board-sync's findings step
+posted to the Linear board (SMD-2681): one row per ticket pair and word —
+the pair in order by 079's ticket identity, the word (`outdates`, `related`,
+`evolves`, `duplicate`), the ticket commented on, Linear's comment id, and the
+proposal and relation-facet ids it named. `origin` is `posted`, counted
+against the daily cap, or `found`, a marker already on the board. Rows are
+only inserted — a posted one after Linear answers, in the transaction that
+posted — so a failed post records nothing. It needs nothing before it. See
+[What it tells the board](#the-board-in-the-brain-smd-1954). test-schema [78],
+test-upgrade [20ai], test-live [41].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -1440,6 +1451,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
+| | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
@@ -3865,20 +3878,131 @@ mirror keeps the hand captures' shape, which had none. A Linear webhook would be
 exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
 which would call this tool's `syncIssue` with the one identifier it was told.
 
+**What it tells the board (SMD-2681).** The board comes in; consolidation's
+findings about it went nowhere until someone read the queue. With
+`LINEAR_COMMENT_API_KEY` set, every pass (not `--audit`, and not `--only`,
+which brings in only the named tickets' links) ends with `board-findings.ts`'s
+step: a pending `outdates` proposal (029) or a standing `related`, `evolves`
+or `duplicate` relation (084) between two tickets the board does not link is
+posted as one comment on the newer ticket — the ticket of the thought the
+judge saw as newer. The same step runs on its own:
+
+```bash
+bun board-findings.ts --url … --dry-run   # what would be posted and what the gate would refuse — the board unread, so a pair already on it is listed too; no Linear request, no row
+bun board-findings.ts --url …             # post, up to the cap
+bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run applies, over OB1_FINDINGS_POST_CAP
+```
+
+- **Which findings.** Two Linear rows (`metadata.source = 'linear'`:
+  board-sync's tickets and their dated sections) filed under two different
+  tickets — 079's identity, `coalesce(metadata->>'ticket', metadata->>'issue')`,
+  which must read as an identifier (`SMD-123`) — that no active Linear link
+  joins: neither 079's `consolidation_tickets_linked` nor a `duplicate_of`
+  either way. That is SMD-2680's board-pair rule, asked when posting (a link
+  made after the verdict never moves the proposal, and the pass has just
+  brought in the links of every ticket Linear says moved — a link added
+  without moving either ticket's `updatedAt` waits for a `--full` pass), narrowed to Linear rows: a fork change record
+  or a capture can carry a `ticket` too, and its text is not the board's, so
+  `brain_info`'s board counts can be higher than what is posted. A session
+  note, or any thought that is not a Linear row, on either side is never
+  posted.
+- **One comment per ticket pair.** Several proposals or relations between rows
+  of the same two tickets are one comment. It names the two tickets, each
+  finding's word and direction and the judge's confidence, a proposal's
+  one-line reason (as code, so a link or a mention in it is shown, not
+  rendered), and how to act: a proposal is decided in the brain
+  (`cd db && bun consolidate.ts --accept <id>`, or `--reject <id>`); a
+  `related` or `evolves` relation by linking the tickets as related on the
+  board, which this tool's next pass brings back, after which 079 leaves the
+  pair out of the candidates; a `duplicate` by marking one a duplicate of the
+  other, after which the pair is not posted again (079 still pairs it for the
+  judge). It proposes only: no link is added, no status moved, no description
+  edited.
+- **Posted once.** Migration 087's `board_findings_posted` holds one row per
+  ticket pair and word (`outdates`, `related`, `evolves`, `duplicate`), so a
+  relation a re-judge replaced at another score is not posted again, and a pair
+  is posted again only for a word not posted for it before (a proposal judged
+  the other way round is not). The comment's last line is a marker,
+  `ob1-finding SMD-A SMD-B words`, in letters, digits, hyphens and spaces:
+  Linear keeps a comment as rich text and returns
+  markdown derived from it, so the marker is read back with identifiers
+  un-autolinked and escapes undone. Before posting, both tickets' comments are
+  read (the first 250 of each); a word a marker already names — another brain
+  posted it, or this one lost its row — is recorded `found` and not posted.
+  So a person who writes the line on either ticket silences that word for the
+  pair. Two brains on one board read each other's markers; two that post the
+  same pair in the same moment can both post.
+  Each post holds one lock for the whole brain, re-reads what is recorded and
+  re-counts the day's posts under it, then posts and writes its rows in that
+  transaction: a post that fails records nothing and the next pass tries
+  again, and two posters at once post neither a pair twice nor past the cap. A
+  run killed after Linear answered and before the commit leaves the comment
+  with no row; the next run finds its marker and records it `found`, which the
+  cap does not count.
+- **Bounded.** At most `OB1_FINDINGS_POST_CAP` comments (default 5, 0 to 100)
+  in any 24 hours, counted from the comments this brain recorded posting — a
+  comment Linear made after the step gave up on it is recorded `found` later,
+  and not counted, and each brain counts its own; best first, by the
+  judge's confidence and then age. The confidence does not yet rank real
+  findings (SMD-2705), so the cap is the guard. A bad value stops the tool with
+  exit 2, as a bad interval does — in board-sync, when the key is set.
+- **A ticket off the board.** A ticket deleted in Linear, or moved out of the
+  initiative, keeps its row (above). Board-sync passes the step this pass's
+  census, and a pair with a ticket off it — or one this pass failed to fetch,
+  whose links it did not bring in — is left alone, no Linear request,
+  while a ticket on it that the comment key cannot find fails the pass: the
+  key does not see the board's teams. The census is as old as its pass: a
+  ticket deleted while a pass runs fails that pass's post once, and the next
+  census drops it. A pair that fails every pass — a team the comment key
+  cannot see — keeps the heartbeat `failed`; give the key the team, or, as
+  the owner, record the pair as told with a `found` row in
+  `board_findings_posted` for each word. Run on its own, `board-findings.ts` has
+  no census: Linear's "Entity not found" is reported as no such ticket and
+  asked again next run; any other error is a failure.
+- **Through the egress gate.** The comment leaves to `api.linear.app`, so it
+  is gated as a subject of its own: type `board-finding`, source
+  `board-findings`, and its text for a `marker:` term — values a capture is
+  unlikely to carry, since `OB1_EGRESS_ALLOW` is the server's too and a term
+  admits any row carrying its value. Under the default deny nothing is posted:
+  board-sync says so once at start and leaves the step off, and
+  `board-findings.ts` prints what it would have posted. Opt in with
+  `OB1_EGRESS_ALLOW=type:board-finding`. That term lets the comments out
+  and nothing else: board-sync's own embeddings still need their endpoint
+  declared local or a term of their own, and board-sync judges its up-front
+  refusal without it. The two thoughts are not gated
+  themselves: both are the board's own rows, and what leaves is a remark about
+  them, to that board.
+- **Its own key.** `LINEAR_COMMENT_API_KEY` is a key that can comment, never
+  `LINEAR_API_KEY`: that one is someone's whole account, which this tool only
+  reads with. Board-sync warns when the two are the same key. The key is read
+  from the environment or a `.env` on `db/env.ts`'s search path and never
+  printed. Unset, the step is off and nothing is said.
+- **Exit and heartbeat.** A post that fails (Linear refused, answered without
+  creating it, or did not answer within 20 s) is reported and fails the pass,
+  so `heartbeat:board-sync` says `failed`; the next pass tries again.
+- **Grants.** The `structure` group holds `SELECT, INSERT` on
+  `board_findings_posted` and `SELECT` on `supersession_proposals`; the step
+  also reads `thoughts` and `thought_facets` (the capture group's) and
+  executes 079's function — `--groups capture,structure`. A role that lacks
+  any of them is said once at start and the step stays off; a dry run needs
+  the reads alone. Compose's `board-sync` connects as the owner and
+  needs nothing.
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2689 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1190 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2705 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1228 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
+bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 

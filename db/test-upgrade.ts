@@ -527,8 +527,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // capture-only key's pointer lapses when another takes its target,
   // SMD-2638), 084 (the judge's relations stored, SMD-1873), 085 (a
   // capture-only key's stamp yields to the first classified key that can read
-  // at a higher trust, SMD-2664) and 086 (the operator resets such a label,
-  // SMD-2744) stay recorded and
+  // at a higher trust, SMD-2664), 086 (the operator resets such a label,
+  // SMD-2744) and 087 (what the findings step posted to the board,
+  // SMD-2681) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -637,13 +638,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // redefines 073's backfill_thought_actors on its own body, refusing by
   // name without 055, 060, 073 or 074 ([20ag]); 086 adds the reset and
   // redefines 085's restamp and backfill on their own bodies, refusing by
-  // name without 046 or 085 ([20ah]) — all
+  // name without 046 or 085 ([20ah]); 087 adds a table and
+  // needs nothing ([20ai]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 57, `030 is among the last fifty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 58, `030 is among the last fifty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3879,6 +3881,26 @@ console.log("\n[20ah] Migration 086: refused by name without 085; onto a populat
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the086 });
   assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 086 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20ai] Migration 087: onto a populated brain at the file before it — the table, its key and its index, no thought moved; a row recorded after it; a re-apply a no-op that keeps the row (SMD-2681)");
+{
+  await dropSchema(URL_);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the087 = MIGRATIONS.find((f) => f.endsWith("_board_findings_posted.sql"))!;  // by name: renumbered when main takes its number
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the087 });
+  await sql`INSERT INTO thoughts (content, metadata) VALUES ('upgrade 087: a ticket row', '{"issue": "SMD-1"}'::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at FROM thoughts ORDER BY id`);
+  const before = await rows();
+  assert((await sql`SELECT to_regclass('board_findings_posted') IS NULL AS absent`)[0].absent === true, "before 087 there is no posted record");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the087 });
+  const [shape] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS t, to_regclass('board_findings_posted_at_idx') IS NOT NULL AS i`;
+  assert(shape.t && shape.i && (await rows()) === before, "087 onto the populated brain: the table and the cap's index, and no thought moved");
+  await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('SMD-1', 'SMD-2', 'related', 'SMD-2', 'posted', 'c1', ARRAY[gen_random_uuid()])`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the087 });
+  const [n] = await sql`SELECT count(*)::int AS n FROM board_findings_posted`;
+  assert(n.n === 1 && (await rows()) === before, "a re-apply of 087 is a no-op: the posted row kept, no thought moved");
   await sql.close();
 }
 
