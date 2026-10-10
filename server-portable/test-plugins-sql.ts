@@ -472,7 +472,7 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     const scriptedOk = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : async () => coreOk({ id: thought })) }) as never;
     const brokenSaid = await runHook(brokenHook, { core: scriptedOk, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) },
       { headers: {}, query: {}, body: new TextEncoder().encode(brokenText), text: brokenText }).then(() => "", (e: Error) => e.message);
-    // Retried the moment the 500 is in hand, nothing awaited between: the discard ran before it (review pass 3).
+    // Retried the moment the 500 is in hand, nothing awaited between (review pass 3). That the discard ran before the 500 is the unit suite's to hold, whose discard is slow: here the release reaches the table first either way.
     const retried = await deferredVia(brokenId, async () => coreOk({ id: thought }));
     await Promise.all(tracked);
     assert(brokenSaid === "the handler's own fault, after its claim" && retried.status === 202 && (await rowOf(brokenId))?.thought_id === thought,

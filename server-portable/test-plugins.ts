@@ -752,10 +752,12 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   /** A handle that records each statement's bound values, and answers a claim with `claimed`. */
   const bound: { q: string; values: unknown[] }[] = [];
   let claimed: { claimed: string }[] = [{ claimed: "2026-10-09 20:00:00.123456+00" }];
+  let reclaimed = false;
   const record = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ").trim();
     bound.push({ q, values });
-    return Promise.resolve(q.includes("RETURNING claimed_at") ? claimed : q.startsWith("SELECT thought_id") ? [{ thought_id: null }] : []);
+    // A release finds its claim (RETURNING id) unless `reclaimed` says another took it.
+    return Promise.resolve(q.includes("RETURNING claimed_at") ? claimed : q.startsWith("SELECT thought_id") ? [{ thought_id: null }] : q.startsWith("DELETE FROM deliveries WHERE id =") && !reclaimed ? [{ id: values[0] }] : []);
   }) as unknown as PluginSql;
   const db = { tx: <T>(fn: (sql: PluginSql) => Promise<T>) => fn(record) };
   const T1 = "00000000-0000-4000-8000-000000000001";
@@ -860,6 +862,12 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   // A discard whose release fails says so, for the handler's fault line to have its claim's fate beside it.
   await onceById({ db: failingRelease, captureSeconds: 120, defer: deferring.defer }, "evt-14", async () => ({ value: 0, thoughtId: T1 }), { keepSeconds: 660, defer: true });
   const stuck = await discards.at(-1)!().then(() => "", (e: Error) => e.message);
+  // A release whose DELETE finds no claim of its own — a retry took it past the lease, or the prune — says so, not "given back".
+  reclaimed = true;
+  await onceById(deferring, "evt-15", async () => { throw new Error("outlived its lease"); }, { keepSeconds: 660, defer: true });
+  const taken = await left.at(-1)!().then(() => "", (e: Error) => e.message);
+  reclaimed = false;
+  assert(taken === "delivery evt-15 (its id already re-claimed or pruned): outlived its lease", `a release that found no claim of its own is not told as given back (${taken})`);
   assert(stuck === "delivery evt-14 (its id left to lapse at the lease): its handler failed after the claim, and the claim could not be given back", `a discard whose release fails is a fault naming the delivery (${stuck})`);
   // The types a plugin meets, held by tsc: never called.
   const typed = async (flag: boolean) => {
@@ -899,6 +907,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
       late: { description: "Fails, leaving a timer that defers.", handler: async (ctx) => { setTimeout(() => { lateTried = true; ctx.defer(async () => { ran += 100; }, async () => { undone++; }); }, 5); throw new Error("before the timer"); } },
       nested: { description: "Defers work that defers more.", handler: async (ctx) => { ctx.defer(async () => { ctx.defer(async () => { nestedRan++; }); }); return { status: 202 }; } },
       sloppy: { description: "Defers with a discard that is slow and one that fails, then fails.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }, async () => { await Bun.sleep(50); undone++; }); ctx.defer(async () => { ran += 100; }, async () => { throw new Error("could not undo"); }); throw new Error("after both"); } },
+      stringy: { description: "Answers an object whose toJSON is a string.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }); return { status: 202, body: { toJSON: () => "a string" } as never }; } },
       shifty: { description: "Answers an object read differently twice.", handler: async () => { let reads = 0; return { get status() { return reads++ ? 418 : 202; }, body: { get x() { if (reads++ > 1) throw new Error("read again"); return 1; } } } as never; } },
       odd: { description: "Defers work that fails with a message that is no string.", handler: async (ctx) => { ctx.defer(async () => { throw Object.assign(new Error(), { message: 42 }); }); return { status: 202 }; } },
     } });
@@ -954,6 +963,10 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   await Promise.all(tracked);
   assert(r.status === 500 && undoneAtFailure === undoneBefore + 1 && faults.at(-2) === "api hook /hooks/probe-defer/sloppy deferred fault: discard: could not undo" && faults.at(-1) === "api hook /hooks/probe-defer/sloppy fault: after both",
     `a failed handler's discards run before its 500 is in hand — their lines before its own — and a discard's failure is told as a discard's (${undoneAtFailure - undoneBefore}, ${JSON.stringify(faults.slice(-2))})`);
+  const ranAtStringy = ran;
+  r = await post("stringy");
+  await Promise.all(tracked);
+  assert(r.status === 500 && ran === ranAtStringy && /stringy fault: .*not a JSON object/.test(faults.at(-1) ?? ""), `a body whose JSON is no object (a toJSON answering a string) is refused as written, before its work starts (${r.status}, ${faults.at(-1)})`);
   r = await post("shifty");
   const shiftyBody = await r.text();
   assert(r.status === 202 && shiftyBody === '{"x":1}', `the answer written is the one runHook checked, its status and body read once (${r.status} ${shiftyBody})`);

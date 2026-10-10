@@ -362,12 +362,19 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     if (body !== undefined && (body === null || typeof body !== "object" || Array.isArray(body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
     // Serialised here, so a body JSON cannot write (a BigInt, a cycle) is this
     // hook's fault before its work starts, not the route's after (review pass 2).
-    reply = { status, body, text: status === 204 ? null : (body === undefined ? undefined : JSON.stringify(body)) ?? "{}" };
+    const text = status === 204 ? null : (body === undefined ? undefined : JSON.stringify(body)) ?? "{}";
+    // The text, not the object: a toJSON that answers a string or null passes the object's check (review pass 4).
+    if (text !== null && !text.startsWith("{")) throw new Error(`${hook.path} answered a body that is not a JSON object`);
+    reply = { status, body, text };
   } catch (err) {
     outcome = "failed";
     const undo = pending.splice(0).flatMap(({ discarded }) => (discarded ? [start(discarded, "discard")] : []));
     // Before the 500, so a retry sent the moment it arrives finds the claim given back (review pass 3); bounded, so a store that hangs cannot hold it.
-    if (undo.length) await Promise.race([Promise.all(undo), new Promise<void>((resolve) => setTimeout(resolve, DISCARD_WAIT_MS))]);
+    if (undo.length) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.all(undo), new Promise<void>((resolve) => { timer = setTimeout(resolve, DISCARD_WAIT_MS); })]);
+      clearTimeout(timer);
+    }
     throw err;
   }
   outcome = "answered";

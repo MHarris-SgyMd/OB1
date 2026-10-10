@@ -527,7 +527,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
         core: deps.core,
         secret,
         track: deps.track,
-        // Work the handler left to run after its answer: the same one line as a fault, after the sender has its answer.
+        // Work the handler deferred: its failure the same one line as a fault — after the answer for its work, before the 500 for a failed handler's discards.
         deferredFault: (message) => faultLog(`api hook ${hook.path} deferred fault: ${message}`),
       }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {

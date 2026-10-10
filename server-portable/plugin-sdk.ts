@@ -144,16 +144,17 @@ export interface HookContext {
    * sender that wants one sooner than the work takes (Slack: three seconds):
    * it starts on the event loop's next turn after the handler returns an
    * answer the runtime takes, and not at all if the handler throws or answers
-   * what is refused — `discarded` runs then instead, before the 500 is sent,
+   * what is refused — `discarded` runs then instead, before the 500 is sent
+   * (waited on for 5 s at most),
    * to undo what the handler did for the work (onceById gives its claim
    * back). Work runs on any answer taken, a retryable 409 or 503 included, so
    * work its sender's retry must not repeat goes through onceById. The
    * runtime owns both:
    * a failure is caught and written to the REST core's fault log as one line,
    * never a rejection that would stop the process, and the server's stop
-   * waits for them as for a request, within OB1_STOP_GRACE — those deferred
-   * while the handler or deferred work runs; one from a timer the handler
-   * left is outside that count. Its sender has its 2xx by then and resends
+   * waits for them as for a request, within OB1_STOP_GRACE — counted from
+   * when each is deferred, so one from a timer the handler left is waited for
+   * only if it is deferred before the stop finds nothing running. Its sender has its 2xx by then and resends
    * nothing: work that fails is told only to the fault log, and work a crash
    * or the stop's cut ends only to the stop's count of what it cut, if to
    * anything.
@@ -346,12 +347,16 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   });
   if (!claim.claimed) return claim.thoughtId ? { duplicate: claim.thoughtId } : { inFlight: true };
   const claimedAt = claim.at;
-  // One that cannot be given back lapses with the lease.
-  // Whether it was given back: one that cannot be lapses with the lease.
-  const release = (): Promise<boolean> =>
-    ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).then(() => true, () => false);
-  // What became of the claim when no thought was recorded: given back (true), not (false), or kept to lapse (null).
-  let gaveBack: boolean | null = null;
+  // What became of its own claim: given back; already no longer its own (a
+  // retry took it past the lease, or the prune); or, the DELETE failing, left
+  // to lapse at the lease (review pass 4: a DELETE that matched nothing was told as given back).
+  type Fate = "given back" | "already re-claimed or pruned" | "left to lapse at the lease";
+  const release = (): Promise<Fate> =>
+    ctx.db
+      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`)
+      .then((rows): Fate => (rows.length ? "given back" : "already re-claimed or pruned"), (): Fate => "left to lapse at the lease");
+  // What became of the claim when no thought was recorded; null, kept to lapse (a thoughtId that is no uuid).
+  let gaveBack: Fate | null = null;
   let captured = true;
   const finish = async (): Promise<T> => {
     let done: OnceRun<T>;
@@ -383,7 +388,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     // fault names the delivery — short, so a long id leaves the fault line's
     // 300 characters to the fault (review pass 2) — and what became of its
     // claim, before the fault's own words (review pass 3).
-    const named = () => `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key} (its id ${gaveBack === null ? "kept to lapse at the lease" : gaveBack ? "given back" : "left to lapse at the lease"})`;
+    const named = () => `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key} (its id ${gaveBack ?? "kept to lapse at the lease"})`;
     ctx.defer!(
       () =>
         finish().then(
@@ -398,7 +403,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
       // The handler failed after the claim: its sender is told 500 and retries, so the id is given back now, not at the lease.
       async () => {
         gaveBack = await release();
-        if (!gaveBack) throw new Error(`${named()}: its handler failed after the claim, and the claim could not be given back`);
+        if (gaveBack === "left to lapse at the lease") throw new Error(`${named()}: its handler failed after the claim, and the claim could not be given back`);
       },
     );
     return { deferred: true };
