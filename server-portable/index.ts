@@ -263,6 +263,14 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
     async (input) => say.renderDelete(await core.deleteThought(principal, input)),
     (err) => say.failed(err, { lead: "delete_thought failed: " }));
 
+  // The operator's reset of a capture-only key's settled or moved label
+  // (migration 086, SMD-2744): a write key's tool, the operator gate the
+  // database's (the key's registry kind), so a write key not classified
+  // operator sees it and is refused.
+  registerOp("reset_capture_stamp",
+    async (input) => say.renderResetCaptureStamp(await core.resetCaptureStamp(principal, input)),
+    (err) => say.failed(err, { lead: "reset_capture_stamp failed: ", hint: say.resetHint }));
+
   // Tool 12 & 13: the write half of worker_status (SMD-2132), and Tool 14,
   // run_worker's dry-run preview (SMD-2272) — core/workers.ts. Write-scoped,
   // like update/delete: none is registered for a read or capture key. The two

@@ -49,14 +49,15 @@ ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
 
-Four services, in order (six with the profile):
+The services, in order, the last two with the profile:
 
 | Service | Replaces |
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
 | `server` | Upstream's Edge Function and its deploy command |
-| `proxy` | Supabase's gateway in front of the function — the stack's one published port, with the server at `/mcp` on it ("One origin" below) |
+| `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the server at `/mcp` on it ("One origin" below) |
+| `forwarder` | — the stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
 
@@ -74,8 +75,8 @@ http://127.0.0.1:8000/mcp?key=<your key>
 
 8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
 publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
-the URL, `smoke.sh` and the `lsof` line below follow it. It is the proxy's port,
-and `/mcp` the server's path on it. A client configured before SMD-1846 at the
+the URL, `smoke.sh` and the `lsof` line below follow it. It is the port in front
+of the proxy (the forwarder's, SMD-2583), and `/mcp` the server's path on it. A client configured before SMD-1846 at the
 root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
 route ("One origin" below), until v2.0.0; give new clients `/mcp`, and move
 the old ones ("Moving a client to /mcp").
@@ -96,7 +97,7 @@ client that resolves `localhost` to `::1` first without falling back is refused
 
 The stack above builds `server` and `migrate` from the checkout, pins
 `postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
-`compose.yaml`, shared by `ollama-pull`), and `proxy` and `n8n` by digest in
+`compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder` and `n8n` by digest in
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the job
 `.github/workflows/release.yml` (SMD-1860) runs on the tag a cut is named by —
 `v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
@@ -166,7 +167,12 @@ nothing is on compose's default network:
   own Ollama and Jev, which fetch their weights there and are called there by
   name.
 - `auth-egress`, outward: the authorization server's alone.
-- `edge`, outward: the proxy's alone, where its port is published.
+- `front`, internal: the forwarder and the proxy alone, where the forwarder
+  reaches the proxy as `proxy.ob1.internal`.
+- `edge`, outward: the forwarder's alone, where the stack's port is
+  published. The proxy is on internal networks alone (`front` and `mesh`),
+  so a name it looks up that nothing holds is never asked of the host's
+  resolvers.
 
 An internal network has no route out, and a container on internal networks
 alone publishes no port, so `compose.host-ports.yaml` gives Postgres one more
@@ -174,7 +180,8 @@ network of its own, `postgres-port`, for its loopback port.
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | `proxy:8000` on `edge` and `mesh`, which nothing in the stack dials; it dials every backend on the `mesh` network, by a name resolved with no search domains: the server as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, a canary or working tier's server as `mcp.canary.ob1.internal:8000` or `mcp.working.ob1.internal:8000` while one has joined the mesh (SMD-2294), and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the server as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, a canary or working tier's server as `mcp.canary.ob1.internal:8000` or `mcp.working.ob1.internal:8000` while one has joined the mesh (SMD-2294), and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` | Nothing of its own: the forwarder's port | Through the forwarder |
 | `server` | `server:8000` on `egress` — n8n; `mcp.ob1.internal` on `mesh` — the proxy, and from where it probes the authorization server's `/healthz` (SMD-2382). It dials `postgres:5432` on `data` and the model provider on `egress`: the ADR has it on the mesh alone, which waits on its calls going through the REST core (SMD-2287) | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the two servers, board-sync, the workers and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
@@ -187,7 +194,7 @@ network of its own, `postgres-port`, for its loopback port.
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
-proxy alone, on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
+forwarder alone, in front of its proxy (SMD-2583), on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
 on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
 `/working/mcp` the others' (a bodiless 404 while that tier is stopped; stable's
 `/mcp` answers 502 then, as compose.yaml's does). Its
@@ -215,7 +222,8 @@ that, `--port` gives it its own proxy on loopback, as before.
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000` | `127.0.0.1:${SERVER_PORT:-8000}`: `/mcp`, `/canary/mcp`, `/working/mcp` | Through a TLS proxy or tunnel, as compose.yaml's proxy; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
+| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000`; `proxy.ob1.internal` on `front` | Nothing of its own: `/mcp`, `/canary/mcp`, `/working/mcp` on the forwarder's port | Through the forwarder |
+| `forwarder` | on `edge`, and dials the proxy alone on `front`, as compose.yaml's (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` | Through a TLS proxy or tunnel, as compose.yaml's; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
 | `<tier>-server` | `<tier>-server:8000` on `data` and `egress`; `mcp.<tier>.ob1.internal` (stable: `mcp.ob1.internal`) on `mesh` | Nothing of its own: its path on the proxy's port | Through the proxy |
 | `<tier>-api` | `api.<tier>.ob1.internal:8000` (stable: `api.ob1.internal`) on `mesh`, and `<tier>-api:8000` on `data` and `egress` — a key is still required for anything but `/health` and `/openapi.json` | Nothing | Nothing |
 
@@ -224,7 +232,7 @@ that, `--port` gives it its own proxy on loopback, as before.
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
-service publishes from which file — the proxy and the profile's n8n from
+service publishes from which file — the forwarder and the profile's n8n from
 `compose.yaml`, the database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
@@ -241,7 +249,7 @@ the shell does not read that file; and the trailing space anchors the port,
 since without it a Supabase CLI stack on 54321 and 54322 matches `5432` and
 reads as the database leaking)
 
-shows `127.0.0.1:<port>` for the proxy, and for 5432 nothing without the
+shows `127.0.0.1:<port>` for the forwarder, and for 5432 nothing without the
 host-ports file and `127.0.0.1:5432` with it; a line on 11434 is a
 host-installed Ollama (SETUP.md's macOS path), not the stack's — `127.0.0.1` is
 its own default and enough, since `host.containers.internal` reaches the host's
@@ -257,8 +265,9 @@ drops a probe of a closed port), so read `lsof`, not the error's wording.
 
 ## One origin: the proxy and its paths
 
-The stack publishes one port, the `proxy` service's (Traefik, pinned by digest),
-and each service is a path on it rather than a port of its own (SMD-1846). The
+The stack's one origin is the `proxy` service (Traefik, pinned by digest), behind
+the one port the stack publishes (the forwarder's, below), and each service is a
+path on it rather than a port of its own (SMD-1846). The
 paths today:
 
 | Path | Answered by |
@@ -280,14 +289,25 @@ Every backend is dialled by its name on the `mesh` network — the server as
 service name on each network it joins, and a tier's container on this mesh is
 a `server` too (SMD-2294). A name nothing on the networks holds — a tier that
 is not up, the authorization server with its profile off, this stack's own
-server while it is stopped or recreated — is forwarded to the host's
-resolvers, since the proxy is on `edge` too, an outward network, where its
-port is published (an internal network forwards no name and publishes no
-port, measured on podman 6): a resolver that answers `*.ob1.internal` itself
-(a split-horizon DNS serving `.internal`, a hostile network's) would be sent
-that route's requests, keys included. Putting the proxy on internal networks
-alone, behind a forwarder that holds the published port, closes it; that is
-the network move's second part (SMD-2583).
+server while it is stopped or recreated — stays in the stack: the proxy is
+on internal networks alone, `front` and `mesh`, and an internal network
+forwards no name it does not hold to the host's resolvers (measured on podman
+6; CI's "The proxy asks nothing outside the stack…" holds it on Docker). So a
+resolver that answers `*.ob1.internal` itself (a split-horizon DNS serving
+`.internal`, a hostile network's) is never asked (SMD-2583).
+
+A container on internal networks alone publishes no port, so the port is the
+**forwarder**'s: a small TCP forwarder on `edge` and `front`, its script
+inline in `compose.yaml` (`x-forwarder`, which `deploy/forwarder.ts` holds and
+check 28 holds the two equal). It terminates nothing and reads nothing:
+per connection it looks the proxy up as `proxy.ob1.internal.` and dials it
+only at an address on `front` — the interface no default route leaves by —
+since its own lookup reaches the host's resolvers while the proxy is down: a
+resolver answering that name gets nothing, and the forwarder logs that it
+refused. It opens each connection with the PROXY protocol's line naming the
+client, which the proxy trusts from the private ranges, so the access log and
+`X-Forwarded-For` name each client rather than the forwarder (and what may write
+that line other than the forwarder is under "Abuse limits" below).
 
 The path reaches the server as it came, prefix and all: the server answers POST
 at every path and `/health` under any prefix, so `/mcp` needs no setting there.
@@ -308,16 +328,25 @@ an `up` after a route changed recreates it: compose does not recreate a
 container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
 
+**Upgrading a stack from before SMD-2583's forwarder** is one plain `compose
+up -d` (with its `-f` files and profiles): compose recreates the proxy without
+its port, then creates the forwarder, which waits for it, on the port. On
+that first `up`, name the forwarder wherever you name the proxy (`up -d
+--build server proxy forwarder`): `up proxy` alone frees the port and never
+creates the forwarder. **Rolling back** to a `compose.yaml` from before it
+needs `up -d --remove-orphans`, or the forwarder, an orphan, keeps the port.
+
 **Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
 (with the `-f` files and profiles it runs with): compose recreates the server
 without its port, then starts the proxy on it — about 1.5 s with no answer on
 the port, measured on podman — and every client URL keeps working. The last
 30–100 ms of it is the proxy's own 404, between its start and its routes
 loading; an SDK client connected across it saw one 404 and went on (measured).
-On that first `up` name the proxy wherever you name the server (`up -d --build
-server proxy`): `up server` alone recreates the server without its port and
-never creates the proxy. Once the proxy runs, recreating the server alone is
-fine for the proxy — it keeps the port and finds the new container by name —
+On that first `up` name the proxy and the forwarder wherever you name the server
+(`up -d --build server proxy forwarder`): `up server` alone recreates the server
+without its port and never creates either. Once they run, recreating the server
+alone is fine — the forwarder keeps the port and the proxy finds the new
+container by name —
 but a rebuild names the REST core too, or the proxy, which depends on it ("The
 REST core", below): `api` runs the server's image, and a container keeps the
 image it started on. **Rolling back** to
@@ -522,7 +551,7 @@ through a tunnel. The proxy's legacy route still answers there, for a window
 that closes with **v2.0.0**, and no sooner than two weeks after the first
 release carrying this section (SMD-2306). After the window the root is the
 proxy's 404, and a client still on it stops working (SMD-2532). The port does
-not change, since the proxy publishes the same `SERVER_PORT`. Only the path
+not change: the forwarder publishes the same `SERVER_PORT` the proxy did. Only the path
 changes: add `/mcp`.
 
 **During the window.** Every answer through the legacy route carries two
@@ -632,16 +661,17 @@ baked one, so set none. Unset at build, the image reports `unknown`; a Worker
 always does (wrangler has no build arg). Rebuild with it:
 
 ```bash
-OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy
+OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
 ```
 
 The REST core runs the server's image by name, and the proxy depends on it,
 so this rebuilds and recreates it too; add `-f compose.api-public.yaml` where
 `/api` is on.
 
-`proxy` named beside `server`: the proxy waits on the server, nothing waits on
-the proxy, so `up server` alone on a stack from before SMD-1846 recreates the
-server without its port and never creates the proxy that takes it over.
+`proxy` and `forwarder` named beside `server`: the proxy waits on the server
+and the forwarder on the proxy, nothing waits on the forwarder, so `up server`
+alone on a stack from before SMD-1846 recreates the server without its port and
+never creates the forwarder that takes it over (SMD-2583).
 
 The release images carry the tagged commit — the cut's merge commit, in full
 (`.github/workflows/release.yml`) — which is not `releases.json`'s `server` field
@@ -677,8 +707,8 @@ and SMD-2238.
 What comes back after the host, the Docker daemon or a podman machine
 restarts is each container's restart policy; compose is not involved. In
 `compose.yaml` what serves is `unless-stopped`: Postgres, the two servers,
-the proxy, Ollama, n8n, the orchestration runner and the authorization
-server. What runs once is `"no"`: the migrator, `ollama-pull` and the
+the proxy, the forwarder that publishes its port, Ollama, n8n, the
+orchestration runner and the authorization server. What runs once is `"no"`: the migrator, `ollama-pull` and the
 runner's role job. `board-sync`, the two workers and `jev` are
 `on-failure:3`, so that a configuration a restart does not fix stops them
 rather than loops; count on neither runtime to start those at boot. The
@@ -757,8 +787,8 @@ podman update --restart unless-stopped open-brain-tiers-stable-postgres-1   # an
 ```
 
 **To check after a reboot**, list the stack with the `-f` files and profiles
-it was brought up with: `postgres`, `server`, `api` and `proxy` should be
-`Up`, and `/health` should answer 200. Whatever is still down, the same
+it was brought up with: `postgres`, `server`, `api`, `proxy` and `forwarder`
+should be `Up`, and `/health` should answer 200. Whatever is still down, the same
 `up -d` the stack was brought up with starts in order.
 
 ```bash
@@ -934,6 +964,20 @@ is the lockstep census alone; `db/README.md`, "The board in the brain"). The
 scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
+
+**Telling the board what consolidation found** (SMD-2681). Set
+`LINEAR_COMMENT_API_KEY` in `deploy/.env` — a Linear key of its own that can
+comment, not `LINEAR_API_KEY` — and, under the default egress policy, add
+`type:board-finding` to `OB1_EGRESS_ALLOW`.
+Each pass then ends by posting a consolidation finding between two tickets the
+board does not link (a pending `outdates` proposal, or a standing `related`,
+`evolves` or `duplicate` relation) as one comment on the newer ticket: what the
+judge found and how to act on it. It proposes only, never adding a link or
+moving a status. At most `OB1_FINDINGS_POST_CAP` (5) comments go out in any 24
+hours, and a ticket pair is told once per finding word. Without the term the
+start-up log says the step is off; `bun db/board-findings.ts --url … --dry-run`
+prints what it would post. `db/README.md`, "What it tells the board", has the
+rules.
 
 ## Extraction and consolidation as services
 
@@ -1563,7 +1607,8 @@ stable is redeployed:
 stays. It deregisters the connector only when `claude` has it at user scope
 and at a URL of the canary's: `/canary/mcp`, which no other service answers,
 on loopback (`127.0.0.1`, `localhost`, `[::1]`) or on the address stable's
-proxy is bound to, or a canary proxy's port with any path (and either with
+origin is bound to (its forwarder's, or its proxy's before SMD-2583), or a
+canary proxy's port with any path (and either with
 any `?key=`). A connector at stable's own `/mcp` is never the canary's. An
 `up` that moves the canary between stable's origin and `--port` without
 `--connect` leaves the connector where it was, and says how to move it.
@@ -1578,7 +1623,8 @@ a connector at its port stays the canary's and a re-run with `--connect`
 moves it. Only a failure after the health wait (at the smoke, or the
 connector) leaves it answering meanwhile; a
 failed refresh or health wait stops the canary's servers.
-A canary proxy's port is read from its container, running or stopped (a
+A canary proxy's port is read from its container — its forwarder's, which
+publishes it since SMD-2583, or its proxy's before that — running or stopped (a
 reboot can leave it stopped: "After a reboot" above); once that is gone, pass
 the `--port` it was stood up with.
 `claude mcp get` shows the
@@ -2211,13 +2257,20 @@ says so every five minutes. Compose's `proxy` shares `mesh` with `auth`, so
 `OB1_AUTH_TRUSTED_PROXY=proxy` resolves.
 
 Leave `OB1_AUTH_TRUSTED_PROXY` unset unless the proxy's entry is each
-client's own. Compose's proxy trusts no forwarded header, so with one hop the
-entry is the proxy's own peer: each client's address when the published port
-faces clients directly (a Linux host's port forwarding keeps the source),
-but one address for everyone behind a host tunnel (cloudflared, `tailscale
-funnel`, caddy) or a forwarder that rewrites the source (rootless podman on
-macOS showed every client as its gateway, measured). A lockout there is
-everyone's. Two hops need the tunnel to write its client into
+client's own. Compose's proxy trusts no forwarded header; it takes the
+client's address from the forwarder's PROXY protocol line (SMD-2583), so with
+one hop the entry is the address the forwarder's port saw: each client's
+when the published port faces clients directly (a Linux host's port
+forwarding keeps the source), but one address for everyone behind a host
+tunnel (cloudflared, `tailscale funnel`, caddy) or a port forwarder that
+rewrites the source (rootless podman on macOS showed every client as its
+gateway, measured). A lockout there is everyone's. The proxy trusts that line
+from the private ranges, so anything inside the stack that reaches its port —
+the mesh's servers and the authorization server — could name another
+address, and so could a process on a Linux host itself: an internal network's
+gateway is a bridge address on the host, inside the private ranges, and the host
+dials a container on one from it though no port is published (rootful podman,
+measured). Only these per-address limits read it. Two hops need the tunnel to write its client into
 `X-Forwarded-For` and the proxy to trust that header (Traefik's
 `forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
 passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters

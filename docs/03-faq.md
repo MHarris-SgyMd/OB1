@@ -188,7 +188,7 @@ When you generate a new key on openrouter.ai/keys, the old key is revoked immedi
 
    ```bash
    # edit OPENROUTER_API_KEY in deploy/.env, then
-   podman compose -f deploy/compose.yaml up -d server proxy
+   podman compose -f deploy/compose.yaml up -d server proxy forwarder
    ```
 
    A running server keeps the key it started with, so the restart is what makes the new one take effect. Every extension, worker or gateway you run under `bun` with the key in its environment is restarted the same way. (If the stack runs the `local-models` profile, there is no OpenRouter key to rotate.)

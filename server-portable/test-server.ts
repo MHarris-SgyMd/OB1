@@ -2962,4 +2962,45 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
 server.stop();
 provider.stop(true);
 
+console.log("\n[22] reset_capture_stamp's reply says the ways on by the trust the row is left at, the notice line only where fetch shows one, and a refusal by what the key is (SMD-2744)");
+{
+  const { renderResetCaptureStamp } = await import("./render.ts");
+  const ID = "00000000-0000-4000-8000-000000002744";
+  const reply = (trust: string | null, extra: Record<string, unknown> = {}) =>
+    renderResetCaptureStamp({ ok: true, value: { id: ID, reset: true, restored: true, movedBy: "bot", declines: 0, declinedBy: [], stamp: { actorKind: "agent", actorName: "hook", trust }, caller: "op", ...extra } } as never).content[0].text;
+  const atIngested = reply("ingested"), atAgent = reply("agent"), atOperator = reply("operator"), atNone = reply(null);
+  assert(/fetch shows this outside text under a notice line/.test(atIngested) && [atAgent, atNone].every((t) => !/notice line/.test(t) && /exactly as stored \(fetch's text\)/.test(t)) && !/notice line/.test(atOperator),
+    "the notice line is named only for a row left at ingested — fetch shows no notice on any other (review pass 2: an AI client stripped a real first line)");
+  assert(/- with trust "ingested": the label stays as it is, outside text, and the row is settled against every other key/.test(atIngested) && /your own key's later plain re-capture still moves it/.test(atIngested)
+      && /- plainly: the label moves to your key at trust operator — the outside-text notice goes/.test(atIngested),
+    "at ingested: both ways on, the keep settled against every OTHER key, the plain way's cost named (review pass 3)");
+  assert(/- with trust "ingested": the label stays at agent and the row is settled against every other key \(it does not mark the text as outside text/.test(atAgent) && !/keep outside text/.test(atAgent) && /- plainly: the label moves to your key at trust operator\./.test(atAgent),
+    "at agent: the ingested way does not claim to keep outside text — there is none (review pass 3)");
+  assert(/No re-capture can move this label: no key's trust outranks operator\. A text edit \(update_thought\) is what stamps the thought as yours\.$/.test(atOperator) && !/Re-capture the text/.test(atOperator),
+    "at operator: no re-capture is asked for, since none can move it (review pass 3)");
+  assert(/the label has no trust, so a re-capture by any classified key moves it: plainly, to your key at trust operator/.test(atNone) && /with trust "ingested": to your key at trust ingested, kept outside text/.test(atNone) && !/stays as it is/.test(atNone),
+    "at no trust: an ingested re-capture moves the label too, and the reply does not promise it stays (review pass 2)");
+  assert(/^Reset [0-9a-f-]{36}: the label bot's re-capture moved is back/.test(atAgent)
+      && /^Reset [0-9a-f-]{36}: 2 declines \(by op, bot\) no longer count\./.test(reply("ingested", { restored: false, movedBy: null, declines: 2, declinedBy: ["op", "bot"], caller: "someone" })),
+    "the reply names whose move it undid, and whose declines no longer count");
+  const mine = reply("ingested", { restored: true, movedBy: "op", declines: 1, declinedBy: ["op"], caller: "op" });
+  assert(/^Reset [0-9a-f-]{36}: the label your key's \(op\) re-capture moved is back.*1 decline \(by yours \(op\)\) no longer counts/.test(mine) && /This undid your own key's keep: re-capture with trust "ingested" to keep it again\./.test(mine),
+    `the caller's own move and keep are said to be its own, and how to keep it again (review pass 3) (${mine.split("\n").slice(0, 2).join(" | ")})`);
+  const othersKeep = reply("ingested", { restored: false, movedBy: null, declines: 1, declinedBy: ["bot"], caller: "op" });
+  const paddedOwn = reply("ingested", { restored: false, movedBy: null, declines: 1, declinedBy: ["op"], caller: " op " });
+  assert(!/your own key's keep/.test(othersKeep) && /your own key's keep/.test(paddedOwn),
+    "the keep is said to be the caller's own only when it is — another key's decline is not, a padded caller name still is (review pass 3)");
+  const operatorKindIngested = renderResetCaptureStamp({ ok: true, value: { id: ID, reset: true, restored: true, movedBy: "bot", declines: 0, declinedBy: [], stamp: { actorKind: "operator", actorName: "hook", trust: "ingested" }, caller: "op" } } as never).content[0].text;
+  assert(/- plainly: the label moves to your key at trust operator/.test(operatorKindIngested) && !/No re-capture can move this label/.test(operatorKindIngested),
+    "the branch is the trust's, not the kind's: an operator-kind capture key's ingested label is moved by a plain re-capture");
+  const refused = (kind: string | null, key = "plain-key") =>
+    renderResetCaptureStamp({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key, kind } } as never);
+  const unclassified = refused(null, "o'key").content[0].text, agentKey = refused("agent").content[0].text, captureKey = refused("capture-only").content[0].text;
+  assert(/is unclassified\. If it is the operator's own, classify it: SELECT set_agent_kind\('o''key', 'operator'\)/.test(unclassified) && refused(null, "k".repeat(100)).content[0].text.includes(`set_agent_kind('${"k".repeat(100)}', 'operator')`)
+      && [" padded", "two\nlines", "tab\tname"].every((k) => /classify it with set_agent_kind and the key's exact name/.test(refused(null, k).content[0].text) && !/SELECT set_agent_kind/.test(refused(null, k).content[0].text)) && /is classified agent: use the operator's own key/.test(agentKey) && !/set_agent_kind/.test(agentKey) && /is capture-only\.$/.test(captureKey),
+    `the refusal by what the key is: an unclassified one given its line (its name quoted), a classified one told to use the operator's own, a capture-only one told so (${unclassified.slice(-90)})`);
+  assert(JSON.stringify(refused("agent").structuredContent) === JSON.stringify({ code: "REFUSED_NOT_OPERATOR", retryable: false, text: agentKey }),
+    "…and neither the key's name nor its kind is in the refusal's structured content");
+}
+
 report();

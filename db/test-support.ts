@@ -38,6 +38,8 @@ export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
  * holding them, so anything with a foreign key has to be named before it.
  */
 const TABLES = [
+  // 087's posted record (SMD-2681): no foreign key either way.
+  "board_findings_posted",
   "thought_sources",
   "thought_facets",
   "thought_audit",
@@ -317,6 +319,8 @@ const FUNCTIONS = [
   "ob1_drop_relation_derivation()",
   // 085 (SMD-2664): a re-capture at a higher trust moves the stamp.
   "ob1_restamp_recapture(uuid, text, jsonb, text)",
+  // 086 (SMD-2744): the operator resets a settled or moved label.
+  "ob1_reset_capture_stamp(uuid, jsonb)",
 ];
 
 /**

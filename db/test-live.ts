@@ -55,6 +55,9 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, 
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
+import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
+import { linearClient } from "./linear-api.ts";
+import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -10918,6 +10921,367 @@ console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over
       `${pages} heap pages need ${ruleKb.toFixed(0)} kB by the rule: 8 kB under it the bitmap is lossy (${under}), 8 kB over it exact (${over})`);
   } finally {
     await sql.close();
+  }
+}
+
+console.log("\n[41] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
+{
+  const bsql = new SQL({ url: URL_!, max: 2 });
+  // The stub: every operation logged by name; a ticket's comments kept so a
+  // marker posted is read back; failNext answers one comment with an error.
+  type Op = { name: string; vars: Record<string, unknown> };
+  const ops: Op[] = [];
+  const comments = new Map<string, string[]>();
+  let failNext = false, unsuccessfulNext = false, made = 0, delayMs = 0, hangMs = 0;
+  // The next ticket read's answer, when not the ticket: another error, an empty answer, or Linear's no-such-ticket as an HTTP 400.
+  let ticketNext: null | "error" | "empty" | "http400" | "partial" = null;
+  // Linear keeps a comment as rich text and hands back markdown derived from
+  // it: an identifier comes back autolinked, a hyphen may come back escaped.
+  // The stub stores what it is sent that way, so the marker is read as Linear
+  // would return it (review pass 1).
+  const asLinearReturnsIt = (body: string) => body
+    .replace(/\b(ZQ-\d+)\b/g, (_, id: string) => `<issue id="u-${id}" href="https://linear.app/zq/issue/${id}/x">${id}</issue>`)
+    .replace(/ob1-finding/g, "ob1\\-finding");
+  const stub = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const { query, variables } = (await req.json()) as { query: string; variables: Record<string, unknown> };
+      const name = /^\s*(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "anonymous";
+      ops.push({ name, vars: variables });
+      if (name === "BoardFindingTicket") {
+        const id = String(variables.id);
+        const mode = ticketNext; ticketNext = null;
+        if (mode === "error") return Response.json({ data: { issue: null }, errors: [{ message: "Field 'comments' not found on type 'Issue'", path: ["issue", "comments"] }] });
+        if (mode === "empty") return Response.json({});
+        if (mode === "partial") return Response.json({ data: { issue: { id: `uuid-${id}`, identifier: id, comments: { nodes: [] } } }, errors: [{ message: "comments could not be read", path: ["issue", "comments"] }] });
+        if (mode === "http400") return Response.json({ errors: [{ message: "Entity not found: Issue", path: ["issue"], extensions: { code: "INVALID_INPUT", statusCode: 400 } }], data: null }, { status: 400 });
+        if (!/^ZQ-\d+$/.test(id)) return Response.json({ data: { issue: null }, errors: [{ message: "Entity not found" }] });
+        return Response.json({ data: { issue: { id: `uuid-${id}`, identifier: id, comments: { nodes: (comments.get(id) ?? []).map((body) => ({ body })) } } } });
+      }
+      if (name === "BoardFindingComment") {
+        if (hangMs) { const ms = hangMs; hangMs = 0; await Bun.sleep(ms); }
+        if (delayMs) await Bun.sleep(delayMs);
+        if (failNext) { failNext = false; return Response.json({ data: null, errors: [{ message: "rate limited" }] }); }
+        if (unsuccessfulNext) { unsuccessfulNext = false; return Response.json({ data: { commentCreate: { success: false, comment: null } } }); }
+        const on = String(variables.issueId).replace(/^uuid-/, "");
+        comments.set(on, [...(comments.get(on) ?? []), asLinearReturnsIt(String(variables.body))]);
+        return Response.json({ data: { commentCreate: { success: true, comment: { id: `c-${++made}` } } } });
+      }
+      return Response.json({ data: null, errors: [{ message: `the stub has no ${name}` }] });
+    },
+  });
+  const gql = linearClient("lin_api_test", fetch, { url: `http://127.0.0.1:${stub.port}/graphql`, timeoutMs: 5000 });
+  const allow = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "type:board-finding" }));
+  const deny = findingGate(resolveEgressPolicy({}));
+  const lines: string[] = [];
+  // Every run's report, held to one outcome per pair at the end.
+  const reports: FindingsReport[] = [];
+  const run = (o: { cap?: number; dryRun?: boolean; gate?: typeof allow; stopped?: () => boolean; db?: SQL; board?: ReadonlySet<string> } = {}): Promise<FindingsReport> =>
+    postFindings({ board: o.board, sql: o.db ?? bsql, gql: o.dryRun ? null : gql, cap: o.cap ?? 10, dryRun: o.dryRun ?? false, gate: o.gate ?? allow, stopped: o.stopped, showRefused: true, log: (l) => lines.push(l), warn: (l) => lines.push(l) }).then((r) => { reports.push(r); return r; });
+  const opNames = () => [...new Set(ops.map((o) => o.name))].sort().join(",");
+  const posts = () => ops.filter((o) => o.name === "BoardFindingComment");
+  const rowsOf = async (a: string, b: string) => (await bsql`SELECT word, posted_on, origin, comment_id, finding_ids::text[] AS ids FROM board_findings_posted WHERE ticket_a = ${a} AND ticket_b = ${b} ORDER BY word`) as { word: string; posted_on: string; origin: string; comment_id: string | null; ids: string[] }[];
+
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
+  const ticket = (n: number, what: string) => row(`ZQ-${n} — ${what} (board-findings fixture)`, { source: "linear", issue: `ZQ-${n}` });
+  const propose = async (older: { id: string; fp: string }, newer: { id: string; fp: string }, verdict = "newer_supersedes_older", confidence = 0.9, reason = "the newer ticket's plan replaces the older's") =>
+    String(((await bsql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, ${verdict}, ${confidence}::numeric, ${reason}, 0.9::float, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: unknown }).r);
+  const relate = async (newer: { id: string; fp: string }, older: { id: string; fp: string }, relation: string | null, confidence = 0.8) =>
+    ((await bsql`SELECT record_thought_relation(${newer.id}::uuid, ${older.id}::uuid, ${relation}, ${confidence}::numeric, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: { action: string; id: string | null } }).r;
+  const link = (holder: { id: string }, relation: string, target: string) =>
+    bsql`SELECT record_source_links(${holder.id}::uuid, 'linear', ${JSON.stringify([{ relation, target }])}::text::jsonb)`;
+
+  try {
+    // Whatever earlier sections left between two tickets is recorded found,
+    // so this section's runs see its own fixtures alone.
+    for (const f of await selectFindings(bsql)) {
+      await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, finding_ids) VALUES (${f.a}, ${f.b}, ${f.word}, ${f.newer}, 'found', ARRAY[${f.id}::uuid]) ON CONFLICT DO NOTHING`;
+    }
+    const z1 = await ticket(1, "the old plan"), z2 = await ticket(2, "the new plan");
+    const pid = await propose(z1, z2);
+    // A dated section row carries `ticket` alone (079's identity reads it).
+    const z4 = await ticket(4, "a feature");
+    const z3s = await row("ZQ-3 — 2026-10-01: a dated section saying the same (board-findings fixture)", { source: "linear", ticket: "ZQ-3", section: "2026-10-01" });
+    const rel34 = await relate(z3s, z4, "related", 0.7);
+    // Never posted: a session note on one side; two rows of one ticket; settled proposals; linked since; duplicate either way; a closed relation.
+    const note = await row("a session note about ZQ-5 (board-findings fixture)", { source: "claude-code" });
+    const z5 = await ticket(5, "a ticket a note talks about");
+    await propose(z5, note);
+    const z6 = await ticket(6, "one ticket"), z6s = await row("ZQ-6 — 2026-10-02: its own section (board-findings fixture)", { source: "linear", ticket: "ZQ-6", section: "2026-10-02" });
+    await propose(z6, z6s);
+    const z7 = await ticket(7, "settled a"), z8 = await ticket(8, "settled b"), z7b = await ticket(70, "settled c"), z8b = await ticket(80, "settled d"), z7c = await ticket(71, "settled e"), z8c = await ticket(81, "settled f");
+    const acc = await propose(z7, z8), rej = await propose(z7b, z8b), stl = await propose(z7c, z8c);
+    await bsql`UPDATE supersession_proposals SET status = 'accepted', reviewed_at = now(), superseding_id = newer_id WHERE id = ${acc}::uuid`;
+    await bsql`UPDATE supersession_proposals SET status = 'rejected', reviewed_at = now() WHERE id = ${rej}::uuid`;
+    await bsql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${stl}::uuid`;
+    const z9 = await ticket(9, "linked later a"), z10 = await ticket(10, "linked later b");
+    await propose(z9, z10);
+    await link(z10, "relates_to", "ZQ-9");
+    const z11 = await ticket(11, "a duplicate"), z12 = await ticket(12, "its original");
+    await propose(z11, z12);
+    await link(z11, "duplicate_of", "ZQ-12");   // the older side holds it: the reverse direction
+    const z66 = await ticket(66, "an original"), z67 = await ticket(67, "its duplicate, filed later");
+    await propose(z66, z67);
+    await link(z67, "duplicate_of", "ZQ-66");   // …and the newer side holding it
+    // A fork change record carries `ticket` too (ingest-records.ts), and a capture may: its text is not the board's.
+    const z60 = await ticket(60, "a ticket a change record names");
+    const rec = await row("ZQ-61 — the change record's own text (board-findings fixture)", { source: "fork", ticket: "ZQ-61" });
+    await propose(z60, rec);
+    // An identity that is no identifier (lower case here) never reaches a comment.
+    const z62 = await ticket(62, "a ticket"), lower = await row("zq-63 — a row whose identity is lower case (board-findings fixture)", { source: "linear", issue: "zq-63" });
+    await relate(lower, z62, "related");
+    const z13 = await ticket(13, "closed a"), z14 = await ticket(14, "closed b");
+    await relate(z14, z13, "evolves");
+    await relate(z14, z13, null);
+    // Two words on one pair: one comment, two rows.
+    const z15 = await ticket(15, "two words a"), z16 = await ticket(16, "two words b");
+    const p1516 = await propose(z15, z16, "newer_supersedes_older", 0.6, "ZQ-16 restates ZQ-15");
+    const r1516 = await relate(z16, z15, "related", 0.95);
+    // A marker already on the ticket: recorded found, not posted.
+    const z17 = await ticket(17, "told a"), z18 = await ticket(18, "told b");
+    await relate(z18, z17, "evolves");
+    // …on the OTHER ticket of the pair, as Linear hands it back: both tickets are read.
+    comments.set("ZQ-17", [asLinearReturnsIt("Some earlier discussion.\n\nob1-finding ZQ-17 ZQ-18 evolves")]);
+
+    // 1. The first run.
+    const r1 = await run();
+    const posted1 = posts();
+    const on = posted1.map((o) => String(o.vars.issueId)).sort().join(",");
+    assert(r1.posted.length === 3 && r1.found.length === 1 && r1.failed.length === 0 && on === "uuid-ZQ-16,uuid-ZQ-2,uuid-ZQ-3",
+      `the first run posts one comment per unlinked ticket pair, on the newer ticket — ZQ-2 (a proposal), ZQ-3 (a section row's relation), ZQ-16 (two words) — and nothing for the note, a change record, a lower-case identity, one ticket's two rows, the settled, the linked, a duplicate either side holds, the closed (${summaryLine(r1, 10, false).trim()}; on ${on})`);
+    assert(opNames() === "BoardFindingComment,BoardFindingTicket", `the request log holds a ticket read and a comment, nothing else — no link, no status, no edit (${opNames()})`);
+    const body2 = String(posted1.find((o) => o.vars.issueId === "uuid-ZQ-2")!.vars.body);
+    assert(/\*\*ZQ-2 outdates ZQ-1\*\* \(confidence 0\.90\): `the newer ticket's plan replaces the older's`/.test(body2) && body2.includes(`bun consolidate.ts --accept ${pid}`) && body2.includes(`--reject ${pid}`)
+        && /changed nothing on this board/.test(body2) && body2.trimEnd().endsWith("ob1-finding ZQ-1 ZQ-2 outdates"),
+      `the proposal's comment names both tickets, the direction, the confidence, the reason and how to decide it, says it changed nothing, and ends with its marker:\n${body2}`);
+    const body16 = String(posted1.find((o) => o.vars.issueId === "uuid-ZQ-16")!.vars.body);
+    assert(body16.indexOf("is related to") < body16.indexOf("outdates ZQ-15") && body16.trimEnd().endsWith("ob1-finding ZQ-15 ZQ-16 related outdates"),
+      `two words on one pair are one comment, the higher confidence first, both in the marker:\n${body16}`);
+    const rows1516 = await rowsOf("ZQ-15", "ZQ-16");
+    assert(JSON.stringify(rows1516.map((r) => [r.word, r.posted_on, r.origin, r.ids])) === JSON.stringify([["outdates", "ZQ-16", "posted", [p1516]], ["related", "ZQ-16", "posted", [r1516.id]]]) && rows1516[0].comment_id === rows1516[1].comment_id && rows1516[0].comment_id !== null,
+      `…and two rows, one per word, naming the finding ids and the one comment (${JSON.stringify(rows1516)})`);
+    const rows34 = await rowsOf("ZQ-3", "ZQ-4");
+    assert(rows34.length === 1 && rows34[0].word === "related" && rows34[0].posted_on === "ZQ-3" && rows34[0].ids[0] === rel34.id, `a section row counts as its ticket: ZQ-3 ~ ZQ-4 recorded on ZQ-3 (${JSON.stringify(rows34)})`);
+    const found = await rowsOf("ZQ-17", "ZQ-18");
+    assert(found.length === 1 && found[0].origin === "found" && found[0].comment_id === null && !comments.has("ZQ-18"),
+      `a marker already on the other ticket of the pair, as Linear returns it, is recorded found, and nothing is posted (${JSON.stringify(found)})`);
+    // A lost record: the rows gone, the comments as Linear returns them are what stop a second post.
+    await bsql`DELETE FROM board_findings_posted WHERE ticket_a = 'ZQ-1' AND ticket_b = 'ZQ-2'`;
+    const lost = await run();
+    assert(lost.posted.length === 0 && lost.found.length === 1 && posts().length === 3, `a pair whose row was lost is found on the board, autolinked and escaped as Linear returns it, and not posted again (${summaryLine(lost, 10, false).trim()})`);
+
+    // 2. A re-run: nothing to tell, so no request at all.
+    ops.length = 0;
+    const r2 = await run();
+    assert(r2.pairs === 0 && ops.length === 0, `a re-run posts nothing and asks Linear nothing (${r2.pairs} pair(s), ${ops.length} request(s))`);
+    // A re-judge that replaces the relation at another score: a new facet id, the same word — not a new finding.
+    const again = await relate(z3s, z4, "related", 0.75);
+    const r3 = await run();
+    assert(again.action === "replaced" && again.id !== rel34.id && r3.pairs === 0 && ops.length === 0, `a relation replaced at another score is not posted again (${again.action}; ${r3.pairs} pair(s))`);
+
+    // 3. The cap: three new pairs, a cap leaving two of the day's five.
+    const fresh: { id: string; fp: string }[] = [];
+    for (const n of [20, 21, 22, 23, 24, 25]) fresh.push(await ticket(n, "capped"));
+    await relate(fresh[1], fresh[0], "related", 0.9);
+    await relate(fresh[3], fresh[2], "related", 0.8);
+    await relate(fresh[5], fresh[4], "related", 0.7);
+    // Two of the first run's three count: the lost pair's row is `found` now, which never counts.
+    const r4 = await run({ cap: 4 });
+    assert(r4.postedBefore === 2 && r4.posted.length === 2 && r4.waitingOnCap === 1 && r4.posted.map((p) => p.on).join(",") === "ZQ-21,ZQ-23",
+      `with two posted today and a cap of four, two more are posted, best first, and one waits (${summaryLine(r4, 4, false).trim()})`);
+    const asked = ops.length;
+    const r5 = await run({ cap: 4 });
+    assert(r5.posted.length === 0 && r5.waitingOnCap === 1 && posts().length === 2 && ops.length === asked,
+      `…and a run the same day posts nothing more, and a pair waiting on the cap costs no Linear request (${summaryLine(r5, 4, false).trim()}; ${ops.length - asked} request(s))`);
+    await bsql`UPDATE board_findings_posted SET posted_at = posted_at - interval '25 hours' WHERE ticket_a LIKE 'ZQ-%'`;
+    const r6 = await run({ cap: 4 });
+    assert(r6.postedBefore === 0 && r6.posted.length === 1 && r6.posted[0].on === "ZQ-25", `a day later the third is posted (${summaryLine(r6, 5, false).trim()})`);
+    // A marker found on the board costs no place under the cap: the best pair is found, the next still posts.
+    const z40 = await ticket(40, "found first a"), z41 = await ticket(41, "found first b"), z42 = await ticket(42, "after it a"), z43 = await ticket(43, "after it b");
+    await relate(z41, z40, "related", 0.99);
+    await relate(z43, z42, "related", 0.5);
+    comments.set("ZQ-41", ["ob1-finding ZQ-40 ZQ-41 related"]);
+    const r6b = await run({ cap: 2 });
+    assert(r6b.postedBefore === 1 && r6b.found.length === 1 && r6b.posted.length === 1 && r6b.posted[0].on === "ZQ-43" && r6b.waitingOnCap === 0,
+      `a pair found on the board does not use the cap's one place left: the next pair is posted (${summaryLine(r6b, 2, false).trim()})`);
+    // A new word on a pair told before is a new finding: posted, with that word alone.
+    await propose(z4, z3s, "newer_supersedes_older", 0.6, "the section restates the feature");
+    const rw = await run();
+    const bodyNew = String(posts().at(-1)?.vars.body ?? "");
+    assert(rw.posted.length === 1 && rw.posted[0].on === "ZQ-3" && rw.posted[0].words.join() === "outdates" && !/is related to/.test(bodyNew) && (await rowsOf("ZQ-3", "ZQ-4")).length === 2,
+      `a pair posted as related and later judged outdates is posted again, for the new word alone (${summaryLine(rw, 10, false).trim()})`);
+
+    // 4. The egress gate, a dry run, a failed post, then the post.
+    const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");
+    await relate(z31, z30, "duplicate", 0.85);
+    ops.length = 0; lines.length = 0;
+    const r7 = await run({ gate: deny });
+    assert(r7.refused === 1 && r7.posted.length === 0 && ops.length === 0 && lines.some((l) => /not posted on ZQ-31: .*deny \(the default\)/.test(l) && /type:board-finding/.test(l) && /ZQ-31 duplicates ZQ-30/.test(l)),
+      `under the default deny the comment is refused before any request, and printed with the rule and the term that allows it (${ops.length} request(s))`);
+    const r8 = await run({ dryRun: true });
+    assert(r8.pairs === 1 && ops.length === 0 && (await rowsOf("ZQ-30", "ZQ-31")).length === 0 && lines.some((l) => /would post on ZQ-31/.test(l) && /mark one a duplicate of the other/.test(l)),
+      `a dry run prints the comment, asks Linear nothing and records nothing (${ops.length} request(s))`);
+    failNext = true;
+    const r9 = await run();
+    assert(r9.failed.length === 1 && /rate limited/.test(r9.failed[0].error) && (await rowsOf("ZQ-30", "ZQ-31")).length === 0,
+      `a post Linear refuses records nothing (${JSON.stringify(r9.failed)})`);
+    unsuccessfulNext = true;
+    const r9b = await run();
+    assert(r9b.failed.length === 1 && /did not create the comment/.test(r9b.failed[0].error) && (await rowsOf("ZQ-30", "ZQ-31")).length === 0,
+      `a post Linear answers with success false records nothing either (${JSON.stringify(r9b.failed)})`);
+    const stoppedRun = await run({ stopped: () => true });
+    assert(stoppedRun.pairs === 1 && stoppedRun.posted.length === 0 && stoppedRun.failed.length === 0, "a signal before a pair ends the step with nothing posted");
+    const r10 = await run();
+    assert(r10.posted.length === 1 && (await rowsOf("ZQ-30", "ZQ-31"))[0]?.origin === "posted", `…and the next run posts it (${summaryLine(r10, 10, false).trim()})`);
+
+    // 5. A ticket Linear does not have for this key — deleted, or out of its sight — is a fact, not a failure.
+    const gone = await row("GONE-1 — a ticket deleted in Linear, its row kept (board-findings fixture)", { source: "linear", issue: "GONE-1" });
+    const z44 = await ticket(44, "paired with a deleted ticket");
+    await relate(z44, gone, "related");
+    const r11 = await run();
+    assert(r11.unreachable.length === 1 && r11.unreachable[0].ticket === "GONE-1" && r11.failed.length === 0 && r11.posted.length === 0 && (await rowsOf("GONE-1", "ZQ-44")).length === 0,
+      `a pair with a ticket Linear cannot find is reported, not failed, and nothing is recorded (${summaryLine(r11, 10, false).trim()})`);
+    // Only Linear's no-such-ticket answer is that: another error, or an empty answer, is a failure; the answer as an HTTP 400 is still no ticket.
+    ticketNext = "error";
+    const rErr = await run();
+    ticketNext = "empty";
+    const rEmpty = await run();
+    ticketNext = "partial";
+    const rPartial = await run();
+    ticketNext = "http400";
+    const r400 = await run();
+    assert(rErr.failed.length === 1 && rErr.unreachable.length === 0 && rPartial.failed.length === 1 && rEmpty.failed.length === 1 && rEmpty.unreachable.length === 0 && r400.unreachable.length === 1 && r400.unreachable[0].ticket === "ZQ-44" && r400.failed.length === 0,
+      `a read error that is not Linear's no-such-ticket — "not found" about a field, a ticket with its comments unread, or an empty answer — fails the pair; the no-such-ticket answer sent as HTTP 400 is still no ticket (${JSON.stringify([rErr.failed, rEmpty.failed, r400.unreachable])})`);
+    // With the board's census — board-sync's — a ticket off it is not asked of Linear, and one on it the key cannot find is the key's failure.
+    const asked2 = ops.length;
+    const offIt = await run({ board: new Set(["ZQ-44"]) });
+    assert(offIt.offBoard === 1 && offIt.unreachable.length === 0 && ops.length === asked2,
+      `with the census, a pair whose ticket the board no longer lists is left alone, with no Linear request (${summaryLine(offIt, 10, false).trim()})`);
+    const onIt = await run({ board: new Set(["ZQ-44", "GONE-1"]) });
+    assert(onIt.failed.length === 1 && /which the board lists/.test(onIt.failed[0].error) && onIt.unreachable.length === 0,
+      `…and a ticket the board lists that the comment key cannot find fails: the key does not see the board (${JSON.stringify(onIt.failed)})`);
+
+    // 6. The re-gate: a marker found for one word changes the body, and the gate reads the body sent.
+    const z52 = await ticket(52, "regate a"), z53 = await ticket(53, "regate b");
+    await propose(z52, z53, "newer_supersedes_older", 0.9);
+    await relate(z53, z52, "related", 0.8);
+    comments.set("ZQ-52", ["ob1-finding ZQ-52 ZQ-53 outdates"]);
+    const onlyOutdates = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:outdates" }));
+    const r12 = await run({ gate: onlyOutdates });
+    assert(r12.foundWords === 1 && r12.found.length === 0 && r12.posted.length === 0 && !comments.get("ZQ-53") && (await rowsOf("ZQ-52", "ZQ-53")).map((r) => `${r.word}:${r.origin}`).join() === "outdates:found" && lines.some((l) => /^  not posted on ZQ-53: /.test(l)),
+      `a body that lost its found word is gated again: the text without 'outdates' is refused under marker:outdates (${summaryLine(r12, 10, false).trim()})`);
+    await run();
+
+    // 7. Two posters at once: one lock for the brain, the cap and the record re-read under it.
+    const z54 = await ticket(54, "race a"), z55 = await ticket(55, "race b"), z56 = await ticket(56, "race c"), z57 = await ticket(57, "race d");
+    await relate(z55, z54, "related", 0.9);
+    await relate(z57, z56, "related", 0.8);
+    const today = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+    const other = new SQL({ url: URL_!, max: 2 });
+    try {
+      delayMs = 150;
+      const before = posts().length;
+      const [ra, rb] = await Promise.all([run({ cap: today + 1 }), run({ cap: today + 1, db: other })]);
+      assert(posts().length - before === 1 && ra.posted.length + rb.posted.length === 1 && ra.waitingOnCap + rb.waitingOnCap >= 1,
+        `two posters at once with one place left under the cap post one comment between them (${posts().length - before} posted)`);
+      const z58 = await ticket(58, "race e"), z59 = await ticket(59, "race f");
+      await relate(z59, z58, "related", 0.99);
+      const before2 = posts().length;
+      const [rc, rd] = await Promise.all([run({ cap: 100 }), run({ cap: 100, db: other })]);
+      assert(posts().length - before2 === 2 && (comments.get("ZQ-59") ?? []).length === 1 && rc.posted.length + rd.posted.length === 2,
+        `…and two posters on one pair post it once: the second re-reads the record under the lock (${(comments.get("ZQ-59") ?? []).length} comment(s) on ZQ-59)`);
+      // Two posters on two DIFFERENT pairs with one place left: the lock is the brain's, not the pair's.
+      const z90 = await ticket(90, "cross a"), z91 = await ticket(91, "cross b"), z92 = await ticket(92, "cross c"), z93 = await ticket(93, "cross d");
+      await relate(z91, z90, "related", 0.95);
+      await relate(z93, z92, "related", 0.94);
+      const today2 = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+      const onlyZQ93 = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:ZQ-93" }));
+      const before4 = posts().length;
+      await Promise.all([run({ cap: today2 + 1 }), run({ cap: today2 + 1, db: other, gate: onlyZQ93 })]);
+      assert(posts().length - before4 === 1, `two posters starting on two different pairs with one place left post one comment between them (${posts().length - before4} posted)`);
+    } finally {
+      delayMs = 0;
+      await other.close();
+    }
+    assert(opNames() === "BoardFindingComment,BoardFindingTicket", `still nothing but ticket reads and comments in the log (${opNames()})`);
+
+    // A dry run under the cap and the gate, over several pairs: counted, not subtracted.
+    const z94 = await ticket(94, "dry a"), z95 = await ticket(95, "dry b"), z96 = await ticket(96, "dry c"), z97 = await ticket(97, "dry d");
+    await relate(z95, z94, "related", 0.5);
+    await relate(z97, z96, "related", 0.4);
+    const pendingDry = groupFindings(await selectFindings(bsql)).length;
+    const today3 = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+    const zq9 = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:ZQ-9" }));
+    const dryRun2 = await run({ dryRun: true, cap: today3 + 2, gate: zq9 });
+    // Pending, best first: the cross pair the cap left (0.95 or 0.94, allowed), GONE-1 ~ ZQ-44 (0.8, refused: no "ZQ-9"), ZQ-94 ~ ZQ-95 (allowed), ZQ-96 ~ ZQ-97 (left for the cap).
+    assert(pendingDry === 4 && dryRun2.wouldPost === 2 && dryRun2.refused === 1 && dryRun2.waitingOnCap === 1,
+      `a dry run takes the cap's places for what it would post, not for what the gate would refuse (${summaryLine(dryRun2, today3 + 2, true).trim()})`);
+    await run();
+
+    // 5. The step as board-sync sets it up from the environment.
+    const off = await findingsStep(bsql, {});
+    const bad = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_FINDINGS_POST_CAP: "101" });
+    const denied = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x" });
+    const on2 = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_EGRESS_ALLOW: "type:board-finding", OB1_FINDINGS_POST_CAP: "0" }, { url: `http://127.0.0.1:${stub.port}/graphql` });
+    assert("off" in off && /LINEAR_COMMENT_API_KEY is not set/.test(off.off) && "error" in bad && /OB1_FINDINGS_POST_CAP/.test(bad.error)
+        && "off" in denied && /egress gate refuses every comment/.test(denied.off) && "step" in on2 && on2.cap === 0,
+      `board-sync's step: off without the key, exit-2 configuration for a cap over 100, off under the default deny, on with the term (${JSON.stringify([off, bad, denied, "step" in on2 ? on2.banner : on2])})`);
+    const stubUrl = `http://127.0.0.1:${stub.port}/graphql`;
+    const z64 = await ticket(64, "step a"), z65 = await ticket(65, "step b");
+    await relate(z65, z64, "evolves", 0.9);
+    const before3 = posts().length;
+    const capped = "step" in on2 ? await on2.step.run({ dryRun: false }) : -1;
+    assert(capped === 0 && posts().length === before3, `the step reads the cap it was given: 0 posts nothing, exit 0 (${capped})`);
+    const timed = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_EGRESS_ALLOW: "type:board-finding", OB1_FINDINGS_POST_CAP: "100" }, { url: stubUrl, timeoutMs: 300 });
+    const before5 = posts().length;
+    const signalled = "step" in timed ? await timed.step.run({ dryRun: false, stopped: () => true }) : -1;
+    assert(signalled === 0 && posts().length === before5 && (await rowsOf("ZQ-64", "ZQ-65")).length === 0, `the step passes board-sync's signal through: stopped, it posts nothing (exit ${signalled})`);
+    hangMs = 3000;
+    const t0 = performance.now();
+    const hung = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
+    const took = performance.now() - t0;
+    assert(hung === 1 && took < 2000 && (await rowsOf("ZQ-64", "ZQ-65")).length === 0,
+      `a Linear that does not answer is given up on at the step's bound, records nothing, and fails the step (exit ${hung}, ${took.toFixed(0)} ms)`);
+    await Bun.sleep(3000);  // the abandoned request lands at the stub: the comment is on the board with no row
+    const fine = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
+    assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
+      `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
+
+    // A role: capture and structure are what the step needs; without INSERT on the record it is off, and a dry run needs the reads alone.
+    const FROLE = "ob1_live_findings";
+    const fUrl = URL_!.replace(/\/\/[^@]*@/, `//${FROLE}:ob1findings@`);
+    const [{ mayCreate: mayCreateF }] = (await bsql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (fUrl === URL_ || !mayCreateF) {
+      skip("the findings step under a granted role", fUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropF = () => bsql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${FROLE}') THEN EXECUTE 'DROP OWNED BY ${FROLE}'; EXECUTE 'DROP ROLE ${FROLE}'; END IF; END $$`);
+      await dropF();
+      const rs = new SQL({ url: fUrl, max: 1 });
+      try {
+        await bsql.unsafe(`CREATE ROLE ${FROLE} LOGIN PASSWORD 'ob1findings'`);
+        const granted = await migrateInProcess({ grant: FROLE, groups: "capture,structure" });
+        const full = await findingsSchemaProblem(rs);
+        await bsql.unsafe(`REVOKE INSERT ON board_findings_posted FROM ${FROLE}`);
+        const noInsert = await findingsSchemaProblem(rs), dryOk = await findingsSchemaProblem(rs, { write: false });
+        await bsql.unsafe(`REVOKE SELECT ON supersession_proposals FROM ${FROLE}`);
+        const noQueue = await findingsSchemaProblem(rs, { write: false });
+        assert(granted.code === 0 && full === null && /lacks SELECT and INSERT on board_findings_posted \(the structure group\)/.test(noInsert ?? "") && dryOk === null
+            && /lacks SELECT on supersession_proposals \(the structure group\).*--groups capture,structure/.test(noQueue ?? ""),
+          `capture and structure are the step's grants; without INSERT on the record it is off, naming it, while a dry run needs the reads alone (${JSON.stringify([full, noInsert, dryOk, noQueue])})`);
+      } finally {
+        await rs.close();
+        await dropF();
+      }
+    }
+
+    assert(reports.length > 20 && reports.every((r) => outcomes(r) === r.pairs),
+      `every run's outcome counts add up to its pairs (${reports.filter((r) => outcomes(r) !== r.pairs).map((r) => `${outcomes(r)} of ${r.pairs}`).join(", ") || `${reports.length} runs`})`);
+  } catch (err) {
+    assert(false, `[41] stopped: ${(err as Error).stack}`);
+  } finally {
+    stub.stop(true);
+    await bsql.close();
   }
 }
 
