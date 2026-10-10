@@ -453,12 +453,12 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     const failingId = `evt-${RUN}-later-fails`;
     const failing = await deferredVia(failingId, async () => { throw new Error("embedder down"); });
     await Promise.all(tracked);
-    assert(failing.status === 202 && (await rowOf(failingId)) === undefined && JSON.stringify(deferredFaults) === JSON.stringify([`delivery ${failingId}: embedder down`]),
+    assert(failing.status === 202 && (await rowOf(failingId)) === undefined && JSON.stringify(deferredFaults) === JSON.stringify([`delivery ${failingId} (its id given back): embedder down`]),
       `a deferred capture that throws: answered 202 all the same, its claim given back, one fault naming the delivery (${failing.status}, ${JSON.stringify(deferredFaults)})`);
     const refusedId = `evt-${RUN}-later-refused`;
     const refused = await deferredVia(refusedId, async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: thought, detail: "d" } as never));
     await Promise.all(tracked);
-    assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId}: no thought captured; its id given back`,
+    assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId} (its id given back): no thought captured`,
       `a deferred capture the core refuses: its claim given back and a fault naming the delivery, not lost without a word (${JSON.stringify(deferredFaults.at(-1))})`);
     // A handler that fails after claiming with defer: its sender is told 500
     // and retries, so the claim is given back now, not left to the lease.
@@ -472,7 +472,7 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     const scriptedOk = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : async () => coreOk({ id: thought })) }) as never;
     const brokenSaid = await runHook(brokenHook, { core: scriptedOk, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) },
       { headers: {}, query: {}, body: new TextEncoder().encode(brokenText), text: brokenText }).then(() => "", (e: Error) => e.message);
-    await Promise.all(tracked);
+    // Retried the moment the 500 is in hand, nothing awaited between: the discard ran before it (review pass 3).
     const retried = await deferredVia(brokenId, async () => coreOk({ id: thought }));
     await Promise.all(tracked);
     assert(brokenSaid === "the handler's own fault, after its claim" && retried.status === 202 && (await rowOf(brokenId))?.thought_id === thought,

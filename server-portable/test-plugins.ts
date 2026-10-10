@@ -825,7 +825,7 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   bound.length = 0;
   await onceById(deferring, "evt-9", async () => { throw new Error("embedder down"); }, { keepSeconds: 660, defer: true });
   const deferredThrow = await left[1]().then(() => "", (e: Error) => e.message);
-  assert(deferredThrow === "delivery evt-9: embedder down" && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true, `a deferred run that throws gives its claim back and throws on, for ctx.defer to log (${deferredThrow})`);
+  assert(deferredThrow === "delivery evt-9 (its id given back): embedder down" && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true, `a deferred run that throws gives its claim back and throws on, for ctx.defer to log (${deferredThrow})`);
   claimed = [];
   const busyDeferred = await onceById(deferring, "evt-10", async () => ({ value: 0, thoughtId: T1 }), { keepSeconds: 660, defer: true });
   assert(JSON.stringify(busyDeferred) === '{"inFlight":true}' && left.length === 2, "an id still running is in flight with defer too, and nothing is deferred");
@@ -842,12 +842,12 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   const discardBound = bound.map((b) => b.q);
   assert(discardBound.length === 1 && discardBound[0].startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz"),
     `with defer, onceById hands ctx.defer a discard that gives its own claim back, for a handler that fails after claiming (${JSON.stringify(discardBound)})`);
-  assert(nothing === "delivery events evt-12: no thought captured; its id given back" && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true,
+  assert(nothing === "delivery events evt-12 (its id given back): no thought captured" && bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ?") === true,
     `a deferred run that hands back no thought (a refusal of the core's) gives its claim back and is a fault naming the delivery, not a silent loss (${nothing})`);
   bound.length = 0;
   await onceById(deferring, "evt-13", async () => ({ value: 0, thoughtId: "U024BE7LH" }), { keepSeconds: 660, defer: true });
   const notUuidDeferred = await left.at(-1)!().then(() => "", (e: Error) => e.message);
-  assert(/^delivery evt-13: onceById: a run's thoughtId is the core's thought id/.test(notUuidDeferred) && !bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE id = ?") || b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
+  assert(/^delivery evt-13 \(its id kept to lapse at the lease\): onceById: a run's thoughtId is the core's thought id/.test(notUuidDeferred) && !bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE id = ?") || b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
     `a deferred thoughtId that is no uuid: a fault naming the delivery, its claim kept and nothing recorded (${notUuidDeferred})`);
   // A long id named short, leaving the fault line to the fault; a release that fails says so rather than claim it gave the id back.
   const failingRelease = { tx: <R>(fn: (sql: PluginSql) => Promise<R>) => fn(((strings: TemplateStringsArray, ...values: unknown[]) =>
@@ -855,8 +855,12 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   const longId = "L".repeat(167);
   await onceById({ db: failingRelease, captureSeconds: 120, defer: deferring.defer }, longId, async () => ({ value: 0, thoughtId: null }), { keepSeconds: 660, defer: true, scope: "s".repeat(32) });
   const lapsed = await left.at(-1)!().then(() => "", (e: Error) => e.message);
-  assert(lapsed === `delivery ${`${"s".repeat(32)} ${longId}`.slice(0, 61)}...: no thought captured; its id left to lapse at the lease`,
+  assert(lapsed === `delivery ${`${"s".repeat(32)} ${longId}`.slice(0, 61)}... (its id left to lapse at the lease): no thought captured`,
     `a 200-character key is named in 64, and a release that failed is told as one (${lapsed.length} characters: ${lapsed.slice(-60)})`);
+  // A discard whose release fails says so, for the handler's fault line to have its claim's fate beside it.
+  await onceById({ db: failingRelease, captureSeconds: 120, defer: deferring.defer }, "evt-14", async () => ({ value: 0, thoughtId: T1 }), { keepSeconds: 660, defer: true });
+  const stuck = await discards.at(-1)!().then(() => "", (e: Error) => e.message);
+  assert(stuck === "delivery evt-14 (its id left to lapse at the lease): its handler failed after the claim, and the claim could not be given back", `a discard whose release fails is a fault naming the delivery (${stuck})`);
   // The types a plugin meets, held by tsc: never called.
   const typed = async (flag: boolean) => {
     const later: OnceDeferred = await onceById(deferring, "t", async () => ({ value: 1, thoughtId: null }), { keepSeconds: 1, defer: true });
@@ -878,6 +882,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   let ran = 0;
   let spun = 0;
   let undone = 0;
+  let nestedRan = 0;
   let lateTried = false;
   const probe = definePlugin({ name: "probe-defer", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
     hooks: {
@@ -892,6 +897,9 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
       undone: { description: "Defers work with a discard, then fails.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }, async () => { undone++; }); throw new Error("after the claim"); } },
       bigint: { description: "Defers work, then answers a body JSON cannot write.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }, async () => { undone++; }); return { status: 202, body: { n: 1n } as never }; } },
       late: { description: "Fails, leaving a timer that defers.", handler: async (ctx) => { setTimeout(() => { lateTried = true; ctx.defer(async () => { ran += 100; }, async () => { undone++; }); }, 5); throw new Error("before the timer"); } },
+      nested: { description: "Defers work that defers more.", handler: async (ctx) => { ctx.defer(async () => { ctx.defer(async () => { nestedRan++; }); }); return { status: 202 }; } },
+      sloppy: { description: "Defers with a discard that is slow and one that fails, then fails.", handler: async (ctx) => { ctx.defer(async () => { ran += 100; }, async () => { await Bun.sleep(50); undone++; }); ctx.defer(async () => { ran += 100; }, async () => { throw new Error("could not undo"); }); throw new Error("after both"); } },
+      shifty: { description: "Answers an object read differently twice.", handler: async () => { let reads = 0; return { get status() { return reads++ ? 418 : 202; }, body: { get x() { if (reads++ > 1) throw new Error("read again"); return 1; } } } as never; } },
       odd: { description: "Defers work that fails with a message that is no string.", handler: async (ctx) => { ctx.defer(async () => { throw Object.assign(new Error(), { message: 42 }); }); return { status: 202 }; } },
     } });
   const deferApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, log: () => {}, faultLog: (l) => faults.push(l),
@@ -935,10 +943,25 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
   const bigintBody = (await r.json()) as { code?: string; message?: string };
   assert(r.status === 500 && bigintBody.code === "FAILED" && bigintBody.message === undefined && ran === ranAtUndo && undone === 2 && /\/hooks\/probe-defer\/bigint fault: .*BigInt/.test(faults.at(-1) ?? ""),
     `a body JSON cannot write is the hook's fault before its work starts: FAILED with nothing of why, a fault line, the discard run and not the work (${JSON.stringify(bigintBody)}, ${faults.at(-1)})`);
+  const trackedAtNest = tracked.length;
+  r = await post("nested");
+  await Promise.all(tracked);
+  await Promise.all(tracked);
+  assert(r.status === 202 && nestedRan === 1 && tracked.length === trackedAtNest + 2, `work that defers more: the second runs too, counted by the tracker (${nestedRan}, ${tracked.length - trackedAtNest} tracked)`);
+  const undoneBefore = undone;
+  r = await post("sloppy");
+  const undoneAtFailure = undone;
+  await Promise.all(tracked);
+  assert(r.status === 500 && undoneAtFailure === undoneBefore + 1 && faults.at(-2) === "api hook /hooks/probe-defer/sloppy deferred fault: discard: could not undo" && faults.at(-1) === "api hook /hooks/probe-defer/sloppy fault: after both",
+    `a failed handler's discards run before its 500 is in hand — their lines before its own — and a discard's failure is told as a discard's (${undoneAtFailure - undoneBefore}, ${JSON.stringify(faults.slice(-2))})`);
+  r = await post("shifty");
+  const shiftyBody = await r.text();
+  assert(r.status === 202 && shiftyBody === '{"x":1}', `the answer written is the one runHook checked, its status and body read once (${r.status} ${shiftyBody})`);
+  const undoneBeforeLate = undone;
   r = await post("late");
   await Bun.sleep(30);
   await Promise.all(tracked);
-  assert(r.status === 500 && lateTried && ran === ranAtUndo && undone === 3, `a deferral from a timer a failed handler left: its discard, never its work (ran ${ran - ranAtUndo}, undone ${undone})`);
+  assert(r.status === 500 && lateTried && ran === ranAtUndo && undone === undoneBeforeLate + 1, `a deferral from a timer a failed handler left: its discard, never its work (ran ${ran - ranAtUndo}, undone ${undone})`);
   r = await post("long");
   await Promise.all(tracked);
   const longLine = faults.at(-1) ?? "";

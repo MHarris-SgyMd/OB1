@@ -536,8 +536,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
       return c.json({ code: "FAILED", retryable: false }, 500);
     }
-    if (answer.status === 204) return c.body(null, 204);
-    return c.json(answer.body ?? {}, answer.status);
+    const { status, text } = answer;
+    if (status === 204 || text === null) return c.body(null, 204);
+    // The JSON text runHook checked before the work started, not the body read again (review pass 3).
+    return c.body(text, status, { "content-type": "application/json" });
   });
 
   // A path a route serves, sent with another method, is a 405 naming the

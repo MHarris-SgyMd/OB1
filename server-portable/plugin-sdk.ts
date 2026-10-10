@@ -144,8 +144,11 @@ export interface HookContext {
    * sender that wants one sooner than the work takes (Slack: three seconds):
    * it starts on the event loop's next turn after the handler returns an
    * answer the runtime takes, and not at all if the handler throws or answers
-   * what is refused — `discarded` runs then instead, to undo what the handler
-   * did for the work (onceById gives its claim back). The runtime owns both:
+   * what is refused — `discarded` runs then instead, before the 500 is sent,
+   * to undo what the handler did for the work (onceById gives its claim
+   * back). Work runs on any answer taken, a retryable 409 or 503 included, so
+   * work its sender's retry must not repeat goes through onceById. The
+   * runtime owns both:
    * a failure is caught and written to the REST core's fault log as one line,
    * never a rejection that would stop the process, and the server's stop
    * waits for them as for a request, within OB1_STOP_GRACE — those deferred
@@ -306,9 +309,9 @@ export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlig
  * resend while the run goes on is still told to retry. A deferred run that
  * throws, hands back no thought (a refusal of the core's, say) or a
  * `thoughtId` that is no uuid reaches the fault log, its message naming the
- * delivery (`delivery <scope> <id>: …`), and not the sender, who has its
- * answer; a run that throws with the refusal's code says more than one that
- * hands back nothing.
+ * delivery and what became of its claim (`delivery <scope> <id> (its id given
+ * back): …`), and not the sender, who has its answer; a run that throws with
+ * the refusal's code says more than one that hands back nothing.
  */
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer: true }): Promise<OnceDeferred>;
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: false }): Promise<Once<T>>;
@@ -347,18 +350,21 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   // Whether it was given back: one that cannot be lapses with the lease.
   const release = (): Promise<boolean> =>
     ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).then(() => true, () => false);
-  let released: boolean | null = null;
+  // What became of the claim when no thought was recorded: given back (true), not (false), or kept to lapse (null).
+  let gaveBack: boolean | null = null;
+  let captured = true;
   const finish = async (): Promise<T> => {
     let done: OnceRun<T>;
     try {
       done = await run();
     } catch (err) {
-      await release();
+      gaveBack = await release();
       throw err;
     }
     const thoughtId = done.thoughtId;
     if (thoughtId === null) {
-      released = await release();
+      captured = false;
+      gaveBack = await release();
       return done.value;
     }
     // Anything else would fail the record unseen. Not given back: a resend is
@@ -373,22 +379,27 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   };
   if (options.defer) {
     // Its sender has its answer: a run that captured nothing is a fault to
-    // tell, not a claim given back for a retry that will not come.
-    // Named short, so a long id leaves the fault line's 300 characters to the fault (review pass 2).
-    const named = `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key}`;
+    // tell, not a claim given back for a retry that will not come. Each
+    // fault names the delivery — short, so a long id leaves the fault line's
+    // 300 characters to the fault (review pass 2) — and what became of its
+    // claim, before the fault's own words (review pass 3).
+    const named = () => `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key} (its id ${gaveBack === null ? "kept to lapse at the lease" : gaveBack ? "given back" : "left to lapse at the lease"})`;
     ctx.defer!(
       () =>
         finish().then(
           (value) => {
-            if (released !== null) throw new Error(`${named}: no thought captured; its id ${released ? "given back" : "left to lapse at the lease"}`);
+            if (!captured) throw new Error(`${named()}: no thought captured`);
             return value;
           },
           (err: unknown) => {
-            throw new Error(`${named}: ${err instanceof Error ? err.message : String(err)}`);
+            throw new Error(`${named()}: ${err instanceof Error ? err.message : String(err)}`);
           },
         ),
       // The handler failed after the claim: its sender is told 500 and retries, so the id is given back now, not at the lease.
-      () => release(),
+      async () => {
+        gaveBack = await release();
+        if (!gaveBack) throw new Error(`${named()}: its handler failed after the claim, and the claim could not be given back`);
+      },
     );
     return { deferred: true };
   }
