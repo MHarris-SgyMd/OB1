@@ -3006,6 +3006,9 @@ if (configFailed) {
          * words it.
          */
         type Overload = { cfg: string; settings: Record<string, string>; src: string; rows: number; nargs: number; sig: string };
+        // 039's walk: the statement's ORDER BY, not a word a comment could carry
+        // (the walk index check, and the memory row's pairing, SMD-2871).
+        const WALK_ORDERS_BY_CAST = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/;
         let catalog: { mt: Overload[]; hy: { nargs: number; sig: string; src: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
@@ -3447,19 +3450,24 @@ if (configFailed) {
          * setting) when the valid HNSW indexes over thoughts and
          * thought_chunks outgrow shared_buffers — found by access method, so
          * 039's halfvec swap and any later rename read alike; an INVALID
-         * index the planner ignores is not counted, though a valid staging
-         * index built before 039 adopts it is. `filter bitmap memory` is
+         * index the planner ignores is not counted. Nor is a staging index
+         * built by hand that 039 is about to adopt, in the state it adopts
+         * from — db/config.mjs's residentIndexes has the rule — and the row
+         * says what it left out (SMD-2871). `filter bitmap memory` is
          * information only, until SMD-1464 settles the plan mode the
          * expensive bitmap depends on. db/config.mjs's memorySizing holds the
          * arithmetic and memoryRows the wording.
          */
         try {
-          const { memorySizing, memoryRows } = await import("../db/config.mjs");
+          const { memorySizing, memoryRows, residentIndexes } = await import("../db/config.mjs");
+          const indexes = (await sql`
+            SELECT c.relname AS name, t.relname AS "table", pg_relation_size(i.indexrelid)::bigint AS bytes, pg_get_indexdef(i.indexrelid) AS def
+              FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_am a ON a.oid = c.relam
+             WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks'))`)
+            .map((r: { name: string; table: string; bytes: string | number; def: string }) => ({ name: String(r.name), table: String(r.table), bytes: Number(r.bytes), def: String(r.def) }));
           const [m] = await sql`
             SELECT
-              (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
-                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
-                WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+              (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped)::int AS dim,
               COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
               current_setting('block_size')::int AS block,
               pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
@@ -3471,20 +3479,25 @@ if (configFailed) {
             add("vector index memory", "skip", why);
             add("filter bitmap memory", "skip", why);
           } else {
+            // Whether the body walks the vector column (before 039) or the
+            // cast decides which of a pair is walked; unread, nothing is left out.
+            const bodyCasts = catalog instanceof Error || !catalog.mt.length ? null : WALK_ORDERS_BY_CAST.test(catalog.mt[0].src);
             const s = memorySizing({
-              hnswBytes: Number(m.hnsw),
+              ...residentIndexes({ indexes, dim: Number(m.dim), bodyCasts }),
               sharedBuffersBytes: Number(m.shared),
               heapBytes: Number(m.heap),
               blockSize: Number(m.block),
               workMemBytes: Number(m.work),
             });
             // The rows' wording is memoryRows', where test-schema holds every branch.
-            for (const row of memoryRows(s)) add(row.name, row.status, row.detail, row.fix);
+            // As ledgerRemedy reads it: recorded, not recorded (or no ledger), or unread.
+            const ledgerHas039 = ledger.has("039") ? true : ledgerRead || !ledgerPresent ? false : null;
+            for (const row of memoryRows(s, { ledgerHas039 })) add(row.name, row.status, row.detail, row.fix);
           }
         } catch (e) {
           // Both rows, so each direct check still prints exactly one.
           const why = `could not verify: ${(e as Error).message}`;
-          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class and pg_am, and the shared_buffers and work_mem settings.";
+          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class, pg_am and pg_attribute, and the shared_buffers and work_mem settings.";
           add("vector index memory", "warn", why, reads);
           add("filter bitmap memory", "warn", why, reads);
         }
@@ -3628,7 +3641,7 @@ if (configFailed) {
           if (!mt.length) {
             add("walk index", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
           } else {
-            const bodyCasts = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/.test(mt[0].src);
+            const bodyCasts = WALK_ORDERS_BY_CAST.test(mt[0].src);
             const HALF = /USING hnsw \(\(\(embedding\)::(\w+\.)?halfvec\(\d+\)\) (\w+\.)?halfvec_cosine_ops\)$/;
             const idx = (await sql`
               SELECT n.name, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid

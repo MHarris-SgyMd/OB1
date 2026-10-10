@@ -75,6 +75,8 @@ import {
   bytesText,
   memoryRows,
   memorySizing,
+  residentIndexes,
+  REAPPLY_COMMAND,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
@@ -12949,6 +12951,82 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
          && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
          && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
     "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+  // SMD-2871: a staging index 039 is about to adopt is passed apart, sized
+  // nothing, and said in either branch, one or two of them; the warning's
+  // remedy then has 039 applied first, the way the ledger calls for, and a
+  // table 039 would build on in its transaction staged before that.
+  const stagedOne = memorySizing({ ...base, stagedBytes: 34 * MB, stagedTables: ["thoughts"] });
+  assert(stagedOne.resident.needBytes === 100 * MB && stagedOne.resident.recommend === memorySizing(base).resident.recommend && stagedOne.resident.fits
+         && stagedOne.resident.stagedBytes === 34 * MB && stagedOne.resident.stagedCount === 1 && stagedOne.resident.stagedTables.join() === "thoughts"
+         && memorySizing(base).resident.stagedBytes === 0 && memorySizing(base).resident.stagedCount === 0 && memorySizing(base).resident.builds.length === 0,
+    "a staging index's bytes are carried apart, and neither the fit nor the recommendation counts them; none by default");
+  const [okStaged] = memoryRows(stagedOne);
+  const over = { ...base, hnswBytes: 128 * MB + 1 };
+  const [warnStaged] = memoryRows(memorySizing({ ...over, stagedBytes: 43 * MB, stagedTables: ["thoughts", "thought_chunks"] }));
+  assert(okStaged.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB). Not counted: thoughts_embedding_halfvec_idx (34 MB), a staging index 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx until 039 swaps the staging index in. Run preflight again after 039"
+         && warnStaged.status === "warn" && warnStaged.detail.endsWith("(SMD-1499). Not counted: thoughts_embedding_halfvec_idx and thought_chunks_embedding_halfvec_idx (43 MB), staging indexes 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx and thought_chunks_embedding_idx until 039 swaps the staging indexes in. Run preflight again after 039"),
+    `a staging index left out is said in the ok row and the warning, one or two of them (${okStaged.detail.slice(okStaged.detail.indexOf("Not counted"), okStaged.detail.indexOf(";"))})`);
+  const SIZING = "Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB';";
+  const leadOne = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }))[0].fix ?? "";
+  const leadRecorded = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"], builds: ["thought_chunks"] }), { ledgerHas039: true })[0].fix ?? "";
+  const leadUnread = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }), { ledgerHas039: null })[0].fix ?? "";
+  const AFTER = "run preflight again after 039 and size only if it still warns (the size below is for the indexes as they stand). ";
+  const REAPPLY_STEPS = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
+  assert((warnStaged.fix ?? "").startsWith(`Apply 039: \`bun db/migrate.ts\`. 039 adopts the staging indexes, which changes the size: ${AFTER}${SIZING}`)
+         && leadOne.startsWith(`Apply 039: \`bun db/migrate.ts\`. 039 adopts the staging index, which changes the size: ${AFTER}${SIZING}`)
+         && leadUnread.startsWith(`This role could not read schema_migrations, so whether 039 is recorded is unknown: run \`bun db/migrate.ts\`, and if it applies nothing, re-apply the recorded migrations — ${REAPPLY_STEPS}. 039 adopts the staging index, which`)
+         && leadRecorded.startsWith(`First, on a brain past a million rows, build thought_chunks_embedding_halfvec_idx CONCURRENTLY, as 039's header says; otherwise 039 builds it inside its transaction, holding writers while it does. Re-apply the recorded migrations: ${REAPPLY_STEPS}. 039 adopts the staging indexes, which changes the size: ${AFTER}${SIZING}`),
+    "the warning's remedy has 039 applied before sizing: a plain migrator run where the ledger does not record it, a re-apply where it does, both where it could not be read, and a table 039 would build on staged CONCURRENTLY first; the size below said to be the indexes' as they stand");
+  // Before 039 with nothing staged — the common case, where preflight passes
+  // both tables in builds — the row and its remedy read as before SMD-2871.
+  const unstagedRows = memoryRows(memorySizing({ ...over, builds: ["thoughts", "thought_chunks"] }), { ledgerHas039: null });
+  const unstagedOk = memoryRows(memorySizing({ ...base, builds: ["thoughts", "thought_chunks"] }));
+  assert((unstagedRows[0].fix ?? "").startsWith(SIZING) && unstagedRows[0].detail.endsWith("(SMD-1499)") && unstagedOk[0].detail === okRes.detail,
+    "nothing staged: no clause and no 039-first remedy, whatever builds and the ledger say");
+  // residentIndexes: which index of a pair is walked. Left out only in the
+  // state 039 adopts from and the body walks around: anywhere else counted.
+  const W = EMBEDDING_DIM;
+  const VEC = (t: string, tail = "") => `CREATE INDEX ${t}_embedding_idx ON public.${t} USING hnsw (embedding vector_cosine_ops)${tail}`;
+  const HALFDEF = (t: string, name: string, dim = W) => `CREATE INDEX ${name} ON public.${t} USING hnsw (((embedding)::halfvec(${dim})) halfvec_cosine_ops)`;
+  const ix = (name: string, table: string, def: string, bytes: number) => ({ name, table, def, bytes });
+  const shippedVec = [ix("thoughts_embedding_idx", "thoughts", VEC("thoughts"), 30 * MB), ix("thought_chunks_embedding_idx", "thought_chunks", VEC("thought_chunks"), 60 * MB)];
+  const stage = (t: string, def = HALFDEF(t, `${t}_embedding_halfvec_idx`), bytes = t === "thoughts" ? 10 * MB : 20 * MB) => ix(`${t}_embedding_halfvec_idx`, t, def, bytes);
+  const resident = (indexes: { name: string; table: string; def: string; bytes: number }[], bodyCasts: boolean | null = false) => residentIndexes({ indexes, dim: W, bodyCasts });
+  const pair = resident([...shippedVec, stage("thoughts"), stage("thought_chunks")]);
+  const one = resident([...shippedVec, stage("thoughts")]);
+  const withM = resident([ix("thoughts_embedding_idx", "thoughts", VEC("thoughts", " WITH (m='16', ef_construction='64')"), 30 * MB), stage("thoughts")]);
+  // pgvector in a schema off the search path: pg_get_indexdef qualifies the type and both operator classes.
+  const qualified = resident([
+    ix("thoughts_embedding_idx", "thoughts", `CREATE INDEX thoughts_embedding_idx ON public.thoughts USING hnsw (embedding extensions.vector_cosine_ops)`, 30 * MB),
+    ix("thoughts_embedding_halfvec_idx", "thoughts", `CREATE INDEX thoughts_embedding_halfvec_idx ON public.thoughts USING hnsw (((embedding)::extensions.halfvec(${W})) extensions.halfvec_cosine_ops)`, 10 * MB),
+  ]);
+  assert(pair.hnswBytes === 90 * MB && pair.stagedBytes === 30 * MB && pair.stagedCount === 2 && pair.builds.length === 0
+         && one.hnswBytes === 90 * MB && one.stagedBytes === 10 * MB && one.stagedCount === 1 && one.builds.join() === "thought_chunks"
+         && withM.stagedCount === 1 && withM.hnswBytes === 30 * MB && qualified.stagedCount === 1 && qualified.hnswBytes === 30 * MB
+         && resident(shippedVec).stagedCount === 0 && resident(shippedVec).hnswBytes === 90 * MB,
+    "039's window — a body on the vector column, the vector index under the shipped name (its own build parameters or not, pgvector's schema named or not), a staging index of 039's shape — leaves the staging index out on each table it is built on, and names a table 039 would build on itself");
+  const halfShipped = (t: string) => ix(`${t}_embedding_idx`, t, HALFDEF(t, `${t}_embedding_idx`), 10 * MB);
+  assert(resident([...shippedVec.slice(0, 1), stage("thoughts"), halfShipped("thought_chunks")]).builds.length === 0
+         && resident(shippedVec).builds.join() === "thoughts,thought_chunks" && resident([]).builds.length === 0
+         && resident([...shippedVec, stage("thoughts"), stage("thought_chunks", HALFDEF("thought_chunks", "thought_chunks_embedding_halfvec_idx", W + 1))]).builds.length === 0,
+    "a table 039 builds on is one with the vector index under the shipped name and nothing under the staging one: a staging name of another shape is 039's refusal, not a build");
+  const counted = (label: string, r: { hnswBytes: number; stagedBytes: number; stagedCount: number }, total: number) =>
+    r.stagedCount === 0 && r.stagedBytes === 0 && r.hnswBytes === total ? "" : label;
+  const missed = [
+    counted("body casts (the walk index remedy's rebuild: the staging index is the one walked)", resident([...shippedVec, stage("thoughts")], true), 100 * MB),
+    counted("body unread", resident([...shippedVec, stage("thoughts")], null), 100 * MB),
+    counted("shipped index already 039's (039 skips the table)", resident([halfShipped("thoughts"), stage("thoughts")]), 20 * MB),
+    counted("no index under the shipped name", resident([stage("thoughts")]), 10 * MB),
+    counted("shipped index under another name", resident([ix("pf_aside", "thoughts", VEC("thoughts"), 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("shipped index of another operator class (no index for the walk now)", resident([ix("thoughts_embedding_idx", "thoughts", VEC("thoughts").replace("vector_cosine_ops", "vector_l2_ops"), 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("shipped index partial", resident([ix("thoughts_embedding_idx", "thoughts", `${VEC("thoughts")} WHERE (embedding IS NOT NULL)`, 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("staging index over the vector column (039 refuses it)", resident([...shippedVec.slice(0, 1), stage("thoughts", `CREATE INDEX thoughts_embedding_halfvec_idx ON public.thoughts USING hnsw (embedding vector_cosine_ops)`, 30 * MB)]), 60 * MB),
+    counted("staging index at another width", resident([...shippedVec.slice(0, 1), stage("thoughts", HALFDEF("thoughts", "thoughts_embedding_halfvec_idx", W + 1))]), 40 * MB),
+    counted("staging index with its own m (039 refuses it)", resident([...shippedVec.slice(0, 1), stage("thoughts", `${HALFDEF("thoughts", "thoughts_embedding_halfvec_idx")} WITH (m='32')`)]), 40 * MB),
+    counted("staging index on the other table's name", resident([...shippedVec.slice(0, 1), ix("thought_chunks_embedding_halfvec_idx", "thoughts", HALFDEF("thoughts", "thought_chunks_embedding_halfvec_idx"), 10 * MB)]), 40 * MB),
+  ].filter(Boolean);
+  assert(missed.length === 0,
+    `anywhere else the staging index is counted like any other: a casting or unread body, a shipped index already 039's, not there or of no use to the walk, a staging index 039 would refuse (${missed.join("; ") || "none missed"})`);
   const [noIndex] = memoryRows(memorySizing({ ...base, hnswBytes: 0 }));
   assert(noIndex.status === "ok" && noIndex.detail.startsWith("no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold"),
     `no valid HNSW index: said as none, not as an index of 0 kB (${noIndex.detail.slice(0, 60)}…)`);
