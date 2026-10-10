@@ -1437,7 +1437,9 @@ setting, each with the value compose read, quoted afresh, but for three kinds:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
-  the workers' `OB1_WORKER_KEY` and `LINEAR_API_KEY`;
+  the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
+  `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
+  comment; SMD-2882);
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the
