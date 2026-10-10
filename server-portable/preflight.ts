@@ -4575,7 +4575,7 @@ if (configFailed) {
                 : !log
                 ? null
                 : !logged
-                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment), so a search wakes the scheduler; until then it can run its passes through a session of searches."
+                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment) and recreate it — podman compose -f deploy/compose.yaml up -d server api — so a search wakes the scheduler; until then it can run its passes through a session of searches."
                   : !readable
                     ? "Grant the scheduler's role the opt-in sleep group, `bun db/migrate.ts --grant <role> --groups <its groups>,sleep` (db/README.md, \"Grants for a capturing role\"), or run it as the owner, then restart it (its start reads the privilege once) — until then a search does not wake it."
                     : null;

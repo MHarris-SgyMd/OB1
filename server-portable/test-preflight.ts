@@ -3572,7 +3572,7 @@ else {
       // The log off: writes alone wake it, a warning with the switch.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
       const offOut = await run(SQL_ENV);
-      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server/.test(fix(offOut.out, "sleep")),
+      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d server api — so/.test(fix(offOut.out, "sleep")),
         `the log off warns that a search does not wake it, with the switch (${row(offOut.out, "sleep")} | ${fix(offOut.out, "sleep")})`);
 
       // The log on but this role cannot read it: the opt-in sleep group is the fix; granted it, a search wakes it.

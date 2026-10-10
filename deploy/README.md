@@ -1223,7 +1223,10 @@ beside it`, and `awake:` with the live call that woke it. `extract-entities.ts
 --status` (the command above) reads its progress, and a status read is not a
 live call. `COMPOSE_PROFILES=sleep` in `deploy/.env` brings it back with the
 stack's `up -d`; like the workers it is `on-failure:3`, so after a reboot
-neither runtime starts it on its own ("After a reboot", above).
+neither runtime starts it on its own ("After a reboot", above). Name the
+profile on `down` too (`--profile sleep down`, or `COMPOSE_PROFILES=sleep`): a
+plain `down` removes Postgres and leaves `sleep` running, waiting for ever for
+a database that is gone.
 
 **From the `workers` profile.** Stop its followers first, and take `workers`
 out of `COMPOSE_PROFILES`: the `sleep` service refuses to run (exit 2, and
@@ -1241,6 +1244,8 @@ the two ways out: one profile or the other, each taken out of
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
+# retiring the profile: delete the rows the log or preflight names, e.g.
+podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -c "DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%'"
 podman compose -f deploy/compose.yaml --profile sleep up -d sleep
 ```
 
@@ -1248,12 +1253,15 @@ podman compose -f deploy/compose.yaml --profile sleep up -d sleep
 pass runs beside a live call) and `OB1_SLEEP_WORKERS` (each pass's workers,
 unset 1), digits only (`deploy/.env.example`). The scheduler reads its
 environment once, so recreate the service after changing any of them, the
-key or the model.
+key or the model: `podman compose -f deploy/compose.yaml --profile sleep up -d
+sleep`. A `restart` keeps the values it was created with.
 
 **Changing the model** is the `workers` profile's procedure above with `sleep`
 in place of the two followers: stop `sleep` before the change reaches it, run
-the switch, then bring back `server api sleep`. Under `sleep` the switch's
-backlog is extracted while the brain is quiet, and consolidation waits for it.
+the switch, then bring back `server api sleep`. The switch extracts the backlog
+itself, in the foreground and beside any live traffic, as it does under
+`workers`; only consolidation's new pool — the thoughts re-pooled under the
+new key — waits for the brain to go quiet.
 
 It has no budget yet (SMD-2679). Quieter banners and configuration checks at
 its start are SMD-2752.
