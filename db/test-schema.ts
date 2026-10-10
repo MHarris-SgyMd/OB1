@@ -70,6 +70,11 @@ import {
   SEARCH_THOUGHTS_HYBRID_SIGNATURE,
   SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
   stripSqlComments,
+  BITMAP_BYTES_PER_PAGE,
+  BITMAP_PAGE_SHARE_GATED,
+  bytesText,
+  memoryRows,
+  memorySizing,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
@@ -6634,9 +6639,9 @@ console.log("\n[46] Migration 050: the actor on the row — who wrote the curren
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /050/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
-  assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
-    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 085's restamp window orders by seq alone, against rows written after 050), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
-  assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.action = 'update'\) OVER \(\)\)\) AS vouched/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text — not from sorting first (fourth review pass)");
+  assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+\(a\.action = 'capture' AND NOT bool_or\(a\.texted\) OVER \(\)\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
+    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone in this ORDER BY: a pre-050 seq is heap order — second review pass; 085's restamp window orders by seq alone, against rows written after 050; 086's vouched capture sorts ahead of a newer reset), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+  assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.texted\) OVER \(\)\)\) AS vouched/.test(bfSrc) && /\(a\.action = 'update' AND NOT \(a\.diff \? 'restamped'\) AND NOT \(a\.diff \? 'restamp_reset'\)\) AS texted/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text (086: a restamp and a reset write none) — not from sorting first (fourth review pass)");
   assert(/CROSS JOIN LATERAL \([\s\S]*?THEN content_fingerprint_of\(t\.content\) END AS fp\s+OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
   assert(!/DROP TABLE/.test(bfSrc) && /CREATE TEMP TABLE %I ON COMMIT DROP/.test(bfSrc), "…and names its temp table per call, dropped at commit, with nothing dropped by hand (023's shape; CLAUDE.md's rail)");
@@ -7634,7 +7639,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("085") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 5 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -11449,8 +11454,8 @@ console.log("\n[66] Migration 073: the content's trust on the row — metadata.t
   // The shape: the three writers stamp with the event's declaration after
   // folding the payload's into it; the raw path reads the handoff; the 1-arg
   // stamp is the 2-arg with none.
-  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("085"),
-    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 085 of the backfill (073's body, a restamp a writer)");
+  assert(["update_thought", "ob1_stamp_actor", "ob1_actor_stamp", "ob1_actor_stamp_kept", "ob1_declared_trust"].every((f) => lastDefinerOf(f).startsWith("073")) && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
+    "073 is the last definer of update_thought, the stamp trigger, both stamp arms and the fold, 080 of upsert_thought (073's bodies, with 'keep') and 086 of the backfill (073's body, a restamp a writer — 085 — and a reset undoing it — 086)");
   const bodies = await Promise.all(["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"].map(src));
   assert(bodies.every((b) => /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', NULL\);\s+v_new_meta := ob1_actor_stamp\(COALESCE\(p_payload->'metadata', '\{\}'::jsonb\), v_decl->>'trust'\)/.test(b)
                        && /v_decl     := ob1_declared_trust\(v_event, p_payload->'metadata', v_old_meta\);\s+v_new_meta := ob1_actor_stamp_kept/.test(b)
@@ -12899,6 +12904,447 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   await reapply("085");
   assert(JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`)).n === 1,
     "085 re-applied: one function, and no row moved");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against shared_buffers (a warning), and the filter bitmaps against work_mem (information only) (SMD-1499, db/config.mjs)");
+{
+  // Pure arithmetic: preflight reads the numbers and prints what this returns.
+  const MB = 1048576;
+  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 8000 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
+  assert(BITMAP_BYTES_PER_PAGE === 64 && Math.abs(BITMAP_PAGE_SHARE_GATED - (1 - 1 / Math.E)) < 1e-12 && ROUTE_ESTIMATE_MIN_PAGES === 8192,
+    "an exact bitmap page costs 64 bytes, and on a heap 037's gate samples (8,192 pages up) a filter at its boundary touches at least 1 - 1/e of the pages");
+  const atPool = memorySizing({ ...base, hnswBytes: 128 * MB });
+  const overPool = memorySizing({ ...base, hnswBytes: 128 * MB + 1 });
+  assert(atPool.resident.fits && !overPool.resident.fits && overPool.resident.recommend === "192MB",
+    `indexes the size of the pool fit; one byte more does not, and the pool it needs is rounded up to 64 MB (${overPool.resident.recommend})`);
+  // Under the gate every filter takes the GIN route, so the bitmap is the whole heap.
+  const ungated = memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 });
+  assert(!ungated.bitmap.gated && ungated.bitmap.bitmapPages === 8000 && ungated.bitmap.fits && !memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 - 1 }).bitmap.fits,
+    `under 8,192 pages the bitmap is every page (${ungated.bitmap.bitmapPages}), and work_mem one byte short of it is short`);
+  const gated = memorySizing({ ...base, heapBytes: 100000 * 8192 });
+  assert(gated.bitmap.gated && gated.bitmap.bitmapPages === 63213 && gated.bitmap.needBytes === 63213 * 64 && gated.bitmap.fits,
+    `at 100,000 pages a filter at the gate's boundary touches about 1 - 1/e of them: ${gated.bitmap.bitmapPages} pages, ${gated.bitmap.needBytes} bytes, within 4 MB`);
+  const partial = memorySizing({ ...base, heapBytes: 8191 * 8192 + 1, workMemBytes: 64 * MB });
+  assert(partial.bitmap.heapPages === 8192 && partial.bitmap.gated, `a heap a byte past a page boundary counts the page it reaches into (${partial.bitmap.heapPages})`);
+  const bigBlocks = memorySizing({ ...base, heapBytes: 100000 * 8192, blockSize: 32768 });
+  assert(bigBlocks.bitmap.heapPages === 25000 && bigBlocks.bitmap.gated, `pages are counted in the server's block size (${bigBlocks.bitmap.heapPages} at 32 kB)`);
+  const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: (4143 + 837) * MB });
+  assert(tenMillion.resident.recommend === "4992MB" && tenMillion.bitmap.bitmapPages === 316121 && tenMillion.bitmap.wholeHeapBytes === 500096 * 64 && !tenMillion.bitmap.fits,
+    `SMD-1499's ten-million-row corpus (3,907 MiB heap; 4,143 + 837 MiB of HNSW): shared_buffers ${tenMillion.resident.recommend}; the gate-boundary filter's bitmap ${tenMillion.bitmap.bitmapPages} pages, the whole heap's ${tenMillion.bitmap.wholeHeapBytes} bytes, both past 4 MB`);
+  const empty = memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 });
+  assert(empty.resident.recommend === "64MB" && empty.resident.fits && empty.bitmap.fits && empty.bitmap.needBytes === 0,
+    `an empty brain fits, and its recommendation never rounds below its step (${empty.resident.recommend})`);
+  // memoryRows: every branch's wording, the resident warning's included,
+  // which no live test reaches (a pool cannot be lowered for one database).
+  const [okRes] = memoryRows(memorySizing(base));
+  const [warnRes] = memoryRows(overPool);
+  assert(okRes.name === "vector index memory" && warnRes.name === "vector index memory"
+         && okRes.status === "ok" && okRes.fix === undefined && okRes.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB)"
+         && warnRes.status === "warn" && /are 129 MB and shared_buffers is 128 MB: a vector search walks an index the buffer pool cannot hold\. The OS page cache serves the walk, but not as well — at ten million rows, .* about a third of the throughput/.test(warnRes.detail),
+    `the resident row: ok with both sizes; a warning past the pool, with the page cache's measured third (${warnRes.detail.slice(0, 60)}…)`);
+  assert(/^Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB'; then restart postgres/.test(warnRes.fix ?? "")
+         && /`<tier>-postgres`/.test(warnRes.fix ?? "")
+         && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
+         && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
+    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+  const [noIndex] = memoryRows(memorySizing({ ...base, hnswBytes: 0 }));
+  assert(noIndex.status === "ok" && noIndex.detail.startsWith("no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold"),
+    `no valid HNSW index: said as none, not as an index of 0 kB (${noIndex.detail.slice(0, 60)}…)`);
+  const ungatedRows = memoryRows(memorySizing({ ...base, heapBytes: 8000 * 8192 }));
+  const gatedFits = memoryRows(memorySizing({ ...base, heapBytes: 100000 * 8192 }));
+  const gatedWithin = memoryRows(memorySizing({ ...base, heapBytes: 10000 * 8192 }));
+  const onePage = memoryRows(memorySizing({ ...base, heapBytes: 8192 }));
+  const gatedPast = memoryRows(memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 4980 * MB }));
+  const emptyRows = memoryRows(memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 }));
+  assert([ungatedRows, gatedFits, gatedWithin, gatedPast, onePage, emptyRows].every(([, b]) => b.name === "filter bitmap memory" && b.status === "ok" && b.fix === undefined && /\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle/.test(b.detail)),
+    "the bitmap row is ok with no remedy in every regime, and names SMD-1464");
+  assert(ungatedRows[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all 8,000 of its pages: its routing count's bitmap (500 kB) fits work_mem (4 MB). Information only")
+         && !/generic-plan/.test(ungatedRows[1].detail)
+         && onePage[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching its one page: its routing count's bitmap (1 kB) fits work_mem (4 MB). Information only"),
+    "under the gate: every page (a one-page heap said as one), the routing count's bitmap, no separate generic-plan figure (it is the same heap)");
+  assert(gatedFits[1].detail.startsWith("a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least 63,213 of the thoughts heap's 100,000 pages: its routing count's bitmap (4 MB) fits work_mem (4 MB); a generic-plan GIN walk's bitmap can cover the whole heap (7 MB, past work_mem)"),
+    `above the gate: a floor of 1 - 1/e of the pages, and the whole heap for a generic-plan walk with its verdict (${gatedFits[1].detail.slice(0, 80)}…)`);
+  assert(/touches at least 6,322 of the thoughts heap's 10,000 pages: its routing count's bitmap \(396 kB\) fits work_mem \(4 MB\); a generic-plan GIN walk's bitmap can cover the whole heap \(625 kB, within work_mem\)\. Information only/.test(gatedWithin[1].detail),
+    "above the gate on a heap whose whole bitmap fits: the generic-plan figure within work_mem");
+  assert(/touches at least 316,121 of the thoughts heap's 500,096 pages: its routing count's bitmap \(20 MB\) passes work_mem \(4 MB\) and goes lossy, which costs little: under LIMIT v_exact \+ 1 it rechecks pages only until it has its rows; a generic-plan GIN walk's bitmap can cover the whole heap \(31 MB, past work_mem\)/.test(gatedPast[1].detail)
+         && emptyRows[1].detail.startsWith("the thoughts heap is empty, so no filter builds a bitmap. Information only"),
+    "past work_mem the routing count's lossiness is said to cost little; an empty heap says it builds none");
+  assert(bytesText(512) === "1 kB" && bytesText(MB - 1) === "1024 kB" && bytesText(MB) === "1 MB" && bytesText(1024 * MB - 1) === "1024 MB" && bytesText(1024 * MB) === "1.0 GB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
+    "sizes read as kB, MB, or GB to one decimal, rounded up: a size a byte past a setting never reads as equal to it");
+}
+
+console.log("\n[77] Migration 086: the operator resets a capture-only key's settled or moved label — a key the registry classifies operator, not capture-scoped; a row a capture-only key captured whose text never changed; the declines and the restamp since the latest reset no longer count, a restamp's stamp put back, one event in the operator's name — and the next re-capture is weighed afresh; the backfill reads a restamp with a reset after it as no writer (SMD-2744)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type Meta = Record<string, unknown>;
+  // [75] re-applied 085, whose restamp and backfill 086 redefines.
+  await restoreShipped("upsert_thought", "update_thought", "ob1_restamp_recapture", "backfill_thought_actors");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+
+  // The shape.
+  const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_reset_capture_stamp'`);
+  const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_reset_capture_stamp(uuid, jsonb)"])).c ?? "";
+  const rc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
+  const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
+  assert(shape.fns === 1 && /ob1:reset-is-the-operators/.test(shape.body) && /086 \/ SMD-2744/.test(c) && /086 \/ SMD-2744/.test(rc) && /086 \/ SMD-2744/.test(bc)
+      && lastDefinerOf("ob1_reset_capture_stamp").startsWith("086") && lastDefinerOf("ob1_restamp_recapture").startsWith("086") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
+    "086's one function, its sentinel in its body; it, the restamp and the backfill name 086 and the ticket, 086 the last definer of all three");
+  const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_restamp_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
+  assert((rsSrc.match(/AND \(v_since IS NULL OR [a-z]\.seq > v_since\)/g) ?? []).length === 3 && /diff \? 'restamp_reset'/.test(rsSrc),
+    "the restamp reads the row's restamp, the other agents' declines and its own since the latest reset — three reads, each bounded");
+
+  // Keys as the server sees them: agent ids from the registry.
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  const HOOK = { name: "hook-76", agent_id: await agent("a", "hook-76", "capture"), via: "test-door", scope: "capture" };
+  const HOOKX = { name: "hookx-76", agent_id: await agent("b", "hookx-76", "capture"), via: "test-door", scope: "capture" };
+  const CAPOP = { name: "capop-76", agent_id: await agent("c", "capop-76", "capture"), via: "test-door", scope: "capture" };
+  const OP = { name: "op-76", agent_id: await agent("d", "op-76", "write"), via: "test-door" };
+  const BOT = { name: "bot-76", agent_id: await agent("e", "bot-76", "write"), via: "test-door" };
+  const UNC = { name: "unc-76", agent_id: await agent("f", "unc-76", "write"), via: "test-door" };
+  // The operator's key by name only: its registry lookup failed.
+  const OPNAME = { name: "op-76", via: "test-door" };
+  await db.exec(`SELECT set_agent_kind('hook-76', 'agent'); SELECT set_agent_kind('capop-76', 'operator'); SELECT set_agent_kind('op-76', 'operator'); SELECT set_agent_kind('bot-76', 'agent')`);
+
+  const cap = async (content: string, envelope: Record<string, unknown>) =>
+    (await one<{ r: { id: string; fingerprint: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(5)])).r;
+  /** A capture as the stores make it: upsert_thought, then — landing on a row, without 'keep' — 082's note and the restamp. */
+  const capture = async (content: string, actor: Meta, trust: string | null = null) => {
+    const keep = actor.scope === "capture";
+    const r = await cap(content, { metadata: { source: "mcp" }, actor, ...(trust ? { event: { trust } } : {}), ...(keep ? { recapture: "keep" } : {}) });
+    if (r.existed && !keep) await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [r.id, JSON.stringify(actor)]);
+    const restamped = r.existed && !keep
+      ? (await one<{ r: boolean }>(`SELECT ob1_restamp_recapture($1::uuid, $2::text, $3::jsonb, $4::text) AS r`, [r.id, r.fingerprint, JSON.stringify(actor), trust])).r
+      : null;
+    return { ...r, restamped };
+  };
+  const marks = async (id: string) => {
+    const m = (await one<{ m: Meta | null }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [id]))?.m;
+    return `${m?.actor_kind ?? "-"}/${m?.actor_name ?? "-"}/${m?.trust ?? "-"}`;
+  };
+  type Reset = { ok: boolean; error?: string; reset?: boolean; restored?: boolean; declines?: number; declined_by?: string[]; moved_by?: string | null; kind?: string | null; actor_kind?: string | null; actor_name?: string | null; trust?: string | null };
+  const reset = async (id: string, actor: Meta | null) =>
+    (await one<{ r: Reset }>(`SELECT ob1_reset_capture_stamp($1::uuid, $2::jsonb) AS r`, [id, actor === null ? null : JSON.stringify(actor)])).r;
+  const events = async (id: string) => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [id])).n;
+  const lastEvent = async (id: string) => one<{ action: string; actor_name: string | null; canonical_agent_id: string | null; actor_kind: string | null; trust: string | null; diff: Meta; projected: boolean }>(
+    `SELECT a.action, a.actor_name, a.canonical_agent_id::text, a.actor_kind, a.trust, a.diff, t.updated_at = a.created_at AS projected
+       FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = $1::uuid ORDER BY a.seq DESC LIMIT 1`, [id]);
+
+  // Verify, first: a row settled by another key's decline — an agent key
+  // declaring the capture key's own trust, weighed and not higher.
+  const T1 = "[77] the hook's outside text an agent re-sends as outside text";
+  const hook1 = await capture(T1, HOOK, "ingested");
+  assert((await capture(T1, BOT, "ingested")).restamped === false && (await capture(T1, OP)).restamped === false && (await marks(hook1.id)) === "agent/hook-76/ingested",
+    `setup: an agent key's equal re-capture declines, and settles the row against the operator (${await marks(hook1.id)})`);
+  const r1 = await reset(hook1.id, OP);
+  const ev1 = await lastEvent(hook1.id);
+  assert(r1.ok === true && r1.reset === true && r1.restored === false && r1.declines === 1 && JSON.stringify(r1.declined_by) === '["bot-76"]' && r1.moved_by === null && r1.trust === "ingested" && (await marks(hook1.id)) === "agent/hook-76/ingested",
+    `the operator resets it: one decline no longer counts, nothing to put back, the stamp as it was (${JSON.stringify(r1)})`);
+  assert(ev1.action === "update" && JSON.stringify(ev1.diff) === '{"restamp_reset":true}' && ev1.actor_name === "op-76" && ev1.canonical_agent_id === OP.agent_id && ev1.actor_kind === "operator" && ev1.trust === "ingested" && ev1.projected === true,
+    `…as one update event naming the operator — its key, its id, its kind — the diff the reset alone, its trust the row's, and projected (${JSON.stringify(ev1)})`);
+  assert((await capture(T1, OP)).restamped === true && (await marks(hook1.id)) === "operator/op-76/operator", `…and the operator's re-capture then moves it (${await marks(hook1.id)})`);
+
+  // Verify, second: a row settled by a name-only decline, which settles it
+  // for every caller — reset by the operator, and by the operator's key by
+  // name alone (its kind by its label, as the audit row reads it).
+  const T2 = "[77] the hook's outside text the operator's key re-sends by name only";
+  const hook2 = await capture(T2, HOOK, "ingested");
+  assert((await capture(T2, OPNAME, "ingested")).restamped === false && (await capture(T2, OP)).restamped === false && (await capture(T2, BOT)).restamped === false,
+    "setup: a name-only decline settles the row for the operator and an agent alike");
+  const r2 = await reset(hook2.id, OPNAME);
+  const ev2 = await lastEvent(hook2.id);
+  assert(r2.ok === true && r2.reset === true && r2.declines === 1 && ev2.actor_name === "op-76" && ev2.canonical_agent_id === null && ev2.actor_kind === "operator",
+    `the operator's key by name only resets it, the event naming the key and no id (${JSON.stringify(r2)}; ${JSON.stringify(ev2)})`);
+  assert((await capture(T2, OP)).restamped === true && (await marks(hook2.id)) === "operator/op-76/operator", "…and the operator's re-capture then moves it");
+
+  // A restamp moved the label: the reset puts the capture key's stamp back,
+  // the stamp's three keys alone — a key edited since stays as it is now.
+  const T3 = "[77] the hook's outside text an agent re-sends first";
+  const hook3 = await capture(T3, HOOK, "ingested");
+  assert((await capture(T3, BOT)).restamped === true && (await marks(hook3.id)) === "agent/bot-76/agent", "setup: an agent key's re-capture moved the stamp to itself");
+  await one(`SELECT update_thought($1::uuid, NULL, $2::jsonb, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook3.id, JSON.stringify({ topic: "[77] kept" }), JSON.stringify(BOT)]);
+  assert((await capture(T3, OP)).restamped === false && (await marks(hook3.id)) === "agent/bot-76/agent", "setup: …so the operator's re-capture moves nothing (moved once)");
+  const r3 = await reset(hook3.id, OP);
+  const ev3 = await lastEvent(hook3.id);
+  const meta3 = (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [hook3.id])).m;
+  assert(r3.ok === true && r3.reset === true && r3.restored === true && r3.declines === 0 && r3.moved_by === "bot-76" && (await marks(hook3.id)) === "agent/hook-76/ingested" && meta3.topic === "[77] kept" && meta3.source === "mcp",
+    `the operator's reset puts the capture key's stamp back — its kind, name and trust — and keeps the key edited since (${await marks(hook3.id)}; ${JSON.stringify(meta3)})`);
+  assert(ev3.diff.restamp_reset === true && (ev3.diff.metadata as { after: Meta }).after.trust === "ingested" && (ev3.diff.metadata as { before: Meta }).before.trust === "agent" && ev3.trust === "ingested" && ev3.actor_name === "op-76",
+    `…one event, the metadata's move in its diff beside the reset, its trust the row's (${JSON.stringify(ev3)})`);
+  assert((await capture(T3, OP)).restamped === true && (await marks(hook3.id)) === "operator/op-76/operator", "…and the operator's re-capture then moves it");
+  // An unclassified capture key's row has no kind and no trust: put back, the keys are gone.
+  const T4 = "[77] an unclassified hook's text the operator re-sends";
+  const hook4 = await capture(T4, HOOKX, "agent");
+  assert((await capture(T4, OP)).restamped === true && (await marks(hook4.id)) === "operator/op-76/operator", "setup: the operator moved an unclassified capture key's stamp");
+  const r4 = await reset(hook4.id, OP);
+  const meta4 = (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [hook4.id])).m;
+  assert(r4.restored === true && (await marks(hook4.id)) === "-/hookx-76/-" && !("actor_kind" in meta4) && !("trust" in meta4) && r4.trust === null,
+    `…reset, the stamp is the capture key's again: its name, and no kind or trust key at all (${JSON.stringify(meta4)})`);
+
+  // Since the latest reset: a reset row is weighed afresh, so a decline
+  // after it settles it again, and a second reset clears that one.
+  const T5 = "[77] the hook's text, declined, reset, declined again";
+  const hook5 = await capture(T5, HOOK, "ingested");
+  await capture(T5, BOT, "ingested");
+  assert((await reset(hook5.id, OP)).reset === true, "setup: declined, then reset");
+  assert((await capture(T5, BOT, "ingested")).restamped === false && (await capture(T5, OP)).restamped === false,
+    "a decline after the reset settles the row again: the first classified reader after it is weighed");
+  const again = await reset(hook5.id, OP);
+  assert(again.reset === true && again.declines === 1 && (await capture(T5, OP)).restamped === true, `…and a second reset counts the one decline since the first, and frees the row (${JSON.stringify(again)})`);
+  // A restamp before the latest reset is not put back a second time.
+  const T15 = "[77] the hook's text moved, reset, then declined";
+  const hook15 = await capture(T15, HOOK, "ingested");
+  await capture(T15, BOT);
+  assert((await reset(hook15.id, OP)).restored === true && (await capture(T15, BOT, "ingested")).restamped === false, "setup: moved, reset, then the agent's own equal re-capture declines");
+  const r15 = await reset(hook15.id, OP);
+  assert(r15.reset === true && r15.restored === false && r15.declines === 1 && JSON.stringify(r15.declined_by) === '["bot-76"]' && (await marks(hook15.id)) === "agent/hook-76/ingested",
+    `…so the second reset clears that decline and restores nothing: the restamp was before the first (${JSON.stringify(r15)})`);
+  // The window is since the LATEST reset: after two move-and-reset cycles a
+  // third reset has nothing (run-it, review pass 3: from the first reset,
+  // the third re-cleared what the second had).
+  const T26 = "[77] the hook's text moved and reset twice";
+  const hook26 = await capture(T26, HOOK, "ingested");
+  await capture(T26, BOT);
+  await reset(hook26.id, OP);
+  await capture(T26, BOT);
+  await reset(hook26.id, OP);
+  const n26 = await events(hook26.id);
+  const third = await reset(hook26.id, OP);
+  assert(third.reset === false && (await events(hook26.id)) === n26 && (await marks(hook26.id)) === "agent/hook-76/ingested",
+    `a third reset after two move-and-reset cycles has nothing to reset (${JSON.stringify(third)})`);
+  // Nothing settled since the latest reset, or ever: nothing written.
+  const n5 = await events(hook5.id);
+  const T6 = "[77] the hook's text nobody re-sent";
+  const hook6 = await capture(T6, HOOK, "ingested");
+  const n6 = await events(hook6.id);
+  const idle = await reset(hook6.id, OP);
+  const T7 = "[77] the hook's text, declined and reset";
+  const hook7 = await capture(T7, HOOK, "ingested");
+  await capture(T7, BOT, "ingested");
+  await reset(hook7.id, OP);
+  const n7 = await events(hook7.id);
+  const twice = await reset(hook7.id, OP);
+  assert(idle.ok === true && idle.reset === false && idle.trust === "ingested" && (await events(hook6.id)) === n6 && twice.reset === false && (await events(hook7.id)) === n7 && (await events(hook5.id)) === n5,
+    `a row nobody weighed, and a row reset with nothing since, answer reset false and write nothing (${JSON.stringify(idle)}; ${JSON.stringify(twice)})`);
+
+  // The operator alone.
+  const T8 = "[77] the hook's text a key that is not the operator would reset";
+  const hook8 = await capture(T8, HOOK, "ingested");
+  await capture(T8, BOT, "ingested");
+  const n8 = await events(hook8.id);
+  const asSession = async (setting: string) => {
+    await one(`SELECT set_config('ob1.actor', $1, false)`, [setting]);
+    try { return (await reset(hook8.id, null)).error ?? "accepted"; } finally { await one(`SELECT set_config('ob1.actor', '', false)`); }
+  };
+  const refusals = {
+    agent: (await reset(hook8.id, BOT)).error,
+    unclassified: (await reset(hook8.id, UNC)).error,
+    capOperator: (await reset(hook8.id, CAPOP)).error,
+    capScopedOperator: (await reset(hook8.id, { ...OP, scope: "capture" })).error,
+    unknownName: (await reset(hook8.id, { name: "nobody-76", via: "test-door" })).error,
+    noKey: (await reset(hook8.id, { via: "test-door" })).error,
+    noActor: (await reset(hook8.id, null)).error,
+    sessionCapture: await asSession(JSON.stringify({ ...OP, scope: "capture" })),
+    sessionBroken: await asSession('{"name": "op-76"'),
+  };
+  const kinds = { agent: (await reset(hook8.id, BOT)).kind, unclassified: (await reset(hook8.id, UNC)).kind, capOperator: (await reset(hook8.id, CAPOP)).kind };
+  assert(kinds.agent === "agent" && kinds.unclassified === null && kinds.capOperator === "capture-only",
+    `a refusal says the registry's kind for the caller — the server's way to tell a key to classify from one never to (${JSON.stringify(kinds)})`);
+  assert(Object.values(refusals).every((e) => e === "NOT_OPERATOR") && (await events(hook8.id)) === n8 && (await marks(hook8.id)) === "agent/hook-76/ingested",
+    `an agent key, an unclassified key, an operator-kind capture-only key, the operator's key scoped capture, an unknown name, an actor naming no key, no actor, a capture-scoped session and a malformed one are each refused NOT_OPERATOR, writing nothing (${JSON.stringify(refusals)})`);
+  assert((await asSession(JSON.stringify(OP))) === "accepted" && (await marks(hook8.id)) === "agent/hook-76/ingested", "…while the operator, the session's actor with none passed, resets it");
+  assert(/must be a JSON object/.test(await one(`SELECT ob1_reset_capture_stamp($1::uuid, '"op-76"'::jsonb)`, [hook8.id]).then(() => "accepted", (e: Error) => e.message)),
+    "an actor that is not an object is refused by name");
+
+  // Only a row whose label 085 moves.
+  const T9 = "[77] the operator's own outside text";
+  const op9 = await capture(T9, OP, "ingested");
+  await capture(T9, BOT, "ingested");
+  const T10 = "[77] the hook's text an agent rewrote";
+  const hook10 = await capture(T10, HOOK, "ingested");
+  await capture(T10, BOT, "ingested");
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook10.id, "[77] the agent's rewrite", JSON.stringify(BOT)]);
+  const T11 = "[77] a capture key's text from before the scope mark";
+  const pre11 = await capture(T11, { name: "hook-76", via: "test-door" }, "ingested");
+  const T12 = "[77] the hook's text an agent re-spaced";
+  const hook12 = await capture(T12, HOOK, "ingested");
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook12.id, "[77] the hook's text  an agent re-spaced", JSON.stringify(BOT)]);
+  await capture(T12, BOT, "ingested");
+  const notMine = { operators: (await reset(op9.id, OP)).error, rewritten: (await reset(hook10.id, OP)).error, unmarked: (await reset(pre11.id, OP)).error, gone: (await reset("00000000-0000-4000-8000-000000000086", OP)).error };
+  assert(notMine.operators === "NOT_CAPTURE_STAMP" && notMine.rewritten === "NOT_CAPTURE_STAMP" && notMine.unmarked === "NOT_CAPTURE_STAMP" && notMine.gone === "NOT_FOUND",
+    `a key that can read's own row, a capture key's text another key rewrote, a capture row without the scope mark: NOT_CAPTURE_STAMP; no row: NOT_FOUND (${JSON.stringify(notMine)})`);
+  assert((await reset(hook12.id, OP)).reset === true, "…while a whitespace-only edit (018's unchanged text) is no rewrite: that row resets");
+  // A rewritten row nothing settled answers before any text is hashed.
+  const T16 = "[77] the hook's text an agent rewrote, nothing settled";
+  const hook16 = await capture(T16, HOOK, "ingested");
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook16.id, "[77] the agent's rewrite, unsettled", JSON.stringify(BOT)]);
+  const r16 = await reset(hook16.id, OP);
+  assert(r16.ok === true && r16.reset === false && (await marks(hook16.id)) === "agent/bot-76/agent", `a rewritten row nothing settled answers reset false, its label the editor's (${JSON.stringify(r16)})`);
+  // Planted (no live write leaves them): metadata that is not an object.
+  const T17 = "[77] the hook's text, its metadata replaced by a raw writer";
+  const hook17 = await capture(T17, HOOK, "ingested");
+  await capture(T17, BOT);
+  const nonObject: Record<string, string | undefined> = {};
+  for (const planted of ["'[]'::jsonb", `'"text"'::jsonb`, "NULL"]) {
+    await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+    await db.exec(`UPDATE thoughts SET metadata = ${planted} WHERE id = '${hook17.id}'`);
+    await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+    nonObject[planted] = (await reset(hook17.id, OP)).error;
+  }
+  assert(Object.values(nonObject).every((e) => e === "NOT_CAPTURE_STAMP"), `metadata that is an array, a scalar or NULL is no stamp to put back: NOT_CAPTURE_STAMP (${JSON.stringify(nonObject)})`);
+  await db.exec(`DELETE FROM thoughts WHERE id = '${hook17.id}'`);  // the backfill below would stamp its NULL metadata
+
+  // The stamp put back is the capture key's as the backfill derives it: the
+  // registry's kind now, the trust never raised (cold read, review pass 1:
+  // a key demoted since came back above its kind).
+  await db.exec(`SELECT set_agent_kind('hookd-76', 'agent')`);
+  const HOOKD = { name: "hookd-76", agent_id: await agent("1", "hookd-76", "capture"), via: "test-door", scope: "capture" };
+  const T18 = "[77] a hook's text the operator moved, the hook demoted since";
+  const hook18 = await capture(T18, HOOKD);
+  await capture(T18, OP);
+  await db.exec(`SELECT set_agent_kind('hookd-76', 'ingested')`);
+  const r18 = await reset(hook18.id, OP);
+  assert(r18.restored === true && r18.moved_by === "op-76" && (await marks(hook18.id)) === "ingested/hookd-76/ingested",
+    `a capture key demoted since the restamp comes back at its kind now, its trust lowered with it — and the answer names the operator as the key whose move it undid (${await marks(hook18.id)}; ${JSON.stringify(r18)})`);
+  // Planted restamp rows (085 writes neither): one with no before-image
+  // still puts the capture key's stamp back, derived from its capture row;
+  // of two in one window, the oldest's image is the one that lowers it.
+  const T19 = "[77] the hook's text, a raw restamp with no image";
+  const hook19 = await capture(T19, HOOK, "ingested");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES ('${hook19.id}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true}'::jsonb)`);
+  const r19 = await reset(hook19.id, OP);
+  assert(r19.reset === true && r19.restored === true && (await marks(hook19.id)) === "agent/hook-76/ingested",
+    `a restamp row with no metadata image still puts the capture key's stamp back: it is the capture row's (${JSON.stringify(r19)})`);
+  const T20 = "[77] the hook's text, two raw restamps in one window";
+  const hook20 = await capture(T20, HOOK, "ingested");
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES
+    ('${hook20.id}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true, "metadata": {"before": {"source": "mcp", "actor_kind": "agent", "actor_name": "hook-76", "trust": "ingested"}, "after": {"source": "mcp", "actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}}}'::jsonb),
+    ('${hook20.id}', 'update', 'op-76', 'operator', 'operator', '{"restamped": true, "metadata": {"before": {"source": "mcp", "actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}, "after": {"source": "mcp", "actor_kind": "operator", "actor_name": "op-76", "trust": "operator"}}}'::jsonb)`);
+  const r20 = await reset(hook20.id, OP);
+  assert(r20.restored === true && r20.moved_by === "bot-76" && (await marks(hook20.id)) === "agent/hook-76/ingested",
+    `of two restamps in one window the oldest's image is put back — the capture key's, not the first restamper's (${JSON.stringify(r20)})`);
+
+  // A capture key unclassified at its capture, classified after the restamp:
+  // the reset derives the stamp the next backfill pass derives — the kind
+  // now, and the trust that kind supports for an undeclared capture — so
+  // the pass finds nothing to change (review pass 2: from the restamp's
+  // image the reset left no trust, and the pass gave it one).
+  const HOOKC = { name: "hookc-76", agent_id: await agent("2", "hookc-76", "capture"), via: "test-door", scope: "capture" };
+  const T21 = "[77] an unclassified hook's text, the hook classified after the operator moved it";
+  const hook21 = await capture(T21, HOOKC);
+  await capture(T21, OP);
+  await db.exec(`SELECT set_agent_kind('hookc-76', 'agent')`);
+  const r21 = await reset(hook21.id, OP);
+  const bf21 = (await one<{ r: { differing: number } }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert(r21.restored === true && (await marks(hook21.id)) === "agent/hookc-76/agent" && bf21.differing === 0,
+    `the reset gives a capture key classified since its capture the kind and trust the backfill gives it, and a pass after finds nothing (${await marks(hook21.id)}; ${JSON.stringify(bf21)})`);
+
+  // The registry lookup is the backfill's, by id then name, falling back to
+  // the capture row's kind (run-it, review pass 2: each arm survived a mutant).
+  // A key renamed since its capture is found by its id; a key with no agent
+  // id by its name; a key the registry holds no kind for any more by the
+  // kind its capture row recorded.
+  await db.exec(`SELECT set_agent_kind('hookr-76', 'agent'); SELECT set_agent_kind('hookn-76', 'agent'); SELECT set_agent_kind('hookg-76', 'agent')`);
+  const HOOKR = { name: "hookr-76", agent_id: await agent("3", "hookr-76", "capture"), via: "test-door", scope: "capture" };
+  const HOOKN = { name: "hookn-76", via: "test-door", scope: "capture" };
+  const HOOKG = { name: "hookg-76", agent_id: await agent("4", "hookg-76", "capture"), via: "test-door", scope: "capture" };
+  const moveThenReset = async (what: string, hook: Meta, between: string) => {
+    const t = `[77] a hook's text the operator moved, ${what}`;
+    const row = await capture(t, hook);
+    await capture(t, OP);
+    await db.exec(between);
+    const r = await reset(row.id, OP);
+    return { r, marks: await marks(row.id) };
+  };
+  const renamed = await moveThenReset("the hook renamed and demoted since", HOOKR, `UPDATE ob1_agents SET label = 'hookr-76-renamed' WHERE label = 'hookr-76'; SELECT set_agent_kind('hookr-76-renamed', 'ingested')`);
+  const nameOnly = await moveThenReset("the hook name-only, demoted since", HOOKN, `SELECT set_agent_kind('hookn-76', 'ingested')`);
+  const kindGone = await moveThenReset("the hook's kind gone from the registry since", HOOKG, `UPDATE ob1_agents SET kind = NULL WHERE label = 'hookg-76'`);
+  assert(renamed.marks === "ingested/hookr-76/ingested" && nameOnly.marks === "ingested/hookn-76/ingested" && kindGone.marks === "agent/hookg-76/agent",
+    `a renamed capture key is found by its id, a name-only one by its name, and one the registry holds no kind for by its capture row's — the name the capture's (${JSON.stringify([renamed.marks, nameOnly.marks, kindGone.marks])})`);
+  // The trust as the backfill derives it: an unclassified key's claim, filed
+  // because it could not support it, is the declaration once the key is
+  // classified; and the stamp the restamp found only lowers it — a row a
+  // demotion and a pass lowered keeps its lower word after a promotion.
+  await db.exec(`SELECT set_agent_kind('hookl-76', 'agent')`);
+  const HOOKX2 = { name: "hookx2-76", agent_id: await agent("6", "hookx2-76", "capture"), via: "test-door", scope: "capture" };
+  const HOOKL = { name: "hookl-76", agent_id: await agent("7", "hookl-76", "capture"), via: "test-door", scope: "capture" };
+  const T24 = "[77] an unclassified hook's text declaring agent, classified operator since";
+  const hook24 = await capture(T24, HOOKX2, "agent");
+  await capture(T24, OP);
+  await db.exec(`SELECT set_agent_kind('hookx2-76', 'operator')`);
+  await reset(hook24.id, OP);
+  const reset24 = await marks(hook24.id);  // read now: the pass below would mend a wrong reset
+  const T25 = "[77] a hook's text a demotion lowered, the hook promoted back before the operator moved it";
+  const hook25 = await capture(T25, HOOKL);
+  await db.exec(`SELECT set_agent_kind('hookl-76', 'ingested')`);
+  await one(`SELECT backfill_thought_actors() AS r`);
+  await db.exec(`SELECT set_agent_kind('hookl-76', 'agent')`);
+  const lowered25 = await marks(hook25.id);
+  await capture(T25, OP);
+  await reset(hook25.id, OP);
+  assert(reset24 === "operator/hookx2-76/agent" && lowered25 === "ingested/hookl-76/ingested" && (await marks(hook25.id)) === "agent/hookl-76/ingested",
+    `the claim an unclassified key filed is its declaration once classified, and the stamp the restamp found only lowers (${reset24}; ${lowered25} → ${await marks(hook25.id)})`);
+  // An unclassified capture key that declared ingested keeps it: the one
+  // trust an unclassified key supports.
+  const HOOKU = { name: "hooku-76", agent_id: await agent("5", "hooku-76", "capture"), via: "test-door", scope: "capture" };
+  const T22 = "[77] an unclassified hook's outside text the operator moved";
+  const hook22 = await capture(T22, HOOKU, "ingested");
+  await capture(T22, OP);
+  const r22 = await reset(hook22.id, OP);
+  assert(r22.restored === true && (await marks(hook22.id)) === "-/hooku-76/ingested", `an unclassified capture key's declared ingested is put back with it (${await marks(hook22.id)})`);
+  // A decline and then the same agent's restamp in one window: both undone.
+  const T23 = "[77] the hook's text an agent declined, then lifted";
+  const hook23 = await capture(T23, HOOK, "ingested");
+  const declined23 = await capture(T23, BOT, "ingested");
+  const lifted23 = await capture(T23, BOT);
+  const r23 = await reset(hook23.id, OP);
+  assert(declined23.restamped === false && lifted23.restamped === true && r23.restored === true && r23.declines === 1 && r23.moved_by === "bot-76" && (await marks(hook23.id)) === "agent/hook-76/ingested",
+    `an agent's decline and its own later restamp in one window are both undone, the label put back (${JSON.stringify(r23)})`);
+
+  // The backfill: a restamp with a reset after it is no writer; the capture
+  // is again (a mutant without the reset in the backfill put the agent's
+  // stamp back; one without the capture's place in the order stripped it).
+  const T13 = "[77] the hook's text an agent moved, then the operator reset";
+  const hook13 = await capture(T13, HOOK, "ingested");
+  await capture(T13, BOT);
+  await reset(hook13.id, OP);
+  const T14 = "[77] the hook's text reset, then the operator moved";
+  const hook14 = await capture(T14, HOOK, "ingested");
+  await capture(T14, BOT);
+  await reset(hook14.id, OP);
+  await capture(T14, OP);
+  const bf = (await one<{ r: { rows: number; differing: number } }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert(bf.differing === 0 && (await marks(hook13.id)) === "agent/hook-76/ingested" && (await marks(hook14.id)) === "operator/op-76/operator" && (await marks(hook4.id)) === "-/hookx-76/-",
+    `a backfill pass after the resets finds nothing to change — reset, the capture key is the writer; restamped after the reset, the restamp's key (${JSON.stringify(bf)}; ${await marks(hook13.id)}; ${await marks(hook14.id)})`);
+  await db.exec(`SELECT set_agent_kind('hook-76', 'ingested')`);
+  await one(`SELECT backfill_thought_actors() AS r`);
+  assert((await marks(hook13.id)) === "ingested/hook-76/ingested" && (await marks(hook14.id)) === "operator/op-76/operator",
+    `…and a reclassification reaches a reset row through its capture key, not the restamp's (${await marks(hook13.id)})`);
+  await db.exec(`SELECT set_agent_kind('hook-76', 'agent')`);
+
+  // Planted (no live write leaves it): a thought with no capture row — loaded
+  // with the audit trigger off — whose log holds a restamp and a reset after
+  // it. The reset ended the restamp and vouches for nothing itself, so nobody
+  // stands and the marks go; reading a reset's NULL after-text as matching
+  // the row's NULL hash would have made the operator's reset the writer.
+  const BARE = "76767676-7676-4767-8767-767676767676";
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${BARE}', '[77] loaded unaudited, restamped then reset', '{"actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}'::jsonb, '${unit(76)}'::vector)`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES
+    ('${BARE}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true}'::jsonb),
+    ('${BARE}', 'update', 'op-76', 'operator', 'operator', '{"restamp_reset": true}'::jsonb)`);
+  await one(`SELECT backfill_thought_actors() AS r`);
+  assert((await marks(BARE)) === "-/-/-", `a thought with no capture row, its restamp ended by a reset: nobody is the writer — not the reset's operator (${await marks(BARE)})`);
+
+  // A re-apply moves nothing.
+  const rows = JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`));
+  await reapply("086");
+  assert(JSON.stringify(await q(`SELECT id, metadata FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'ob1_reset_capture_stamp'`)).n === 1,
+    "086 re-applied: one function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
 }

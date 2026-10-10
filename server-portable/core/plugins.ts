@@ -14,6 +14,7 @@ import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
 import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
+import { failure } from "./refusal.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -299,12 +300,90 @@ export function hookPrincipal(plugin: string): Principal {
 /**
  * One delivery to an enabled webhook: the handler's answer, held to a status a
  * sender reads and a JSON object body. A handler that answers otherwise is
- * the plugin's fault, thrown.
+ * the plugin's fault, thrown. Work it defers (SMD-2767) starts once that
+ * answer has been held — its body serialised, so nothing after this fails it
+ * — on the event loop's next turn, under `track` so the stop waits for it,
+ * its failure handed to `deferredFault` as one bounded message. A handler
+ * that throws, or answers what is refused, starts none of it, so its
+ * sender's retry of the 500 does not run it twice; each deferral's
+ * `discarded` runs instead, to undo what the handler did for it (onceById's
+ * claim, given back) — awaited, within DISCARD_WAIT_MS, before the fault is
+ * thrown, so the sender's retry of the 500 finds it undone. The answer is
+ * returned as it was held — its status read once, its body as the JSON text
+ * checked — for the route to write, so nothing read again can fail it after
+ * its work has started.
  */
-export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"] }, request: HookRequest): Promise<HookAnswer> {
+export async function runHook(hook: LoadedHook, deps: { core: Core; secret: string; track?: CallOptions["track"]; deferredFault?: (message: string) => void }, request: HookRequest): Promise<HookReply> {
   const ctx = contextFor(hook.plugin, { core: deps.core, principal: hookPrincipal(hook.plugin), track: deps.track });
-  const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret }, request);
-  if (!answer || !HOOK_STATUSES.has(answer.status)) throw new Error(`${hook.path} answered status ${answer?.status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);
-  if (answer.body !== undefined && (answer.body === null || typeof answer.body !== "object" || Array.isArray(answer.body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
-  return answer;
+  // The core's settings as this delivery finds them, read only by a hook that asks.
+  const core = deps.core;
+  const deferredFault = deps.deferredFault ?? ((message: string) => console.error(`hook ${hook.path} deferred fault: ${message}`));
+  const start = (work: () => Promise<unknown>, what: "work" | "discard" = "work"): Promise<void> => {
+    // The next turn, not a microtask: one queued now would run before the
+    // answer is written, and work that spins before its first await would
+    // hold the sender's 2xx (review pass 1, measured on Bun 1.4.0). What the
+    // socket takes at once is written by then; a large answer's tail may
+    // still wait on work that spins (review pass 2).
+    const run = () =>
+      new Promise<void>((resolve) => setImmediate(resolve))
+        .then(work)
+        .then(
+          () => undefined,
+          (err) => {
+            // Never a rejection: one left unhandled stops the process, and with it every client.
+            try {
+              deferredFault(`${what === "discard" ? "discard: " : ""}${String(failure(err).message).replace(/\s+/g, " ")}`.slice(0, 300));
+            } catch {
+              // A log that throws loses the line, not the server.
+            }
+          },
+        );
+    // Counted from now, so the stop finds no gap between the request and its work.
+    return deps.track ? deps.track(run) : run();
+  };
+  // Held until the answer is: a handler that fails defers nothing, and runs each deferral's `discarded` instead.
+  const pending: { work: () => Promise<unknown>; discarded?: () => Promise<unknown> }[] = [];
+  let outcome: "held" | "answered" | "failed" = "held";
+  const defer = (work: () => Promise<unknown>, discarded?: () => Promise<unknown>) => {
+    // A function, so the work starts under the tracker and a throw before its first await is caught too.
+    if (typeof work !== "function" || (discarded !== undefined && typeof discarded !== "function")) throw new Error(`${hook.path}: ctx.defer takes functions that start the work`);
+    if (outcome === "held") pending.push({ work, discarded });
+    else if (outcome === "answered") void start(work);
+    // Deferred after its handler failed (a timer it left): never its work.
+    else if (discarded) void start(discarded, "discard");
+  };
+  let reply: HookReply;
+  try {
+    const answer = await hook.handler({ call: ctx.call, db: ctx.db, secret: deps.secret, get captureSeconds() { return core.captureSeconds(); }, defer }, request);
+    // Each read once: what is checked is what is written (review pass 3).
+    const status = answer?.status;
+    const body = answer?.body;
+    if (!answer || !HOOK_STATUSES.has(status)) throw new Error(`${hook.path} answered status ${status}: a webhook answers 200, 202, 204, 400, 401, 403, 404, 409, 413, 422 or 503`);
+    if (body !== undefined && (body === null || typeof body !== "object" || Array.isArray(body))) throw new Error(`${hook.path} answered a body that is not a JSON object`);
+    // Serialised here, so a body JSON cannot write (a BigInt, a cycle) is this
+    // hook's fault before its work starts, not the route's after (review pass 2).
+    const text = status === 204 ? null : (body === undefined ? undefined : JSON.stringify(body)) ?? "{}";
+    // The text, not the object: a toJSON that answers a string or null passes the object's check (review pass 4).
+    if (text !== null && !text.startsWith("{")) throw new Error(`${hook.path} answered a body that is not a JSON object`);
+    reply = { status, body, text };
+  } catch (err) {
+    outcome = "failed";
+    const undo = pending.splice(0).flatMap(({ discarded }) => (discarded ? [start(discarded, "discard")] : []));
+    // Before the 500, so a retry sent the moment it arrives finds the claim given back (review pass 3); bounded, so a store that hangs cannot hold it.
+    if (undo.length) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.all(undo), new Promise<void>((resolve) => { timer = setTimeout(resolve, DISCARD_WAIT_MS); })]);
+      clearTimeout(timer);
+    }
+    throw err;
+  }
+  outcome = "answered";
+  for (const { work } of pending.splice(0)) void start(work);
+  return reply;
 }
+
+/** How long a failed handler's 500 waits for its deferrals' discards: a claim's release is one short transaction. */
+export const DISCARD_WAIT_MS = 5_000;
+
+/** A webhook's answer as runHook held it: the status, the body, and the body as the JSON text the route writes (null for a 204). */
+export type HookReply = { status: HookAnswer["status"]; body?: Record<string, unknown>; text: string | null };

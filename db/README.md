@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2643 assertions: 2643 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-six (86) migrations applied, and
+`bun test-schema.ts` prints `2705 assertions: 2705 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 087 SMD-2681).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1293,15 +1293,53 @@ server before 082 wrote, the Chrome extension's pages included — stays as it
 is. Only a classified key is weighed, and a re-capture made while a key was
 unclassified is not replayed when it is classified: classify write keys
 (`set_agent_kind`) before relying on this. A label settled by another key's
-decline, or a name-only one, has no reset: a text edit by a key that can
-read, or deleting the thought and capturing the text again, stamps it
-afresh. The settled rows are those with a decline in the log —
+decline, or a name-only one, or moved by the wrong key, is the operator's to
+reset since 086 (below). The settled rows are those with a decline in the log —
 `SELECT DISTINCT thought_id FROM thought_audit WHERE diff ? 'restamp_declined'`,
 `AND canonical_agent_id IS NULL` for the name-only ones. `thought_changes`
 reads a restamp as "re-captured … the label moved to this key" and a decline
 as "re-captured … the label kept". It refuses to apply
 without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
 test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
+
+Migration 086 is the operator's way out of a label 085 settled or moved
+(SMD-2744). Under 085 the first classified key that can read to re-capture a
+capture-only key's text moves the label or declines it, and either settles
+the row against every other key — so a label could stick where the operator
+holds it wrong: another key reached the row first, or a name-only decline
+was written while the registry lookup failed. Nothing short of a text edit
+or a delete and re-capture undid it. `ob1_reset_capture_stamp(id, actor)`,
+which the server's `reset_capture_stamp` tool calls, refuses (`NOT_OPERATOR`)
+any actor that is not a key the registry classifies `operator` — by its
+agent id, else its name, the lookup the audit row's `actor_kind` is made
+by — and any capture-only actor. It refuses (`NOT_CAPTURE_STAMP`) a row
+whose label 085 does not move: no `"scope": "capture"` mark on its capture
+row. A row with nothing settled since its latest reset is left alone
+(`reset: false`), and one whose text was changed since its capture is
+refused (`NOT_CAPTURE_STAMP`). Otherwise the declines and the restamp since
+the latest reset no longer count: one update event, its diff
+`{"restamp_reset": true}`, in the operator's name, and, where a restamp moved
+the label, the metadata with `actor_kind`, `actor_name` and `trust` derived
+from the capture row exactly as `backfill_thought_actors` derives a
+capture's — the trimmed name, the registry's kind for it now, the trust the
+capture recorded (or the claim it filed) under that kind, lowered by the
+stamp the restamp found and never raised — every other key as the row holds
+it, so a pass after the reset finds nothing to change. The answer names the
+keys whose restamp and declines it undid, which may be the operator's own.
+The next classified key that can read to re-capture the text is weighed
+again, so the operator re-captures it straight after — the text as stored,
+not `fetch`'s, which shows an outside text under a notice line: plainly, and
+the label moves to its key; declaring `ingested`, and a label at `ingested`
+or `agent` stays as it is and the row is settled again against every other
+key (the operator's own later plain re-capture still moves it), while a
+label with no trust moves to the operator's key at `ingested`. An
+agent key landing in between is weighed first. `ob1_restamp_recapture` is
+085's body reading the declines and the restamp after the latest reset, and
+`backfill_thought_actors` 085's body with a reset among its candidate rows:
+a restamp with a reset after it is no writer, and the capture is the writer
+again. It refuses to apply without 046 or 085. test-schema [77],
+test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
+test-e2e-sql [13g].
 
 Migration 087 adds `board_findings_posted`, what board-sync's findings step
 posted to the Linear board (SMD-2681): one row per ticket pair and word —
@@ -2927,6 +2965,11 @@ OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts   # section F: under lo
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
+# Server settings for a run (SMD-1499): `-c name=value` pairs handed to
+# postgres, each checked before the container starts. SMD-1499's sized runs
+# set shared_buffers to the HNSW indexes' size this way.
+OB1_PG_ARGS="-c shared_buffers=1GB -c work_mem=16MB" OB1_BENCH_LOAD=1,10 ./with-postgres.sh bun bench-hnsw.ts
+
 # Before/after a redefinition of match_thoughts, from one tree: the after
 # arm's schema stops at the named migration (the function before 040 here;
 # 038 for the function before 039, 037 for the one before 038). Not with
@@ -3951,8 +3994,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2643 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1227 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2705 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1228 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

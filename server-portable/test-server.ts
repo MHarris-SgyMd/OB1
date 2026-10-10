@@ -1563,14 +1563,26 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     }).then((r) => `answered ${r.status}`, () => "cut off");
+    // Beside it, a keyed mirror held at the registry (the database never
+    // answers; its deadline is 2.5 s, past the 1 s bound): only the stop's
+    // cutOpenRequests can write its line — the MCP call above has its own
+    // abort handler, this route none (review pass 4: no test held that call).
+    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
+      .then((r) => `answered ${r.status}`, () => "cut off");
     await Bun.sleep(300);
     graced.proc.kill("SIGTERM");
     const graceCode = await exited(graced.proc, 4_000);
     const graceLog = await graced.out;
     const graceTook = performance.now() - tg;
+    await mirrorStalled;
+    const graceLines = graceLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>);
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
-      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog),
-      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
+      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === "MCP_ACCESS_KEY").length === 1,
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+    const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
+    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
+      `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
   } finally {
     for (const { proc } of [busy, idle, ctrlC, cutter, graced]) proc.kill("SIGKILL");
     silent.stop(true);
@@ -2754,9 +2766,241 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   const kept = withSseKeepalive(new Response(slow, { headers: { "content-type": "text/event-stream" } }), { intervalMs: 20, onEnd: (b) => { counted = b; } });
   const received = (await kept.arrayBuffer()).byteLength;
   assert(received > payload.byteLength && counted === payload.byteLength, `bytes counts the body (${counted}), not the keepalive frames sent beside it (${received} received)`);
+
+  // Every route has its line (SMD-1849 PR 2a): a keyed mirror with its route,
+  // tool and key's name; notFound's 405; a CORS preflight — and the keyless
+  // liveness probe's 200 none.
+  const routed = await linesOf(async () => {
+    await fetch(`${BASE}/health`).then((r) => r.text());
+    await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp`).then((r) => r.text());
+    await fetch(`${BASE}/mcp`, { method: "OPTIONS" }).then((r) => r.text());
+  });
+  const [keyedHealth, workers, notAllowed, preflight] = routed;
+  assert(routed.length === 4, `four lines for five requests — the keyless liveness probe's none (${JSON.stringify(routed)})`);
+  assert(keyedHealth?.route === "/health" && keyedHealth.tool === "brain_info" && keyedHealth.agent === "MCP_ACCESS_KEY" && keyedHealth.status === 200 && keyedHealth.outcome === "ok",
+    `a keyed /health under a prefix: its route as a template, brain_info, the key's name (${JSON.stringify(keyedHealth)})`);
+  assert(workers?.route === "/worker-status" && workers.tool === "worker_status" && workers.agent === "MCP_ACCESS_KEY" && workers.status === 200 && workers.outcome === "error" && workers.code === "FAILED",
+    `the worker-status mirror, whose store is not there: a 200 {error} answer, an \`error\` FAILED line (${JSON.stringify(workers)})`);
+  assert(notAllowed?.status === 405 && notAllowed.outcome === "refused" && !("route" in notAllowed), `a GET of the MCP endpoint: 405 \`refused\` (${JSON.stringify(notAllowed)})`);
+  assert(preflight?.method === "OPTIONS" && preflight.status === 200 && preflight.outcome === "ok", `a CORS preflight (${JSON.stringify(preflight)})`);
+
+  // The mirrors, each to its line (review pass 1): a preflight at a health path
+  // is logged (only a keyless GET or HEAD 200 there is the liveness probe); a
+  // mirror that showed a caller nothing is `refused`; a worker action's
+  // refusal carries its code and the key's name; a /jobs 404 the key's name; a
+  // key whose scope does not reach the mirror is `refused` as a keyless one is,
+  // and a worker action's store fault `error` FAILED (review pass 5).
+  const mirrors = await linesOf(async () => {
+    await fetch(`${BASE}/health`, { method: "OPTIONS" }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/health`, { method: "HEAD" }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": CAPTURE_KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-retry-failed`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`).then((r) => r.text());
+  });
+  const [healthPreflight, keylessWorkers, workerRun, noJob, captureWorkers, retryFault, keylessRun, keylessJob] = mirrors;
+  assert(mirrors.length === 8 && healthPreflight?.method === "OPTIONS" && healthPreflight.route === undefined && healthPreflight.outcome === "ok",
+    `a preflight at /health is logged; a keyless HEAD there is the liveness probe, and not (${JSON.stringify(mirrors)})`);
+  assert(keylessWorkers?.route === "/worker-status" && keylessWorkers.status === 200 && keylessWorkers.outcome === "refused" && !("agent" in keylessWorkers),
+    `a keyless mirror's 200 that shows nothing is \`refused\` (${JSON.stringify(keylessWorkers)})`);
+  assert(workerRun?.route === "/worker-run" && workerRun.tool === "run_worker" && workerRun.agent === "MCP_ACCESS_KEY" && workerRun.status === 400 && workerRun.code === "RUN_WORKER_DRAIN_NOT_AVAILABLE" && workerRun.outcome === "refused",
+    `a worker action's refusal: its code, its tool, the key's name (${JSON.stringify(workerRun)})`);
+  assert(noJob?.route === "/jobs/:id" && noJob.tool === "job_status" && noJob.agent === "MCP_ACCESS_KEY" && noJob.status === 404 && noJob.outcome === "refused",
+    `a /jobs 404: the route, job_status, the key's name (${JSON.stringify(noJob)})`);
+  assert(captureWorkers?.route === "/worker-status" && captureWorkers.status === 200 && captureWorkers.outcome === "refused" && !("agent" in captureWorkers),
+    `a capture-only key at the worker-status mirror: \`refused\`, as a keyless caller is (${JSON.stringify(captureWorkers)})`);
+  assert(retryFault?.route === "/worker-retry-failed" && retryFault.agent === "MCP_ACCESS_KEY" && retryFault.status === 200 && retryFault.outcome === "error" && retryFault.code === "FAILED",
+    `a worker action whose store is not there: a 200 {error} answer, an \`error\` FAILED line (${JSON.stringify(retryFault)})`);
+  assert([keylessRun, keylessJob].every((l) => l?.status === 200 && l.outcome === "refused" && !("agent" in l)) && keylessRun?.route === "/worker-run" && keylessJob?.route === "/jobs/:id",
+    `a keyless worker action and /jobs poll: \`refused\`, each mirror saying so of its own (review pass 7) (${JSON.stringify([keylessRun, keylessJob])})`);
+
+  // The MCP server's job stream: one line at its end with its bytes, and one
+  // `abandoned` line for a client gone before it listens, mid-stream, or by
+  // letting go of the body with no abort — and no record left open.
+  const { startJob } = await import("./jobs.ts");
+  const { hashKey } = await import("./auth.ts");
+  const { openRequestCount } = await import("./telemetry.ts");
+  const openBefore = openRequestCount();
+  const ownJob = (ms: number) => startJob({ keyHash: hashKey(KEY), name: "MCP_ACCESS_KEY", scope: "write" } as never, "scan_thoughts", async () => { await Bun.sleep(ms); return { done: true }; }).jobId;
+  const jobStream = (id: string, signal?: AbortSignal) => Promise.resolve(worker.fetch(new Request(`http://mcp/mcp/jobs/${id}/stream`, { headers: { "x-brain-key": KEY }, signal })));
+  const [jobDone] = await linesOf(() => jobStream(ownJob(80)).then((r) => r.text()));
+  assert(jobDone?.route === "/jobs/:id/stream" && jobDone.tool === "job_status" && jobDone.outcome === "ok" && typeof jobDone.bytes === "number" && (jobDone.bytes as number) > 0 && (jobDone.ms as number) >= 40,
+    `a job stream that ends: one line at its end, \`ok\` with its bytes (${JSON.stringify(jobDone)})`);
+  // Each way a client goes, alone — the line is read before anything else
+  // could end the record (the body's cancel comes after, outside the window).
+  let preBody: ReadableStream | null = null;
+  const preGone = await linesOf(async () => {
+    const pre = new AbortController();
+    pre.abort();
+    preBody = (await jobStream(ownJob(300), pre.signal)).body;
+  }, 30);
+  let midReader: ReadableStreamDefaultReader | null = null;
+  const midGone = await linesOf(async () => {
+    const mid = new AbortController();
+    midReader = (await jobStream(ownJob(300), mid.signal)).body!.getReader();
+    await midReader.read();
+    mid.abort();
+  }, 30);
+  const letGone = await linesOf(async () => {
+    const reader = (await jobStream(ownJob(300))).body!.getReader();
+    await reader.read();
+    await reader.cancel();
+  }, 30);
+  const late = await linesOf(async () => {
+    await (preBody as ReadableStream | null)?.cancel().catch(() => {});
+    await (midReader as ReadableStreamDefaultReader | null)?.cancel().catch(() => {});
+  }, 400);
+  const each = [preGone, midGone, letGone];
+  assert(each.every((g) => g.length === 1 && g[0]?.outcome === "abandoned" && g[0].route === "/jobs/:id/stream") && late.length === 0 && openRequestCount() === openBefore,
+    `gone before the route listens, by its abort mid-stream, or by letting go of the body with no abort: one \`abandoned\` line each, written then, none later, no record left open (${openRequestCount() - openBefore} open; ${JSON.stringify(each.map((g) => g.map((l) => l.outcome)))}; ${late.length} late)`);
+  // The MCP endpoint's own stream, let go of with no abort, as a runtime whose signal never aborts does.
+  embedDelayMs = 300;
+  let endpointLetGo: Record<string, unknown>[] = [];
+  try {
+    endpointLetGo = await linesOf(async () => {
+      const r = await Promise.resolve(worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: AUTH, body: JSON.stringify(callOf("search_thoughts", { query: "let go of" }, 95)) })));
+      const reader = r.body!.getReader();
+      await reader.cancel();
+    }, 30);
+    await Bun.sleep(400);
+  } finally {
+    embedDelayMs = 0;
+  }
+  assert(endpointLetGo.length === 1 && endpointLetGo[0]?.outcome === "abandoned" && endpointLetGo[0].tool === "search_thoughts",
+    `the MCP endpoint's stream let go of with no abort: \`abandoned\`, written then (${JSON.stringify(endpointLetGo)})`);
+  // The liveness probe's record is let go, not left open.
+  const beforeProbe = openRequestCount();
+  await fetch(`${BASE}/health`).then((r) => r.text());
+  assert(openRequestCount() === beforeProbe, `the dropped liveness probe leaves no record open (${openRequestCount() - beforeProbe})`);
+  // A key the registry does not clear, at a mirror: shown `ok`, logged `refused` with why (review pass 3).
+  {
+    const registry = agents();
+    const resolve = registry.resolve.bind(registry);
+    let notClearedLines: Record<string, unknown>[] = [];
+    try {
+      registry.resolve = async () => ({ status: "revoked", agentId: "agent-r", revokedAt: "2026-10-09T00:00:00.000Z", reason: null });
+      notClearedLines = await linesOf(async () => {
+        await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+        await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+        await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+      });
+      registry.resolve = async () => ({ status: "busy" });
+      notClearedLines.push(...await linesOf(() => fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY } }).then((r) => r.text())));
+    } finally {
+      registry.resolve = resolve;
+    }
+    const [revokedWorkers, revokedHealth, revokedRun, busyJobs] = notClearedLines;
+    assert(notClearedLines.length === 4 && revokedWorkers?.outcome === "refused" && revokedWorkers.code === "REVOKED" && revokedWorkers.agent === "MCP_ACCESS_KEY" && revokedWorkers.status === 200
+      && revokedHealth?.outcome === "refused" && revokedHealth.code === "REVOKED" && revokedRun?.route === "/worker-run" && revokedRun.outcome === "refused" && revokedRun.code === "REVOKED"
+      && busyJobs?.outcome === "refused" && busyJobs.code === "BUSY",
+      `a revoked or busy key at a mirror: \`refused\`, REVOKED or BUSY, by its name, though its answer is \`ok\` (${JSON.stringify(notClearedLines)})`);
+  }
+  // A keyless GET at a health path under /.well-known/ is no probe: its 404 is logged (review pass 4).
+  const wellKnownHealth = await linesOf(() => fetch(`${BASE}/.well-known/health`).then((r) => r.text()));
+  assert(wellKnownHealth.length === 1 && wellKnownHealth[0]?.status === 404 && wellKnownHealth[0].outcome === "refused", `a keyless GET of /.well-known/health: its 404 logged (${JSON.stringify(wellKnownHealth)})`);
+  // A path the `*` middleware never matches (an encoded line break) still has its line, from notFound (review pass 3).
+  const unmatched = await linesOf(() => fetch(`${BASE}/abc%0A`).then((r) => r.text()));
+  assert(unmatched.length === 1 && unmatched[0]?.status === 405 && unmatched[0].outcome === "refused", `a path with an encoded line break: one 405 \`refused\` line (${JSON.stringify(unmatched)})`);
+
+  // A wrong key at /health is a guess, and logged: only a request that presented no key is the probe (review pass 2).
+  const guesses = await linesOf(async () => {
+    await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": "a-wrong-guess" } }).then((r) => r.text());
+    await fetch(`${BASE}/health?key=another-guess`).then((r) => r.text());
+  });
+  assert(guesses.length === 2 && guesses.every((l) => l.route === "/health" && l.outcome === "refused" && l.status === 200 && !("agent" in l)) && !JSON.stringify(guesses).includes("guess"),
+    `a wrong key at /health, in a header or ?key=: \`refused\`, logged, the key nowhere in it (${JSON.stringify(guesses)})`);
+  // A stream's ceiling ends its record `stalled` (the keepalive's ten minutes, called here as the keepalive calls it).
+  const { beginRequest: begin, endsWithStream } = await import("./telemetry.ts");
+  const stallLines: Record<string, unknown>[] = [];
+  const stallTrace = begin("api", new Request("http://x/v1/jobs/j/stream"), (r) => stallLines.push(r as unknown as Record<string, unknown>));
+  endsWithStream(stallTrace, new AbortController().signal).onStall();
+  assert(stallLines.length === 1 && stallLines[0]?.outcome === "stalled" && stallLines[0].status === 200 && stallTrace.deferred, `a stream at its ceiling: \`stalled\`, its 200 kept (${JSON.stringify(stallLines)})`);
+  // A mirror request whose client is gone before it answers is `abandoned`, not its answer's outcome.
+  const goneMirror = await linesOf(async () => {
+    const gone = new AbortController();
+    gone.abort();
+    await Promise.resolve(worker.fetch(new Request("http://mcp/mcp/worker-status", { headers: { "x-brain-key": KEY }, signal: gone.signal }))).then((r) => r.text()).catch(() => {});
+  });
+  assert(goneMirror.length === 1 && goneMirror[0]?.outcome === "abandoned" && !("code" in goneMirror[0]), `a mirror whose client is already gone: \`abandoned\` (${JSON.stringify(goneMirror)})`);
+
+  // The stop's cut: every record still open is ended `cut`, keeping the status
+  // its answer had; one already ended is not ended again.
+  const { beginRequest, cutOpenRequests } = await import("./telemetry.ts");
+  const cutLines: Record<string, unknown>[] = [];
+  const write = (r: object) => cutLines.push(r as Record<string, unknown>);
+  const pending = beginRequest("api", new Request("http://x/v1/search", { method: "POST" }), write);
+  pending.route = "/v1/search";
+  const streaming = beginRequest("mcp", new Request("http://x/mcp", { method: "POST" }), write);
+  streaming.status = 200;
+  streaming.tool = "search_thoughts";
+  const finished = beginRequest("mcp", new Request("http://x/mcp", { method: "POST" }), write);
+  finished.end({ status: 200, outcome: "ok" });
+  finished.end({ status: 500, outcome: "error" });
+  const leftController = new AbortController();
+  const leftTrace = beginRequest("api", new Request("http://x/v1/whoami", { signal: leftController.signal }), write);
+  leftTrace.route = "/v1/whoami";
+  leftController.abort();
+  cutOpenRequests();
+  const cutOf = (route: unknown, tool: unknown) => cutLines.filter((l) => l.outcome === "cut" && l.route === route && l.tool === tool);
+  const leftLine = cutLines.find((l) => l.route === "/v1/whoami");
+  assert(cutOf("/v1/search", undefined)[0]?.status === 0 && cutOf(undefined, "search_thoughts")[0]?.status === 200 && cutLines.filter((l) => l.outcome === "ok").length === 1 && cutLines.length === 4,
+    `cutOpenRequests ends each open record \`cut\` with its status, and leaves an ended one alone; a second end writes nothing (${JSON.stringify(cutLines)})`);
+  assert(leftLine?.outcome === "abandoned" && leftLine.status === 0, `an open record whose client is already gone is \`abandoned\` at the cut, not \`cut\` (review pass 7) (${JSON.stringify(leftLine)})`);
+  // `end`'s time is the one it is handed — the middleware notes it before it
+  // reads an error answer's code — not the moment the line is written.
+  const timed: Record<string, unknown>[] = [];
+  const timedTrace = beginRequest("api", new Request("http://x/v1/stats"), (r) => timed.push(r as unknown as Record<string, unknown>));
+  timedTrace.end({ status: 200 }, timedTrace.started + 7);
+  assert(timed[0]?.ms === 7, `end(fields, at): ms is at - started, not the time the line is written (${JSON.stringify(timed)})`);
 }
 
 server.stop();
 provider.stop(true);
+
+console.log("\n[22] reset_capture_stamp's reply says the ways on by the trust the row is left at, the notice line only where fetch shows one, and a refusal by what the key is (SMD-2744)");
+{
+  const { renderResetCaptureStamp } = await import("./render.ts");
+  const ID = "00000000-0000-4000-8000-000000002744";
+  const reply = (trust: string | null, extra: Record<string, unknown> = {}) =>
+    renderResetCaptureStamp({ ok: true, value: { id: ID, reset: true, restored: true, movedBy: "bot", declines: 0, declinedBy: [], stamp: { actorKind: "agent", actorName: "hook", trust }, caller: "op", ...extra } } as never).content[0].text;
+  const atIngested = reply("ingested"), atAgent = reply("agent"), atOperator = reply("operator"), atNone = reply(null);
+  assert(/fetch shows this outside text under a notice line/.test(atIngested) && [atAgent, atNone].every((t) => !/notice line/.test(t) && /exactly as stored \(fetch's text\)/.test(t)) && !/notice line/.test(atOperator),
+    "the notice line is named only for a row left at ingested — fetch shows no notice on any other (review pass 2: an AI client stripped a real first line)");
+  assert(/- with trust "ingested": the label stays as it is, outside text, and the row is settled against every other key/.test(atIngested) && /your own key's later plain re-capture still moves it/.test(atIngested)
+      && /- plainly: the label moves to your key at trust operator — the outside-text notice goes/.test(atIngested),
+    "at ingested: both ways on, the keep settled against every OTHER key, the plain way's cost named (review pass 3)");
+  assert(/- with trust "ingested": the label stays at agent and the row is settled against every other key \(it does not mark the text as outside text/.test(atAgent) && !/keep outside text/.test(atAgent) && /- plainly: the label moves to your key at trust operator\./.test(atAgent),
+    "at agent: the ingested way does not claim to keep outside text — there is none (review pass 3)");
+  assert(/No re-capture can move this label: no key's trust outranks operator\. A text edit \(update_thought\) is what stamps the thought as yours\.$/.test(atOperator) && !/Re-capture the text/.test(atOperator),
+    "at operator: no re-capture is asked for, since none can move it (review pass 3)");
+  assert(/the label has no trust, so a re-capture by any classified key moves it: plainly, to your key at trust operator/.test(atNone) && /with trust "ingested": to your key at trust ingested, kept outside text/.test(atNone) && !/stays as it is/.test(atNone),
+    "at no trust: an ingested re-capture moves the label too, and the reply does not promise it stays (review pass 2)");
+  assert(/^Reset [0-9a-f-]{36}: the label bot's re-capture moved is back/.test(atAgent)
+      && /^Reset [0-9a-f-]{36}: 2 declines \(by op, bot\) no longer count\./.test(reply("ingested", { restored: false, movedBy: null, declines: 2, declinedBy: ["op", "bot"], caller: "someone" })),
+    "the reply names whose move it undid, and whose declines no longer count");
+  const mine = reply("ingested", { restored: true, movedBy: "op", declines: 1, declinedBy: ["op"], caller: "op" });
+  assert(/^Reset [0-9a-f-]{36}: the label your key's \(op\) re-capture moved is back.*1 decline \(by yours \(op\)\) no longer counts/.test(mine) && /This undid your own key's keep: re-capture with trust "ingested" to keep it again\./.test(mine),
+    `the caller's own move and keep are said to be its own, and how to keep it again (review pass 3) (${mine.split("\n").slice(0, 2).join(" | ")})`);
+  const othersKeep = reply("ingested", { restored: false, movedBy: null, declines: 1, declinedBy: ["bot"], caller: "op" });
+  const paddedOwn = reply("ingested", { restored: false, movedBy: null, declines: 1, declinedBy: ["op"], caller: " op " });
+  assert(!/your own key's keep/.test(othersKeep) && /your own key's keep/.test(paddedOwn),
+    "the keep is said to be the caller's own only when it is — another key's decline is not, a padded caller name still is (review pass 3)");
+  const operatorKindIngested = renderResetCaptureStamp({ ok: true, value: { id: ID, reset: true, restored: true, movedBy: "bot", declines: 0, declinedBy: [], stamp: { actorKind: "operator", actorName: "hook", trust: "ingested" }, caller: "op" } } as never).content[0].text;
+  assert(/- plainly: the label moves to your key at trust operator/.test(operatorKindIngested) && !/No re-capture can move this label/.test(operatorKindIngested),
+    "the branch is the trust's, not the kind's: an operator-kind capture key's ingested label is moved by a plain re-capture");
+  const refused = (kind: string | null, key = "plain-key") =>
+    renderResetCaptureStamp({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key, kind } } as never);
+  const unclassified = refused(null, "o'key").content[0].text, agentKey = refused("agent").content[0].text, captureKey = refused("capture-only").content[0].text;
+  assert(/is unclassified\. If it is the operator's own, classify it: SELECT set_agent_kind\('o''key', 'operator'\)/.test(unclassified) && refused(null, "k".repeat(100)).content[0].text.includes(`set_agent_kind('${"k".repeat(100)}', 'operator')`)
+      && [" padded", "two\nlines", "tab\tname"].every((k) => /classify it with set_agent_kind and the key's exact name/.test(refused(null, k).content[0].text) && !/SELECT set_agent_kind/.test(refused(null, k).content[0].text)) && /is classified agent: use the operator's own key/.test(agentKey) && !/set_agent_kind/.test(agentKey) && /is capture-only\.$/.test(captureKey),
+    `the refusal by what the key is: an unclassified one given its line (its name quoted), a classified one told to use the operator's own, a capture-only one told so (${unclassified.slice(-90)})`);
+  assert(JSON.stringify(refused("agent").structuredContent) === JSON.stringify({ code: "REFUSED_NOT_OPERATOR", retryable: false, text: agentKey }),
+    "…and neither the key's name nor its kind is in the refusal's structured content");
+}
 
 report();

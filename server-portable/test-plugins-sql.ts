@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
+import type { PluginSql } from "./plugin-sdk.ts";
 import { migrationSha } from "../db/version.mjs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
 
@@ -309,14 +310,14 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
   // scripted: the claim's release and record as Postgres holds them, not as
   // test-plugins' stand-in table does.
   const { enabledHooks, loadPlugins, runHook } = await import("./core/plugins.ts");
-  const { ok: coreOk } = await import("./core/refusal.ts");
+  const { ok: coreOk, refuse: coreRefuse } = await import("./core/refusal.ts");
   const { SqlStore } = await import("./store-sql.ts");
   const store = new SqlStore(URL_, { max: 1, pluginPassword: PLUGIN_PW });
   const [hook] = enabledHooks(loadPlugins("example"), "example");
   const rowOf = async (id: string) => one<{ thought_id: string | null; claimed_at: string } | undefined>(sql`SELECT thought_id::text, claimed_at::text FROM plugin_example.deliveries WHERE id = ${id}`);
-  /** One signed delivery of `id` through the hook, its capture `capture`: the answer, or the message it threw. */
-  const viaHook = async (id: string, capture: () => Promise<unknown>) => {
-    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : capture) }) as never;
+  /** One signed delivery of `id` through the hook, its capture `capture`, under a core whose captures may run `captureSeconds`: the answer, or the message it threw. */
+  const viaHook = async (id: string, capture: () => Promise<unknown>, captureSeconds = 120) => {
+    const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => captureSeconds : capture) }) as never;
     const text = JSON.stringify({ id, text: `smd2755: ${id}` });
     const ts = Math.floor(Date.now() / 1000);
     try {
@@ -352,6 +353,130 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     });
     const recorded = await rowOf(prunedId);
     assert(typeof answered === "object" && answered.status === 202 && recorded?.thought_id === thought, `a capture whose claim was pruned meanwhile is recorded, and answered 202 (${JSON.stringify(answered)}, ${JSON.stringify(recorded)})`);
+    // The lease follows the core's deadline (SMD-2768): at OB1_LLM_TIMEOUT=600
+    // a claim four minutes old is a capture that may still be running.
+    const slowId = `evt-${RUN}-slow`;
+    const never = async () => { throw new Error("the capture ran"); };
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${slowId}, now() - interval '4 minutes')`;
+    const slowHeld = await viaHook(slowId, never, 600);
+    assert(typeof slowHeld === "object" && slowHeld.status === 409, `a core whose captures may run 600 s: a claim four minutes old is 409, not taken (${JSON.stringify(slowHeld)})`);
+    await sql`UPDATE plugin_example.deliveries SET claimed_at = now() - interval '661 seconds' WHERE id = ${slowId}`;
+    const slowTaken = await viaHook(slowId, async () => coreOk({ id: thought }), 600);
+    assert(typeof slowTaken === "object" && slowTaken.status === 202 && (await rowOf(slowId))?.thought_id === thought, `past its 660 s lease, taken (${JSON.stringify(slowTaken)})`);
+    // A lease longer than the window: the prune keeps an unfinished claim
+    // until its lease ends, and still drops a captured id at the window.
+    const longId = `evt-${RUN}-long`;
+    const doneId = `evt-${RUN}-done`;
+    await sql`INSERT INTO plugin_example.deliveries (id, claimed_at) VALUES (${longId}, now() - interval '12 minutes')`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${doneId}, ${thought}, now() - interval '12 minutes')`;
+    const longHeld = await viaHook(longId, never, 1200);
+    const kept = await rowOf(longId);
+    assert(typeof longHeld === "object" && longHeld.status === 409 && kept !== undefined && kept.thought_id === null && (await rowOf(doneId)) === undefined,
+      `a core whose captures may run 1200 s: a claim twelve minutes old outlives the eleven-minute window, 409, while a captured id that old is pruned (${JSON.stringify(longHeld)}, ${JSON.stringify(kept)})`);
+    // Scopes: two hooks' ids in the one table, each pruned by its own window.
+    const { onceById } = await import("./plugin-sdk.ts");
+    const handle = { db: { tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", fn) }, captureSeconds: 120 };
+    const forGood = `rw-${RUN}`;
+    const shortLived = `ev-${RUN}`;
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) VALUES (${`readwise ${forGood}`}, ${thought}, now() - interval '12 minutes'), (${`events ${shortLived}`}, ${thought}, now() - interval '12 minutes')`;
+    const once = (scope: string, id: string, keepSeconds: number) => onceById(handle, id, async () => ({ value: "ran", thoughtId: thought }), { keepSeconds, scope });
+    const fresh = await once("events", `ev-${RUN}-new`, 660);
+    const survivors = (await sql`SELECT id FROM plugin_example.deliveries WHERE id IN (${`readwise ${forGood}`}, ${`events ${shortLived}`})`).map((r: { id: string }) => r.id);
+    assert("ran" in fresh && JSON.stringify(survivors) === JSON.stringify([`readwise ${forGood}`]), `a scope's claim prunes its own scope's old ids, not another's (${JSON.stringify(survivors)})`);
+    const again = await once("readwise", forGood, Infinity);
+    const elsewhere = await once("events", forGood, 660);
+    assert("duplicate" in again && again.duplicate === thought && "ran" in elsewhere, `so a hook kept for good still knows its id twelve minutes on, and the same id under another scope is another delivery (${JSON.stringify(again)}, ${JSON.stringify(elsewhere)})`);
+    // The index onceById's doc comment gives a plugin keeping one scope for
+    // good beside one that prunes: the prune, as onceById sends it, reads it
+    // past a kept scope's old rows rather than scanning them.
+    const docIndex = /`(CREATE INDEX IF NOT EXISTS deliveries_by_scope ON deliveries [^`]+)`/.exec(readFileSync(new URL("./plugin-sdk.ts", import.meta.url), "utf8"))?.[1] ?? "";
+    await sql.unsafe(docIndex.replace(" ON deliveries ", " ON plugin_example.deliveries "));
+    await sql`INSERT INTO plugin_example.deliveries (id, thought_id, claimed_at) SELECT 'kept ' || ${RUN} || '-' || n, ${thought}, now() - interval '1 day' FROM generate_series(1, 5000) n`;
+    await sql`ANALYZE plugin_example.deliveries`;
+    let plan = "";
+    const explaining = {
+      db: {
+        tx: <R>(fn: (q: PluginSql) => Promise<R>): Promise<R> => store.pluginTx("example", (q) => fn(((strings: TemplateStringsArray, ...values: unknown[]) => {
+          if (!strings[0].startsWith("DELETE FROM deliveries WHERE claimed_at")) return q(strings, ...values);
+          // Frozen, as a template's are: pluginTx takes nothing else.
+          const explain = Object.freeze(Object.assign(["EXPLAIN " + strings[0], ...strings.slice(1)], { raw: Object.freeze(["EXPLAIN " + strings.raw[0], ...strings.raw.slice(1)]) }));
+          return q(explain as unknown as TemplateStringsArray, ...values).then((rows) => { plan = rows.map((r) => String(Object.values(r)[0])).join("\n"); return []; });
+        }) as PluginSql)),
+      },
+      captureSeconds: 120,
+    };
+    await onceById(explaining, `ev-${RUN}-plan`, async () => ({ value: 0, thoughtId: thought }), { keepSeconds: 660, scope: "events" });
+    assert(/deliveries_by_scope/.test(plan) && /Index Cond: .*CASE/.test(plan), `the doc comment's index is the one the scoped prune reads (${plan.replace(/\s+/g, " ").slice(0, 160)})`);
+    await sql`DELETE FROM plugin_example.deliveries WHERE id LIKE ${`kept ${RUN}-%`}`;
+    await sql.unsafe("DROP INDEX plugin_example.deliveries_by_scope");
+    // A deferred capture (SMD-2767): a hook of the example's plugin that
+    // answers once its id is claimed and leaves the capture to ctx.defer, run
+    // through runHook over the real table — recorded against its id as an
+    // awaited one is, and given back when it throws, with one fault line.
+    const tracked: Promise<unknown>[] = [];
+    const deferredFaults: string[] = [];
+    const laterHook = {
+      plugin: "example", name: "later", path: "/hooks/example/later", description: "Answers before its capture.",
+      handler: async (ctx: Parameters<typeof hook.handler>[0], req: { text: string }) => {
+        const { id } = JSON.parse(req.text) as { id: string };
+        const once = await onceById(ctx, id, async () => {
+          const captured = await ctx.call("capture_thought", { content: `smd2767: ${id}`, source: "example-hook", trust: "ingested" });
+          return { value: captured, thoughtId: captured.ok ? captured.value.id : null };
+        }, { keepSeconds: 660, defer: true });
+        if ("duplicate" in once) return { status: 200 as const, body: { id: once.duplicate, duplicate: true } };
+        if ("inFlight" in once) return { status: 409 as const, body: { code: "IN_FLIGHT", retryable: true } };
+        return { status: 202 as const, body: { accepted: true } };
+      },
+    };
+    const deferredVia = (id: string, capture: () => Promise<unknown>) => {
+      const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : capture) }) as never;
+      const text = JSON.stringify({ id });
+      return runHook(laterHook, { core: scripted, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) }, { headers: {}, query: {}, body: new TextEncoder().encode(text), text });
+    };
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const laterId = `evt-${RUN}-later`;
+    // With a deadline: an answer that waited for the capture would wait on `held` for good.
+    const first = await Promise.race([
+      deferredVia(laterId, async () => { await held; return coreOk({ id: thought }); }),
+      Bun.sleep(5000).then(() => { throw new Error("the deferred capture's answer waited for the capture"); }),
+    ]);
+    const claimRow = await rowOf(laterId);
+    const meanwhile = await deferredVia(laterId, async () => coreOk({ id: thought }));
+    assert(first.status === 202 && claimRow !== undefined && claimRow.thought_id === null && meanwhile.status === 409,
+      `a deferred capture: 202 once its id is claimed, and a resend while it runs is 409 (${first.status}, ${JSON.stringify(claimRow)}, ${meanwhile.status})`);
+    release();
+    await Promise.all(tracked);
+    const afterwards = await deferredVia(laterId, async () => coreOk({ id: thought }));
+    assert((await rowOf(laterId))?.thought_id === thought && afterwards.status === 200 && (afterwards.body as { id?: string }).id === thought && deferredFaults.length === 0,
+      `once it ends, it is recorded against its id as an awaited capture is, and a resend is that thought's duplicate (${JSON.stringify(afterwards)})`);
+    const failingId = `evt-${RUN}-later-fails`;
+    const failing = await deferredVia(failingId, async () => { throw new Error("embedder down"); });
+    await Promise.all(tracked);
+    assert(failing.status === 202 && (await rowOf(failingId)) === undefined && JSON.stringify(deferredFaults) === JSON.stringify([`delivery ${failingId} (its id given back): embedder down`]),
+      `a deferred capture that throws: answered 202 all the same, its claim given back, one fault naming the delivery (${failing.status}, ${JSON.stringify(deferredFaults)})`);
+    const refusedId = `evt-${RUN}-later-refused`;
+    const refused = await deferredVia(refusedId, async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: thought, detail: "d" } as never));
+    await Promise.all(tracked);
+    assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId} (its id given back): no thought captured`,
+      `a deferred capture the core refuses: its claim given back and a fault naming the delivery, not lost without a word (${JSON.stringify(deferredFaults.at(-1))})`);
+    // A handler that fails after claiming with defer: its sender is told 500
+    // and retries, so the claim is given back now, not left to the lease.
+    const brokenHook = { ...laterHook, name: "broken", path: "/hooks/example/broken",
+      handler: async (ctx: Parameters<typeof hook.handler>[0], req: { text: string }) => {
+        await laterHook.handler(ctx, req);
+        throw new Error("the handler's own fault, after its claim");
+      } };
+    const brokenId = `evt-${RUN}-later-broken`;
+    const brokenText = JSON.stringify({ id: brokenId });
+    const scriptedOk = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : async () => coreOk({ id: thought })) }) as never;
+    const brokenSaid = await runHook(brokenHook, { core: scriptedOk, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) },
+      { headers: {}, query: {}, body: new TextEncoder().encode(brokenText), text: brokenText }).then(() => "", (e: Error) => e.message);
+    // Retried the moment the 500 is in hand, nothing awaited between (review pass 3). That the discard ran before the 500 is the unit suite's to hold, whose discard is slow: here the release reaches the table first either way.
+    const retried = await deferredVia(brokenId, async () => coreOk({ id: thought }));
+    await Promise.all(tracked);
+    assert(brokenSaid === "the handler's own fault, after its claim" && retried.status === 202 && (await rowOf(brokenId))?.thought_id === thought,
+      `a handler that fails after a deferred claim gives the id back at once: the sender's retry of its 500 is claimed and captured, not told 409 until the lease (${retried.status})`);
   } finally {
     await store.close();
   }

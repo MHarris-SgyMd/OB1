@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -26,6 +26,7 @@ import type {
   Derivative,
   ListFilters,
   DeleteResult,
+  ResetStampResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
@@ -516,6 +517,17 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);
+  }
+
+  async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
+    // 086 (SMD-2744): the function decides who may, and names the actor in
+    // the event it appends; a schema before it has none, and this throws.
+    const { data, error } = await this.client.rpc("ob1_reset_capture_stamp", {
+      p_id: opts.id,
+      p_actor: actorPayload(opts.actor),
+    });
+    if (error) throw new Error(error.message);
+    return normaliseResetStamp(data);
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {

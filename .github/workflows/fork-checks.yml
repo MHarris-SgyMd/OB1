@@ -119,6 +119,16 @@ jobs:
       - name: Dashboard reply parsers
         run: bun dashboards/open-brain-dashboard/test-parsers.ts
 
+      # The forwarder's self-check (SMD-2583): which lookup answers it dials —
+      # an address on front alone, never its own, the gateway, a network or
+      # broadcast address or a link-local one, and none when no default route
+      # was read — the PROXY line it writes, and how it closes: a reply after
+      # the client's half-close arrives whole, and a client that never ends
+      # its side is let go. Bun only, no container; the deploy-stack job runs
+      # it again from the copy compose mounts.
+      - name: The forwarder's address rule and how it closes
+        run: bun deploy/forwarder.ts --self-check
+
   portable-server:
     name: Portable server (Bun + Workers)
     runs-on: ubuntu-24.04
@@ -1202,8 +1212,15 @@ jobs:
       - name: Every published port binds loopback
         working-directory: deploy
         run: |
+          # The forwarder's script, as compose renders it in each stack, is
+          # deploy/forwarder.ts byte for byte: a `$` in it would be read as a
+          # variable (check 28 refuses one in the file; this holds the render).
+          for f in compose.yaml compose.tiers.yaml; do
+            docker compose -f "$f" config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
+              || { echo "$f's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
+          done
           docker compose -f compose.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.proxy.ports | length == 1) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is; it dials the REST
           # core by its rooted mesh name (SMD-2294; the table is check 28's
@@ -1221,21 +1238,22 @@ jobs:
           # config lists is the canary's own proxy, started only with --port).
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
             | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
-          # The three-brain stack (SMD-2294) publishes its proxy alone, on
-          # loopback, on compose.yaml's pinned image, as compose renders it.
+          # The three-brain stack (SMD-2294) publishes its forwarder alone, on
+          # loopback, the proxy on compose.yaml's pinned image behind it
+          # (SMD-2583), as compose renders it.
           # Its routes and each tier's wiring are check-fork-consistency's
           # check 27, which reads the file itself.
           docker compose -f compose.tiers.yaml --profile local-models config --format json \
-            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.proxy.ports | length == 1) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
+            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 3) and .services.proxy.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
+            | jq -e '([.services[].ports[]?] | length == 3) and .services.forwarder.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
           # (SMD-2212) publishes none. Without a profile a plain config
-          # names exactly the five services it should: SMD-1846 added the proxy,
-          # SMD-2284 the REST core (`api`, the server's image by name).
+          # names exactly the six services it should: SMD-1846 added the proxy,
+          # SMD-2284 the REST core (`api`, the server's image by name), SMD-2583 the forwarder.
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1266,11 +1284,11 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["proxy"]) and (on("mesh") == ["api", "auth", "proxy", "server"])'
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "proxy", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["proxy"]) and .networks.data.internal == true'
+            | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and (on("stable-mesh") == ["api", "server"])'
           # SMD-2424: the workers profile's two followers publish nothing,
@@ -1286,7 +1304,7 @@ jobs:
           # are run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
 
@@ -1315,6 +1333,47 @@ jobs:
               echo "the probe on open-brain_egress did not answer for itself (exit $rc): $out" >&2; exit 1
             fi
           done
+
+      # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
+      # alone, so it asks no resolver outside the stack: a public name does
+      # not resolve there, where the same image on the forwarder's outward
+      # network resolves it (so a missing tool cannot pass). The forwarder's
+      # self-check runs from the copy compose.yaml mounts. The proxy logs a
+      # client by the PROXY line, as neither the forwarder nor itself. And with
+      # the proxy stopped, a decoy answering to the proxy's name on `edge` is
+      # what the forwarder resolves, and gets nothing: the forwarder dials only
+      # an address on `front`, refuses, and says so.
+      - name: The proxy asks nothing outside the stack, and the forwarder dials it alone
+        working-directory: deploy
+        run: |
+          PROXY_IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)"
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
+          if docker compose -f compose.yaml exec -T proxy getent hosts example.com; then echo "the proxy resolved an outside name" >&2; exit 1; fi
+          docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check
+          fwd=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_front").IPAddress}}' "$(docker compose -f compose.yaml ps -q forwarder)")
+          [ -n "$fwd" ] || { echo "the forwarder has no address on open-brain_front" >&2; exit 1; }
+          for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] && break; sleep 2; done
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] || { echo "/health through the forwarder did not answer ok" >&2; exit 1; }
+          client=$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy | grep -F '"RequestPath":"/health"' | tail -n 1 | jq -r .ClientHost)
+          # Neither container's own address on any network: a missing line logs the forwarder's, and a line
+          # built from the wrong socket names the proxy's or the forwarder's (review pass 2).
+          own=" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$(docker compose -f compose.yaml ps -q forwarder)" "$(docker compose -f compose.yaml ps -q proxy)" | tr '\n' ' ')"
+          if [ -z "$client" ] || [ "$client" = null ] || [[ "$own" == *" $client "* ]]; then echo "the proxy logged /health from '$client', one of the forwarder's or the proxy's own addresses ($own): no PROXY line naming the client" >&2; exit 1; fi
+          stopped=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          docker compose -f compose.yaml stop proxy
+          trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy' EXIT
+          # A raw TCP listener, so it counts a connection whatever its first bytes:
+          # the forwarder opens with the PROXY line, which an HTTP server refuses
+          # unlogged (a forwarder that dialled it went uncounted, measured).
+          docker run -d --name ob1-ci-decoy --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
+          decoy=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_edge").IPAddress}}' ob1-ci-decoy)
+          for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" && break; sleep 0.5; done
+          docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }
+          if [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ]; then echo "/health answered ok with the proxy stopped" >&2; exit 1; fi
+          sleep 1
+          [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
+          docker compose -f compose.yaml logs --no-color --since "$stopped" forwarder | grep -F 'resolved only to addresses the forwarder does not dial'
 
       # SMD-2658, SMD-2685. check-fork-consistency's checks 27 and 28 hold
       # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
@@ -1374,8 +1433,8 @@ jobs:
               compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
-              # The release's: an image and its pull policy, on any service but the proxy.
-              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
+              # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
+              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
             esac
           }
@@ -1391,8 +1450,9 @@ jobs:
             | def rest: del(.services.proxy, .configs) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
-            and (($r.configs // {}) | keys) == ([$want[].source] | sort)
+            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder"] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
+            and $r.configs.forwarder == $alone.configs.forwarder
             and ($r | rest) == ($alone | rest)
             and ([$r.networks[].name] | length == (unique | length))
             and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
@@ -2012,7 +2072,7 @@ jobs:
           grep -F 'note: stable has a public origin (https://brain.example.test)' /tmp/canary-up.out
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
           grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8010/canary/mcp -H' /tmp/fake-claude.log
-          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "a canary on stable's origin runs a proxy of its own" >&2; exit 1; }
+          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy forwarder)" ] || { echo "a canary on stable's origin runs a proxy or forwarder of its own" >&2; exit 1; }
           for svc in server:mcp api:api; do
             got=$(on_stable_mesh "${svc%%:*}")
             grep -qw "${svc#*:}.canary.ob1.internal" <<<"$got" || { echo "the canary's ${svc%%:*} is not on stable's mesh as ${svc#*:}.canary.ob1.internal: '$got'" >&2; exit 1; }
@@ -2036,7 +2096,7 @@ jobs:
           grep -F 'returned none of' /tmp/canary-wrong.out
           grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
           grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
-          [ "$(docker compose -p open-brain-canary -f compose.yaml port proxy 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own proxy is not on loopback only" >&2; exit 1; }
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own forwarder is not on loopback only" >&2; exit 1; }
           [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
@@ -2061,7 +2121,7 @@ jobs:
           noted=$(grep -nF 'connector open-brain-canary still points at' /tmp/canary-back.out | cut -d: -f1)
           removed=$(grep -nF 'canary proxy removed' /tmp/canary-back.out | cut -d: -f1)
           if ! { [ -n "$noted" ] && [ -n "$removed" ] && [ "$noted" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the connector step (noted at line ${noted:-?}, removed at ${removed:-?})" >&2; exit 1; fi
-          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy)" ] || { echo "the canary's own proxy outlived the move to stable's origin" >&2; exit 1; }
+          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy forwarder)" ] || { echo "the canary's own proxy or forwarder outlived the move to stable's origin" >&2; exit 1; }
           if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
           grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }
           # The first keyed request to a server this --no-smoke run recreated:
@@ -2473,7 +2533,8 @@ jobs:
       # disabled, nothing came back: the dogfood stack stayed down 47
       # minutes). This is the Docker half of the ticket's Verify, on every
       # run: the daemon restarts, and with nothing started by hand Postgres,
-      # the server, the REST core and the proxy each come back on its policy,
+      # the server, the REST core, the proxy and the forwarder in front of it
+      # (SMD-2583) each come back on its policy,
       # started after the restart (so a daemon that kept them running proves
       # nothing) and healthy by its own healthcheck, not merely `Running`,
       # which Docker also reports for a container in restart backoff (review
@@ -2497,7 +2558,7 @@ jobs:
             if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
             docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
           }
-          # Running and healthy: each of the four declares a healthcheck (the
+          # Running and healthy: each of the five declares a healthcheck (the
           # server's is its image's, server-portable/Dockerfile).
           back() {
             local status health
@@ -2505,10 +2566,10 @@ jobs:
             [ "$status" = running ] && [ "$health" = healthy ]
           }
           while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back proxy; then break; fi
+            if back postgres && back server && back api && back proxy && back forwarder; then break; fi
             sleep 2
           done
-          for s in postgres server api proxy; do
+          for s in postgres server api proxy forwarder; do
             read -r status health policy started <<<"$(state "$s")"
             at=$(date -d "$started" +%s)
             echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
