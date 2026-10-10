@@ -20,7 +20,7 @@ import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOpti
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
-import { knowTools, logRequest, outcomeOf, requestLine, type RequestRecord } from "../telemetry.ts";
+import { beginRequest, endsWithStream, errorCode, knowTools, logRequest, outcomeOf, requestLine, traceOf, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -72,32 +72,6 @@ async function boundedBody(req: Request, limit: number): Promise<Uint8Array | nu
   let at = 0;
   for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
   return out;
-}
-
-/**
- * What a request's line learns as it is handled: the operation its route
- * runs and the name of the key that authenticated. Keyed by the request, so
- * the line's middleware reads what the handler below it found.
- */
-const SEEN = new WeakMap<Request, { tool?: string; agent?: string }>();
-
-/**
- * An error answer's code, for its line: every 4xx and 5xx this server sends
- * is JSON carrying one (`refuse`, a refusal's value, `failure`), read from a
- * copy so the answer itself is untouched. A success, or a body that is not
- * JSON or carries no code, gives none; telemetry.ts holds what it gives to
- * the enum spelling. A refused HEAD's line has its GET's code: Hono answers a
- * HEAD as its GET and drops the body after this middleware has read it.
- */
-async function errorCode(res: Response): Promise<string | undefined> {
-  if (res.status < 400 || !/^application\/json\b/i.test(res.headers.get("content-type") ?? "")) return undefined;
-  const body = await res.clone().json().catch(() => null) as { code?: unknown } | null;
-  return typeof body?.code === "string" ? body.code : undefined;
-}
-function seen(c: Context): { tool?: string; agent?: string } {
-  let s = SEEN.get(c.req.raw);
-  if (!s) SEEN.set(c.req.raw, (s = {}));
-  return s;
 }
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
@@ -188,7 +162,7 @@ type RestEnv = { Variables: { template?: string } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const app = new Hono<RestEnv>();
-  const log = (r: RequestRecord) => (deps.log ? deps.log(requestLine(r)) : logRequest(r));
+  const write = (r: RequestRecord) => (deps.log ? deps.log(requestLine(r)) : logRequest(r));
   const faultLog = deps.faultLog ?? ((line: string) => console.error(line));
 
   // The enabled plugins' operations (SMD-2310), read at the first request that
@@ -213,26 +187,42 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // `abandoned` for a client gone before the answer — a body read the client
   // cut off is a throw, and onError's 500, which no one receives and is no
   // fault of the server's), an error answer's code and the time — to the
-  // answer, so a job stream's line is written as it opens. Registered first,
-  // so every answer below is counted — but the liveness probe's: the
+  // answer, or for the job stream, which ends its own record, to the
+  // stream's end. The record (telemetry.ts's RequestTrace) is made here,
+  // first, so every answer below is counted, and the handlers fill in what
+  // they learn (notFound makes one for a path this middleware never sees) —
+  // but the liveness probe, a GET or HEAD of /health, gets none: the
   // container's healthcheck asks every 30 s, and half the log was its 200
-  // (SMD-2284 PR 3 review pass 1). A /health that is not a 200 is still logged.
+  // (SMD-2284 PR 3 review pass 1). Decided as it arrives, so nothing (PR 2b's
+  // span included) starts for it; the route answers it 200 every time, and an
+  // environment that will not seed is a 500 the healthcheck itself reports.
   app.use("*", async (c, next) => {
-    deps.init();
-    const started = performance.now();
-    await next();
-    const ms = performance.now() - started;
-    // A plugin operation's route is the template its dispatcher set ("-" for none it takes), not the wildcard's.
+    if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/health") {
+      deps.init();
+      return next();
+    }
+    // The record first, so an environment that will not seed (init throws,
+    // onError's 500) is still a line; a throw that is not an Error, which
+    // Hono passes up rather than to onError, ends it as one.
+    const trace = beginRequest("api", c.req.raw, write);
+    try {
+      deps.init();
+      await next();
+    } catch (err) {
+      // An Error goes on to onError, whose 500 says FAILED; a non-Error escapes, with no body.
+      trace.end({ status: 500, outcome: "error", code: err instanceof Error ? "FAILED" : undefined });
+      throw err;
+    }
+    if (trace.deferred || trace.ended) return;
+    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the wildcard's.
     const template = c.get("template");
-    const route = template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
-    if (route === "/health" && c.res.status === 200) return;
-    const seen = SEEN.get(c.req.raw);
-    const gone = c.req.raw.signal.aborted;
-    const code = gone ? undefined : await errorCode(c.res);
-    log({
-      door: "api", method: c.req.method, route, tool: seen?.tool, agent: seen?.agent, status: c.res.status,
-      outcome: gone ? "abandoned" : outcomeOf(c.res.status, code), code, ms,
-    });
+    trace.route ??= template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
+    // The time first, so `ms` is the request's, not the read of its answer's code.
+    const at = performance.now();
+    const gone = trace.clientGone;
+    const code = gone ? undefined : trace.code ?? await errorCode(c.res);
+    const outcome = gone ? "abandoned" : trace.outcome ?? outcomeOf(c.res.status, code);
+    trace.end({ status: c.res.status, outcome, code }, at);
   });
 
   // Liveness, for the container's healthcheck: no key, no store, no answer
@@ -274,7 +264,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       if (principal) break;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
-    seen(c).agent = principal.name;
+    const trace = traceOf(c.req.raw);
+    if (trace) trace.agent = principal.name;
     // Present at all, even empty, the forwarder slot must hold a forwarder's
     // key: a slot the caller filled is never ignored (an empty one is no
     // carrier named). Its digest is checked before either key reaches the
@@ -304,6 +295,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // caller's key; a disabled plugin is not listed, nor one the key can call nothing of. Before the operations'
   // route below, which takes every other path under /v1/plugins.
   app.get("/v1/plugins", async (c) => {
+    const named = traceOf(c.req.raw);
+    if (named) named.route = c.req.routePath;
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
@@ -321,6 +314,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // MCP server's tools/list and the GUI's sign-in read once SMD-2287 and
   // SMD-2280 are clients.
   app.get("/v1/whoami", async (c) => {
+    const named = traceOf(c.req.raw);
+    if (named) named.route = c.req.routePath;
     const p = await caller(c);
     if (p instanceof Response) return p;
     return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: [...visibleToolNames(p), ...pluginRoutes().filter((r) => unlocks(p, r.op.scope)).map((r) => r.op.tool)].sort(), ...(p.act ? { act: p.act } : {}) });
@@ -329,6 +324,12 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // A job's event stream (SMD-2273): its progress and its end as SSE, kept
   // alive while it runs. Its owner alone reads it, as the poll (job_status).
   app.get("/v1/jobs/:job_id/stream", async (c) => {
+    // Named as it starts, so a refusal or a stop's cut before the stream opens says which route and operation.
+    const named = traceOf(c.req.raw);
+    if (named) {
+      named.route = c.req.routePath;
+      named.tool = "job_status";
+    }
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (!mayCall(p, "job_status")) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf("job_status") });
@@ -339,7 +340,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const stream = await subscribeJob(p, id);
     if (!stream) return c.json(refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
     const response = new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
-    return withSseKeepalive(response, { signal: c.req.raw.signal, label: `api jobs/${labelPart(id)}/stream` });
+    // Its line is written where the stream ends — the job's end, the client
+    // gone, the keepalive's ceiling — not as it opens (telemetry.ts
+    // endsWithStream); the middleware leaves the record to it.
+    const ends = named ? endsWithStream(named, c.req.raw.signal) : {};
+    return withSseKeepalive(response, { signal: c.req.raw.signal, label: `api jobs/${labelPart(id)}/stream`, ...ends });
   });
 
   /**
@@ -386,7 +391,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const route = ROUTES[name];
     const fields = pathFields(route.path);
     app.on(route.method, honoPath(route.path), async (c) => {
-      seen(c).tool = name;
+      const trace = traceOf(c.req.raw);
+      if (trace) {
+        trace.tool = name;
+        trace.route = c.req.routePath;
+      }
       const p = await caller(c);
       if (p instanceof Response) return p;
       if (!mayCall(p, name)) return refuse(c, 403, { code: "FORBIDDEN", needs: scopeOf(name) });
@@ -434,7 +443,12 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     const { op } = found;
     c.set("template", honoPath(op.path));
-    seen(c).tool = op.tool;
+    // Named as it starts, so a refusal or a stop's cut says which route and operation.
+    const named = traceOf(c.req.raw);
+    if (named) {
+      named.route = honoPath(op.path);
+      named.tool = op.tool;
+    }
     const p = await caller(c);
     if (p instanceof Response) return p;
     if (!unlocks(p, op.scope)) return refuse(c, 403, { code: "FORBIDDEN", needs: op.scope });
@@ -524,9 +538,14 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // ones it takes; any other path is NO_ROUTE.
   app.notFound((c) => {
     const allow = allowedOn(c.req.path, pluginRoutes().map((r) => [r.pattern, r.method]));
-    return allow.length
+    const answer = allow.length
       ? refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: allow.join(", ") })
       : refuse(c, 404, { code: "NO_ROUTE" });
+    // A path the `*` middleware never matched (one holding an encoded line
+    // break) reaches here with no record: its line is written here, so such a
+    // probe is seen like any other (review pass 3).
+    if (!traceOf(c.req.raw)) beginRequest("api", c.req.raw, write).end({ status: answer.status, outcome: "refused", code: allow.length ? "METHOD_NOT_ALLOWED" : "NO_ROUTE" });
+    return answer;
   });
   // What escapes a route — a throw outside an operation's own catch — is a
   // JSON fault like any other, not a text 500 and a stack on stderr.

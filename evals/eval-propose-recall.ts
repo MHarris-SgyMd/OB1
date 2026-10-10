@@ -12,7 +12,7 @@
  * found each hit, and the misses (what the proposer cannot see).
  *
  * Run against the dogfood stable brain (read-only):
- *   podman run … --network open-brain_default --env-file deploy/.env … \
+ *   podman run … --network open-brain_data --env-file deploy/.env … \
  *     bun /repo/evals/eval-propose-recall.ts
  */
 import { SQL } from "bun";

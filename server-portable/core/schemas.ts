@@ -266,7 +266,7 @@ export const SPECS = {
     description:
       "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
       "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
-      "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects) and the long-running workers' heartbeats (alive, stopped or stale). Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
+      "row counts, database size, vector-index parameters, the board-sync watermark (the newest Linear update any thought reflects), the long-running workers' heartbeats (alive, stopped or stale), and what consolidation found: the supersession proposals pending review (how many, how long ago the oldest was judged, how many pair two tickets the board does not link, how many are stale) and the judged relations standing, by word. Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
       "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
     annotations: {
       readOnlyHint: true,

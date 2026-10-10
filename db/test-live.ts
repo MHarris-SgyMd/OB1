@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -10883,6 +10883,41 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
     assert(false, `[39] stopped: ${(err as Error).message}`);
   } finally {
     await Promise.all([...pool, memory].map((db) => db.close()));
+  }
+}
+
+console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row reports the bitmap against work_mem with (SMD-1499)");
+{
+  // ~4,000 pages with a matching row on every one, a forced bitmap heap scan,
+  // and work_mem 8 kB either side of the rule (this layout: 34 rows a page,
+  // ~4,118 pages, rule ~257 kB). A separate first measurement on PostgreSQL
+  // 16.15, at 4,243 pages: lossy at 256 kB, exact from 272 kB, the rule's 265
+  // kB between. At ~4,000 pages and 8 kB, a server whose entry is outside about
+  // 62-66 bytes (a 32-bit build's 56, a 32 kB block's ~176) fails here rather
+  // than leaving preflight's arithmetic quietly wrong.
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    await sql.unsafe(`CREATE TEMP TABLE bitmap_rule (k int, pad text)`);
+    await sql.unsafe(`INSERT INTO bitmap_rule SELECT g % 7, repeat('x', 200) FROM generate_series(1, 140000) g`);
+    await sql.unsafe(`CREATE INDEX ON bitmap_rule (k)`);
+    await sql.unsafe(`ANALYZE bitmap_rule`);
+    const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size('bitmap_rule') / current_setting('block_size')::int)::int AS pages`);
+    const ruleKb = (Number(pages) * BITMAP_BYTES_PER_PAGE) / 1024;
+    const heapBlocks = async (kb: number) => {
+      const plan: string[] = await sql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+        await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+        await tx.unsafe(`SET LOCAL work_mem = '${kb}kB'`);
+        return (await tx.unsafe(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) SELECT count(*) FROM bitmap_rule WHERE k = 3`)).map((r: Record<string, string>) => String(Object.values(r)[0]));
+      });
+      return plan.find((l) => /Heap Blocks/.test(l))?.trim() ?? "(no bitmap heap scan)";
+    };
+    const under = await heapBlocks(Math.floor(ruleKb) - 8);
+    const over = await heapBlocks(Math.ceil(ruleKb) + 8);
+    assert(Number(pages) > 3500 && /lossy=\d+/.test(under) && /^Heap Blocks: exact=\d+$/.test(over),
+      `${pages} heap pages need ${ruleKb.toFixed(0)} kB by the rule: 8 kB under it the bitmap is lossy (${under}), 8 kB over it exact (${over})`);
+  } finally {
+    await sql.close();
   }
 }
 

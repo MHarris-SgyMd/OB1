@@ -468,6 +468,11 @@ first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
 [`deploy/README.md`](deploy/README.md), "Pinning a release".
 
+After a reboot, Docker brings the stack back by itself once its daemon starts
+at boot. Podman does so only once its `podman-restart.service` is enabled,
+which it was not on a podman machine measured here: see
+[`deploy/README.md`](deploy/README.md), "After a reboot" (SMD-2760).
+
 ### 3. Verify
 
 ```bash
@@ -491,15 +496,15 @@ claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/mc
 until v2.0.0, with a `Deprecation` header, for clients configured before the
 proxy; move those with `deploy/README.md`, "Moving a client to /mcp".
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
-only. By default nothing outside your machine can reach it: the proxy's port is
-the one the stack publishes without its opt-in profiles (n8n's profile adds
+only. By default nothing outside your machine can reach it: the port in front
+of the proxy is the one the stack publishes without its opt-in profiles (n8n's profile adds
 one, also on loopback), and it binds `127.0.0.1`; the database and Ollama are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
 custom connector) connects from Anthropic's side, not from your machine, so it
 needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
 `tailscale funnel` — `tailscale serve` reaches your tailnet alone) dials
 `127.0.0.1:8000` itself, and the loopback default serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
-`deploy/.env` — it opens the stack's one published port, the proxy's, to the
+`deploy/.env` — it opens the stack's one published port, in front of the proxy, to the
 network, with the key in clear on every request until the proxy.
 
 A write key sees every tool; a read key sees all but the ones that write. `capture_thought`,

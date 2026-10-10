@@ -17,7 +17,7 @@
  * gitignored; the grades fixture that references it stays ids-only). Only the
  * corpus's ids + numbers ever enter the repo, via the later grades fixture.
  *
- *   podman run --rm --network open-brain_default --env-file deploy/.env \
+ *   podman run --rm --network open-brain_data --env-file deploy/.env \
  *     -v <worktree>:/repo -w /repo oven/bun:1.4.0-alpine \
  *     sh -c 'export DATABASE_URL="postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain"; bun evals/build-longdoc-corpus.ts'
  */

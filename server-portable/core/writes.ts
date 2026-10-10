@@ -5,11 +5,11 @@
 // MCP registration renders it in the words it always has (render.ts), and the
 // REST core (SMD-2284) answers it as JSON.
 
-import type { EmbeddedCapture } from "../embed.ts";
+import type { EmbedConfig, EmbeddedCapture } from "../embed.ts";
 import { extractMetadata, metadataRefused, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
-import { resolveJevConfig } from "../jev.ts";
+import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
 import { decideCalls, type EgressSubject } from "../egress.ts";
 import { UUID_RE, type ActorStamp, type Citation, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
@@ -116,6 +116,19 @@ export type Captured = {
   /** A re-capture that named pointers it could not write (035): what was named, and what stands. Reader only. */
   recapture: { derivedNamed: boolean; given?: string; current: string | null } | null;
 };
+
+/**
+ * The longest a capture's model calls may run under these settings, in
+ * seconds (SMD-2768): the embedding, the metadata extraction and the genre
+ * tier run at once (capture's Promise.all), each provider call bounded by
+ * OB1_LLM_TIMEOUT and the tier's by its own deadline. With OB1_CHUNK_CONTEXT
+ * on, a long text's windows are blurbed before they are embedded: two rounds.
+ * What a webhook's delivery-id lease is sized from (plugin-sdk.ts's onceById).
+ */
+export function captureCallSeconds(cfg: Pick<EmbedConfig, "timeoutMs" | "chunkContext">, jev: Pick<JevConfig, "timeoutMs"> | null): number {
+  const rounds = cfg.chunkContext ? 2 : 1;
+  return Math.max(rounds * cfg.timeoutMs, jev ? requestTimeoutMs(jev, 1) : 0) / 1000;
+}
 
 export async function capture(ctx: Ctx, principal: Principal, { content, derived_from, supersedes, source, trust, metadata: clientMetadata }: Input<"capture_thought">): Promise<Outcome<Captured>> {
   // What a key that cannot read is told and allowed — decided once here

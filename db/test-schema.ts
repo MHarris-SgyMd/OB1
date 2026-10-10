@@ -70,6 +70,11 @@ import {
   SEARCH_THOUGHTS_HYBRID_SIGNATURE,
   SEARCH_THOUGHTS_HYBRID_SIGNATURE_7,
   stripSqlComments,
+  BITMAP_BYTES_PER_PAGE,
+  BITMAP_PAGE_SHARE_GATED,
+  bytesText,
+  memoryRows,
+  memorySizing,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
@@ -12903,7 +12908,74 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[76] Migration 086: the operator resets a capture-only key's settled or moved label — a key the registry classifies operator, not capture-scoped; a row a capture-only key captured whose text never changed; the declines and the restamp since the latest reset no longer count, a restamp's stamp put back, one event in the operator's name — and the next re-capture is weighed afresh; the backfill reads a restamp with a reset after it as no writer (SMD-2744)");
+console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against shared_buffers (a warning), and the filter bitmaps against work_mem (information only) (SMD-1499, db/config.mjs)");
+{
+  // Pure arithmetic: preflight reads the numbers and prints what this returns.
+  const MB = 1048576;
+  const base = { hnswBytes: 100 * MB, sharedBuffersBytes: 128 * MB, heapBytes: 8000 * 8192, blockSize: 8192, workMemBytes: 4 * MB };
+  assert(BITMAP_BYTES_PER_PAGE === 64 && Math.abs(BITMAP_PAGE_SHARE_GATED - (1 - 1 / Math.E)) < 1e-12 && ROUTE_ESTIMATE_MIN_PAGES === 8192,
+    "an exact bitmap page costs 64 bytes, and on a heap 037's gate samples (8,192 pages up) a filter at its boundary touches at least 1 - 1/e of the pages");
+  const atPool = memorySizing({ ...base, hnswBytes: 128 * MB });
+  const overPool = memorySizing({ ...base, hnswBytes: 128 * MB + 1 });
+  assert(atPool.resident.fits && !overPool.resident.fits && overPool.resident.recommend === "192MB",
+    `indexes the size of the pool fit; one byte more does not, and the pool it needs is rounded up to 64 MB (${overPool.resident.recommend})`);
+  // Under the gate every filter takes the GIN route, so the bitmap is the whole heap.
+  const ungated = memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 });
+  assert(!ungated.bitmap.gated && ungated.bitmap.bitmapPages === 8000 && ungated.bitmap.fits && !memorySizing({ ...base, heapBytes: 8000 * 8192, workMemBytes: 8000 * 64 - 1 }).bitmap.fits,
+    `under 8,192 pages the bitmap is every page (${ungated.bitmap.bitmapPages}), and work_mem one byte short of it is short`);
+  const gated = memorySizing({ ...base, heapBytes: 100000 * 8192 });
+  assert(gated.bitmap.gated && gated.bitmap.bitmapPages === 63213 && gated.bitmap.needBytes === 63213 * 64 && gated.bitmap.fits,
+    `at 100,000 pages a filter at the gate's boundary touches about 1 - 1/e of them: ${gated.bitmap.bitmapPages} pages, ${gated.bitmap.needBytes} bytes, within 4 MB`);
+  const partial = memorySizing({ ...base, heapBytes: 8191 * 8192 + 1, workMemBytes: 64 * MB });
+  assert(partial.bitmap.heapPages === 8192 && partial.bitmap.gated, `a heap a byte past a page boundary counts the page it reaches into (${partial.bitmap.heapPages})`);
+  const bigBlocks = memorySizing({ ...base, heapBytes: 100000 * 8192, blockSize: 32768 });
+  assert(bigBlocks.bitmap.heapPages === 25000 && bigBlocks.bitmap.gated, `pages are counted in the server's block size (${bigBlocks.bitmap.heapPages} at 32 kB)`);
+  const tenMillion = memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: (4143 + 837) * MB });
+  assert(tenMillion.resident.recommend === "4992MB" && tenMillion.bitmap.bitmapPages === 316121 && tenMillion.bitmap.wholeHeapBytes === 500096 * 64 && !tenMillion.bitmap.fits,
+    `SMD-1499's ten-million-row corpus (3,907 MiB heap; 4,143 + 837 MiB of HNSW): shared_buffers ${tenMillion.resident.recommend}; the gate-boundary filter's bitmap ${tenMillion.bitmap.bitmapPages} pages, the whole heap's ${tenMillion.bitmap.wholeHeapBytes} bytes, both past 4 MB`);
+  const empty = memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 });
+  assert(empty.resident.recommend === "64MB" && empty.resident.fits && empty.bitmap.fits && empty.bitmap.needBytes === 0,
+    `an empty brain fits, and its recommendation never rounds below its step (${empty.resident.recommend})`);
+  // memoryRows: every branch's wording, the resident warning's included,
+  // which no live test reaches (a pool cannot be lowered for one database).
+  const [okRes] = memoryRows(memorySizing(base));
+  const [warnRes] = memoryRows(overPool);
+  assert(okRes.name === "vector index memory" && warnRes.name === "vector index memory"
+         && okRes.status === "ok" && okRes.fix === undefined && okRes.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB)"
+         && warnRes.status === "warn" && /are 129 MB and shared_buffers is 128 MB: a vector search walks an index the buffer pool cannot hold\. The OS page cache serves the walk, but not as well — at ten million rows, .* about a third of the throughput/.test(warnRes.detail),
+    `the resident row: ok with both sizes; a warning past the pool, with the page cache's measured third (${warnRes.detail.slice(0, 60)}…)`);
+  assert(/^Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB'; then restart postgres/.test(warnRes.fix ?? "")
+         && /`<tier>-postgres`/.test(warnRes.fix ?? "")
+         && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
+         && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
+    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+  const [noIndex] = memoryRows(memorySizing({ ...base, hnswBytes: 0 }));
+  assert(noIndex.status === "ok" && noIndex.detail.startsWith("no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold"),
+    `no valid HNSW index: said as none, not as an index of 0 kB (${noIndex.detail.slice(0, 60)}…)`);
+  const ungatedRows = memoryRows(memorySizing({ ...base, heapBytes: 8000 * 8192 }));
+  const gatedFits = memoryRows(memorySizing({ ...base, heapBytes: 100000 * 8192 }));
+  const gatedWithin = memoryRows(memorySizing({ ...base, heapBytes: 10000 * 8192 }));
+  const onePage = memoryRows(memorySizing({ ...base, heapBytes: 8192 }));
+  const gatedPast = memoryRows(memorySizing({ ...base, heapBytes: 3907 * MB, hnswBytes: 4980 * MB }));
+  const emptyRows = memoryRows(memorySizing({ ...base, hnswBytes: 0, heapBytes: 0 }));
+  assert([ungatedRows, gatedFits, gatedWithin, gatedPast, onePage, emptyRows].every(([, b]) => b.name === "filter bitmap memory" && b.status === "ok" && b.fix === undefined && /\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle/.test(b.detail)),
+    "the bitmap row is ok with no remedy in every regime, and names SMD-1464");
+  assert(ungatedRows[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all 8,000 of its pages: its routing count's bitmap (500 kB) fits work_mem (4 MB). Information only")
+         && !/generic-plan/.test(ungatedRows[1].detail)
+         && onePage[1].detail.startsWith("on a heap under 8,192 pages every filter takes the GIN route, the broadest touching its one page: its routing count's bitmap (1 kB) fits work_mem (4 MB). Information only"),
+    "under the gate: every page (a one-page heap said as one), the routing count's bitmap, no separate generic-plan figure (it is the same heap)");
+  assert(gatedFits[1].detail.startsWith("a filter at 037's gate boundary (about one match a heap page on a large heap; more on one under ten times v_exact pages, or at a larger match count) touches at least 63,213 of the thoughts heap's 100,000 pages: its routing count's bitmap (4 MB) fits work_mem (4 MB); a generic-plan GIN walk's bitmap can cover the whole heap (7 MB, past work_mem)"),
+    `above the gate: a floor of 1 - 1/e of the pages, and the whole heap for a generic-plan walk with its verdict (${gatedFits[1].detail.slice(0, 80)}…)`);
+  assert(/touches at least 6,322 of the thoughts heap's 10,000 pages: its routing count's bitmap \(396 kB\) fits work_mem \(4 MB\); a generic-plan GIN walk's bitmap can cover the whole heap \(625 kB, within work_mem\)\. Information only/.test(gatedWithin[1].detail),
+    "above the gate on a heap whose whole bitmap fits: the generic-plan figure within work_mem");
+  assert(/touches at least 316,121 of the thoughts heap's 500,096 pages: its routing count's bitmap \(20 MB\) passes work_mem \(4 MB\) and goes lossy, which costs little: under LIMIT v_exact \+ 1 it rechecks pages only until it has its rows; a generic-plan GIN walk's bitmap can cover the whole heap \(31 MB, past work_mem\)/.test(gatedPast[1].detail)
+         && emptyRows[1].detail.startsWith("the thoughts heap is empty, so no filter builds a bitmap. Information only"),
+    "past work_mem the routing count's lossiness is said to cost little; an empty heap says it builds none");
+  assert(bytesText(512) === "1 kB" && bytesText(MB - 1) === "1024 kB" && bytesText(MB) === "1 MB" && bytesText(1024 * MB - 1) === "1024 MB" && bytesText(1024 * MB) === "1.0 GB" && bytesText(128 * MB) === "128 MB" && bytesText(128 * MB + 1) === "129 MB" && bytesText(1.5 * 1024 * MB) === "1.5 GB" && bytesText(6.41 * 1024 * MB) === "6.5 GB",
+    "sizes read as kB, MB, or GB to one decimal, rounded up: a size a byte past a setting never reads as equal to it");
+}
+
+console.log("\n[77] Migration 086: the operator resets a capture-only key's settled or moved label — a key the registry classifies operator, not capture-scoped; a row a capture-only key captured whose text never changed; the declines and the restamp since the latest reset no longer count, a restamp's stamp put back, one event in the operator's name — and the next re-capture is weighed afresh; the backfill reads a restamp with a reset after it as no writer (SMD-2744)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12963,7 +13035,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
 
   // Verify, first: a row settled by another key's decline — an agent key
   // declaring the capture key's own trust, weighed and not higher.
-  const T1 = "[76] the hook's outside text an agent re-sends as outside text";
+  const T1 = "[77] the hook's outside text an agent re-sends as outside text";
   const hook1 = await capture(T1, HOOK, "ingested");
   assert((await capture(T1, BOT, "ingested")).restamped === false && (await capture(T1, OP)).restamped === false && (await marks(hook1.id)) === "agent/hook-76/ingested",
     `setup: an agent key's equal re-capture declines, and settles the row against the operator (${await marks(hook1.id)})`);
@@ -12978,7 +13050,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // Verify, second: a row settled by a name-only decline, which settles it
   // for every caller — reset by the operator, and by the operator's key by
   // name alone (its kind by its label, as the audit row reads it).
-  const T2 = "[76] the hook's outside text the operator's key re-sends by name only";
+  const T2 = "[77] the hook's outside text the operator's key re-sends by name only";
   const hook2 = await capture(T2, HOOK, "ingested");
   assert((await capture(T2, OPNAME, "ingested")).restamped === false && (await capture(T2, OP)).restamped === false && (await capture(T2, BOT)).restamped === false,
     "setup: a name-only decline settles the row for the operator and an agent alike");
@@ -12990,21 +13062,21 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
 
   // A restamp moved the label: the reset puts the capture key's stamp back,
   // the stamp's three keys alone — a key edited since stays as it is now.
-  const T3 = "[76] the hook's outside text an agent re-sends first";
+  const T3 = "[77] the hook's outside text an agent re-sends first";
   const hook3 = await capture(T3, HOOK, "ingested");
   assert((await capture(T3, BOT)).restamped === true && (await marks(hook3.id)) === "agent/bot-76/agent", "setup: an agent key's re-capture moved the stamp to itself");
-  await one(`SELECT update_thought($1::uuid, NULL, $2::jsonb, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook3.id, JSON.stringify({ topic: "[76] kept" }), JSON.stringify(BOT)]);
+  await one(`SELECT update_thought($1::uuid, NULL, $2::jsonb, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook3.id, JSON.stringify({ topic: "[77] kept" }), JSON.stringify(BOT)]);
   assert((await capture(T3, OP)).restamped === false && (await marks(hook3.id)) === "agent/bot-76/agent", "setup: …so the operator's re-capture moves nothing (moved once)");
   const r3 = await reset(hook3.id, OP);
   const ev3 = await lastEvent(hook3.id);
   const meta3 = (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [hook3.id])).m;
-  assert(r3.ok === true && r3.reset === true && r3.restored === true && r3.declines === 0 && r3.moved_by === "bot-76" && (await marks(hook3.id)) === "agent/hook-76/ingested" && meta3.topic === "[76] kept" && meta3.source === "mcp",
+  assert(r3.ok === true && r3.reset === true && r3.restored === true && r3.declines === 0 && r3.moved_by === "bot-76" && (await marks(hook3.id)) === "agent/hook-76/ingested" && meta3.topic === "[77] kept" && meta3.source === "mcp",
     `the operator's reset puts the capture key's stamp back — its kind, name and trust — and keeps the key edited since (${await marks(hook3.id)}; ${JSON.stringify(meta3)})`);
   assert(ev3.diff.restamp_reset === true && (ev3.diff.metadata as { after: Meta }).after.trust === "ingested" && (ev3.diff.metadata as { before: Meta }).before.trust === "agent" && ev3.trust === "ingested" && ev3.actor_name === "op-76",
     `…one event, the metadata's move in its diff beside the reset, its trust the row's (${JSON.stringify(ev3)})`);
   assert((await capture(T3, OP)).restamped === true && (await marks(hook3.id)) === "operator/op-76/operator", "…and the operator's re-capture then moves it");
   // An unclassified capture key's row has no kind and no trust: put back, the keys are gone.
-  const T4 = "[76] an unclassified hook's text the operator re-sends";
+  const T4 = "[77] an unclassified hook's text the operator re-sends";
   const hook4 = await capture(T4, HOOKX, "agent");
   assert((await capture(T4, OP)).restamped === true && (await marks(hook4.id)) === "operator/op-76/operator", "setup: the operator moved an unclassified capture key's stamp");
   const r4 = await reset(hook4.id, OP);
@@ -13014,7 +13086,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
 
   // Since the latest reset: a reset row is weighed afresh, so a decline
   // after it settles it again, and a second reset clears that one.
-  const T5 = "[76] the hook's text, declined, reset, declined again";
+  const T5 = "[77] the hook's text, declined, reset, declined again";
   const hook5 = await capture(T5, HOOK, "ingested");
   await capture(T5, BOT, "ingested");
   assert((await reset(hook5.id, OP)).reset === true, "setup: declined, then reset");
@@ -13023,7 +13095,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   const again = await reset(hook5.id, OP);
   assert(again.reset === true && again.declines === 1 && (await capture(T5, OP)).restamped === true, `…and a second reset counts the one decline since the first, and frees the row (${JSON.stringify(again)})`);
   // A restamp before the latest reset is not put back a second time.
-  const T15 = "[76] the hook's text moved, reset, then declined";
+  const T15 = "[77] the hook's text moved, reset, then declined";
   const hook15 = await capture(T15, HOOK, "ingested");
   await capture(T15, BOT);
   assert((await reset(hook15.id, OP)).restored === true && (await capture(T15, BOT, "ingested")).restamped === false, "setup: moved, reset, then the agent's own equal re-capture declines");
@@ -13033,7 +13105,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // The window is since the LATEST reset: after two move-and-reset cycles a
   // third reset has nothing (run-it, review pass 3: from the first reset,
   // the third re-cleared what the second had).
-  const T26 = "[76] the hook's text moved and reset twice";
+  const T26 = "[77] the hook's text moved and reset twice";
   const hook26 = await capture(T26, HOOK, "ingested");
   await capture(T26, BOT);
   await reset(hook26.id, OP);
@@ -13045,11 +13117,11 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
     `a third reset after two move-and-reset cycles has nothing to reset (${JSON.stringify(third)})`);
   // Nothing settled since the latest reset, or ever: nothing written.
   const n5 = await events(hook5.id);
-  const T6 = "[76] the hook's text nobody re-sent";
+  const T6 = "[77] the hook's text nobody re-sent";
   const hook6 = await capture(T6, HOOK, "ingested");
   const n6 = await events(hook6.id);
   const idle = await reset(hook6.id, OP);
-  const T7 = "[76] the hook's text, declined and reset";
+  const T7 = "[77] the hook's text, declined and reset";
   const hook7 = await capture(T7, HOOK, "ingested");
   await capture(T7, BOT, "ingested");
   await reset(hook7.id, OP);
@@ -13059,7 +13131,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
     `a row nobody weighed, and a row reset with nothing since, answer reset false and write nothing (${JSON.stringify(idle)}; ${JSON.stringify(twice)})`);
 
   // The operator alone.
-  const T8 = "[76] the hook's text a key that is not the operator would reset";
+  const T8 = "[77] the hook's text a key that is not the operator would reset";
   const hook8 = await capture(T8, HOOK, "ingested");
   await capture(T8, BOT, "ingested");
   const n8 = await events(hook8.id);
@@ -13088,31 +13160,31 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
     "an actor that is not an object is refused by name");
 
   // Only a row whose label 085 moves.
-  const T9 = "[76] the operator's own outside text";
+  const T9 = "[77] the operator's own outside text";
   const op9 = await capture(T9, OP, "ingested");
   await capture(T9, BOT, "ingested");
-  const T10 = "[76] the hook's text an agent rewrote";
+  const T10 = "[77] the hook's text an agent rewrote";
   const hook10 = await capture(T10, HOOK, "ingested");
   await capture(T10, BOT, "ingested");
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook10.id, "[76] the agent's rewrite", JSON.stringify(BOT)]);
-  const T11 = "[76] a capture key's text from before the scope mark";
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook10.id, "[77] the agent's rewrite", JSON.stringify(BOT)]);
+  const T11 = "[77] a capture key's text from before the scope mark";
   const pre11 = await capture(T11, { name: "hook-76", via: "test-door" }, "ingested");
-  const T12 = "[76] the hook's text an agent re-spaced";
+  const T12 = "[77] the hook's text an agent re-spaced";
   const hook12 = await capture(T12, HOOK, "ingested");
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook12.id, "[76] the hook's text  an agent re-spaced", JSON.stringify(BOT)]);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook12.id, "[77] the hook's text  an agent re-spaced", JSON.stringify(BOT)]);
   await capture(T12, BOT, "ingested");
   const notMine = { operators: (await reset(op9.id, OP)).error, rewritten: (await reset(hook10.id, OP)).error, unmarked: (await reset(pre11.id, OP)).error, gone: (await reset("00000000-0000-4000-8000-000000000086", OP)).error };
   assert(notMine.operators === "NOT_CAPTURE_STAMP" && notMine.rewritten === "NOT_CAPTURE_STAMP" && notMine.unmarked === "NOT_CAPTURE_STAMP" && notMine.gone === "NOT_FOUND",
     `a key that can read's own row, a capture key's text another key rewrote, a capture row without the scope mark: NOT_CAPTURE_STAMP; no row: NOT_FOUND (${JSON.stringify(notMine)})`);
   assert((await reset(hook12.id, OP)).reset === true, "…while a whitespace-only edit (018's unchanged text) is no rewrite: that row resets");
   // A rewritten row nothing settled answers before any text is hashed.
-  const T16 = "[76] the hook's text an agent rewrote, nothing settled";
+  const T16 = "[77] the hook's text an agent rewrote, nothing settled";
   const hook16 = await capture(T16, HOOK, "ingested");
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook16.id, "[76] the agent's rewrite, unsettled", JSON.stringify(BOT)]);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [hook16.id, "[77] the agent's rewrite, unsettled", JSON.stringify(BOT)]);
   const r16 = await reset(hook16.id, OP);
   assert(r16.ok === true && r16.reset === false && (await marks(hook16.id)) === "agent/bot-76/agent", `a rewritten row nothing settled answers reset false, its label the editor's (${JSON.stringify(r16)})`);
   // Planted (no live write leaves them): metadata that is not an object.
-  const T17 = "[76] the hook's text, its metadata replaced by a raw writer";
+  const T17 = "[77] the hook's text, its metadata replaced by a raw writer";
   const hook17 = await capture(T17, HOOK, "ingested");
   await capture(T17, BOT);
   const nonObject: Record<string, string | undefined> = {};
@@ -13130,7 +13202,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // a key demoted since came back above its kind).
   await db.exec(`SELECT set_agent_kind('hookd-76', 'agent')`);
   const HOOKD = { name: "hookd-76", agent_id: await agent("1", "hookd-76", "capture"), via: "test-door", scope: "capture" };
-  const T18 = "[76] a hook's text the operator moved, the hook demoted since";
+  const T18 = "[77] a hook's text the operator moved, the hook demoted since";
   const hook18 = await capture(T18, HOOKD);
   await capture(T18, OP);
   await db.exec(`SELECT set_agent_kind('hookd-76', 'ingested')`);
@@ -13140,13 +13212,13 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // Planted restamp rows (085 writes neither): one with no before-image
   // still puts the capture key's stamp back, derived from its capture row;
   // of two in one window, the oldest's image is the one that lowers it.
-  const T19 = "[76] the hook's text, a raw restamp with no image";
+  const T19 = "[77] the hook's text, a raw restamp with no image";
   const hook19 = await capture(T19, HOOK, "ingested");
   await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES ('${hook19.id}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true}'::jsonb)`);
   const r19 = await reset(hook19.id, OP);
   assert(r19.reset === true && r19.restored === true && (await marks(hook19.id)) === "agent/hook-76/ingested",
     `a restamp row with no metadata image still puts the capture key's stamp back: it is the capture row's (${JSON.stringify(r19)})`);
-  const T20 = "[76] the hook's text, two raw restamps in one window";
+  const T20 = "[77] the hook's text, two raw restamps in one window";
   const hook20 = await capture(T20, HOOK, "ingested");
   await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES
     ('${hook20.id}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true, "metadata": {"before": {"source": "mcp", "actor_kind": "agent", "actor_name": "hook-76", "trust": "ingested"}, "after": {"source": "mcp", "actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}}}'::jsonb),
@@ -13161,7 +13233,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // the pass finds nothing to change (review pass 2: from the restamp's
   // image the reset left no trust, and the pass gave it one).
   const HOOKC = { name: "hookc-76", agent_id: await agent("2", "hookc-76", "capture"), via: "test-door", scope: "capture" };
-  const T21 = "[76] an unclassified hook's text, the hook classified after the operator moved it";
+  const T21 = "[77] an unclassified hook's text, the hook classified after the operator moved it";
   const hook21 = await capture(T21, HOOKC);
   await capture(T21, OP);
   await db.exec(`SELECT set_agent_kind('hookc-76', 'agent')`);
@@ -13180,7 +13252,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   const HOOKN = { name: "hookn-76", via: "test-door", scope: "capture" };
   const HOOKG = { name: "hookg-76", agent_id: await agent("4", "hookg-76", "capture"), via: "test-door", scope: "capture" };
   const moveThenReset = async (what: string, hook: Meta, between: string) => {
-    const t = `[76] a hook's text the operator moved, ${what}`;
+    const t = `[77] a hook's text the operator moved, ${what}`;
     const row = await capture(t, hook);
     await capture(t, OP);
     await db.exec(between);
@@ -13199,13 +13271,13 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   await db.exec(`SELECT set_agent_kind('hookl-76', 'agent')`);
   const HOOKX2 = { name: "hookx2-76", agent_id: await agent("6", "hookx2-76", "capture"), via: "test-door", scope: "capture" };
   const HOOKL = { name: "hookl-76", agent_id: await agent("7", "hookl-76", "capture"), via: "test-door", scope: "capture" };
-  const T24 = "[76] an unclassified hook's text declaring agent, classified operator since";
+  const T24 = "[77] an unclassified hook's text declaring agent, classified operator since";
   const hook24 = await capture(T24, HOOKX2, "agent");
   await capture(T24, OP);
   await db.exec(`SELECT set_agent_kind('hookx2-76', 'operator')`);
   await reset(hook24.id, OP);
   const reset24 = await marks(hook24.id);  // read now: the pass below would mend a wrong reset
-  const T25 = "[76] a hook's text a demotion lowered, the hook promoted back before the operator moved it";
+  const T25 = "[77] a hook's text a demotion lowered, the hook promoted back before the operator moved it";
   const hook25 = await capture(T25, HOOKL);
   await db.exec(`SELECT set_agent_kind('hookl-76', 'ingested')`);
   await one(`SELECT backfill_thought_actors() AS r`);
@@ -13218,13 +13290,13 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // An unclassified capture key that declared ingested keeps it: the one
   // trust an unclassified key supports.
   const HOOKU = { name: "hooku-76", agent_id: await agent("5", "hooku-76", "capture"), via: "test-door", scope: "capture" };
-  const T22 = "[76] an unclassified hook's outside text the operator moved";
+  const T22 = "[77] an unclassified hook's outside text the operator moved";
   const hook22 = await capture(T22, HOOKU, "ingested");
   await capture(T22, OP);
   const r22 = await reset(hook22.id, OP);
   assert(r22.restored === true && (await marks(hook22.id)) === "-/hooku-76/ingested", `an unclassified capture key's declared ingested is put back with it (${await marks(hook22.id)})`);
   // A decline and then the same agent's restamp in one window: both undone.
-  const T23 = "[76] the hook's text an agent declined, then lifted";
+  const T23 = "[77] the hook's text an agent declined, then lifted";
   const hook23 = await capture(T23, HOOK, "ingested");
   const declined23 = await capture(T23, BOT, "ingested");
   const lifted23 = await capture(T23, BOT);
@@ -13235,11 +13307,11 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // The backfill: a restamp with a reset after it is no writer; the capture
   // is again (a mutant without the reset in the backfill put the agent's
   // stamp back; one without the capture's place in the order stripped it).
-  const T13 = "[76] the hook's text an agent moved, then the operator reset";
+  const T13 = "[77] the hook's text an agent moved, then the operator reset";
   const hook13 = await capture(T13, HOOK, "ingested");
   await capture(T13, BOT);
   await reset(hook13.id, OP);
-  const T14 = "[76] the hook's text reset, then the operator moved";
+  const T14 = "[77] the hook's text reset, then the operator moved";
   const hook14 = await capture(T14, HOOK, "ingested");
   await capture(T14, BOT);
   await reset(hook14.id, OP);
@@ -13260,7 +13332,7 @@ console.log("\n[76] Migration 086: the operator resets a capture-only key's sett
   // the row's NULL hash would have made the operator's reset the writer.
   const BARE = "76767676-7676-4767-8767-767676767676";
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${BARE}', '[76] loaded unaudited, restamped then reset', '{"actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}'::jsonb, '${unit(76)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${BARE}', '[77] loaded unaudited, restamped then reset', '{"actor_kind": "agent", "actor_name": "bot-76", "trust": "agent"}'::jsonb, '${unit(76)}'::vector)`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, trust, diff) VALUES
     ('${BARE}', 'update', 'bot-76', 'agent', 'agent', '{"restamped": true}'::jsonb),

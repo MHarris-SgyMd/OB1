@@ -891,7 +891,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
 console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
 {
-  const { ago, boardSyncValue, brainInfo, formatBytes, heartbeatState, ledgerStatus, parseHeartbeats, parseHnswOptions, readDatabaseFacts, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  const { ago, boardPairsValue, boardSyncValue, brainInfo, deniedObject, formatBytes, heartbeatState, ledgerStatus, newProgress, snapshotFacts, parseHeartbeats, parseHnswOptions, proposalsValue, readDatabaseFacts, relationsValue, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
   type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
   assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
     "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
@@ -914,6 +914,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let answerLedger = false;
   const answer = (text: string): unknown[] => {
     statements.push(text);
+    if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
     if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
     if (/FROM schema_migrations/.test(text)) {
       if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
@@ -923,20 +924,35 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/server_version/.test(text)) {
       return [{
         postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
-        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true },
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true },
         anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public" },
         hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
+        tickets_linked: catalogLinked,
       }];
     }
     if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
     if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
     if (/LIKE 'heartbeat:%'/.test(text)) return heartbeatRows;
+    if (/NOT consolidation_tickets_linked/.test(text)) {
+      if (boardTimeout) throw pgError("canceling statement due to statement timeout", "57014");
+      return [{ n: /FROM supersession_proposals/.test(text) ? proposalsAnswer.board_pairs : 11 }];
+    }
+    if (/FROM supersession_proposals/.test(text)) return [proposalsAnswer];
+    if (/FROM thought_facets/.test(text)) return [relationsAnswer];
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
+    if (lockThoughts && /FROM thoughts\b/.test(text) && /count\(\*\)::float8/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
   let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
   let heartbeatRows: unknown[] = [];
+  let lockThoughts = false;
+  let catalogLinked = true;
+  let boardTimeout = false;
+  let lockFacets = false;
+  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  let failRelease: RegExp | null = null;
+  let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   const slow = new Set<string>();
   const tag = (strings: TemplateStringsArray) => {
     const text = strings.join("?");
@@ -952,8 +968,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const tx = Object.assign(tag, {
     savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => {
       if (savepointMs) await Bun.sleep(savepointMs);
+      const before = statements.length;
       const r = await fn(tag);
       if (releaseMs) await Bun.sleep(releaseMs);
+      if (failRelease && statements.slice(before).some((t) => failRelease!.test(t))) throw pgError("server closed the connection unexpectedly", "08006");
       return r;
     },
   });
@@ -987,6 +1005,128 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   boardAnswer = "2026-09-24T12:00:00.000Z";
   assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
     `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
+  // What consolidation found (SMD-2680): the queue on the lean read too, for
+  // preflight's proposals row; the standing relations with the counts only.
+  // The board pairs are read where 079's function is there — two reads of
+  // their own — and not otherwise: null, with no entry in unread.
+  catalogLinked = false;
+  statements.length = 0;
+  const noRule = await readDatabaseFacts(fake);
+  catalogLinked = true;
+  const without = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  statements.length = 0;
+  await readDatabaseFacts(fake);
+  const withRule = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  assert(without === 0 && withRule === 2 && noRule.proposals?.pending === 6 && noRule.proposals?.boardPairs === null && noRule.relations?.boardPairs === null && !Object.keys(noRule.unread).some((k) => /boardPairs/.test(k)),
+    `the board pairs read 079's rule when the catalog has it — two reads — and are null, unnamed, without it (${without}, ${withRule}, ${JSON.stringify(noRule.proposals)})`);
+  // An empty queue and no standing relation pair nothing: neither board
+  // statement is sent, so a refusal of 079's predicate cannot speak for them
+  // (run-it, review pass 4).
+  proposalsAnswer = { pending: 0, stale: 2, oldest_s: null, board_pairs: 4 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  boardTimeout = true;
+  statements.length = 0;
+  const emptyQueue = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  assert(emptyQueue.proposals?.boardPairs === 0 && emptyQueue.relations?.boardPairs === 0 && !Object.keys(emptyQueue.unread).some((k) => /boardPairs/.test(k)) && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `an empty queue and no relation send no board statement and count none (${JSON.stringify(emptyQueue.proposals)}, ${JSON.stringify(emptyQueue.unread)})`);
+  // …and under a refused lock on thoughts, or at a deadline, an empty queue
+  // still reads 0 with no entry, and a queue not read leaves no board entry
+  // beside its own (review pass 5).
+  proposalsAnswer = { pending: 0, stale: 0, oldest_s: null, board_pairs: 0 };
+  lockThoughts = true;
+  const emptyLocked = await readDatabaseFacts(fake);
+  lockThoughts = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  // At a deadline in the queue's board read, with no relation standing, the
+  // snapshot names the queue's board count and settles the relations' to 0.
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  hang.add("NOT consolidation_tickets_linked");
+  const dlProgress = newProgress();
+  void readDatabaseFacts(fake, {}, dlProgress);
+  await Bun.sleep(200);
+  const dl = snapshotFacts(dlProgress)!;
+  hang.delete("NOT consolidation_tickets_linked");
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  proposalsAnswer = { pending: 1, stale: "x", oldest_s: 1, board_pairs: 0 };
+  const parentLost = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(emptyLocked.proposals?.boardPairs === 0 && !("proposals.boardPairs" in emptyLocked.unread) && dl.unread["proposals.boardPairs"]?.reason === "deadline" && dl.relations?.boardPairs === 0 && !("relations.boardPairs" in dl.unread)
+      && parentLost.proposals === null && !("proposals.boardPairs" in parentLost.unread),
+    `an empty queue under a lock reads 0, unnamed; a deadline names a board count only beside a read queue; a queue not read leaves no board entry (${JSON.stringify(emptyLocked.proposals)}, ${JSON.stringify(Object.keys(dl.unread))}, ${JSON.stringify(Object.keys(parentLost.unread))})`);
+  // A board read that times out takes its count alone: the queue and the
+  // relations stand (run-it, review pass 2: at ~45k pending the one statement
+  // passed the health cap and the whole queue went unread).
+  boardTimeout = true;
+  const slowBoard = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  assert(slowBoard.proposals?.pending === 6 && slowBoard.proposals?.boardPairs === null && slowBoard.unread["proposals.boardPairs"]?.reason === "timeout"
+      && slowBoard.relations?.related === 9 && slowBoard.relations?.boardPairs === null && slowBoard.unread["relations.boardPairs"]?.reason === "timeout" && !("proposals" in slowBoard.unread),
+    `a board-pair read that times out leaves the queue and the relations read (${JSON.stringify(slowBoard.proposals)}, ${JSON.stringify(Object.keys(slowBoard.unread))})`);
+  statements.length = 0;
+  const leanFindings = await readDatabaseFacts(fake, { stats: false });
+  assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
+      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
+    `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
+  const qShapes = [
+    { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },
+    { pending: -1, stale: 0, oldest_s: null }, { pending: 1.5, stale: 0, oldest_s: 1 }, { pending: 1, stale: "x", oldest_s: 1 }, { pending: 1, stale: 0, oldest_s: "soon" }, undefined,
+  ].map((r) => { try { return JSON.stringify(proposalsValue(r)); } catch { return "threw"; } });
+  assert(qShapes.join("|") === '{"pending":0,"stale":0,"oldestPendingS":null,"boardPairs":null}|{"pending":3,"stale":0,"oldestPendingS":13,"boardPairs":null}|{"pending":0,"stale":1,"oldestPendingS":null,"boardPairs":null}|{"pending":1,"stale":0,"oldestPendingS":0,"boardPairs":null}|threw|threw|threw|threw|threw',
+    `the queue's counts are counts and its age whole seconds, or the read did not answer (${qShapes.join("|")})`);
+  const rShapes = [{ related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: null, duplicate: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0 }, undefined]
+    .map((r) => { try { return JSON.stringify(relationsValue(r)); } catch { return "threw"; } });
+  const bShapes = [{ n: 4 }, { n: "4" }, { n: -1 }, { n: null }, {}, undefined].map((r) => { try { return String(boardPairsValue("x", r)); } catch { return "threw"; } });
+  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"boardPairs":null}|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
+    `the relations' and the board pairs' counts are counts, or the read did not answer (${rShapes.join("|")} / ${bShapes.join("|")})`);
+  proposalsAnswer = { pending: 1, stale: "two", oldest_s: 1, board_pairs: 0 };
+  const oddQueue = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(oddQueue.proposals === null && oddQueue.unread.proposals?.reason === "error" && oddQueue.counts?.thoughts === 7,
+    `a queue answer that is not counts is unread, the other facts read (${JSON.stringify(oddQueue.unread.proposals)})`);
+  // A table whose lock a read of it alone was refused is not waited on again
+  // in the same read (SMD-2680): the watermark and the two board counts touch
+  // thoughts, and none is sent once its count was refused; the queue and the
+  // relations, which do not, stand.
+  lockThoughts = true;
+  statements.length = 0;
+  const lockProgress = newProgress();
+  const lockedOut = await readDatabaseFacts(fake, {}, lockProgress);
+  lockThoughts = false;
+  // …and leaves nothing pending, so a deadline after it cannot rename it (run-it, review pass 1).
+  assert(lockProgress.pending.size === 0, `a read not tried leaves nothing pending (${[...lockProgress.pending].join(", ")})`);
+  const skipped = ["boardSync", "relations.boardPairs", "proposals.boardPairs"].filter((f) => lockedOut.unread[f]?.reason === "timeout" && /^not tried — a lock on thoughts \(the table or one of its indexes\) was refused/.test(lockedOut.unread[f]?.message ?? ""));
+  assert(lockedOut.unread["counts.thoughts"]?.reason === "timeout" && skipped.length === 3 && lockedOut.proposals?.pending === 6 && lockedOut.relations?.related === 9 && !statements.some((t) => /linear_updated_at|NOT consolidation_tickets_linked/.test(t)) && lockedOut.schemaVersion !== null,
+    `after a refused lock on thoughts the reads that touch it are named, not sent (${skipped.join(", ")})`);
+  // A lock refused to the relations' read (thought_facets alone) is not
+  // waited on by the queue's board count, which reads it through 079's
+  // predicate (run-it, review pass 3).
+  lockFacets = true;
+  statements.length = 0;
+  const facetsLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  assert(facetsLocked.unread.relations?.reason === "timeout" && /^not tried — a lock on thought_facets/.test(facetsLocked.unread["proposals.boardPairs"]?.message ?? "")
+      && facetsLocked.proposals?.pending === 6 && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `after a refused lock on thought_facets the queue's board count is not sent (${JSON.stringify(facetsLocked.unread["proposals.boardPairs"])})`);
+  // A board read whose release fails takes its count back (review pass 3).
+  failRelease = /NOT consolidation_tickets_linked/;
+  const boardReleaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  assert(boardReleaseFailed.proposals?.pending === 6 && boardReleaseFailed.proposals?.boardPairs === null && boardReleaseFailed.unread["proposals.boardPairs"]?.reason === "error"
+      && boardReleaseFailed.relations?.related === 9 && boardReleaseFailed.relations?.boardPairs === null && boardReleaseFailed.unread["relations.boardPairs"]?.reason === "error",
+    `a failed release after a board read leaves its count null and unread, the queue and the relations read (${JSON.stringify(boardReleaseFailed.proposals)}, ${JSON.stringify(boardReleaseFailed.relations)})`);
+  // A savepoint that fails after the findings reads wrote takes the values
+  // back: neither field is both read and unread (the `clear`s; run-it, review pass 1).
+  failRelease = /FROM supersession_proposals|FROM thought_facets/;
+  const releaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  // …and the board reads after them, finding no field to fill, send nothing and record nothing.
+  assert(releaseFailed.proposals === null && releaseFailed.unread.proposals?.reason === "error" && releaseFailed.relations === null && releaseFailed.unread.relations?.reason === "error"
+      && !("proposals.boardPairs" in releaseFailed.unread) && !("relations.boardPairs" in releaseFailed.unread),
+    `a failed release after the queue and relations reads leaves both null and unread (${JSON.stringify(releaseFailed.proposals)}, ${JSON.stringify(releaseFailed.relations)})`);
   // The workers' heartbeats (SMD-2261, PR 2) are read on preflight's lean read too.
   assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
     `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
@@ -1092,6 +1232,26 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const lostBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null, unread: { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
   assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
     `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
+  // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
+  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
+  const boardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "timeout", message: "canceling statement due to statement timeout" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const execLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "refused", message: "permission denied for function consolidation_tickets_linked" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
+  const pre079 = renderBrainInfo(await brainInfo(server, async () => planted(78, { proposals: { pending: 2, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const denied = [deniedObject("permission denied for table thoughts"), deniedObject("permission denied for function consolidation_tickets_linked"), deniedObject("canceling statement due to lock timeout")];
+  assert(JSON.stringify(denied) === '[{"kind":"table","name":"thoughts"},{"kind":"function","name":"consolidation_tickets_linked"},null]', `a refusal names its table or function (${JSON.stringify(denied)})`);
+  const noTables = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null }), 1000));
+  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const line = (t: string, label: string) => t.split("\n").find((l) => l.startsWith(label)) ?? "";
+  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\)$/m.test(readText)
+      && /^Relations: +none — migration 084 is not applied$/m.test(pre084)
+      && /^Proposals: +none pending$/m.test(quiet) && /^Relations: +none standing$/m.test(quiet)
+      && /^Proposals: +none pending; 3 stale$/m.test(staleOnly) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\)$/m.test(staleOnly)
+      && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
+      && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
+    `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,
@@ -1403,14 +1563,26 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     }).then((r) => `answered ${r.status}`, () => "cut off");
+    // Beside it, a keyed mirror held at the registry (the database never
+    // answers; its deadline is 2.5 s, past the 1 s bound): only the stop's
+    // cutOpenRequests can write its line — the MCP call above has its own
+    // abort handler, this route none (review pass 4: no test held that call).
+    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
+      .then((r) => `answered ${r.status}`, () => "cut off");
     await Bun.sleep(300);
     graced.proc.kill("SIGTERM");
     const graceCode = await exited(graced.proc, 4_000);
     const graceLog = await graced.out;
     const graceTook = performance.now() - tg;
+    await mirrorStalled;
+    const graceLines = graceLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>);
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
-      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog),
-      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
+      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === "MCP_ACCESS_KEY").length === 1,
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+    const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
+    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
+      `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
   } finally {
     for (const { proc } of [busy, idle, ctrlC, cutter, graced]) proc.kill("SIGKILL");
     silent.stop(true);
@@ -2594,6 +2766,197 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   const kept = withSseKeepalive(new Response(slow, { headers: { "content-type": "text/event-stream" } }), { intervalMs: 20, onEnd: (b) => { counted = b; } });
   const received = (await kept.arrayBuffer()).byteLength;
   assert(received > payload.byteLength && counted === payload.byteLength, `bytes counts the body (${counted}), not the keepalive frames sent beside it (${received} received)`);
+
+  // Every route has its line (SMD-1849 PR 2a): a keyed mirror with its route,
+  // tool and key's name; notFound's 405; a CORS preflight — and the keyless
+  // liveness probe's 200 none.
+  const routed = await linesOf(async () => {
+    await fetch(`${BASE}/health`).then((r) => r.text());
+    await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp`).then((r) => r.text());
+    await fetch(`${BASE}/mcp`, { method: "OPTIONS" }).then((r) => r.text());
+  });
+  const [keyedHealth, workers, notAllowed, preflight] = routed;
+  assert(routed.length === 4, `four lines for five requests — the keyless liveness probe's none (${JSON.stringify(routed)})`);
+  assert(keyedHealth?.route === "/health" && keyedHealth.tool === "brain_info" && keyedHealth.agent === "MCP_ACCESS_KEY" && keyedHealth.status === 200 && keyedHealth.outcome === "ok",
+    `a keyed /health under a prefix: its route as a template, brain_info, the key's name (${JSON.stringify(keyedHealth)})`);
+  assert(workers?.route === "/worker-status" && workers.tool === "worker_status" && workers.agent === "MCP_ACCESS_KEY" && workers.status === 200 && workers.outcome === "error" && workers.code === "FAILED",
+    `the worker-status mirror, whose store is not there: a 200 {error} answer, an \`error\` FAILED line (${JSON.stringify(workers)})`);
+  assert(notAllowed?.status === 405 && notAllowed.outcome === "refused" && !("route" in notAllowed), `a GET of the MCP endpoint: 405 \`refused\` (${JSON.stringify(notAllowed)})`);
+  assert(preflight?.method === "OPTIONS" && preflight.status === 200 && preflight.outcome === "ok", `a CORS preflight (${JSON.stringify(preflight)})`);
+
+  // The mirrors, each to its line (review pass 1): a preflight at a health path
+  // is logged (only a keyless GET or HEAD 200 there is the liveness probe); a
+  // mirror that showed a caller nothing is `refused`; a worker action's
+  // refusal carries its code and the key's name; a /jobs 404 the key's name; a
+  // key whose scope does not reach the mirror is `refused` as a keyless one is,
+  // and a worker action's store fault `error` FAILED (review pass 5).
+  const mirrors = await linesOf(async () => {
+    await fetch(`${BASE}/health`, { method: "OPTIONS" }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/health`, { method: "HEAD" }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": CAPTURE_KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-retry-failed`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`).then((r) => r.text());
+  });
+  const [healthPreflight, keylessWorkers, workerRun, noJob, captureWorkers, retryFault, keylessRun, keylessJob] = mirrors;
+  assert(mirrors.length === 8 && healthPreflight?.method === "OPTIONS" && healthPreflight.route === undefined && healthPreflight.outcome === "ok",
+    `a preflight at /health is logged; a keyless HEAD there is the liveness probe, and not (${JSON.stringify(mirrors)})`);
+  assert(keylessWorkers?.route === "/worker-status" && keylessWorkers.status === 200 && keylessWorkers.outcome === "refused" && !("agent" in keylessWorkers),
+    `a keyless mirror's 200 that shows nothing is \`refused\` (${JSON.stringify(keylessWorkers)})`);
+  assert(workerRun?.route === "/worker-run" && workerRun.tool === "run_worker" && workerRun.agent === "MCP_ACCESS_KEY" && workerRun.status === 400 && workerRun.code === "RUN_WORKER_DRAIN_NOT_AVAILABLE" && workerRun.outcome === "refused",
+    `a worker action's refusal: its code, its tool, the key's name (${JSON.stringify(workerRun)})`);
+  assert(noJob?.route === "/jobs/:id" && noJob.tool === "job_status" && noJob.agent === "MCP_ACCESS_KEY" && noJob.status === 404 && noJob.outcome === "refused",
+    `a /jobs 404: the route, job_status, the key's name (${JSON.stringify(noJob)})`);
+  assert(captureWorkers?.route === "/worker-status" && captureWorkers.status === 200 && captureWorkers.outcome === "refused" && !("agent" in captureWorkers),
+    `a capture-only key at the worker-status mirror: \`refused\`, as a keyless caller is (${JSON.stringify(captureWorkers)})`);
+  assert(retryFault?.route === "/worker-retry-failed" && retryFault.agent === "MCP_ACCESS_KEY" && retryFault.status === 200 && retryFault.outcome === "error" && retryFault.code === "FAILED",
+    `a worker action whose store is not there: a 200 {error} answer, an \`error\` FAILED line (${JSON.stringify(retryFault)})`);
+  assert([keylessRun, keylessJob].every((l) => l?.status === 200 && l.outcome === "refused" && !("agent" in l)) && keylessRun?.route === "/worker-run" && keylessJob?.route === "/jobs/:id",
+    `a keyless worker action and /jobs poll: \`refused\`, each mirror saying so of its own (review pass 7) (${JSON.stringify([keylessRun, keylessJob])})`);
+
+  // The MCP server's job stream: one line at its end with its bytes, and one
+  // `abandoned` line for a client gone before it listens, mid-stream, or by
+  // letting go of the body with no abort — and no record left open.
+  const { startJob } = await import("./jobs.ts");
+  const { hashKey } = await import("./auth.ts");
+  const { openRequestCount } = await import("./telemetry.ts");
+  const openBefore = openRequestCount();
+  const ownJob = (ms: number) => startJob({ keyHash: hashKey(KEY), name: "MCP_ACCESS_KEY", scope: "write" } as never, "scan_thoughts", async () => { await Bun.sleep(ms); return { done: true }; }).jobId;
+  const jobStream = (id: string, signal?: AbortSignal) => Promise.resolve(worker.fetch(new Request(`http://mcp/mcp/jobs/${id}/stream`, { headers: { "x-brain-key": KEY }, signal })));
+  const [jobDone] = await linesOf(() => jobStream(ownJob(80)).then((r) => r.text()));
+  assert(jobDone?.route === "/jobs/:id/stream" && jobDone.tool === "job_status" && jobDone.outcome === "ok" && typeof jobDone.bytes === "number" && (jobDone.bytes as number) > 0 && (jobDone.ms as number) >= 40,
+    `a job stream that ends: one line at its end, \`ok\` with its bytes (${JSON.stringify(jobDone)})`);
+  // Each way a client goes, alone — the line is read before anything else
+  // could end the record (the body's cancel comes after, outside the window).
+  let preBody: ReadableStream | null = null;
+  const preGone = await linesOf(async () => {
+    const pre = new AbortController();
+    pre.abort();
+    preBody = (await jobStream(ownJob(300), pre.signal)).body;
+  }, 30);
+  let midReader: ReadableStreamDefaultReader | null = null;
+  const midGone = await linesOf(async () => {
+    const mid = new AbortController();
+    midReader = (await jobStream(ownJob(300), mid.signal)).body!.getReader();
+    await midReader.read();
+    mid.abort();
+  }, 30);
+  const letGone = await linesOf(async () => {
+    const reader = (await jobStream(ownJob(300))).body!.getReader();
+    await reader.read();
+    await reader.cancel();
+  }, 30);
+  const late = await linesOf(async () => {
+    await (preBody as ReadableStream | null)?.cancel().catch(() => {});
+    await (midReader as ReadableStreamDefaultReader | null)?.cancel().catch(() => {});
+  }, 400);
+  const each = [preGone, midGone, letGone];
+  assert(each.every((g) => g.length === 1 && g[0]?.outcome === "abandoned" && g[0].route === "/jobs/:id/stream") && late.length === 0 && openRequestCount() === openBefore,
+    `gone before the route listens, by its abort mid-stream, or by letting go of the body with no abort: one \`abandoned\` line each, written then, none later, no record left open (${openRequestCount() - openBefore} open; ${JSON.stringify(each.map((g) => g.map((l) => l.outcome)))}; ${late.length} late)`);
+  // The MCP endpoint's own stream, let go of with no abort, as a runtime whose signal never aborts does.
+  embedDelayMs = 300;
+  let endpointLetGo: Record<string, unknown>[] = [];
+  try {
+    endpointLetGo = await linesOf(async () => {
+      const r = await Promise.resolve(worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: AUTH, body: JSON.stringify(callOf("search_thoughts", { query: "let go of" }, 95)) })));
+      const reader = r.body!.getReader();
+      await reader.cancel();
+    }, 30);
+    await Bun.sleep(400);
+  } finally {
+    embedDelayMs = 0;
+  }
+  assert(endpointLetGo.length === 1 && endpointLetGo[0]?.outcome === "abandoned" && endpointLetGo[0].tool === "search_thoughts",
+    `the MCP endpoint's stream let go of with no abort: \`abandoned\`, written then (${JSON.stringify(endpointLetGo)})`);
+  // The liveness probe's record is let go, not left open.
+  const beforeProbe = openRequestCount();
+  await fetch(`${BASE}/health`).then((r) => r.text());
+  assert(openRequestCount() === beforeProbe, `the dropped liveness probe leaves no record open (${openRequestCount() - beforeProbe})`);
+  // A key the registry does not clear, at a mirror: shown `ok`, logged `refused` with why (review pass 3).
+  {
+    const registry = agents();
+    const resolve = registry.resolve.bind(registry);
+    let notClearedLines: Record<string, unknown>[] = [];
+    try {
+      registry.resolve = async () => ({ status: "revoked", agentId: "agent-r", revokedAt: "2026-10-09T00:00:00.000Z", reason: null });
+      notClearedLines = await linesOf(async () => {
+        await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+        await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+        await fetch(`${BASE}/mcp/worker-run`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+      });
+      registry.resolve = async () => ({ status: "busy" });
+      notClearedLines.push(...await linesOf(() => fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY } }).then((r) => r.text())));
+    } finally {
+      registry.resolve = resolve;
+    }
+    const [revokedWorkers, revokedHealth, revokedRun, busyJobs] = notClearedLines;
+    assert(notClearedLines.length === 4 && revokedWorkers?.outcome === "refused" && revokedWorkers.code === "REVOKED" && revokedWorkers.agent === "MCP_ACCESS_KEY" && revokedWorkers.status === 200
+      && revokedHealth?.outcome === "refused" && revokedHealth.code === "REVOKED" && revokedRun?.route === "/worker-run" && revokedRun.outcome === "refused" && revokedRun.code === "REVOKED"
+      && busyJobs?.outcome === "refused" && busyJobs.code === "BUSY",
+      `a revoked or busy key at a mirror: \`refused\`, REVOKED or BUSY, by its name, though its answer is \`ok\` (${JSON.stringify(notClearedLines)})`);
+  }
+  // A keyless GET at a health path under /.well-known/ is no probe: its 404 is logged (review pass 4).
+  const wellKnownHealth = await linesOf(() => fetch(`${BASE}/.well-known/health`).then((r) => r.text()));
+  assert(wellKnownHealth.length === 1 && wellKnownHealth[0]?.status === 404 && wellKnownHealth[0].outcome === "refused", `a keyless GET of /.well-known/health: its 404 logged (${JSON.stringify(wellKnownHealth)})`);
+  // A path the `*` middleware never matches (an encoded line break) still has its line, from notFound (review pass 3).
+  const unmatched = await linesOf(() => fetch(`${BASE}/abc%0A`).then((r) => r.text()));
+  assert(unmatched.length === 1 && unmatched[0]?.status === 405 && unmatched[0].outcome === "refused", `a path with an encoded line break: one 405 \`refused\` line (${JSON.stringify(unmatched)})`);
+
+  // A wrong key at /health is a guess, and logged: only a request that presented no key is the probe (review pass 2).
+  const guesses = await linesOf(async () => {
+    await fetch(`${BASE}/mcp/health`, { headers: { "x-brain-key": "a-wrong-guess" } }).then((r) => r.text());
+    await fetch(`${BASE}/health?key=another-guess`).then((r) => r.text());
+  });
+  assert(guesses.length === 2 && guesses.every((l) => l.route === "/health" && l.outcome === "refused" && l.status === 200 && !("agent" in l)) && !JSON.stringify(guesses).includes("guess"),
+    `a wrong key at /health, in a header or ?key=: \`refused\`, logged, the key nowhere in it (${JSON.stringify(guesses)})`);
+  // A stream's ceiling ends its record `stalled` (the keepalive's ten minutes, called here as the keepalive calls it).
+  const { beginRequest: begin, endsWithStream } = await import("./telemetry.ts");
+  const stallLines: Record<string, unknown>[] = [];
+  const stallTrace = begin("api", new Request("http://x/v1/jobs/j/stream"), (r) => stallLines.push(r as unknown as Record<string, unknown>));
+  endsWithStream(stallTrace, new AbortController().signal).onStall();
+  assert(stallLines.length === 1 && stallLines[0]?.outcome === "stalled" && stallLines[0].status === 200 && stallTrace.deferred, `a stream at its ceiling: \`stalled\`, its 200 kept (${JSON.stringify(stallLines)})`);
+  // A mirror request whose client is gone before it answers is `abandoned`, not its answer's outcome.
+  const goneMirror = await linesOf(async () => {
+    const gone = new AbortController();
+    gone.abort();
+    await Promise.resolve(worker.fetch(new Request("http://mcp/mcp/worker-status", { headers: { "x-brain-key": KEY }, signal: gone.signal }))).then((r) => r.text()).catch(() => {});
+  });
+  assert(goneMirror.length === 1 && goneMirror[0]?.outcome === "abandoned" && !("code" in goneMirror[0]), `a mirror whose client is already gone: \`abandoned\` (${JSON.stringify(goneMirror)})`);
+
+  // The stop's cut: every record still open is ended `cut`, keeping the status
+  // its answer had; one already ended is not ended again.
+  const { beginRequest, cutOpenRequests } = await import("./telemetry.ts");
+  const cutLines: Record<string, unknown>[] = [];
+  const write = (r: object) => cutLines.push(r as Record<string, unknown>);
+  const pending = beginRequest("api", new Request("http://x/v1/search", { method: "POST" }), write);
+  pending.route = "/v1/search";
+  const streaming = beginRequest("mcp", new Request("http://x/mcp", { method: "POST" }), write);
+  streaming.status = 200;
+  streaming.tool = "search_thoughts";
+  const finished = beginRequest("mcp", new Request("http://x/mcp", { method: "POST" }), write);
+  finished.end({ status: 200, outcome: "ok" });
+  finished.end({ status: 500, outcome: "error" });
+  const leftController = new AbortController();
+  const leftTrace = beginRequest("api", new Request("http://x/v1/whoami", { signal: leftController.signal }), write);
+  leftTrace.route = "/v1/whoami";
+  leftController.abort();
+  cutOpenRequests();
+  const cutOf = (route: unknown, tool: unknown) => cutLines.filter((l) => l.outcome === "cut" && l.route === route && l.tool === tool);
+  const leftLine = cutLines.find((l) => l.route === "/v1/whoami");
+  assert(cutOf("/v1/search", undefined)[0]?.status === 0 && cutOf(undefined, "search_thoughts")[0]?.status === 200 && cutLines.filter((l) => l.outcome === "ok").length === 1 && cutLines.length === 4,
+    `cutOpenRequests ends each open record \`cut\` with its status, and leaves an ended one alone; a second end writes nothing (${JSON.stringify(cutLines)})`);
+  assert(leftLine?.outcome === "abandoned" && leftLine.status === 0, `an open record whose client is already gone is \`abandoned\` at the cut, not \`cut\` (review pass 7) (${JSON.stringify(leftLine)})`);
+  // `end`'s time is the one it is handed — the middleware notes it before it
+  // reads an error answer's code — not the moment the line is written.
+  const timed: Record<string, unknown>[] = [];
+  const timedTrace = beginRequest("api", new Request("http://x/v1/stats"), (r) => timed.push(r as unknown as Record<string, unknown>));
+  timedTrace.end({ status: 200 }, timedTrace.started + 7);
+  assert(timed[0]?.ms === 7, `end(fields, at): ms is at - started, not the time the line is written (${JSON.stringify(timed)})`);
 }
 
 server.stop();

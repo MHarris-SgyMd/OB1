@@ -16,8 +16,8 @@ import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { unlocks, visibleToolNames } from "./tools.ts";
 import { enabledHooks, hookSecrets, loadPlugins, manifestProblems, pluginNames, pluginProblem, runOperation, toolNameOf } from "./core/plugins.ts";
-import { hmacSha256Hex } from "./plugin-sdk.ts";
-import type { Core } from "./core/index.ts";
+import { hmacSha256Hex, isDeliveryId, onceById, verifyTimestamped, type HookRequest, type PluginSql } from "./plugin-sdk.ts";
+import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -496,8 +496,8 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // Over REST.
   const SECRET = "hook-secret-0123";
   const faults: string[] = [];
-  const hookApp = (hooksRaw: string | undefined, secretsRaw: string | undefined) => createRestApp({
-    core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")}` }), resolve: async () => identity, track: (run) => run(), log: (l) => lines.push(l), faultLog: (l) => faults.push(l),
+  const hookApp = (hooksRaw: string | undefined, secretsRaw: string | undefined, withCore: Core = core) => createRestApp({
+    core: withCore, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")}` }), resolve: async () => identity, track: (run) => run(), log: (l) => lines.push(l), faultLog: (l) => faults.push(l),
     plugins: () => loadPlugins("example"),
     hooks: () => ({ hooks: enabledHooks(loadPlugins("example"), hooksRaw), secrets: hookSecrets(secretsRaw).secrets }),
   });
@@ -505,7 +505,12 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const deliver = (app: ReturnType<typeof hookApp>, body: string, headers: Record<string, string> = {}, path = "/hooks/example/capture", method = "POST") =>
     app.fetch(new Request(`http://api${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: method === "GET" ? undefined : body }));
   const body = JSON.stringify({ text: "a thought from a webhook" });
-  const signed = { "x-example-signature": hmacSha256Hex(SECRET, body) };
+  /** The example's signature: over "<timestamp>.<body>", the timestamp beside it (SMD-2755). */
+  const sign = (data: string | Uint8Array, ts = Math.floor(Date.now() / 1000), key = SECRET) => ({
+    "x-example-timestamp": String(ts),
+    "x-example-signature": hmacSha256Hex(key, new Uint8Array([...new TextEncoder().encode(`${ts}.`), ...(typeof data === "string" ? new TextEncoder().encode(data) : data)])),
+  });
+  const signed = sign(body);
   calls.length = 0;
   answer = async () => coreOk({ id: "t-hook" });
   let r = await deliver(on, body, signed);
@@ -520,12 +525,33 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await deliver(on, body, { ...signed, "x-forwarded-prefix": "/api" });
   assert(r.status === 404 && calls.length === 0, "a delivery that came through /api (X-Forwarded-Prefix): 404, the handler never ran — /api does not open /hooks");
   calls.length = 0;
-  r = await deliver(on, body, { "x-example-signature": hmacSha256Hex("another", body) });
-  assert(r.status === 401 && calls.length === 0, "a delivery signed with another secret: 401, and the core never ran");
+  const code = async (res: Response) => ((await res.json()) as { code?: string }).code;
+  r = await deliver(on, body, sign(body, undefined, "another"));
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a delivery signed with another secret: 401 BAD_SIGNATURE, and the core never ran");
   r = await deliver(on, body);
-  assert(r.status === 401, "an unsigned delivery: 401");
-  r = await deliver(on, "{not json", { "x-example-signature": hmacSha256Hex(SECRET, "{not json") });
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP", "an unsigned delivery: 401");
+  // Replays (SMD-2755): a recorded delivery verifies for the tolerance alone.
+  const now = Math.floor(Date.now() / 1000);
+  r = await deliver(on, body, sign(body, now - 301));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "a delivery signed 301 s ago: 401 STALE_DELIVERY, and the core never ran");
+  r = await deliver(on, body, sign(body, now + 310));
+  assert(r.status === 401 && (await code(r)) === "STALE_DELIVERY" && calls.length === 0, "one dated 310 s ahead: 401 STALE_DELIVERY too (the 301 s edges are [12]'s, on a clock of its own)");
+  r = await deliver(on, body, { ...sign(body, now - 301), "x-example-timestamp": String(now) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a stale delivery with its timestamp made fresh: 401 BAD_SIGNATURE — the time is signed");
+  r = await deliver(on, body, { "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "NO_TIMESTAMP" && calls.length === 0, "a sender that signs the body alone, as before SMD-2755, sends no timestamp: 401 NO_TIMESTAMP");
+  r = await deliver(on, body, { "x-example-timestamp": String(now), "x-example-signature": hmacSha256Hex(SECRET, body) });
+  assert(r.status === 401 && (await code(r)) === "BAD_SIGNATURE" && calls.length === 0, "a signature over the body alone, a timestamp beside it: 401 BAD_SIGNATURE — the time is not in what was signed");
+  r = await deliver(on, "{not json", sign("{not json"));
   assert(r.status === 400, "a signed body that is not JSON: 400");
+  const nul = JSON.stringify({ text: "a NUL \u0000 here", id: "evt-nul" });
+  r = await deliver(on, nul, sign(nul));
+  assert(r.status === 400 && (await code(r)) === "BAD_TEXT" && calls.length === 0, "text with a NUL, which Postgres will not store: 400 BAD_TEXT, before any claim or model call");
+  for (const id of [7, "", "x".repeat(201), "a\u0000b", "\ud800", "has space", "é"]) {
+    const withId = JSON.stringify({ text: "t", id });
+    r = await deliver(on, withId, sign(withId));
+    assert(r.status === 400 && (await code(r)) === "BAD_ID" && calls.length === 0, `a delivery id that is not 1 to 200 printable ASCII characters (${JSON.stringify(id).slice(0, 12)}): 400 BAD_ID, before any claim or capture`);
+  }
   calls.length = 0;
   r = await deliver(hookApp("example", undefined), body, signed);
   assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED" && calls.length === 0, "no secret for the plugin: the REST core refuses, 503, and the handler never runs");
@@ -536,7 +562,7 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   r = await deliver(on, body, {}, "/hooks/example/capture", "GET");
   assert(r.status === 405 && r.headers.get("allow") === "POST", "a GET of a webhook: 405, Allow POST");
   const big = JSON.stringify({ text: "x".repeat(1024 * 1024) });
-  r = await deliver(on, big, { "x-example-signature": hmacSha256Hex(SECRET, big) });
+  r = await deliver(on, big, sign(big));
   assert(r.status === 413 && calls.length === 0, "a body over 1 MiB: 413, before the handler reads it");
   answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
   r = await deliver(on, body, signed);
@@ -559,8 +585,110 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   // The bytes as sent: a BOM-prefixed body the sender signed verifies.
   const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(body)]);
   answer = async () => coreOk({ id: "t-bom" });
-  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", "x-example-signature": hmacSha256Hex(SECRET, bom) } }));
+  r = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: bom, headers: { "content-type": "application/json", ...sign(bom) } }));
   assert(r.status === 202, `a body signed over its bytes, BOM and all, verifies (${r.status})`);
+  // A delivery's id (SMD-2755), over a stand-in for the example's deliveries
+  // table (test-plugins-sql runs the real one): claimed before the capture,
+  // given back when the capture fails so the sender's retry runs; a resend of
+  // a captured one runs nothing, and of one still running is told to retry.
+  /** A thought id the stub core answers: a uuid, as onceById records. */
+  const thought = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const claims = new Map<string, string | null>();
+  /** Unfinished claims past their lease, which the next claim of the id takes. */
+  const lapsed = new Set<string>();
+  /** Each claim's claimed_at, as the claim returns it and the release matches it. */
+  const claimedAt = new Map<string, string>();
+  let tick = 0;
+  let recordFails = false;
+  /** The seconds the last prune and claim were bound: the window and the lease (SMD-2768). */
+  let pruneBound: unknown[] = [];
+  let leaseBound: unknown;
+  const standIn = (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const q = strings.join("?").replace(/\s+/g, " ").trim();
+    const id = values[0] as string;
+    if (q.startsWith("DELETE FROM deliveries WHERE claimed_at <")) return Promise.resolve((pruneBound = values, []));
+    if (q.startsWith("INSERT INTO deliveries (id) VALUES (?) ON CONFLICT (id) DO UPDATE SET claimed_at = now() WHERE deliveries.thought_id IS NULL AND")) {
+      leaseBound = values[1];
+      if (!claims.has(id) || (claims.get(id) === null && lapsed.delete(id))) {
+        const at = `t${++tick}`;
+        return Promise.resolve((claims.set(id, null), claimedAt.set(id, at), [{ claimed: at }]));
+      }
+      return Promise.resolve([]);
+    }
+    if (q.startsWith("SELECT thought_id FROM deliveries WHERE id =")) return Promise.resolve(claims.has(id) ? [{ thought_id: claims.get(id) }] : []);
+    if (q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz")) return Promise.resolve((claims.get(id) === null && claimedAt.get(id) === values[1] && claims.delete(id), []));
+    if (q.startsWith("INSERT INTO deliveries (id, thought_id) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET thought_id =")) {
+      if (recordFails) return Promise.reject(new Error("connection reset"));
+      return Promise.resolve((claims.set(id, values[1] as string), []));
+    }
+    throw new Error(`the stand-in table has no answer for: ${q}`);
+  };
+  const tableCore = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? async (_p: string, fn: (sql: typeof standIn) => Promise<unknown>) => fn(standIn) : prop === "captureSeconds" ? () => 300 : (core as unknown as Record<string | symbol, unknown>)[prop]) }) as unknown as Core;
+  const withIds = hookApp("example", `example=${SECRET}`, tableCore);
+  const send = (id: string) => { const b = JSON.stringify({ id, text: `delivery ${id}` }); return deliver(withIds, b, sign(b)); };
+  const captures = () => calls.filter((c) => c.name === "capture").length;
+  calls.length = 0;
+  answer = async () => coreOk({ id: thought(1) });
+  r = await send("evt-1");
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === thought(1) && claims.get("evt-1") === thought(1), "a delivery with an id: 202, its id kept with its thought");
+  assert(JSON.stringify(pruneBound) === '[660,360,""]' && leaseBound === 360, `its window eleven minutes, its lease the core's capture deadline (300 s here) and a minute, through the REST app (${JSON.stringify(pruneBound)}, ${leaseBound})`);
+  r = await send("evt-1");
+  const dup = (await r.json()) as { id?: string; duplicate?: boolean };
+  assert(r.status === 200 && dup.id === thought(1) && dup.duplicate === true && captures() === 1, `the same delivery again: 200, the same thought, a duplicate — and capture ran once (${r.status} ${JSON.stringify(dup)}, ${captures()} captures)`);
+  answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
+  r = await send("evt-2");
+  assert(r.status === 422 && !claims.has("evt-2"), "a capture the core refuses gives its claim back");
+  answer = async () => { throw new Error("embedder down"); };
+  r = await send("evt-3");
+  assert(r.status === 500 && !claims.has("evt-3"), "a capture that throws gives its claim back too");
+  answer = async () => coreOk({ id: thought(2) });
+  calls.length = 0;
+  r = await send("evt-2");
+  const retried = r.status;
+  r = await send("evt-3");
+  assert(retried === 202 && r.status === 202 && captures() === 2, `so the sender's retries run, and capture (${retried}, ${r.status}, ${captures()} captures)`);
+  claims.set("evt-4", null);
+  calls.length = 0;
+  r = await send("evt-4");
+  const busy = (await r.json()) as { code?: string; retryable?: boolean };
+  assert(r.status === 409 && busy.code === "IN_FLIGHT" && busy.retryable === true && captures() === 0, `a delivery whose first is still running: 409 IN_FLIGHT, retryable, nothing run (${r.status} ${JSON.stringify(busy)})`);
+  lapsed.add("evt-4");
+  r = await send("evt-4");
+  assert(r.status === 202 && captures() === 1 && claims.get("evt-4") === thought(2), `one whose claim outlived its lease — the server stopped mid-capture — is taken and captured (${r.status}, ${captures()} captures)`);
+  recordFails = true;
+  r = await send("evt-5");
+  recordFails = false;
+  assert(r.status === 202 && ((await r.json()) as { id?: string }).id === thought(2), `a capture whose record fails is still the sender's 202: the thought is there (${r.status})`);
+  // A first attempt that outlives its lease and then fails gives back its own claim, not the retry's that took it.
+  let failFirst: (e: Error) => void = () => {};
+  answer = () => new Promise((_ok, fail) => { failFirst = fail; });
+  const slow = send("evt-7");
+  /** Waits for the stand-in to reach a state, and fails rather than hangs if the handler never gets there. */
+  const until = async (what: string, done: () => boolean) => {
+    for (let i = 0; !done(); i++) {
+      if (i > 2000) throw new Error(`evt-7: ${what} never happened`);
+      await Bun.sleep(1);
+    }
+  };
+  await until("the first claim", () => claims.get("evt-7") === null);
+  lapsed.add("evt-7");
+  let finishRetry: (v: unknown) => void = () => {};
+  answer = () => new Promise((ok) => { finishRetry = ok; });
+  const retry = send("evt-7");
+  await until("the retry's claim", () => !lapsed.has("evt-7"));
+  failFirst(new Error("embedder timed out"));
+  /** An answer awaited with a deadline, so a regression fails the suite rather than hanging it. */
+  const within = (what: string, answer: Response | Promise<Response>) =>
+    Promise.race([answer, Bun.sleep(5000).then(() => { throw new Error(`evt-7: ${what} never answered`); })]);
+  r = await within("the first attempt", slow);
+  assert(r.status === 500 && claims.has("evt-7") && claims.get("evt-7") === null, `the first attempt's late failure leaves the retry's claim standing (${r.status})`);
+  finishRetry(coreOk({ id: thought(3) }));
+  r = await within("the retry", retry);
+  assert(r.status === 202 && claims.get("evt-7") === thought(3), `and the retry records its thought (${r.status})`);
+  answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
+  r = await send("evt-6");
+  const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
+  assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
@@ -571,6 +699,116 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(r.status === 500, "a hook answering a status no sender reads is the plugin's fault: 500");
   r = await oddApp.fetch(new Request("http://api/hooks/probe-kit/list", { method: "POST", body: "{}" }));
   assert(r.status === 500, "a hook answering a body that is no JSON object: 500");
+}
+
+console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separator and body; a time outside the tolerance refused, and only once signed (SMD-2755)");
+{
+  const KEY = "8f42a73054b1749f8f58848be5e6502c";
+  const at = 1_700_000_000;
+  const req = (headers: Record<string, string>, text = '{"token":"x"}'): HookRequest => ({ headers, query: {}, body: new TextEncoder().encode(text), text });
+  // Slack's documented example: v0=HMAC(secret, "v0:<ts>:<body>").
+  const slack = { signatureHeader: "X-Slack-Signature", timestampHeader: "X-Slack-Request-Timestamp", prefix: "v0:", separator: ":", signaturePrefix: "v0=" };
+  const slackBody = "token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554%2F96rGlfmibIGlgcZRskXaIFfN&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c";
+  const slackSent = req({ "x-slack-request-timestamp": "1531420618", "x-slack-signature": "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503" }, slackBody);
+  const slackAt = 1531420618 * 1000;
+  const SLACK_DOC_SECRET = "8f742231b10e8888abcd99yyyzzz85a5"; // Slack's "Verifying requests from Slack" example, public
+  assert(JSON.stringify(verifyTimestamped(slackSent, SLACK_DOC_SECRET, slack, slackAt)) === '{"ok":true,"timestamp":1531420618}', "Slack's documented signed request verifies in Slack's form, the header names in any case");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, separator: "." }, slackAt).ok === false, "and not with another separator");
+  assert(verifyTimestamped(slackSent, SLACK_DOC_SECRET, { ...slack, prefix: "" }, slackAt).ok === false, "nor without the v0: prefix");
+  const v = (headers: Record<string, string>, now = at * 1000, tolerance?: number) => verifyTimestamped(req(headers), KEY, { signatureHeader: "x-sig", timestampHeader: "x-ts", ...(tolerance ? { toleranceSeconds: tolerance } : {}) }, now);
+  const sig = (ts: string, text = '{"token":"x"}') => hmacSha256Hex(KEY, `${ts}.${text}`);
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)) }).ok, "the plain form: HMAC of <ts>.<body>, hex");
+  assert(v({ "x-ts": String(at), "x-sig": sig(String(at)).toUpperCase() }).ok, "upper-case hex is the same signature");
+  const reason = (x: ReturnType<typeof v>) => (x.ok ? "ok" : x.code);
+  assert(reason(v({ "x-sig": sig(String(at)) })) === "NO_TIMESTAMP", "no timestamp: NO_TIMESTAMP");
+  for (const ts of ["", "17e8", "-1", " 1700000000", "1700000000.5", "1".repeat(13)]) assert(reason(v({ "x-ts": ts, "x-sig": sig(ts) })) === "NO_TIMESTAMP", `a timestamp that is not Unix seconds, ${JSON.stringify(ts)}: NO_TIMESTAMP, though signed`);
+  assert(reason(v({ "x-ts": String(at) })) === "BAD_SIGNATURE", "no signature: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at + 1)) })) === "BAD_SIGNATURE", "a signature over another time: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": sig(String(at), '{"token":"y"}') })) === "BAD_SIGNATURE", "a signature over another body: BAD_SIGNATURE");
+  assert(reason(v({ "x-ts": String(at), "x-sig": `v0=${sig(String(at))}` })) === "BAD_SIGNATURE", "a prefix the scheme does not name: BAD_SIGNATURE");
+  const old = String(at - 300);
+  const soon = String(at + 300);
+  assert(v({ "x-ts": old, "x-sig": sig(old) }).ok && v({ "x-ts": soon, "x-sig": sig(soon) }).ok, "300 s old, or 300 s ahead, the default tolerance: verified");
+  const older = String(at - 301);
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older) })) === "STALE_DELIVERY", "301 s old: STALE_DELIVERY");
+  const ahead = String(at + 301);
+  assert(reason(v({ "x-ts": ahead, "x-sig": sig(ahead) })) === "STALE_DELIVERY", "301 s ahead of the clock: STALE_DELIVERY");
+  assert(reason(v({ "x-ts": older, "x-sig": sig(older, "other") })) === "BAD_SIGNATURE", "a stale time on a delivery the secret did not sign: BAD_SIGNATURE, never STALE — the sender learns nothing of the clock");
+  assert(v({ "x-ts": older, "x-sig": sig(older) }, at * 1000, 400).ok && reason(v({ "x-ts": String(at - 61), "x-sig": sig(String(at - 61)) }, at * 1000, 60)) === "STALE_DELIVERY", "the tolerance is the scheme's to set");
+  let thrown = "";
+  try { v({ "x-ts": String(at), "x-sig": sig(String(at)) }, at * 1000, -5); } catch (e) { thrown = (e as Error).message; }
+  assert(/toleranceSeconds -5 is not a positive number/.test(thrown), "a tolerance that is no positive number is the plugin's fault: thrown");
+}
+
+console.log("\n[13] onceById: its lease the core's own capture deadline and a minute, so a raised OB1_LLM_TIMEOUT lengthens it; what it binds, gives back and refuses (SMD-2768)");
+{
+  /** captureSeconds as a core over `env` reads it: no store, which the deadline never asks for. */
+  const deadline = (env: Record<string, string>) => createCore({ env: () => env as never, store: () => Promise.reject(new Error("no store")), door: "test" }).captureSeconds();
+  assert(deadline({}) === 120, `by default one round of model calls at OB1_LLM_TIMEOUT's 120 s (${deadline({})})`);
+  assert(deadline({ OB1_LLM_TIMEOUT: "600" }) === 600, `OB1_LLM_TIMEOUT=600: 600 s (${deadline({ OB1_LLM_TIMEOUT: "600" })})`);
+  assert(deadline({ OB1_LLM_TIMEOUT: "600", OB1_CHUNK_CONTEXT: "on" }) === 1200, "with OB1_CHUNK_CONTEXT on, two rounds: a long text's windows are blurbed, then embedded");
+  assert(deadline({ OB1_LLM_TIMEOUT: "10", OB1_JEV_BASE_URL: "http://jev:8080" }) === 31, "the genre tier's deadline, 30 s and 1 s for its one decision, when it is the longer");
+  assert(deadline({ OB1_LLM_TIMEOUT: "10", OB1_CHUNK_CONTEXT: "on", OB1_JEV_BASE_URL: "http://jev:8080" }) === 31, "and with chunk context on, still the longer of the two: the tier runs beside both rounds, once");
+  /** A handle that records each statement's bound values, and answers a claim with `claimed`. */
+  const bound: { q: string; values: unknown[] }[] = [];
+  let claimed: { claimed: string }[] = [{ claimed: "2026-10-09 20:00:00.123456+00" }];
+  const record = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const q = strings.join("?").replace(/\s+/g, " ").trim();
+    bound.push({ q, values });
+    return Promise.resolve(q.includes("RETURNING claimed_at") ? claimed : q.startsWith("SELECT thought_id") ? [{ thought_id: null }] : []);
+  }) as unknown as PluginSql;
+  const db = { tx: <T>(fn: (sql: PluginSql) => Promise<T>) => fn(record) };
+  const T1 = "00000000-0000-4000-8000-000000000001";
+  const leaseOf = () => bound.find((b) => b.q.startsWith("INSERT INTO deliveries (id) VALUES"))?.values[1];
+  const done = await onceById({ db, captureSeconds: deadline({ OB1_LLM_TIMEOUT: "600" }) }, "evt-1", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660 });
+  assert(JSON.stringify(done) === '{"ran":"v"}' && leaseOf() === 660 && JSON.stringify(bound[0].values) === '[660,660,""]', `with OB1_LLM_TIMEOUT=600, the lease is 660 s, longer than one capture's model calls, and the prune keeps a claim that long (${leaseOf()}, ${JSON.stringify(bound[0].values)})`);
+  assert(bound.at(-1)?.q.startsWith("INSERT INTO deliveries (id, thought_id)") === true && JSON.stringify(bound.at(-1)?.values) === `["evt-1","${T1}"]`, "the run's thought is recorded against its id");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120.3 }, "evt-2", async () => ({ value: "v", thoughtId: null }), { keepSeconds: 660 });
+  assert(leaseOf() === 181, `a fractional deadline is rounded up, whole seconds bound (${leaseOf()})`);
+  assert(bound.at(-1)?.q.startsWith("DELETE FROM deliveries WHERE id = ? AND thought_id IS NULL AND claimed_at = ?::timestamptz") === true && JSON.stringify(bound.at(-1)?.values) === '["evt-2","2026-10-09 20:00:00.123456+00"]', "a run that hands back no thought gives back its own claim, by the claimed_at text the claim returned");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "evt-3", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660, leaseSeconds: 30 });
+  assert(leaseOf() === 30, "a lease the plugin names is its own");
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "evt-6", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: Infinity });
+  assert(!bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE claimed_at")) && leaseOf() === 180, "keepSeconds Infinity, for a sender that signs no time: nothing pruned, the lease as ever");
+  bound.length = 0;
+  let notUuid = "";
+  try { await onceById({ db, captureSeconds: 120 }, "evt-7", async () => ({ value: "v", thoughtId: "U024BE7LH-1531420618" }), { keepSeconds: 660 }); } catch (e) { notUuid = (e as Error).message; }
+  assert(/a uuid, or null/.test(notUuid) && !bound.some((b) => b.q.startsWith("DELETE FROM deliveries WHERE id = ?") || b.q.startsWith("INSERT INTO deliveries (id, thought_id)")),
+    `a run that hands back no thought id of the core's (a sender's own id) is thrown, nothing recorded, and its claim kept: a resend is 409 until the lease, not run again (${notUuid})`);
+  bound.length = 0;
+  await onceById({ db, captureSeconds: 120 }, "Ev0123", async () => ({ value: "v", thoughtId: T1 }), { keepSeconds: 660, scope: "events" });
+  const scoped = bound.find((b) => b.q.startsWith("DELETE FROM deliveries WHERE claimed_at"))?.values;
+  assert(JSON.stringify(scoped) === '[660,180,"events"]' && bound.slice(1).every((b) => b.values[0] === "events Ev0123"),
+    `a scope: its ids kept as "<scope> <id>", and its prune held to its own scope (${JSON.stringify(scoped)}, ${JSON.stringify(bound.slice(1).map((b) => b.values[0]))})`);
+  claimed = [];
+  const busy = await onceById({ db, captureSeconds: 120 }, "evt-4", async () => { throw new Error("never run"); }, { keepSeconds: 660 });
+  assert(JSON.stringify(busy) === '{"inFlight":true}', `an id claimed and not yet captured: in flight, the run not called (${JSON.stringify(busy)})`);
+  const refusedWith = async (id: string, captureSeconds: number, options: Parameters<typeof onceById>[3]) => {
+    try {
+      await onceById({ db, captureSeconds }, id, async () => ({ value: 0, thoughtId: null }), options);
+      return "";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  bound.length = 0;
+  assert(/an id is 1 to 200/.test(await refusedWith("a b", 120, { keepSeconds: 660 })), "an id isDeliveryId refuses is the plugin's fault: thrown");
+  assert(/keepSeconds 0 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 0 })) && /keepSeconds NaN is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: NaN }))
+    && /leaseSeconds NaN is not a number/.test(await refusedWith("evt-5", NaN, { keepSeconds: 660 })) && /leaseSeconds 0 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 0 }))
+    && /leaseSeconds Infinity is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: Infinity })),
+    "a window that is no positive number or Infinity, or a lease that is no positive number, the plugin's own or the default: thrown");
+  assert(/keepSeconds 660 is not a number/.test(await refusedWith("evt-5", 120, { keepSeconds: "660" as never })) && /keepSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 1e10 }))
+    && /leaseSeconds 10000000000 is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, leaseSeconds: 1e10 })) && /leaseSeconds 9999999940 is not/.test(await refusedWith("evt-5", 9999999880, { keepSeconds: 660 })),
+    "a window or lease that is no number, or past 10^9 s (Postgres's timestamps overflow on every claim at about 2 × 10^11): thrown");
+  assert(/scope "Events" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "Events" })) && /scope "a b" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "a b" }))
+    && /scope "x{33}" is not/.test(await refusedWith("evt-5", 120, { keepSeconds: 660, scope: "x".repeat(33) })) && /an id is 1 to 200/.test(await refusedWith("", 120, { keepSeconds: 660, scope: "events" })),
+    "a scope that is not lower-case words and hyphens of at most 32 characters, or an empty id under one: thrown");
+  assert(bound.length === 0, `and each before any claim: no statement run (${bound.length})`);
+  assert(isDeliveryId("evt-1") && isDeliveryId("~".repeat(200)) && ![undefined, 5, "", "a b", "caf\u00e9", "\ud800", "x".repeat(201)].some((v) => isDeliveryId(v)), "isDeliveryId: 1 to 200 characters from ! to ~");
+  assert(isDeliveryId("x".repeat(193), "events") && !isDeliveryId("x".repeat(194), "events") && !isDeliveryId("", "events"), "under a scope, an id leaves room for it and its space; an empty one is still refused");
 }
 
 report();
