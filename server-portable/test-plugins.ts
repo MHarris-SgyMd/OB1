@@ -788,7 +788,7 @@ console.log("\n[13] onceById: its lease the core's own capture deadline and a mi
   claimed = [];
   const busy = await onceById({ db, captureSeconds: 120 }, "evt-4", async () => { throw new Error("never run"); }, { keepSeconds: 660 });
   assert(JSON.stringify(busy) === '{"inFlight":true}', `an id claimed and not yet captured: in flight, the run not called (${JSON.stringify(busy)})`);
-  const refusedWith = async (id: string, captureSeconds: number, options: OnceOptions & { defer?: boolean }) => {
+  const refusedWith = async (id: string, captureSeconds: number, options: OnceOptions) => {
     try {
       // Untyped: these are the calls a plugin's types would refuse, made to see what onceById does with them.
       await (onceById as (...args: unknown[]) => Promise<unknown>)({ db, captureSeconds }, id, async () => ({ value: 0, thoughtId: null }), options);

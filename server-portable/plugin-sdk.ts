@@ -271,6 +271,12 @@ export type OnceOptions = {
    * or changing one forgets the ids kept without it, and no claim prunes them.
    */
   scope?: string;
+  /**
+   * Claim now and leave the run, its record and its release to `ctx.defer`
+   * (SMD-2767), so the sender is answered within its deadline: onceById's
+   * answer is then `OnceDeferred`.
+   */
+  defer?: boolean;
 };
 
 /** What a run hands back: the value to answer with, and the thought to remember the id by — the core's thought id, a uuid; null gives the claim back, so the sender's retry runs. */
@@ -316,8 +322,8 @@ export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlig
  */
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer: true }): Promise<OnceDeferred>;
 export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: false }): Promise<Once<T>>;
-export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: boolean }): Promise<Once<T> | OnceDeferred>;
-export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"> & Partial<Pick<HookContext, "defer">>, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: boolean }): Promise<Once<T> | OnceDeferred> {
+export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions): Promise<Once<T> | OnceDeferred>;
+export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"> & Partial<Pick<HookContext, "defer">>, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions): Promise<Once<T> | OnceDeferred> {
   if (options.defer && typeof ctx.defer !== "function") throw new Error("onceById: defer needs the hook's ctx.defer");
   const scope = options.scope;
   if (scope !== undefined && !(typeof scope === "string" && scope.length <= 32 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(scope))) throw new Error(`onceById: scope ${JSON.stringify(scope)} is not lower-case words and hyphens of at most 32 characters`);
@@ -357,8 +363,8 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
       .then((rows): Fate => (rows.length ? "given back" : "already re-claimed or pruned"), (): Fate => "left to lapse at the lease");
   // What became of the claim when no thought was recorded; null, kept to lapse (a thoughtId that is no uuid).
   let gaveBack: Fate | null = null;
-  let captured = true;
-  const finish = async (): Promise<T> => {
+  // The run's value, and whether it captured a thought.
+  const finish = async (): Promise<{ value: T; captured: boolean }> => {
     let done: OnceRun<T>;
     try {
       done = await run();
@@ -368,9 +374,8 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     }
     const thoughtId = done.thoughtId;
     if (thoughtId === null) {
-      captured = false;
       gaveBack = await release();
-      return done.value;
+      return { value: done.value, captured: false };
     }
     // Anything else would fail the record unseen. Not given back: a resend is
     // 409 until the lease, where a release would run it again on every one.
@@ -380,7 +385,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     await ctx.db
       .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${key}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
       .catch(() => undefined);
-    return done.value;
+    return { value: done.value, captured: true };
   };
   if (options.defer) {
     // Its sender has its answer: a run that captured nothing is a fault to
@@ -392,9 +397,8 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     ctx.defer!(
       () =>
         finish().then(
-          (value) => {
+          ({ captured }) => {
             if (!captured) throw new Error(`${named()}: no thought captured`);
-            return value;
           },
           (err: unknown) => {
             throw new Error(`${named()}: ${err instanceof Error ? err.message : String(err)}`);
@@ -408,7 +412,7 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
     );
     return { deferred: true };
   }
-  return { ran: await finish() };
+  return { ran: (await finish()).value };
 }
 
 /** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */
