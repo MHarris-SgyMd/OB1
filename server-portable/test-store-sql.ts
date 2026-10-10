@@ -879,6 +879,116 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
   await sql.close();
 }
 
+console.log("\n[8e] The operator's reset of a capture-only key's settled or moved label: the store calls migration 086's ob1_reset_capture_stamp with the actor, and reads its answer — the operator's key resets and is named in the event, any other key is refused (SMD-2744)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const resolved = async (label: string, scope: string, seed: string) => {
+    const r = await store.resolveAgent({ keyHash: seed.repeat(32), label, scope });
+    return r.ok ? r.agentId : "";
+  };
+  const hook = { name: "hook-8e", agentId: await resolved("hook-8e", "capture", "9a"), via: "store-test", scope: "capture" as const };
+  const bot = { name: "bot-8e", agentId: await resolved("bot-8e", "write", "a9"), via: "store-test" };
+  const op = { name: "op-8e", agentId: await resolved("op-8e", "write", "9b"), via: "store-test" };
+  await sql`SELECT set_agent_kind('hook-8e', 'agent')`;
+  await sql`SELECT set_agent_kind('bot-8e', 'agent')`;
+  await sql`SELECT set_agent_kind('op-8e', 'operator')`;
+  const made: string[] = [];
+  const capture = async (content: string, actor: typeof hook | typeof bot, trust?: string) => {
+    const r = await store.captureThought({ content, payload: { metadata: { source: "mcp" } }, embedding: unit(7), actor, ...(trust ? { event: { trust } } : {}), ...(actor === hook ? { recapture: "keep" as const } : {}) });
+    made.push(r.id);
+    return r;
+  };
+  const stamp = async (id: string) => {
+    const [m] = await sql`SELECT metadata->>'actor_kind' AS k, metadata->>'actor_name' AS n, metadata->>'trust' AS t FROM thoughts WHERE id = ${id}::uuid`;
+    return `${m?.k ?? "-"}/${m?.n ?? "-"}/${m?.t ?? "-"}`;
+  };
+
+  const T = "[8e] the hook's outside text an agent re-sent first";
+  const row = await capture(T, hook, "ingested");
+  await capture(T, bot);
+  assert((await stamp(row.id)) === "agent/bot-8e/agent", `setup: the agent's re-capture moved the stamp (${await stamp(row.id)})`);
+  const refused = await store.resetCaptureStamp({ id: row.id, actor: bot });
+  assert(!refused.ok && refused.error === "NOT_OPERATOR" && (await stamp(row.id)) === "agent/bot-8e/agent", `an agent key is refused NOT_OPERATOR, nothing moved (${JSON.stringify(refused)})`);
+  const done = await store.resetCaptureStamp({ id: row.id, actor: op });
+  const [ev] = await sql`SELECT actor_name, canonical_agent_id::text AS agent, actor_kind FROM thought_audit WHERE thought_id = ${row.id}::uuid AND diff ? 'restamp_reset'`;
+  assert(done.ok && done.reset && done.restored && done.declines === 0 && done.stamp.actorKind === "agent" && done.stamp.actorName === "hook-8e" && done.stamp.trust === "ingested"
+      && ev?.actor_name === "op-8e" && ev.agent === op.agentId && ev.actor_kind === "operator",
+    `the operator's key resets it: the capture key's stamp back, read into the store's shape, the event in the operator's name and id (${JSON.stringify(done)}; ${JSON.stringify(ev)})`);
+  await capture(T, op);
+  assert((await stamp(row.id)) === "operator/op-8e/operator", `…and the operator's re-capture through the store then moves it (${await stamp(row.id)})`);
+  const fresh = await capture("[8e] the hook's text nobody re-sent", hook, "ingested");
+  const idle = await store.resetCaptureStamp({ id: fresh.id, actor: op });
+  assert(idle.ok && !idle.reset && !idle.restored && idle.stamp.actorName === "hook-8e" && idle.stamp.trust === "ingested", `a reset with nothing to reset answers reset false, and the label (${JSON.stringify(idle)})`);
+  const gone = await store.resetCaptureStamp({ id: "00000000-0000-4000-8000-0000000000e8", actor: op });
+  const own = await capture("[8e] the operator's own text", op);
+  const notCapture = await store.resetCaptureStamp({ id: own.id, actor: op });
+  assert(!gone.ok && gone.error === "NOT_FOUND" && !notCapture.ok && notCapture.error === "NOT_CAPTURE_STAMP", `no row: NOT_FOUND; the operator's own row: NOT_CAPTURE_STAMP (${JSON.stringify([gone, notCapture])})`);
+
+  // The row lock: a text edit held open on another connection makes the
+  // reset wait, and then read the edit — a rewritten row is refused. Without
+  // the lock the reset read the row before the edit and reset it (run-it,
+  // review pass 1).
+  const held = await capture("[8e] the hook's text an edit is held open on", hook, "ingested");
+  await capture("[8e] the hook's text an edit is held open on", bot, "ingested");
+  const editConn = new SQL({ url: URL_, max: 1 });
+  let release!: () => void, editing!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const editHeld = new Promise<void>((r) => { editing = r; });
+  const editDone = editConn.begin(async (tx) => {
+    await tx`SELECT update_thought(p_id := ${held.id}::uuid, p_content := ${"[8e] the agent's rewrite, committed while the reset waits"}::text, p_actor := ${{ name: bot.name, agent_id: bot.agentId, via: "store-test" }}::jsonb)`;
+    editing();
+    await gate;
+  });
+  await editHeld;
+  let waited = false;
+  const resetting = store.resetCaptureStamp({ id: held.id, actor: op }).then((r) => { waited = true; return r; });
+  await Bun.sleep(200);
+  const blocked = !waited;
+  release();
+  await editDone;
+  await editConn.close();
+  const afterEdit = await resetting;
+  assert(blocked && !afterEdit.ok && afterEdit.error === "NOT_CAPTURE_STAMP" && (await stamp(held.id)) === "agent/bot-8e/agent",
+    `a reset meeting a text edit in flight waits for it on the row lock, then refuses the rewritten row (waited ${blocked}; ${JSON.stringify(afterEdit)})`);
+  // The operator is asked again once the row is held: a key demoted while
+  // its reset waited is refused, and nothing is written in its name (run-it,
+  // review pass 2: the event named an agent).
+  const waits = await capture("[8e] the hook's text a reset waits on while its key is demoted", hook, "ingested");
+  await capture("[8e] the hook's text a reset waits on while its key is demoted", bot, "ingested");
+  const holdConn = new SQL({ url: URL_, max: 1 });
+  let free!: () => void, holding!: () => void;
+  const held2 = new Promise<void>((r) => { holding = r; });
+  const gate2 = new Promise<void>((r) => { free = r; });
+  const holdDone = holdConn.begin(async (tx) => {
+    await tx`SELECT 1 FROM thoughts WHERE id = ${waits.id}::uuid FOR UPDATE`;
+    holding();
+    await gate2;
+  });
+  await held2;
+  const demoted = store.resetCaptureStamp({ id: waits.id, actor: op });
+  await Bun.sleep(200);
+  await sql`SELECT set_agent_kind('op-8e', 'agent')`;
+  free();
+  await holdDone;
+  await holdConn.close();
+  const afterDemote = await demoted;
+  await sql`SELECT set_agent_kind('op-8e', 'operator')`;
+  const [resets] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = ${waits.id}::uuid AND diff ? 'restamp_reset'`;
+  assert(!afterDemote.ok && afterDemote.error === "NOT_OPERATOR" && afterDemote.kind === "agent" && resets?.n === 0,
+    `a key demoted while its reset waited on the row is refused once it holds the row, and no reset is written (${JSON.stringify(afterDemote)}; ${resets?.n})`);
+
+  // An answer the store cannot read is a fault, not a guess.
+  await sql`ALTER FUNCTION ob1_reset_capture_stamp(uuid, jsonb) RENAME TO ob1_reset_capture_stamp_real`;
+  await sql.unsafe(`CREATE FUNCTION ob1_reset_capture_stamp(p_id uuid, p_actor jsonb DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{"ok": false, "error": "SOMETHING_NEW"}'::jsonb $$`);
+  let odd = "";
+  try { await store.resetCaptureStamp({ id: row.id, actor: op }); } catch (e) { odd = (e as Error).message; }
+  await sql`DROP FUNCTION ob1_reset_capture_stamp(uuid, jsonb)`;
+  await sql`ALTER FUNCTION ob1_reset_capture_stamp_real(uuid, jsonb) RENAME TO ob1_reset_capture_stamp`;
+  assert(/no envelope this server reads/.test(odd) && /SOMETHING_NEW/.test(odd), `an error the function does not name throws, quoting the answer (${odd.slice(0, 120)})`);
+  await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+  await sql.close();
+}
+
 console.log("\n[9] Provenance: capture writes it, the read methods walk it, and the label lookup finds it (migration 025)");
 {
   const parent = await store.captureThought({

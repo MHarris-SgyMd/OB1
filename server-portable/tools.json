@@ -70,6 +70,10 @@
       "scope": "write"
     },
     {
+      "name": "reset_capture_stamp",
+      "scope": "write"
+    },
+    {
       "name": "retry_failed",
       "scope": "write"
     },

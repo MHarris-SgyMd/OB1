@@ -812,6 +812,28 @@ export type MutationResult =
 export type DeleteResult =
   | { ok: true; id: string; detached?: number; inactive?: number }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/** The three stamp keys a thought's metadata carries (050, 073), as a reset leaves them; null where the row has none. */
+export type ActorStamp = { actorKind: string | null; actorName: string | null; trust: string | null };
+/**
+ * What the operator's reset of a capture-only key's label answers (migration
+ * 086, SMD-2744). `reset` false: nothing settled the row since its capture or
+ * its latest reset, and nothing was written. `restored`: a restamp had moved
+ * the label, and the capture key's stamp is back. `movedBy`: the key whose
+ * restamp the reset undid — the operator's own, when it moved the label since
+ * the last reset. `declines`: the decline events that no longer count, and
+ * `declinedBy` the keys that made them (the operator's own, when it kept the
+ * label). A NOT_OPERATOR refusal carries `kind`, the registry's for the
+ * caller ("capture-only" for a capture-scoped one, null when unclassified).
+ * `stamp`: the row's three stamp keys after.
+ * Refused: NOT_FOUND, NOT_OPERATOR (the caller is not a key the registry
+ * classifies operator, or is a capture-only key), NOT_CAPTURE_STAMP (no
+ * capture-only key's label the reset can put back: another key's row, a text
+ * changed since, or a capture from before the scope mark).
+ */
+export type ResetStampError = "NOT_FOUND" | "NOT_OPERATOR" | "NOT_CAPTURE_STAMP";
+export type ResetStampResult =
+  | { ok: true; reset: boolean; restored: boolean; movedBy: string | null; declines: number; declinedBy: string[]; stamp: ActorStamp }
+  | { ok: false; error: ResetStampError; kind?: string | null };
 /**
  * Both functions' envelopes as one normaliser reads them — the superset that
  * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
@@ -877,6 +899,30 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
         }))
       : undefined,
   };
+}
+
+/**
+ * ob1_reset_capture_stamp's jsonb (migration 086) as the store's union — one
+ * reading for both stores. An error the function does not name, or a body
+ * that is no envelope, throws: a refusal this server cannot word is a fault.
+ */
+export function normaliseResetStamp(r: unknown): ResetStampResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  if (o?.ok === true) {
+    const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+    return {
+      ok: true,
+      reset: o.reset === true,
+      restored: o.restored === true,
+      movedBy: word(o.moved_by),
+      declinedBy: Array.isArray(o.declined_by) ? (o.declined_by as unknown[]).filter((n): n is string => typeof n === "string") : [],
+      declines: typeof o.declines === "number" && Number.isFinite(o.declines) ? o.declines : 0,
+      stamp: { actorKind: word(o.actor_kind), actorName: word(o.actor_name), trust: word(o.trust) },
+    };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: o.error, kind: typeof o.kind === "string" ? o.kind : null };
+  if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "NOT_CAPTURE_STAMP")) return { ok: false, error: o.error };
+  throw new Error(`ob1_reset_capture_stamp answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
 /**
@@ -1386,6 +1432,18 @@ export interface ThoughtStore {
     actor?: Actor;
     detach?: boolean;
   }): Promise<DeleteResult>;
+
+  /**
+   * The operator's reset of a capture-only key's label that a re-capture
+   * settled or moved (migration 086, SMD-2744): ob1_reset_capture_stamp,
+   * which decides who may — a key the registry classifies operator — and
+   * appends the event in the actor's name. A database before 086 has no such
+   * function, and the call throws.
+   */
+  resetCaptureStamp(opts: {
+    id: string;
+    actor?: Actor;
+  }): Promise<ResetStampResult>;
 
   /**
    * Resolve a key digest and its configured name to a stable agent id,
