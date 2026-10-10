@@ -7,8 +7,11 @@
  * nothing else, the marker last), the marker read back, the cap's read, and
  * the comment's egress subject — the gate itself: under the default deny a
  * comment is refused, a type:board-finding or source:board-findings term lets
- * it through, a marker: term reads its text. The database and the stub Linear
- * endpoint are test-live.ts [40].
+ * it through, a marker: term reads its text, and the findings' own terms are
+ * set aside when board-sync judges its own calls — and the wiring board-sync
+ * reads (whether the step runs, the census it is handed, the pass's code) and
+ * the one-outcome-per-pair summary. The database and the stub Linear endpoint
+ * are test-live.ts [40]; the census board-sync hands over, its self-check.
  */
 
 import { resolveEgressPolicy } from "../server-portable/egress.ts";

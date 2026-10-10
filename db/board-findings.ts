@@ -229,7 +229,7 @@ export function commentBody(g: FindingGroup): string {
 }
 
 const TICKET = "[A-Za-z][A-Za-z0-9]*-\\d+";
-const MARKER = new RegExp(`^[ \\t>]*ob1-finding:?[ \\t]+(${TICKET})[ \\t]+(${TICKET})((?:[ \\t,]+[a-z]+)+)[ \\t]*$`, "gmi");
+const MARKER = new RegExp(`^[ \\t>]*ob1-finding[ \\t]+(${TICKET})[ \\t]+(${TICKET})((?:[ \\t,]+[a-z]+)+)[ \\t]*$`, "gmi");
 
 /**
  * A body as Linear may hand it back, read as written: an autolinked
@@ -633,7 +633,7 @@ export function summaryLine(r: FindingsReport, cap: number, dryRun: boolean): st
     ...(r.waitingOnCap ? [`${r.waitingOnCap} waiting on the cap (${cap} a day; ${r.postedLast} posted in the last 24 h)`] : []),
     ...(r.notReached ? [`${r.notReached} not reached (stopped)`] : []),
   ];
-  return `  findings: ${r.pairs} ticket pair(s) to tell the board about — ${parts.join(", ")}`;
+  return `  findings: ${r.pairs} ticket pair(s) with a finding the board has not been told — ${parts.join(", ")}`;
 }
 
 /**
