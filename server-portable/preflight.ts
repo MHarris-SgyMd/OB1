@@ -282,7 +282,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -4335,8 +4335,9 @@ if (configFailed) {
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
         // board-sync's --loop and the extraction and consolidation followers
-        // stamp one after every pass, and the sleep scheduler at least every
-        // minute, its followers through it (SMD-1794). One older than three
+        // stamp one after every pass. The sleep scheduler's, at least every
+        // minute, its followers through it (SMD-1794), is its own row below
+        // (SMD-2678). One older than three
         // of its own intervals is a stopped worker — board-sync was down four
         // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
         // one whose last pass
@@ -4348,11 +4349,12 @@ if (configFailed) {
           if (w === null) {
             if ("workers" in facts.unread) add("workers", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat: rows.");
             else add("workers", "skip", "no ob1_config — migration 006 is not applied.");
-          } else if (w.heartbeats.length === 0) {
-            add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
+          } else if (w.heartbeats.every((h) => h.worker === "sleep")) {
+            add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.heartbeats.length ? " but the sleep scheduler (its own row, below)" : ""}${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
           } else {
-            const wrong = w.heartbeats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
-            const detail = w.heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
+            const beats = w.heartbeats.filter((h) => h.worker !== "sleep");
+            const wrong = beats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
+            const detail = beats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
             if (wrong.length === 0) {
               add("workers", "ok", detail);
             } else {
@@ -4364,11 +4366,93 @@ if (configFailed) {
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
-                  : h.worker === "sleep"
-                    ? `sleep's last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).`
-                    : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
+                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
               });
               add("workers", "warn", detail, fixes.join(" "));
+            }
+          }
+        }
+
+        // The sleep scheduler (SMD-1794; the compose `sleep` profile, SMD-2678):
+        // its heartbeat, its current or last sleep (the row's `slept`), and
+        // what wakes it. A search wakes it only when the server logs searches
+        // (OB1_QUERY_LOG=on) and the scheduler's role can read the log — the
+        // owner, or a role granted the opt-in `sleep` group; the scheduler's own
+        // `reads` word says which, this connection's privilege standing in for
+        // a row from before it (review pass 1). Without either
+        // it sleeps on writes alone: through a search it would keep the model
+        // busy, so that warns. A scheduler that never ran says so and passes.
+        {
+          const w = facts.workers;
+          const h = w?.heartbeats.find((b) => b.worker === "sleep");
+          if (w === null) {
+            if ("workers" in facts.unread) add("sleep", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat:sleep row.");
+            else add("sleep", "skip", "no ob1_config — migration 006 is not applied.");
+          } else if (h === undefined) {
+            add("sleep", "skip", "the sleep scheduler has not run on this brain — `--profile sleep` runs it, as an alternative to `--profile workers` (deploy/README.md, SMD-2678).");
+          } else {
+            // CASE, not AND: Postgres does not promise to skip has_table_privilege
+            // when the table is absent, and on a brain before 034 it would throw.
+            let probe: { log: boolean; readable: boolean } | Error;
+            try {
+              [probe] = (await sql`
+                SELECT to_regclass('public.query_log') IS NOT NULL AS log,
+                       CASE WHEN to_regclass('public.query_log') IS NULL THEN false ELSE has_table_privilege('public.query_log', 'SELECT') END AS readable`) as { log: boolean; readable: boolean }[];
+            } catch (e) {
+              probe = e as Error;
+            }
+            if (probe instanceof Error) {
+              add("sleep", "warn", `${heartbeatState(h)}; could not verify what wakes it: ${probe.message}`, "The check reads to_regclass and has_table_privilege on query_log.");
+            } else {
+              // Whether the scheduler's role reads the log is its own word, on its
+              // row (`reads`, as its start found): preflight's role may be another
+              // (an owner's preflight beside a --grant scheduler, or the reverse).
+              // A row from before it falls back to this connection's privilege.
+              const own = h.reads !== undefined;
+              const log = own ? h.reads !== "missing" : probe.log;
+              const readable = own ? h.reads === "yes" : probe.readable;
+              const { queryLogEnabled } = await import("../db/config.mjs");
+              const logged = queryLogEnabled(env as unknown as Record<string, string | undefined>);
+              // Its start found no log, but 034 is applied since: only a restart
+              // lets it read one (review pass 2).
+              const logSince = own && h.reads === "missing" && probe.log;
+              const wakes = logSince
+                ? "writes alone wake it — its start found no query log, which is applied since"
+                : !log
+                ? "writes alone wake it (no query log: migration 034 is not applied)"
+                : !logged
+                  ? "writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search"
+                  : !readable
+                    ? `writes alone wake it — ${own ? "its role cannot read query_log, as it found at its start" : "this role cannot read query_log (the scheduler has not said whether its own can)"}`
+                    : "a search or a write wakes it";
+              const wakeFix = logSince
+                ? `Restart it so its start finds the query log, applied since it began — ${restartCommand("sleep", null)}.`
+                : !log
+                ? null
+                : !logged
+                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment), so a search wakes the scheduler; until then it can run its passes through a session of searches."
+                  : !readable
+                    ? "Grant the scheduler's role the opt-in sleep group, `bun db/migrate.ts --grant <role> --groups <its groups>,sleep` (db/README.md, \"Grants for a capturing role\"), or run it as the owner, then restart it (its start reads the privilege once) — until then a search does not wake it."
+                    : null;
+              const s = h.slept;
+              const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
+              const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
+              const sleepWords = h.stale || h.ended
+                ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
+                : h.running
+                  ? `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
+                  : s && s.to
+                    ? `awake, its passes waiting for the brain to go quiet — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}`
+                    : "awake, its passes waiting for the brain to go quiet — no sleep yet";
+              const detail = `${heartbeatState(h)}; ${sleepWords}; ${wakes}`;
+              const fixes: string[] = [];
+              if (h.stale || h.ended) {
+                fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (h.outcome === "failed") {
+                fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
+              }
+              if (wakeFix) fixes.push(wakeFix);
+              add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
             }
           }
         }

@@ -1048,6 +1048,24 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   ]);
   assert(slept.heartbeats.length === 1 && slept.ignored === 2 && slept.heartbeats[0].worker === "sleep" && slept.heartbeats[0].job === null && slept.heartbeats[0].running === true,
     `heartbeat:sleep is read with no job, and one carrying a job, in its key or its value, is not (${slept.heartbeats.length}, ${slept.ignored})`);
+  // Its sleep's mark (SMD-2678): carried when of the shape — a UTC instant from,
+  // and to one or null — left off otherwise, the heartbeat still counted; and
+  // never read off another worker's row.
+  const marks = [
+    { from: at, to: null }, { from: at, to: at },
+    { from: "yesterday", to: null }, { from: at, to: "later" }, { from: at }, { to: at }, null, "x",
+  ];
+  const marked = parseHeartbeats(marks.map((s) => ({ key: "heartbeat:sleep", value: JSON.stringify({ ...good, slept: s }), at, age_s: 1 })));
+  assert(marked.heartbeats.length === 8 && marked.ignored === 0
+      && JSON.stringify(marked.heartbeats.map((h) => h.slept ?? null)) === JSON.stringify([{ from: at, to: null }, { from: at, to: at }, null, null, null, null, null, null]),
+    `a sleep mark is carried only when of the shape, and its row counts either way (${JSON.stringify(marked.heartbeats.map((h) => h.slept ?? null))})`);
+  const otherMark = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify({ ...good, slept: { from: at, to: null } }), at, age_s: 1 }]);
+  assert(otherMark.heartbeats.length === 1 && otherMark.heartbeats[0].slept === undefined, "…and another worker's row carries none");
+  // Its word on reading the query log (review pass 1): one of three, else left off; never another worker's.
+  const readsOf = (key: string, reads: unknown) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, reads }), at, age_s: 1 }]).heartbeats[0]?.reads;
+  assert(readsOf("heartbeat:sleep", "yes") === "yes" && readsOf("heartbeat:sleep", "denied") === "denied" && readsOf("heartbeat:sleep", "missing") === "missing"
+      && readsOf("heartbeat:sleep", "maybe") === undefined && readsOf("heartbeat:sleep", true) === undefined && readsOf("heartbeat:board-sync", "yes") === undefined,
+    "the scheduler's reads word is carried when one of three, and never off another worker's row");
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"

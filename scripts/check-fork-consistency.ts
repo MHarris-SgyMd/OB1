@@ -6134,7 +6134,7 @@ const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": nul
 const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
+  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES, sleep: CHECKOUT_MODULES,
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],

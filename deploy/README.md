@@ -161,6 +161,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `jev` (`--profile jev`) | `jev:8020` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
 | `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 | `extract`, `consolidate` (`--profile workers`) | Listen on nothing; dial `postgres:5432` and the model provider | Nothing | Nothing |
+| `sleep` (`--profile sleep`) | Listen on nothing; dial `postgres:5432` and the model provider | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on the `egress` network, through its fetch guard. It is not on the default network, so it cannot reach `postgres`, which stays off the mesh until the network move (SMD-2583), and it holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
@@ -752,6 +753,16 @@ services: `db/extract-entities.ts --follow` as `extract` and
 `db/consolidate.ts --follow` as `consolidate`. Each drains its pool, then
 polls for new work.
 
+**Two profiles, pick one.** `--profile workers` runs both followers always,
+at low concurrency, beside live traffic. `--profile sleep` runs the same two
+passes only while the brain is quiet, and stops them within seconds of the
+next live call ("The `sleep` profile instead", below). They are alternatives,
+not companions: the `sleep` service will not run beside the workers'
+followers — it refuses at its start, and when one starts later it ends
+(exit 2) before its next sleep begins, or within a poll if asleep, both
+profiles brought up at once included. The rest of this
+section is the `workers` profile.
+
 **The cost comes first.** Extraction makes a model call per thought (per
 window of a long one), and consolidation up to three, one per judged pair. On
 a local model that is GPU time: the dogfood brain takes 50 to 90 thoughts a
@@ -944,13 +955,72 @@ workers' key's.
 A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
-This is the baseline for the sleep scheduler (SMD-1794): always on, at low
-concurrency. `db/sleep.ts` runs these passes only while the logs are quiet
-and stops them on a live call; until its compose service (SMD-2678) it runs
-in a one-off container of this profile's `extract` service, with the
-profile's own followers stopped — `db/README.md`, "Sleep", gives the command
-and how to move off this profile, whose followers do not yield. It has no
-budget yet (SMD-2679).
+### The `sleep` profile instead
+
+`--profile sleep` runs one service, `sleep`: `db/sleep.ts --follow`, the
+sleep scheduler (SMD-1794; this service, SMD-2678). It runs this profile's two
+passes only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
+with no live call — extraction first, and consolidation beside it once
+extraction's pool is drained, so the backlog order above is built in. On the
+next live call it stops both within `OB1_SLEEP_POLL` seconds (unset, 5): the
+model call in hand is aborted and every lease returned, and the brain is
+quiet again `OB1_SLEEP_QUIET` seconds after the last one. Each pass's cost is
+the same as under `workers`, spent only while nobody is using the brain.
+`db/README.md`, "Sleep", has the full rules.
+
+**What wakes it.** A write through a key that is not classified `ingested`
+(board-sync's sync writes are), and a search, but only when the server logs
+searches (`OB1_QUERY_LOG=on`) and the scheduler's role may read the log. This
+stack's database URL is the owner's, which may. A role set up with
+`migrate.ts --grant` may only when granted the opt-in **sleep** group,
+`--groups <its groups>,sleep` (`db/README.md`, "Grants for a capturing role"),
+since the log holds every search's text. Otherwise only writes wake it, and
+it could run its passes through a session of searches. Preflight's `sleep`
+row says which applies, and whether it is asleep, with its last sleep.
+
+**First start.** The same worker key as the `workers` profile (`OB1_WORKER_KEY`,
+its line in `MCP_ACCESS_KEYS`), then:
+
+```bash
+podman compose -f deploy/compose.yaml --profile sleep up -d sleep
+podman compose -f deploy/compose.yaml --profile sleep logs -f sleep
+```
+
+The log says `asleep:` when a sleep begins, `extraction drained — consolidating
+beside it`, and `awake:` with the live call that woke it. `extract-entities.ts
+--status` (the command above) reads its progress, and a status read is not a
+live call. `COMPOSE_PROFILES=sleep` in `deploy/.env` brings it back with the
+stack.
+
+**From the `workers` profile.** Stop its followers first, and take `workers`
+out of `COMPOSE_PROFILES`: the `sleep` service refuses to run (exit 2, and
+its log names them) while a follower's heartbeat is fresh — at its start, or
+when an awake or asleep poll finds one — since a follower does not yield to a
+live call. A follower stopped cleanly marks its row ended, so the refusal
+lifts at once; one killed past its grace leaves its row fresh for up to three
+of its intervals (3 min), so delete the rows as the log says — needed anyway
+if you are retiring the profile, or preflight's `workers` row asks for them
+back. Four refusals in a row (its start and three restarts) use up the service's restarts, after which
+`up -d sleep` starts it again.
+
+```bash
+podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
+podman compose -f deploy/compose.yaml --profile sleep up -d sleep
+```
+
+**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_POLL` (1–60, the most a
+pass runs beside a live call) and `OB1_SLEEP_WORKERS` (each pass's workers,
+unset 1), digits only (`deploy/.env.example`). The scheduler reads its
+environment once, so recreate the service after changing any of them, the
+key or the model.
+
+**Changing the model** is the `workers` profile's procedure above with `sleep`
+in place of the two followers: stop `sleep` before the change reaches it, run
+the switch, then bring back `server api sleep`. Under `sleep` the switch's
+backlog is extracted while the brain is quiet, and consolidation waits for it.
+
+It has no budget yet (SMD-2679). Quieter banners and configuration checks at
+its start are SMD-2752.
 
 ## Refreshing a tier
 
@@ -2040,8 +2110,9 @@ so the profile builds from a checkout.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
   worker with a per-thought model cost, so it runs as a service only when asked:
   the `workers` profile runs it and `db/consolidate.ts --follow`, the pass that
-  proposes supersessions from the entities it extracts ("Extraction and
-  consolidation as services", above). Decide on the cost before you ask for it.
+  proposes supersessions from the entities it extracts, or the `sleep` profile
+  runs both only while the brain is quiet ("Extraction and consolidation as
+  services", above). Decide on the cost before you ask for either.
   A follower exits 0 when stopped, so watch its log: it says there when the
   model looks at fault, after each pass drains the pool. A follower started on
   a backlog says nothing until the backlog is done, so try a new model on a

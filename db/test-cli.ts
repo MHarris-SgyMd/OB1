@@ -264,7 +264,7 @@ const entries = sources.filter((f) => {
   ok(grant.code === 2 && /^--grant needs a value; a flag follows it$/m.test(grant.err) && !grant.err.includes("s3cret"), `migrate.ts --grant with a joined --url after it does not echo the password (exit ${grant.code})`);
   // SMD-2289: --groups narrows --grant, is refused on its own before the URL is read, and names an unknown group from the list.
   const lone = run("migrate.ts", "--groups", "capture");
-  ok(lone.code === 2 && /^--groups narrows --grant to some of its groups; it does nothing on its own/m.test(lone.err), `migrate.ts --groups without --grant is refused as that, not as a missing URL (exit ${lone.code}: ${lone.err.split("\n")[0]})`);
+  ok(lone.code === 2 && /^--groups names the groups --grant issues; it does nothing on its own/m.test(lone.err), `migrate.ts --groups without --grant is refused as that, not as a missing URL (exit ${lone.code}: ${lone.err.split("\n")[0]})`);
   const unknownGroup = run("migrate.ts", "--grant", "r", "--groups", "capture,bogus", "--url", "postgres://u:s3cret@127.0.0.1:1/db");
   ok(unknownGroup.code === 2 && /not a group: "bogus"/.test(unknownGroup.err) && /capture, server, worker/.test(unknownGroup.err) && !unknownGroup.err.includes("s3cret"), `migrate.ts --groups names an unknown group and the list, before connecting (exit ${unknownGroup.code})`);
   const loneExact = run("migrate.ts", "--exact");

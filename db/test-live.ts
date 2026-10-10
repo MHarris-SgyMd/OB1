@@ -10327,7 +10327,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
-    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number } : null;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: string } : null;
   };
   const lines: string[] = [];
   const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
@@ -10353,6 +10353,88 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
     assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
       `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+
+    // A claim follower stamping fresh outside the scheduler does not yield to a
+    // live call: a run refuses (2) rather than sleep beside it, and the dry run
+    // names it and exits 0; an ended follower's row is no follower (SMD-2678).
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const besideDry = await sleepRun({ dryRun: true });
+    const besideDryText = lines.join("\n");
+    lines.length = 0;
+    // Bounded: a run that does not refuse sleeps under --follow for ever (the
+    // no-refusal mutant hung the suite for hours, SMD-1794's lesson again).
+    const acBeside = new AbortController();
+    const besideRun = sleepRun({ follow: true, signal: acBeside.signal });
+    const beside = await Promise.race([besideRun, Bun.sleep(20_000).then(() => -1)]);
+    if (beside === -1) { acBeside.abort(); await besideRun; }
+    const besideText = lines.join("\n");
+    await sql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "stopped", ended: true })} WHERE key = 'heartbeat:extract:outside@p2'`;
+    lines.length = 0;
+    const endedDry = await sleepRun({ dryRun: true });
+    const endedDryText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    // A row under the prefix whose key is not pass-stamp's alphabet — one any
+    // worker-group role could plant, a quote in it — is no follower, and never
+    // reaches the DELETE the refusal prints for pasting (review pass 1).
+    const planted = "heartbeat:extract:x'); DELETE FROM thoughts; --";
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${planted}, ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const plantedDry = await sleepRun({ dryRun: true });
+    const plantedText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key = ${planted}`;
+    assert(plantedDry === 0 && !/outside sleep/.test(plantedText) && !plantedText.includes("DELETE FROM thoughts"),
+      `a planted key not of the heartbeat alphabet is not named, nor pasted into a DELETE (exit ${plantedDry})`);
+    // Twenty stale rows that sort first by key do not hide a fresh follower
+    // past the read's bound of twenty: newest first (review pass 2).
+    for (let i = 0; i < 20; i++) {
+      await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:extract:aaa${i}@p2`}, ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, now() - interval '1 hour')`;
+    }
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:zzz@p2', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const hiddenDry = await sleepRun({ dryRun: true });
+    const hiddenText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:aaa%' OR key = 'heartbeat:extract:zzz@p2'`;
+    assert(hiddenDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:zzz@p2 —/.test(hiddenText),
+      `a fresh follower behind twenty stale rows that sort first is still named (exit ${hiddenDry})`);
+    // A signal aborted during a start read that waits on no outage is a stop
+    // before the run began, as one before run() is: 130 and no row (review pass 2).
+    const acEarly = new AbortController();
+    const abortingSql = new Proxy(sql, { apply(t, self, args) { acEarly.abort(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+    lines.length = 0;
+    const earlyRun = sleepRun({ sql: abortingSql, follow: true, signal: acEarly.signal });
+    const earlyCode = await Promise.race([earlyRun, Bun.sleep(20_000).then(() => -1)]);
+    if (earlyCode === -1) { acEarly.abort(); await earlyRun; }
+    assert(earlyCode === 130 && lines.some((l) => /stopped before the pass began/.test(l)) && (await beat()) === null,
+      `a stop during a start read ends it with 130 and stamps no row (exit ${earlyCode})`);
+    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText) && (await beat()) === null
+        && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
+        && endedDry === 0 && !/outside sleep/.test(endedDryText),
+      `a fresh follower outside refuses a run (2, no sleep, no row stamped), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${besideText.split("\n").find((l) => /outside sleep/.test(l))?.trim().slice(0, 120) ?? "no line"})`);
+
+    // The start's reads wait out a database not answering yet (57P03, the
+    // server starting up), as the sleep's own reads do: the compose service
+    // starts beside a Postgres that may be restarting (SMD-2678). A stop
+    // during that wait ends the run as a stop before it began (130).
+    const startingUp = () => Object.assign(new Error("the database system is starting up"), { name: "PostgresError", errno: "57P03" });
+    /** The suite's client, whose first `n` statements fail as a database starting up. */
+    const failing = (n: number) => {
+      let left = n;
+      return new Proxy(sql, { apply(t, self, args) { if (left-- > 0) throw startingUp(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+    };
+    lines.length = 0;
+    const waited = await sleepRun({ sql: failing(1), dryRun: true });
+    const waitedText = lines.join("\n");
+    assert(waited === 0 && /the database is not answering \(the database system is starting up\) — waiting for it/.test(waitedText) && /the database answers again/.test(waitedText) && /a sleep would begin/.test(waitedText),
+      `a database down at the start is waited out, said once, and the run goes on (exit ${waited}: ${lines.filter((l) => /database/.test(l)).join(" | ").trim()})`);
+    lines.length = 0;
+    const acDown = new AbortController();
+    const downRun = sleepRun({ sql: failing(Number.MAX_SAFE_INTEGER), follow: true, signal: acDown.signal });
+    await pollUntil(async () => lines.some((l) => /not answering/.test(l)), 10_000);
+    acDown.abort();
+    const downCode = await Promise.race([downRun, Bun.sleep(15_000).then(() => -1)]);
+    assert(downCode === 130 && lines.some((l) => /not answering/.test(l)) && (await beat()) === null,
+      `a stop while the start waits on the database ends it with 130, no row stamped (exit ${downCode})`);
 
     // One sleep: extraction alone, drained, then consolidation, then done.
     lines.length = 0;
@@ -10434,6 +10516,13 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const ownRows = Number((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key LIKE 'heartbeat:extract%' OR key LIKE 'heartbeat:consolidate%'`)[0].c);
     assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
       `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
+    // The row carries its last sleep (SMD-2678): when it began and when it
+    // ended, the database's instants, the end past the start; and its word on
+    // reading the query log, the owner's here (review pass 1).
+    const mark = endBeat?.slept;
+    const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat?.reads === "yes",
+      `the heartbeat carries the last sleep's start and end, and that it reads the log (${JSON.stringify(mark)}; reads ${endBeat?.reads})`);
 
     // A capture whose transaction began before the sleep and commits after it
     // is dated before the sleep: it still wakes it.
@@ -10613,6 +10702,45 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       slow = 0;
       cli.kill("SIGKILL");
       await cli.exited;
+    }
+
+    // A follower that appears after the start — both profiles started at once,
+    // the follower stamping only past its start probe — ends the run with 2,
+    // as the start's refusal does: found by an awake poll, and by an asleep one
+    // with the passes hard-stopped first, the lease returned (review pass 1).
+    const outsideRow = () => sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
+                                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    const bounded = async (run: Promise<number>, ac: AbortController) => {
+      const code = await Promise.race([run, Bun.sleep(20_000).then(() => -1)]);
+      if (code === -1) { ac.abort(); await run; }
+      return code;
+    };
+    try {
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const acAwake = new AbortController();
+      const awakeRun = sleepRun({ follow: true, quiet: 300, minStampEveryS: 1, signal: acAwake.signal });
+      await pollUntil(async () => (await beat()) !== null, 10_000);
+      await outsideRow();
+      const awakeCode = await bounded(awakeRun, acAwake);
+      const awakeBeat = await beat();
+      assert(awakeCode === 2 && lines.some((l) => /refused: followers are running outside sleep.*heartbeat:consolidate:late@p4/.test(l)) && !lines.some((l) => /asleep:/.test(l)) && awakeBeat?.ended === true && awakeBeat.outcome === "failed",
+        `a follower stamping after the start ends an awake --follow with 2, never having slept, its row ended failed (exit ${awakeCode}; ${JSON.stringify(awakeBeat)})`);
+
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      await capture("A note the follower finds the brain asleep over.", "sync-sleep", 0, 8);
+      slowExtract = 3000;
+      lines.length = 0;
+      const acAsleep = new AbortController();
+      const asleepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acAsleep.signal });
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 20_000);
+      await outsideRow();
+      const asleepCode = await bounded(asleepRun, acAsleep);
+      assert(asleepCode === 2 && lines.some((l) => /refused: followers are running outside sleep/.test(l)) && !(await claims(EX)).claimed,
+        `…and one found asleep stops the passes, returns the lease and ends with 2 (exit ${asleepCode}; claimed ${(await claims(EX)).claimed ?? 0})`);
+    } finally {
+      slowExtract = 0;
+      await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
     }
   } finally {
     stub.stop(true);

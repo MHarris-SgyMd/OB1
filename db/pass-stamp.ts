@@ -18,7 +18,9 @@
  * way), the last pass's `outcome` (PassOutcome below), `ended` once the
  * worker's process is gone, and for extraction the last judged block's
  * malformed answers (SMD-2266's alarm, which a follower otherwise says only on
- * stderr). Each stamp writes the whole value: a restarted follower's first
+ * stderr), and for the sleep scheduler `slept`, its current or last sleep's
+ * `from` and `to` (SleepMark), and `reads`, whether its role reads the query
+ * log (LogReads, SMD-2678). Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -68,6 +70,12 @@ export type PassOutcome = "ok" | "failed" | "stopped";
 /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm. */
 export type MalformedBlock = { answers: number; bad: number; alarm: boolean };
 
+/** The sleep scheduler's current or last sleep: when it began and, once it is over, when it ended — the database's instants, ISO strings (SMD-2678). */
+export type SleepMark = { from: string; to: string | null };
+
+/** Whether the sleep scheduler's role reads query_log, as its start found: a search then wakes it; otherwise only writes do (SMD-2678). */
+export type LogReads = "yes" | "denied" | "missing";
+
 export interface PassStamper {
   /** The row's key. */
   key: string;
@@ -87,6 +95,18 @@ export interface PassStamper {
    * sleep scheduler's beat while awake, and a pass's word mid-sleep (SMD-1794).
    */
   alive(outcome?: Exclude<PassOutcome, "stopped">, malformed?: MalformedBlock | null): Promise<void>;
+  /**
+   * The sleep scheduler's mark of its current or last sleep, carried by the
+   * row's next write (`slept` in the value): preflight's `sleep` row and keyed
+   * /health show it (SMD-2678). Only the scheduler sets it.
+   */
+  slept?(mark: SleepMark): void;
+  /**
+   * The sleep scheduler's word on whether its role reads query_log (`reads`
+   * in the value), so preflight's `sleep` row says what wakes the scheduler,
+   * not what preflight's own role may read (SMD-2678, review pass 1).
+   */
+  watching?(reads: LogReads): void;
 }
 
 /**
@@ -122,12 +142,14 @@ export function passStamper(opts: {
   let outcome: PassOutcome | null = null;
   let ended = false;
   let malformed: MalformedBlock | null = null;
+  let slept: SleepMark | null = null;
+  let reads: LogReads | null = null;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -174,6 +196,12 @@ export function passStamper(opts: {
       if (o !== undefined) outcome = o;
       if (m !== undefined) malformed = m;
       await write(inside);
+    },
+    slept(mark) {
+      slept = mark;
+    },
+    watching(r) {
+      reads = r;
     },
   };
 }
