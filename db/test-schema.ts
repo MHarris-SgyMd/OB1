@@ -12903,7 +12903,7 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[76] Migration 086: board_findings_posted — one row per ticket pair and word, the pair in order, the ticket commented on one of the two, a word and an origin from their lists, at least one finding named; the cap's index; a re-apply a no-op (SMD-2681)");
+console.log("\n[78] Migration 087: board_findings_posted — one row per ticket pair and word, the pair in order, the ticket commented on one of the two, a word and an origin from their lists, at least one finding named; the cap's index; a re-apply a no-op (SMD-2681)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -12916,7 +12916,7 @@ console.log("\n[76] Migration 086: board_findings_posted — one row per ticket 
   const idx = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'board_findings_posted_at_idx'`))?.d ?? "";
   assert(/\(posted_at\) WHERE \(origin = 'posted'::text\)/.test(idx), `the cap's index: posted_at over the rows this brain posted (${idx})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["board_findings_posted"])).c ?? "";
-  assert(/Migration 086 \/ SMD-2681/.test(tc) && /never updated or deleted/.test(tc), "the table's comment names 086, the ticket, and that a row is only inserted");
+  assert(/Migration 087 \/ SMD-2681/.test(tc) && /never updated or deleted/.test(tc), "the table's comment names 087, the ticket, and that a row is only inserted");
 
   const ins = (a: string, b: string, word: string, on: string, origin: string, ids = "{00000000-0000-0000-0000-000000000001}") =>
     db.query(`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, finding_ids) VALUES ($1, $2, $3, $4, $5, $6::uuid[])`, [a, b, word, on, origin, ids])
@@ -12932,8 +12932,8 @@ console.log("\n[76] Migration 086: board_findings_posted — one row per ticket 
   assert(/board_findings_posted_names_a_finding/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-3", "posted", "{}")), "a row naming no finding is refused");
 
   const before = JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`));
-  await reapply("086");
-  assert(JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`)) === before, "086 re-applied: the rows stand");
+  await reapply("087");
+  assert(JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`)) === before, "087 re-applied: the rows stand");
   await db.exec(`DELETE FROM board_findings_posted WHERE true`);
 }
 

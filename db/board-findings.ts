@@ -35,7 +35,7 @@
  *
  * One comment per ticket pair, on the ticket of the thought the judge saw as
  * newer: several proposals or relations between rows of the same two
- * tickets are one comment. The record (migration 086, board_findings_posted)
+ * tickets are one comment. The record (migration 087, board_findings_posted)
  * is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
  * pair posted as related is posted once more only when the judge says
@@ -315,8 +315,8 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
   const [r] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS posted,
                                to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
-  if (!r.posted) return "migration 086 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
-  // 029's table precedes 086 in every tree, so it exists here.
+  if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
+  // 029's table precedes 087 in every tree, so it exists here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
                                has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read,

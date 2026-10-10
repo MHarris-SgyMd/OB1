@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2681).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 087 SMD-2681).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1303,7 +1303,7 @@ as "re-captured … the label kept". It refuses to apply
 without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
 test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
 
-Migration 086 adds `board_findings_posted`, what board-sync's findings step
+Migration 087 adds `board_findings_posted`, what board-sync's findings step
 posted to the Linear board (SMD-2681): one row per ticket pair and word —
 the pair in order by 079's ticket identity, the word (`outdates`, `related`,
 `evolves`, `duplicate`), the ticket commented on, Linear's comment id, and the
@@ -1311,8 +1311,8 @@ proposal and relation-facet ids it named. `origin` is `posted`, counted
 against the daily cap, or `found`, a marker already on the board. Rows are
 only inserted — a posted one after Linear answers, in the transaction that
 posted — so a failed post records nothing. It needs nothing before it. See
-[What it tells the board](#the-board-in-the-brain-smd-1954). test-schema [76],
-test-upgrade [20ah], test-live [40].
+[What it tells the board](#the-board-in-the-brain-smd-1954). test-schema [78],
+test-upgrade [20ai], test-live [41].
 
 ## What changed relative to the guide
 
@@ -1413,7 +1413,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
-| | `board_findings_posted` (086) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
+| | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -3875,7 +3875,7 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   other, after which the pair is not posted again (079 still pairs it for the
   judge). It proposes only: no link is added, no status moved, no description
   edited.
-- **Posted once.** Migration 086's `board_findings_posted` holds one row per
+- **Posted once.** Migration 087's `board_findings_posted` holds one row per
   ticket pair and word (`outdates`, `related`, `evolves`, `duplicate`), so a
   relation a re-judge replaced at another score is not posted again, and a pair
   is posted again only for a word not posted for it before (a proposal judged

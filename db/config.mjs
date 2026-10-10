@@ -2155,7 +2155,7 @@ export const ROLE_GRANTS = Object.freeze({
     // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
     // it posted: read for the cap and "not posted again", inserted after Linear
     // answers. Never updated or deleted — a failed post rolls the claim back.
-    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT", "INSERT"]),             since: "086" }),
+    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT", "INSERT"]),             since: "087" }),
     // …and reads the proposal queue it posts from (review pass 2: through the
     // server group it also took UPDATE on ob1_agent_keys, for one SELECT).
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),                     since: "029" }),

@@ -10889,7 +10889,7 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
   }
 }
 
-console.log("\n[40] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
+console.log("\n[41] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
 {
   const bsql = new SQL({ url: URL_!, max: 2 });
   // The stub: every operation logged by name; a ticket's comments kept so a
@@ -11243,7 +11243,7 @@ console.log("\n[40] db/board-findings.ts: a consolidation finding between two ti
     assert(reports.length > 20 && reports.every((r) => outcomes(r) === r.pairs),
       `every run's outcome counts add up to its pairs (${reports.filter((r) => outcomes(r) !== r.pairs).map((r) => `${outcomes(r)} of ${r.pairs}`).join(", ") || `${reports.length} runs`})`);
   } catch (err) {
-    assert(false, `[40] stopped: ${(err as Error).stack}`);
+    assert(false, `[41] stopped: ${(err as Error).stack}`);
   } finally {
     stub.stop(true);
     await bsql.close();

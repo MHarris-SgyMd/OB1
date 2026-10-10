@@ -38,7 +38,7 @@ export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
  * holding them, so anything with a foreign key has to be named before it.
  */
 const TABLES = [
-  // 086's posted record (SMD-2681): no foreign key either way.
+  // 087's posted record (SMD-2681): no foreign key either way.
   "board_findings_posted",
   "thought_sources",
   "thought_facets",

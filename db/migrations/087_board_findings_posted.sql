@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 086: what consolidation's findings between two tickets the board
+-- Migration 087: what consolidation's findings between two tickets the board
 --                does not link were posted to the board as — one row per
 --                ticket pair and word, so a re-run, a restart or a second
 --                poster on this brain posts nothing again (SMD-2681)
@@ -60,7 +60,7 @@ CREATE INDEX IF NOT EXISTS board_findings_posted_at_idx
   ON board_findings_posted (posted_at) WHERE origin = 'posted';
 
 COMMENT ON TABLE board_findings_posted IS
-  'What db/board-findings.ts posted to the Linear board: one row per (ticket pair, word) — a pending outdates proposal or a standing judged relation between two tickets the board does not link, posted as one comment on the newer ticket. Inserted in the transaction that posts, so a failed post records nothing; never updated or deleted. Migration 086 / SMD-2681.';
+  'What db/board-findings.ts posted to the Linear board: one row per (ticket pair, word) — a pending outdates proposal or a standing judged relation between two tickets the board does not link, posted as one comment on the newer ticket. Inserted in the transaction that posts, so a failed post records nothing; never updated or deleted. Migration 087 / SMD-2681.';
 COMMENT ON COLUMN board_findings_posted.ticket_a IS
   'The pair''s lesser ticket identity, coalesce(metadata->>''ticket'', metadata->>''issue'') (079''s); ticket_a < ticket_b.';
 COMMENT ON COLUMN board_findings_posted.word IS
