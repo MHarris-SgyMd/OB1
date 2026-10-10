@@ -1,6 +1,6 @@
 # Three servers and an authorization server behind the proxy (SMD-2282)
 
-An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16). Amended 2026-10-01: the authorization server keeps its state in SQLite in its own volume, not in a database on the brain's Postgres (SMD-2285, "What else this touches").
+An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16). Amended 2026-10-01: the authorization server keeps its state in SQLite in its own volume, not in a database on the brain's Postgres (SMD-2285, "What else this touches"). Amended 2026-10-10 by SMD-2872 (`docs/one-brain-per-stack.md`): each brain is its own stack, so decision 14 becomes one authorization server per brain, and the passages here that put the tiers on paths of one origin (`/canary/...`) are superseded; that ADR lists them.
 
 The brain's deployed surface becomes three servers and an authorization server, all behind one reverse proxy:
 
