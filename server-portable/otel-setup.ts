@@ -16,10 +16,11 @@
 // dropped — are said on stderr at most once a minute, by count and kind (a
 // count held inside a minute is said when the minute ends), and what is still
 // unsaid at the stop, its own flush's failures included, is said then; never
-// an error's message, which can carry the URL. Context follows a request through its awaits by
-// AsyncLocalStorage, so a tool's span is its request's child, and an incoming
-// W3C `traceparent` is continued, so the proxy's or a client's trace is this
-// one.
+// an error's message, which can carry the URL. Context follows a request
+// through its awaits by AsyncLocalStorage, so a tool's span is its request's
+// child; the W3C propagator reads an incoming `traceparent`, which
+// telemetry.ts links to the request's span, or continues where the operator
+// trusts it (OB1_OTEL_TRUST_TRACEPARENT=1).
 //
 // Workers never loads this: wrangler.toml aliases it to
 // shims/otel-unavailable.ts, so the Worker's bundle holds the API alone.
@@ -252,8 +253,9 @@ export async function flushBatch(provider: { forceFlush(): Promise<void> }, coun
 }
 
 /**
- * The batch's queue at most: OTEL_BSP_MAX_QUEUE_SIZE is the operator's, but each span held costs about 6 KB, and a
- * keyless flood fills any queue while a collector stalls (review pass 6: a million took the server to 6 GB).
+ * The batch's queue at most: OTEL_BSP_MAX_QUEUE_SIZE is the operator's, but each span held costs memory (1–2 KB
+ * measured in review pass 7), and a keyless flood fills any queue while a collector stalls (review pass 6: a million
+ * took the server to 6 GB).
  */
 const MAX_QUEUE = 65_536;
 

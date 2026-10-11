@@ -491,7 +491,7 @@ export function startTelemetry(
   return starting;
 }
 
-/** Shuts the SDK down and forgets its start, so a suite can start it again; spans are no-ops after. A start still loading is waited for, and shuts its own SDK down. */
+/** Shuts the SDK down and forgets its start, so a suite can start it again; spans are no-ops after. A start still loading is waited for, and starts its own SDK's shutdown. */
 export async function stopTelemetry(): Promise<void> {
   generation += 1;
   const loading = starting;

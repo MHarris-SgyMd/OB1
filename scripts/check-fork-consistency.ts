@@ -2848,7 +2848,7 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
-  OB1_OTEL_TRUST_TRACEPARENT: "the telemetry settings (SMD-1849 PR 2b), which reach the servers beside the OTEL_* variables by the observability profile (PR 3) or a second -f file, never this file's forwards: trusting a caller's traceparent is a proxy deployment's to say, not the stack's default",
+  OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",

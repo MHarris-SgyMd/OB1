@@ -2992,7 +2992,7 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   assert(timed[0]?.ms === 7, `end(fields, at): ms is at - started, not the time the line is written (${JSON.stringify(timed)})`);
 }
 
-console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent continued, its trace id on the line — and no key, URL or text in any span");
+console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent linked (continued where trusted), its trace id on the line — and no key, URL or text in any span");
 {
   const { useRequestLog } = await import("./telemetry.ts");
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");

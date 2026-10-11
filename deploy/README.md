@@ -908,9 +908,9 @@ recorded and sent only when the server's environment names a collector:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP/HTTP base URL (`http://lgtm:4318`); spans go to `<it>/v1/traces` as JSON, batched. With neither this nor the next set — the default — nothing is recorded or sent, and a span costs the server well under a microsecond. One that is no http(s) URL sends nothing, and the server says so at start |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | the traces URL itself, over the base |
 | `OTEL_EXPORTER_OTLP_HEADERS` | headers for the collector (`authorization=Bearer …`) |
-| `OTEL_EXPORTER_OTLP_CERTIFICATE` | the CA certificate for an https collector with its own; never `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off every certificate check the server makes |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | the path to a PEM CA certificate, for an https collector with its own; never `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off every certificate check the server makes |
 | `OB1_OTEL_TRUST_TRACEPARENT=1` | continue a caller's `traceparent`, for a deployment whose proxy sets it. Unset — the default — a request starts its own trace and links the caller's: a caller chooses its `traceparent`, and continued it would choose the request's trace (joining any trace it knows, colliding with another request's line) and, under a ratio, its sampling |
-| `OTEL_BSP_MAX_QUEUE_SIZE` | the batch's queue, 2,048 by default and 65,536 at most (said at start when held): each span waiting costs about 6 KB |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | the batch's queue, 2,048 by default and 65,536 at most (said at start when held): each span waiting holds memory (1–2 KB measured) |
 | `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none` | off, with an endpoint set; said at start |
 | `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server) or `open-brain-api` |
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment=canary`); a key it names wins, `service.version` included |
@@ -924,7 +924,7 @@ then, name them in a second `-f` file.
 At start the server says where its spans go — the variable, the endpoint's
 origin and the service's name (held to printable ASCII), so a credential in
 the URL stays out of the log. Spans not sent
-— an export that failed, or spans the batch's full queue (2,048) dropped —
+— an export that failed, or spans the batch's full queue dropped —
 are said on stderr at most once a minute: how many, the origin and the kind
 (`HTTP 400`, `ECONNREFUSED`, `DEPTH_ZERO_SELF_SIGNED_CERT`, `timed out`,
 `retryable status, retries spent`, `too many exports at once`, `queue full`) — each kind with its count when a
@@ -980,8 +980,10 @@ per request `http.request.method`, `http.route`, `http.response.status_code`,
 `gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
 `ob1.outcome`, `ob1.code` and `error.type`; per tool call `gen_ai.tool.name`,
 `ob1.outcome`, `ob1.code` and `error.type`; the trace, span and linked ids,
+each span's name, kind and status, its parent's id and a link's flags,
 timestamps to the nanosecond, and a resource of `service.name`,
-`service.version` and `telemetry.sdk.*` (no host, no process). Together they
+`service.version` and `telemetry.sdk.*` (no host, no process) with whatever
+`OTEL_RESOURCE_ATTRIBUTES` adds. Together they
 are a timeline of which client called which tool, when, and how much came
 back — so name keys after clients, not people (`ob1.agent`), before pointing
 at a collector elsewhere. Any client can fill the batch's queue (a keyless
