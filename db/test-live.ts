@@ -11083,11 +11083,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       ]);
       // A read beside --follow — --status, --dry-run — is no follower's start:
       // the outage still rejects it at once rather than waiting (review pass 3).
-      const readBeside = (engine: typeof runExtract | typeof runConsolidate, at: RegExp, o: { status?: boolean; dryRun?: boolean }) =>
-        Promise.race([
-          engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, ...o, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => ((e as { errno?: string }).errno === "57P03" ? "rejected" : `threw: ${e.message}`)),
+      // Stopped once the race settles, so a regression that waits does not go on retrying through the suite (review pass 4).
+      const readBeside = (engine: typeof runExtract | typeof runConsolidate, at: RegExp, o: { status?: boolean; dryRun?: boolean }) => {
+        const ac = new AbortController();
+        return Promise.race([
+          engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, ...o, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => ((e as { errno?: string }).errno === "57P03" ? "rejected" : `threw: ${e.message}`)),
           Bun.sleep(4_000).then(() => "waited"),
-        ]);
+        ]).finally(() => ac.abort());
+      };
       const besides = await Promise.all([
         readBeside(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/, { status: true }),
         readBeside(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, { dryRun: true }),
@@ -11095,6 +11098,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       assert(besides.every((b) => b === "rejected"), `--status and --dry-run beside --follow reject on a database down, not wait (${besides.join(", ")})`);
       const stoppedAtWrite = await stopInWait(runExtract, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/);
       stoppedIn.push(stoppedAtWrite);
+      // The key as the suite had it, whichever case runs next (review pass 4).
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${EX}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
       assert(stoppedIn.every((r) => r.code === 130 && r.early && !r.began && !r.missing),
         `a stop while a start statement waits on the database ends the pass with 130, before it began, at each of the six (${JSON.stringify(stoppedIn)})`);
     }
