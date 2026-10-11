@@ -6182,7 +6182,7 @@ const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": nul
 const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
+  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES, sleep: CHECKOUT_MODULES,
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],
@@ -6213,6 +6213,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
+    sleep: ["data", "egress"],
     ollama: ["egress"],
     "ollama-pull": ["egress"],
     jev: ["egress"],
@@ -6890,7 +6891,7 @@ await checkPlugins();
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
-  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3",
+  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
 };

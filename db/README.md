@@ -1397,14 +1397,19 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once, or with `--groups capture,worker,…` those alone
-(SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
+issues every group at once but the opt-in **sleep** group, or with `--groups
+capture,worker,…` those alone (SMD-2289) — the only way to issue **sleep**
+(SMD-2678). `--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
 database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
 holds anything else (named by catalog and database); then the groups are
-granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
+granted, so what it holds here is theirs — so an `--exact` without `--groups`
+also takes away a **sleep** grant made earlier: name it again
+(`--groups <its groups>,sleep --exact`) for a scheduler's role, and restart
+the scheduler after either, since it reads the privilege once at its start.
+Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
 a member of no role, its settings in every database cleared; refused if one
@@ -1454,6 +1459,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **sleep** — the sleep scheduler (`sleep.ts`, the compose `sleep` profile, SMD-2678): a search logged in the query log wakes the brain. **Opt-in:** a plain `--grant` leaves it out, since the log holds every search's text; only `--groups …,sleep` issues it. A role without it sleeps on writes alone, and the scheduler and preflight's `sleep` row say so | `query_log` (034) | `SELECT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
@@ -1520,7 +1526,8 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above for the tables, views, sequences and
+`--grant` issues exactly the list above, but for the opt-in **sleep** group,
+for the tables, views, sequences and
 functions that exist, in one transaction — and before committing it asks the
 catalog whether the role now holds each privilege, because a grantor that holds
 a privilege without grant option "grants" it with only a warning and no effect;
@@ -1532,8 +1539,9 @@ runs the revokes, the check and the grants in a transaction it rolls back, so it
 needs the privileges a real run does and shows what that run would refuse. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
-entity extraction, **structure** as well for a structured pass, and **pages**
-for a role that writes pages (064). The
+entity extraction, **structure** as well for a structured pass, **pages**
+for a role that writes pages (064), and **sleep**, named in `--groups`, for
+the role the sleep scheduler connects as when a search should wake it. The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -2782,32 +2790,36 @@ bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ev
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, followers running outside sleep, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
-**Running it.** Until SMD-2678's compose service, on the compose stack (whose
-Postgres publishes no port) run it in a one-off container of the `extract`
-service, which mounts the checkout and carries the server's model settings,
-`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL`, and `OB1_WORKER_KEY` when
-`deploy/.env` sets it — the command replaces the service's, so its refusal
-without the key does not apply, and the passes then say they write with no
-agent id. In the foreground, stopped with Ctrl-C; nothing restarts it:
+**Running it.** On the compose stack, as its own service: `--profile sleep`
+runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
+and `OB1_SLEEP_WORKERS` for its three numbers, digits only (SMD-2678;
+`deploy/README.md`, "The `sleep` profile instead", has the first start and
+the move from the `workers` profile):
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow
+podman compose -f deploy/compose.yaml --profile sleep up -d sleep
 ```
 
-Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
+The service mounts the checkout and carries the server's model settings,
+`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL` and `OB1_WORKER_KEY`, and
+refuses to start without the key (exit 2). Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
 another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
-`capture`, `worker` and `extraction` groups, `server` for the worker key). It
+`capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084) —
+with the opt-in `sleep` group as well for a search to wake it (below). It
 has no `--job`.
 
 **What wakes it.** A write the audit recorded through a key not classified
-`ingested`, and — only for the owner, and only under the server's
-`OB1_QUERY_LOG=on` (off by default) — a read the server logged. Under a
-`--grant` role, or with the log off, only writes wake it; the start says which.
+`ingested`, and — only under the server's `OB1_QUERY_LOG=on` (off by default),
+and only for a role that may read `query_log`: the owner, or one granted the
+opt-in `sleep` group, `migrate.ts --grant <role> --groups <its groups>,sleep`
+("Grants for a capturing role"; the log holds every search's text, so a
+plain `--grant` leaves it out) — a read the server logged. Otherwise only
+writes wake it; the start says which, and preflight's `sleep` row does too.
 board-sync's key is classified `ingested` on the stable brain; an unclassified
 key's writes wake it (reembed, ingest-records, a migration's backfill) until
 `SELECT set_agent_kind('<key name>', 'ingested')` says they are background
@@ -2829,25 +2841,45 @@ refusal at a pass's first start, or mid-pass (the provider refusing the
 request itself), ends the scheduler with 2, as it ends a follower — so the
 same 402 ends it mid-pass and is retried when a sleep's start meets it first.
 
-**Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute:
-preflight's `workers` row reads "running a pass" while asleep, "alive" while
-awake, "its last pass failed" while a pass's last word was a failure (into the
-next sleep, until one of its passes stamps), and stopped once it ends. A pass
-waiting at its start for a provider that does not answer stamps nothing, so the
-row keeps its last word then. Its `consolidate pass` row reads a fresh one as the
-scheduler working the current judge's key, rather than asking for a second
-worker. Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
+**Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
+with `slept`, the current or last sleep's start and, once it is over, its
+end, and `reads`, whether its role read `query_log` at its start — so
+preflight judges what wakes the scheduler by the scheduler's role, not its
+own. Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
+running, for how long; awake, with when the last sleep ended and how long it
+lasted; "its last pass failed" while a pass's last word was a failure (into
+the next sleep, until one of its passes stamps); stopped once it ends, or
+stale, each with the service's restart; and what wakes it — a search or a
+write, or writes alone and why, each lesser case a warning with its fix. The
+`workers` row no longer reads it. A pass waiting at its start for a provider
+that does not answer stamps nothing, so the row keeps its last word then
+(SMD-2752). Its `consolidate pass` row reads a fresh one as the scheduler
+working the current judge's key, rather than asking for a second worker.
+Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
-**From the `workers` profile.** Its followers do not yield. Stop them
-(`podman compose -f deploy/compose.yaml --profile workers stop extract
-consolidate`), stop starting them (take `workers` out of `COMPOSE_PROFILES` in
-`deploy/.env`, and out of any `--profile workers up`), and delete their
-`heartbeat:extract:…` and `heartbeat:consolidate:…` rows, or preflight's
-`workers` row asks for them back. The start and `--dry-run` name any with a
-fresh heartbeat.
+**From the `workers` profile.** Its followers do not yield, so the two are
+alternatives: a run refuses (exit 2) while any of their heartbeats is fresh —
+at its start, and when an awake or asleep poll finds one (a follower brought
+up beside it stamps only after its start probe) — and `--dry-run` names them.
+Stop them (`podman compose -f deploy/compose.yaml --profile workers stop
+extract consolidate`) — a clean stop marks a row ended, which lifts the
+refusal; one killed past its grace stays fresh for up to three intervals —
+stop starting them (take `workers` out of
+`COMPOSE_PROFILES` in `deploy/.env`, and out of any `--profile workers up`),
+and delete their `heartbeat:extract:…` and `heartbeat:consolidate:…` rows,
+or preflight's `workers` row asks for them back. Under `--follow` a refusal
+ends `heartbeat:sleep` on a failure, so preflight's `sleep` row names the
+followers keeping it down and asks for a choice of profile, rather than a
+restart that would refuse again; while the scheduler runs, the `workers` row
+asks for a stopped follower's row to be retired, not started again.
+
+**A database not answering at its start** is waited out, as one mid-sleep
+is (SMD-2599's schedule), so the service started beside a restarting Postgres
+spends none of its three restarts. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the compose service's SIGTERM).
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679), a compose service with preflight's own `sleep` row (SMD-2678).
+(SMD-2679); quieter banners, configuration checks at its start, outage waits
+inside a pass's start and the provider-wait word (SMD-2752).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -3629,7 +3661,9 @@ value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
 extraction, the last judged block's malformed answers and whether they passed
-SMD-2266's alarm. The time is the
+SMD-2266's alarm, and, for the sleep scheduler, `slept`, its current or last
+sleep's start and end, and `reads`, whether its role read `query_log` at its
+start (SMD-2678). The time is the
 row's `updated_at`, the database's `now()`.
 
 - **`ok`:** the pass ran, whatever its rows came to — a document the model
@@ -3662,7 +3696,8 @@ the record; the heartbeat still counts.
 
 **Who reads it.** Keyed `/health`, `brain_info` (a `Workers` row) and
 `GET /v1/brain` carry every heartbeat as `database.workers`. Preflight's
-`workers` row warns, with a remedy for each:
+`workers` row warns, with a remedy for each — for every heartbeat but the
+sleep scheduler's, which has its own `sleep` row ("Sleep", above):
 - when a heartbeat is older than three of its intervals, or its worker ended
   (the remedy names the command that starts it again);
 - when a fresh one's last pass failed;
@@ -3995,7 +4030,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2716 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1228 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1238 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
