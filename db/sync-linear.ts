@@ -81,6 +81,15 @@
  * (or tagged `egress_denied`, which nothing revisits) and calling it synced;
  * --allow-refused is the operator saying that is meant.
  *
+ * ── What it tells the board ──────────────────────────────────────────────────
+ * With LINEAR_COMMENT_API_KEY set, each pass ends with db/board-findings.ts's
+ * step (SMD-2681): a consolidation finding between two tickets the board does
+ * not link — read on the links as of this pass — is posted as one
+ * comment on the newer ticket, up to OB1_FINDINGS_POST_CAP (5) a day and only
+ * where the egress gate allows it (under the default deny,
+ * OB1_EGRESS_ALLOW=type:board-finding). Not under --audit or --only. It
+ * comments only; this tool's own key still only reads.
+ *
  * ── What it does not do ──────────────────────────────────────────────────────
  * Remove: an issue deleted in Linear or moved out of the initiative keeps its
  * row, reported under "extra" by --audit (ingest-records.ts has the same rule).
@@ -119,6 +128,7 @@ import { recordStructure, runName, type Structure } from "./ingest-structure.ts"
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
 import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
+import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -461,6 +471,8 @@ export type PassReport = {
   headWindow: number;
   /** Issues left unwritten because the pass was asked to stop; the next pass finds them. */
   stopped?: number;
+  /** The identifiers the census listed — the board as Linear holds it now; the findings step posts only between these (SMD-2681). */
+  listed: string[];
 };
 
 export type Writer = {
@@ -1002,7 +1014,7 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
 export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
-  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, derived: noDerived(), twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0 };
+  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, derived: noDerived(), twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0, listed: census.map((c) => c.identifier) };
   let wanted = plan.fetch;
   if (opts.only) {
     const listed = new Set(census.map((c) => c.identifier));
@@ -1437,6 +1449,9 @@ function selfCheck(): Promise<number> {
       `a stale ticket's pass reads the headers, patches the adopted holder of the current text and chains the later paste under it (scans ${JSON.stringify(staleScans)}, ${JSON.stringify(repStale.tally)}, P→${staleMixed.rows.get("P")!.supersedes}, A→${staleMixed.rows.get("A")!.supersedes})`);
     ok(rep.plan.unchanged === 1 && rep.tally.unchanged === 1 && rep.errors.length === 1 && /not in the census/.test(rep.errors[0].error) && rep.errors[0].identifier === "SMD-9999" && rep.tally.captured === 0,
       `--only fetches the named identifier though the plan calls it unchanged, and names the one the census lacks; the missing SMD-2000 is not touched (${JSON.stringify({ tally: rep.tally, errors: rep.errors })})`);
+    // The census the findings step is handed (SMD-2681): every ticket the board lists — one the plan calls unchanged, one this pass did not touch — and not a trashed one.
+    ok(JSON.stringify([...rep.listed].sort()) === JSON.stringify(["SMD-1936", "SMD-2000"]) && rep.plan.unchanged === 1,
+      `the pass reports the whole census as listed, not what it fetched (${JSON.stringify(rep.listed)})`);
     let refusedProjects = false;
     try { await initiativeProjects(async <T,>(q: string) => board<T>(q, { after: "more" }), "Open Brain"); } catch (e) { refusedProjects = /more than 50 projects/.test((e as Error).message); }
     ok(refusedProjects, "an initiative with more projects than one page is refused, not silently shortened");
@@ -1611,8 +1626,10 @@ async function main(): Promise<void> {
   // Both endpoints (tenth review pass): a chat endpoint refused wholesale would
   // land every ticket with a vector and `egress_denied` for its tags, which
   // nothing revisits until the ticket next moves in Linear.
-  const wholesale = egressRefusal(cfg.embeddings, cfg.egress)
-    ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? egressRefusal(cfg.chat, cfg.egress) : null);
+  // Judged without the findings step's own allow terms, which no ticket carries (SMD-2681).
+  const ticketPolicy = withoutFindingTerms(cfg.egress);
+  const wholesale = egressRefusal(cfg.embeddings, ticketPolicy)
+    ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? egressRefusal(cfg.chat, ticketPolicy) : null);
   if (wholesale && !cli.has("allow-refused") && !cli.has("audit")) {
     console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
@@ -1626,6 +1643,23 @@ async function main(): Promise<void> {
   // Writer's contract says the hook is absent on such a brain; this is where.
   const has053 = ((await sql`SELECT to_regproc('record_thought_source') IS NOT NULL AS ok`)[0] as { ok: boolean }).ok;
   if (!has053 && !cli.has("audit")) console.error(`  migration 053 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
+  // The findings step (SMD-2681, db/board-findings.ts): after each pass, a
+  // consolidation finding between two tickets the board does not link is
+  // posted as one comment on the newer ticket — on when LINEAR_COMMENT_API_KEY
+  // is set, never under --audit or --only: a pass over a few named tickets has
+  // not brought the rest of the board's links in (review pass 1). Its key is
+  // not this tool's read key. A bad
+  // cap is configuration, exit 2 as a bad interval is; a refusing egress
+  // policy or a missing migration is said once here and the step stays off.
+  let findings: FindingsStep | null = null;
+  const wanted = findingsWanted(process.env, { readKey: key, audit: cli.has("audit"), only: !!only });
+  if (wanted.run) {
+    if (wanted.sameKey) console.error(`  LINEAR_COMMENT_API_KEY is the same key as LINEAR_API_KEY: posting with it can do whatever its owner can on the board — a key of its own that can only comment is the one to use`);
+    const set = await findingsStep(sql, process.env, { dryRun });
+    if ("error" in set) { console.error(set.error); await store.close(); await sql.close(); process.exit(2); }
+    if ("off" in set) console.error(`  findings are not posted to the board: ${set.off}`);
+    else { findings = set.step; console.log(`  ${set.banner}`); }
+  }
   // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
   // passes are told apart by it.
   let run = runName(SELF);
@@ -1706,7 +1740,14 @@ async function main(): Promise<void> {
     const report = await runPass({ gql, readRows, writer, initiative, full: cli.has("full"), only, board });
     console.log(formatReport(report, dryRun));
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
-    return report.errors.length ? 1 : 0;
+    // After the pass, so the links it just brought in are the ones read; a
+    // failed post fails the pass, so the heartbeat says so.
+    let told = 0;
+    if (findings && !stopping) {
+      try { told = await findings.run({ dryRun, stopped: () => stopping, board: boardOf(report.listed, report.errors.map((e) => e.identifier)) }); }
+      catch (e) { told = 1; console.error(`  findings step failed: ${(e as Error).message.split("\n")[0]}`); }
+    }
+    return passCode(report.errors.length, told);
   };
 
   // The initiative is configuration, resolved once before any pass: a name

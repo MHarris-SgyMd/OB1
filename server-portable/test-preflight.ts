@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -887,6 +887,35 @@ else {
   assert(rawBody.code === 0 && /walk index.*orders its walk by the vector column but thoughts_embedding_idx is over embedding::halfvec; thought_chunks_embedding_idx is over embedding::halfvec/s.test(rawBody.out),
          "038 re-applied over 039: the check names the raw-column body over both halfvec indexes, as a warning");
   assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql[^\n]*then db\/migrations\/074_min_trust\.sql, the last definer of match_thoughts/.test(rawBody.out), "…with 039 as the remedy, then 074 — 039's file alone re-creates the 6-argument form beside 074's (second review pass)");
+  /**
+   * SMD-2871: 039's window. The raw-column body is 038's, as before 039;
+   * 001's vector index goes back under the shipped name on thoughts, and the
+   * staging index is built beside it as 039's header has an operator on a
+   * large brain do. The walk uses 001's until 039 runs, so the staging index
+   * is left out and said to be; 039 below then adopts it, which is the
+   * window closing. A staging index under the cast body (the walk index
+   * remedy's rebuild, further down) is the one walked, so it is counted.
+   */
+  const hnswSizes = async () => {
+    const c = new SQL({ url: LIVE, max: 1 });
+    const [z] = await c.unsafe(`
+      SELECT (SELECT sum(pg_relation_size(i.indexrelid)) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
+               WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN ('thoughts'::regclass, 'thought_chunks'::regclass))::bigint AS total,
+             COALESCE(pg_relation_size(to_regclass('thoughts_embedding_halfvec_idx')), 0)::bigint AS staged`);
+    await c.close();
+    return { total: Number(z.total), staged: Number(z.staged) };
+  };
+  const STAGE_SQL = `CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops)`;
+  const memRow = (indexes: number) => `✓\\s+vector index memory\\s+the HNSW indexes \\(${rx(bytesText(indexes))}\\) fit shared_buffers \\([^)]+\\)`;
+  const opened = new SQL({ url: LIVE, max: 1 });
+  await opened.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await opened.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  await opened.unsafe(STAGE_SQL);
+  await opened.close();
+  const inWindow = await hnswSizes();
+  const windowRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(inWindow.staged > 0 && new RegExp(`${memRow(inWindow.total - inWindow.staged)}${rx(`. Not counted: thoughts_embedding_halfvec_idx (${bytesText(inWindow.staged)}), a staging index 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx until 039 swaps the staging index in. Run preflight again after 039`)}\\s*$`, "m").test(windowRun.out),
+         `039's window: the staging index built beside 001's is left out, its size said (${bytesText(inWindow.total - inWindow.staged)} counted, ${bytesText(inWindow.staged)} not)`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuilt = new SQL({ url: LIVE, max: 1 });
   await rebuilt.unsafe(`DROP INDEX thoughts_embedding_idx`);
@@ -895,9 +924,19 @@ else {
   const vecIdx = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column —/s.test(vecIdx.out) && !/thought_chunks_embedding_idx is over/.test(vecIdx.out),
          "001's DDL re-run by hand: the check names the vector index under the cast body and leaves the chunk index unmentioned");
+  const remedy = new SQL({ url: LIVE, max: 1 });
+  await remedy.unsafe(STAGE_SQL);
+  await remedy.close();
+  const underCast = await hnswSizes();
+  const castRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(new RegExp(`${memRow(underCast.total)}\\s*$`, "m").test(castRun.out),
+         `…and a staging index built under the cast body, the walk index remedy's way, is the one walked: counted with the rest, no clause (${bytesText(underCast.total)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  const afterAdopt = await hnswSizes();
   assert(/walk index.*over that expression \(039\)/s.test(paired.out), "…and re-applying 039 pairs them again");
+  assert(afterAdopt.staged === 0 && new RegExp(`${memRow(afterAdopt.total)}\\s*$`, "m").test(paired.out),
+         `…adopting the staging index, after which the memory row counts the indexes there are, no clause (${bytesText(afterAdopt.total)})`);
   // The other two branches, and the ledger's suffix (review pass 3): an
   // INVALID index under the name — what an interrupted CONCURRENTLY build
   // leaves, made here by flipping the catalog flag as test-upgrade [16] does —
