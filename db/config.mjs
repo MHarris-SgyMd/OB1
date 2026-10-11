@@ -492,11 +492,12 @@ export function malformedAlarm(answers, malformed) {
  * SMD-2424, do the claim workers (`--profile workers`); a checkout's command
  * follows for a follower run by hand, the one that can carry a custom --job.
  * Consolidation takes no --job: its key follows the judge model, so the job
- * is named beside it. The sleep scheduler (SMD-1794) runs in a one-off container
- * of the extract service until its own service (SMD-2678), or from a checkout.
+ * is named beside it. The sleep scheduler (SMD-1794) runs as its own compose
+ * service, `--profile sleep` (SMD-2678), or from a checkout; preflight's `sleep`
+ * row names it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow, with the -f files and -p the stack was started with (docker compose alike; a one-off container of the extract service, in the foreground); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
+  if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with (docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy/.env); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
@@ -2176,7 +2177,7 @@ export async function alignVectorSearchPath(sql) {
  * One list, grouped by the role that needs each group, each row naming the
  * migration that introduced the requirement. This is the single spelling:
  * preflight's `write privileges` check reads CAPTURE_WRITES, `migrate.ts
- * --grant` issues every group through grantStatements(), and db/README.md's
+ * --grant` issues every group but the opt-in ones through grantStatements(), and db/README.md's
  * "Grants for a capturing role" is rendered from the same groups — a
  * check-fork-consistency check asserts the README names each table.
  *
@@ -2222,7 +2223,7 @@ export const ROLE_GRANTS = Object.freeze({
     // edit that moves no vector touches the table only under the extractor's
     // recipe (run-it, third review pass; fourth) — so all four are hard here
     // (SMD-1731). The workers' passes write through the same table, and
-    // --grant issues every group.
+    // --grant issues every group but the opt-in ones.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
     // 068's triggers run as the caller on every write of a row carrying an
     // issue key or a supersedes pointer, and reconcile the node_state
@@ -2351,6 +2352,15 @@ export const ROLE_GRANTS = Object.freeze({
   // check as "log off; grant needed if you enable it".
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
+  ]),
+  // The sleep scheduler's read of the query log (db/sleep.ts, SMD-2678): a
+  // search logged there wakes the brain, as a live write in thought_audit
+  // does. Opt-in (OPT_IN_GRANT_GROUPS): the log holds every search's text, so
+  // a plain --grant leaves it out and only `--groups …,sleep` issues it. A
+  // role without it sleeps on writes alone, and the scheduler and preflight's
+  // `sleep` row say so.
+  sleep: Object.freeze([
+    Object.freeze({ table: "query_log", privileges: Object.freeze(["SELECT"]), since: "034" }),
   ]),
   // The durable async job registry (069, SMD-2318): the server writes a row per
   // long-running job as the in-memory registry moves it along (INSERT on start,
@@ -2555,7 +2565,11 @@ export const ROLE_GRANTS = Object.freeze({
 /** The advisory lock (`pg_advisory_xact_lock(hashtext(GRANT_LOCK))`) every `migrate.ts --grant` and `db/login-role.ts` take, so two at once in one database queue rather than deadlock or collide on "tuple concurrently updated" over the same catalog rows (SMD-2289). */
 export const GRANT_LOCK = "ob1:grants";
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "sleep", "jobs", "pages", "community", "extensions", "recipes"]);
+/** The groups a plain `migrate.ts --grant` leaves out: issued only when `--groups` names them (SMD-2678). */
+export const OPT_IN_GRANT_GROUPS = Object.freeze(["sleep"]);
+/** What a plain `migrate.ts --grant <role>` issues: every group but the opt-in ones. */
+export const DEFAULT_GRANT_GROUPS = Object.freeze(ROLE_GRANT_GROUPS.filter((g) => !OPT_IN_GRANT_GROUPS.includes(g)));
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -2689,14 +2703,15 @@ export function grantPresenceSql(objects) {
 }
 /**
  * GRANT statements giving `role` exactly the privileges the given groups need
- * (default: all — the do-everything role the guide sets up). Pass `present` (a
+ * (default: DEFAULT_GRANT_GROUPS, what a plain `migrate.ts --grant` issues —
+ * every group but the opt-in ones, SMD-2678). Pass `present` (a
  * Set of object names that exist — tables, views, sequences and functions alike, the
  * names as the rows spell them) to skip what a partially-migrated database or an
  * unapplied community schema lacks; omit it to emit everything. The role is
  * quoted; the schema USAGE grant is the caller's to add (a schema, not a
  * table). One GRANT per object, its privileges combined, in group/list order.
  */
-export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
+export function grantStatements(role, { groups = DEFAULT_GRANT_GROUPS, present = null } = {}) {
   const ident = quoteIdent(role);
   const out = [];
   for (const { kind, name, privileges } of mergedGrants(groups, present)) {
@@ -2718,7 +2733,7 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
  * grantStatements and grantVerifySql so what is granted and what is checked
  * are one list (SMD-1796, third review pass).
  */
-export function mergedGrants(groups = ROLE_GRANT_GROUPS, present = null) {
+export function mergedGrants(groups = DEFAULT_GRANT_GROUPS, present = null) {
   const ORDER = ["USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE"];
   const byName = new Map();
   for (const g of groups) {

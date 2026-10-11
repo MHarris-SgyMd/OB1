@@ -391,7 +391,7 @@ export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | 
  */
 export type RoleGrant = { table?: string; view?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
 /** The groups ROLE_GRANTS is keyed by. */
-export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "community" | "extensions" | "recipes";
+export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "sleep" | "jobs" | "pages" | "community" | "extensions" | "recipes";
 /**
  * Privileges the fork's SECURITY INVOKER functions need to run as their caller,
  * grouped by the role that needs each group — tables for the migrations' own
@@ -404,6 +404,10 @@ export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>
 export const GRANT_LOCK: string;
 /** The order groups are issued and documented in. */
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
+/** The groups a plain `migrate.ts --grant` leaves out: issued only when `--groups` names them (SMD-2678). */
+export const OPT_IN_GRANT_GROUPS: readonly RoleGrantGroup[];
+/** What a plain `migrate.ts --grant <role>` issues: every group but the opt-in ones. */
+export const DEFAULT_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
