@@ -177,6 +177,8 @@ const {
   isLocalHostname,
   LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
+  plan039,
+  walkRemedy,
 } = await import("../db/config.mjs");
 
 // The embedding model read as embed.ts's resolveEmbedConfig reads it, trimmed
@@ -3009,6 +3011,42 @@ if (configFailed) {
         // 039's walk: the statement's ORDER BY, not a word a comment could carry
         // (the walk index check, and the memory row's pairing, SMD-2871).
         const WALK_ORDERS_BY_CAST = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/;
+        /**
+         * Each table's two index names, shipped and staging, as 039's DO
+         * block reads them (every index, valid or not), and the column's
+         * width — the configured one where the catalog gives none. The walk
+         * index check reads the shipped half; it and the memory row both hand
+         * the pairs to plan039, so the two remedies name the same steps, a
+         * table that is not there marked so that no statement names it
+         * (SMD-2880).
+         */
+        const readPairs = async () => {
+          const rows = (await sql`
+            SELECT n.tbl, n.tbl || '_embedding_idx' AS name, to_regclass('public.' || n.tbl) IS NOT NULL AS present, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid,
+                   pg_get_indexdef(s.indexrelid) AS sdef, s.indisvalid AS svalid,
+                   (SELECT a.atttypmod FROM pg_attribute a WHERE a.attrelid = to_regclass('public.thoughts') AND a.attname = 'embedding' AND NOT a.attisdropped)::int AS dim
+              FROM (VALUES (1, 'thoughts'), (2, 'thought_chunks')) AS n(ord, tbl)
+              LEFT JOIN pg_index i ON i.indexrelid = to_regclass('public.' || n.tbl || '_embedding_idx')
+              LEFT JOIN pg_index s ON s.indexrelid = to_regclass('public.' || n.tbl || '_embedding_halfvec_idx')
+             ORDER BY n.ord`) as { tbl: string; name: string; present: boolean; def: string | null; valid: boolean | null; sdef: string | null; svalid: boolean | null; dim: number | null }[];
+          const width = Number(rows[0]?.dim);
+          return {
+            rows,
+            pairs: rows.map((r) => ({ table: r.tbl, exists: r.present, shipped: r.def === null ? null : { def: r.def, valid: r.valid === true }, staging: r.sdef === null ? null : { def: r.sdef, valid: r.svalid === true } })),
+            dim: width > 0 ? width : embDim,
+          };
+        };
+        // What the ledger says of 039, in apply039's states: recorded; a later
+        // file recorded without it (a row deleted or misspelt by hand, where a
+        // plain run would apply 039 alone after 074 — review pass 2); read
+        // and pending; no ledger; locked (its read timed out, as a migration
+        // holding it does — review pass 3); or unread, with whyUnread.
+        const ledger039 = (): { state: "recorded" | "hole" | "pending" | "none" | "locked" | "unread"; why?: string } =>
+          ledger.has("039") ? { state: "recorded" }
+          : [...ledger].some((n) => n > "039") ? { state: "hole" }
+          : ledgerRead ? { state: "pending" }
+          : !ledgerPresent ? { state: "none" }
+          : { state: ledgerUnread?.reason === "timeout" ? "locked" : "unread", why: whyUnread };
         let catalog: { mt: Overload[]; hy: { nargs: number; sig: string; src: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
@@ -3489,10 +3527,15 @@ if (configFailed) {
               blockSize: Number(m.block),
               workMemBytes: Number(m.work),
             });
-            // The rows' wording is memoryRows', where test-schema holds every branch.
-            // As ledgerRemedy reads it: recorded, not recorded (or no ledger), or unread.
-            const ledgerHas039 = ledger.has("039") ? true : ledgerRead || !ledgerPresent ? false : null;
-            for (const row of memoryRows(s, { ledgerHas039 })) add(row.name, row.status, row.detail, row.fix);
+            // The rows' wording is memoryRows', where test-schema holds every
+            // branch. The pairs are read only for a staging index left out —
+            // the one state its remedy has steps — and a failed read costs the
+            // steps, never the size (review pass 2).
+            let plan: ReturnType<typeof plan039> | undefined;
+            if (s.resident.stagedCount > 0) {
+              try { plan = plan039(await readPairs()); } catch { /* the steps go; the size stays */ }
+            }
+            for (const row of memoryRows(s, { ledger: ledger039(), plan })) add(row.name, row.status, row.detail, row.fix);
           }
         } catch (e) {
           // Both rows, so each direct check still prints exactly one.
@@ -3643,10 +3686,7 @@ if (configFailed) {
           } else {
             const bodyCasts = WALK_ORDERS_BY_CAST.test(mt[0].src);
             const HALF = /USING hnsw \(\(\(embedding\)::(\w+\.)?halfvec\(\d+\)\) (\w+\.)?halfvec_cosine_ops\)$/;
-            const idx = (await sql`
-              SELECT n.name, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid
-              FROM (VALUES ('thoughts_embedding_idx'), ('thought_chunks_embedding_idx')) AS n(name)
-              LEFT JOIN pg_index i ON i.indexrelid = to_regclass('public.' || n.name)`) as { name: string; def: string | null; valid: boolean | null }[];
+            const { rows: idx, pairs, dim } = await readPairs();
             const problems: string[] = [];
             for (const r of idx) {
               if (r.def === null) problems.push(`${r.name} does not exist`);
@@ -3661,11 +3701,11 @@ if (configFailed) {
             } else {
               add("walk index", "warn",
                   `match_thoughts orders its walk by ${bodyCasts ? "embedding::halfvec" : "the vector column"} but ${problems.join("; ")}${ledgerHas039 ? " — although migration 039 is recorded as applied: an earlier definer re-applied by hand, or an index rebuilt by hand" : ""} — the planner has no index path for the walk, so every unfiltered and broad-filter search sequentially scans both tables (exact; 019's latency back)`,
-                  `Apply db/migrations/039_match_thoughts_halfvec_index.sql — \`bun db/migrate.ts\` where the ledger does not record it, \`--reapply\` or the file alone against the direct connection where it does — which swaps a vector index under the name for the halfvec one, builds where the name is free, rebuilds an INVALID one and restores the body's cast; then db/migrations/074_min_trust.sql, the last definer of match_thoughts — 039's file alone re-creates the 6-argument form beside 074's, and every 6-argument call is then "function is not unique" (SMD-1724); on a brain past a million rows build the staging indexes CONCURRENTLY first, as 039's header says.`);
+                  walkRemedy({ ledger: ledger039(), plan: plan039({ pairs, dim }), bodyCasts }));
             }
           }
         } catch (e) {
-          add("walk index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_proc, pg_index and pg_class.");
+          add("walk index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_proc, pg_index, pg_class and pg_attribute.");
         }
 
         /**

@@ -317,17 +317,27 @@ export const BOUNDS_IN_FORCE_SQL: string;
 export const BITMAP_BYTES_PER_PAGE: number;
 /** The least share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e, a floor: the boundary rises on heaps under 10 x v_exact pages and at larger match counts). */
 export const BITMAP_PAGE_SHARE_GATED: number;
-/** SMD-2871: the valid HNSW indexes' bytes a vector search walks, a staging index 039 is about to adopt (body ordering by the vector column, the vector index under the shipped name, the staging index of 039's shape at `dim`) apart; `builds`, the tables 039 would build its own index on (the vector index under the shipped name, nothing under the staging one). `bodyCasts` null when match_thoughts could not be read. */
-export function residentIndexes(input: { indexes: { name: string; table: string; bytes: number; def: string }[]; dim: number; bodyCasts: boolean | null }): { hnswBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[]; builds: string[] };
-/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation; a staging index 039 is about to adopt is passed apart, as stagedBytes and stagedTables, and builds shapes only the remedy — residentIndexes — SMD-2871), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
-export function memorySizing(input: { hnswBytes: number; stagedBytes?: number; stagedTables?: string[]; builds?: string[]; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
-  resident: { fits: boolean; needBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[]; builds: string[]; haveBytes: number; recommend: string };
+/** SMD-2871: the valid HNSW indexes' bytes a vector search walks, a staging index 039 is about to adopt (body ordering by the vector column, the vector index under the shipped name, the staging index of 039's shape at `dim`) apart. `bodyCasts` null when match_thoughts could not be read. */
+export function residentIndexes(input: { indexes: { name: string; table: string; bytes: number; def: string }[]; dim: number; bodyCasts: boolean | null }): { hnswBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[] };
+/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation; a staging index 039 is about to adopt is passed apart, as stagedBytes and stagedTables — residentIndexes — SMD-2871), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
+export function memorySizing(input: { hnswBytes: number; stagedBytes?: number; stagedTables?: string[]; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
+  resident: { fits: boolean; needBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[]; haveBytes: number; recommend: string };
   bitmap: { fits: boolean; heapPages: number; gated: boolean; bitmapPages: number; needBytes: number; wholeHeapBytes: number; haveBytes: number };
 };
 /** A byte count for a preflight line: kB, MB, or GB to one decimal. */
 export function bytesText(bytes: number): string;
-/** Preflight's two SMD-1499 rows from memorySizing's result: `vector index memory` (ok, or warn with the size and the way back) and `filter bitmap memory` (always ok, information only). */
-export function memoryRows(s: ReturnType<typeof memorySizing>, opts?: { ledgerHas039?: boolean | null }): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
+/** SMD-2880: what the ledger says of 039, for a remedy: read and recording neither 039 nor a later file, none, recording 039, recording a later file without it, unreadable (`why`), or locked (`why`). */
+export type Ledger039 = { state: "pending" | "none" | "recorded" | "hole" | "unread" | "locked"; why?: string };
+/** SMD-2871, SMD-2880: how a remedy has 039 applied, by the ledger's state: a plain run (pending, none), the re-apply (recorded, hole, unread), or preflight again once a locked ledger is released. */
+export function apply039(ledger?: Ledger039): string;
+/** One table's two indexes as plan039 reads them: pg_get_indexdef and indisvalid, or null where the name is free; `exists: false` for a table that is not there. */
+export type IndexPair = { table: string; shipped: { def: string; valid: boolean } | null; staging: { def: string; valid: boolean } | null; exists?: boolean };
+/** SMD-2880: what 039's swap does on each table that exists, decided as its DO block decides, and the statements to run before it at `dim`: `first` on any brain, `large` on a table past a million vectors, `steps` the text, grouped by table and numbered ("" when none); `swaps`, the tables where 039 swaps a staging index in. */
+export function plan039(input: { pairs: IndexPair[]; dim: number }): { steps: string; swaps: number; first: string[]; large: string[] };
+/** SMD-2880: the walk index row's remedy — plan039's steps, then apply039; a locked ledger waited out; no re-apply where the steps leave 039 nothing under a casting body. */
+export function walkRemedy(input: { ledger: Ledger039; plan: { steps: string; swaps: number; first: string[]; large: string[] }; bodyCasts?: boolean }): string;
+/** Preflight's two SMD-1499 rows from memorySizing's result: `vector index memory` (ok, or warn with the size and the way back) and `filter bitmap memory` (always ok, information only). `ledger` and `plan`, plan039's, give 039's remedy (SMD-2880). */
+export function memoryRows(s: ReturnType<typeof memorySizing>, opts?: { ledger?: Ledger039; plan?: { steps: string; swaps: number } }): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */

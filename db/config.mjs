@@ -1746,24 +1746,18 @@ export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
  * index itself (it casts), or the walk has no vector index to use now (the
  * shipped name missing, INVALID, partial or another operator class) and the
  * staging index is what 039 puts under the name; so it is counted like any
- * other index. `builds` names a table 039 would build its own index on, in its
- * transaction, holding writers — the vector index under the shipped name
- * and nothing under the staging one (where the staging name is taken by
- * another shape, 039 refuses rather than builds) — which a remedy that has
- * 039 applied says first.
+ * other index. What 039 would build, and what to run before it, is
+ * plan039's (SMD-2880).
  */
 export function residentIndexes({ indexes, dim, bodyCasts }) {
   const VECTOR = /USING hnsw \(embedding (\w+\.)?vector_cosine_ops\)( WITH \([^)]*\))?$/;
   const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::(\\w+\\.)?halfvec\\(${dim}\\)\\) (\\w+\\.)?halfvec_cosine_ops\\)$`);
-  const TABLES = ["thoughts", "thought_chunks"];
   const staged = bodyCasts === false
     ? indexes.filter((s) => s.name === `${s.table}_embedding_halfvec_idx` && HALF.test(s.def)
         && indexes.some((x) => x.table === s.table && x.name === `${s.table}_embedding_idx` && VECTOR.test(x.def)))
     : [];
-  const builds = TABLES.filter((t) => indexes.some((x) => x.table === t && x.name === `${t}_embedding_idx` && VECTOR.test(x.def))
-    && !indexes.some((x) => x.table === t && x.name === `${t}_embedding_halfvec_idx`));
   const sum = (xs) => xs.reduce((t, x) => t + x.bytes, 0);
-  return { hnswBytes: sum(indexes) - sum(staged), stagedBytes: sum(staged), stagedCount: staged.length, stagedTables: staged.map((s) => s.table), builds };
+  return { hnswBytes: sum(indexes) - sum(staged), stagedBytes: sum(staged), stagedCount: staged.length, stagedTables: staged.map((s) => s.table) };
 }
 
 /**
@@ -1779,7 +1773,7 @@ export function residentIndexes({ indexes, dim, bodyCasts }) {
  *   A staging index 039 is about to adopt (residentIndexes says which) is
  *   not in hnswBytes but in stagedBytes and stagedTables: the walk uses the
  *   vector index under the shipped name until 039 swaps the staging one in
- *   (SMD-2871). `builds`, residentIndexes' too, shapes only the remedy.
+ *   (SMD-2871).
  * - Bitmap, information only: a filter's matches are collected one entry per
  *   heap page (BITMAP_BYTES_PER_PAGE). On the custom plans match_thoughts
  *   runs, the bitmap a GIN-routed filter builds is the routing count's, under
@@ -1793,7 +1787,7 @@ export function residentIndexes({ indexes, dim, bodyCasts }) {
  * Pure: preflight reads the numbers and prints what this returns, and the
  * schema suite holds the arithmetic. Sizes in bytes.
  */
-export function memorySizing({ hnswBytes, stagedBytes = 0, stagedTables = [], builds = [], sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
+export function memorySizing({ hnswBytes, stagedBytes = 0, stagedTables = [], sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
   const MB = 1048576;
   const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
   const heapPages = Math.ceil(heapBytes / blockSize);
@@ -1801,7 +1795,7 @@ export function memorySizing({ hnswBytes, stagedBytes = 0, stagedTables = [], bu
   const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
   const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
   return {
-    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, stagedBytes, stagedCount: stagedTables.length, stagedTables, builds, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
+    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, stagedBytes, stagedCount: stagedTables.length, stagedTables, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
     bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, wholeHeapBytes: heapPages * BITMAP_BYTES_PER_PAGE, haveBytes: workMemBytes },
   };
 }
@@ -1814,6 +1808,133 @@ export function bytesText(bytes) {
 }
 
 /**
+ * How a remedy has migration 039 applied, by what the ledger says of it
+ * (SMD-2871, SMD-2880), `ledger.state` one of:
+ * - "pending": the ledger is read and records neither 039 nor a later file
+ *   — a plain migrator run applies the pending files, 039 among them;
+ * - "none": no ledger — a plain run runs every file and records them, where
+ *   --baseline (the migration ledger row's adoption) would record 039 unrun;
+ * - "recorded": it records 039 — the re-apply, since a plain run skips it;
+ * - "hole": it records a later file without 039 (a row removed or misspelt
+ *   by hand) — the re-apply, since a plain run would apply 039 alone after
+ *   074 and leave two match_thoughts forms, every shorter call then "not
+ *   unique";
+ * - "unread": it could not be read (`ledger.why` says why, in preflight's
+ *   words for ledgerRemedy) — the re-apply, which applies 039 either way;
+ * - "locked": its read timed out — a migration or a long transaction holds
+ *   it, perhaps 039 itself, so nothing is run: preflight again once released.
+ * Never the file by hand: 039 and 074 after it are templates only the
+ * migrator fills in. The commands are spelt as REAPPLY_COMMAND spells the
+ * re-apply.
+ */
+export function apply039(ledger = { state: "pending" }) {
+  const reapply = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
+  switch (ledger.state) {
+    case "recorded": return `Re-apply the recorded migrations: ${reapply}.`;
+    case "hole": return `The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${reapply}.`;
+    case "unread": return `Whether 039 is recorded is unknown (${ledger.why ?? "this role cannot read schema_migrations"}), so re-apply the recorded migrations, which applies 039 either way: ${reapply}.`;
+    case "locked": return `The ledger is locked (${ledger.why ?? "its read timed out"}): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.`;
+    case "none": return "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).";
+    default: return "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
+  }
+}
+
+/**
+ * What migration 039's index swap will do on each table, decided as its DO
+ * block decides (SMD-2880), and what an operator runs before it, as
+ * statements to paste — 039's header spells them with `{{EMBEDDING_DIM}}`,
+ * which only the migrator fills in. `pairs` is one entry a table: the
+ * index under the shipped name and the one under the staging name, each
+ * `{ def, valid }` (pg_get_indexdef, indisvalid) or null, and `exists:
+ * false` for a table that is not there (no statement names it). Per table:
+ * - the shipped name holding 039's shape at `dim`: 039 skips the table;
+ * - a valid halfvec index of another shape there: 039 stops on it, so it is
+ *   replaced first — the staging index built (or one of 039's shape kept),
+ *   and once that build has finished, the shipped one dropped and the
+ *   staging one renamed onto the name;
+ * - a valid staging index of another shape: 039 stops on it, so it is
+ *   dropped first;
+ * - a free shipped name: filled first, by renaming a staging index of 039's
+ *   shape onto it or building one under it CONCURRENTLY (an INVALID staging
+ *   index dropped before) — a re-apply, or a plain run with no ledger,
+ *   re-runs 001's and 007's CREATE INDEX ahead of 039 and would build a
+ *   vector index there inside its transaction, then 039 its own;
+ * - beside anything else under the name, 039 swaps the staging index in:
+ *   adopting one of its shape, or building one inside its transaction,
+ *   holding writers — on a table past a million vectors built first,
+ *   CONCURRENTLY, after an INVALID staging index is dropped.
+ * The first steps are needed on any brain, the builds only on a large
+ * table. `steps` is the text, grouped by table, each with its reason and the
+ * statements numbered ("" when nothing is to run first); `first` and `large`
+ * the statements; `swaps` the tables where 039 swaps a staging index in.
+ */
+export function plan039({ pairs, dim }) {
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::(\\w+\\.)?halfvec\\(${dim}\\)\\) (\\w+\\.)?halfvec_cosine_ops\\)$`);
+  const exact = (x) => x?.valid === true && HALF.test(x.def);
+  const groups = [];
+  let swaps = 0;
+  for (const { table: t, shipped, staging, exists } of pairs) {
+    const ship = `${t}_embedding_idx`;
+    const stage = `${t}_embedding_halfvec_idx`;
+    const create = (name) => `CREATE INDEX CONCURRENTLY ${name} ON ${t} USING hnsw ((embedding::halfvec(${dim})) halfvec_cosine_ops);`;
+    if (exists === false || exact(shipped)) continue;
+    const g = { table: t, first: [], large: [], why: [], whyLarge: "" };
+    groups.push(g);
+    if (shipped?.valid === true && shipped.def.includes("halfvec")) {
+      g.why.push(`${ship} is a halfvec index of another shape, which 039 stops on: replacing it drops its own settings`);
+      if (!exact(staging)) g.first.push(...(staging ? [`DROP INDEX CONCURRENTLY ${stage};`] : []), create(stage), { built: true });
+      g.first.push(`DROP INDEX CONCURRENTLY ${ship};`, `ALTER INDEX ${stage} RENAME TO ${ship};`);
+      continue;
+    }
+    if (staging?.valid === true && !exact(staging)) { g.why.push(`${stage} is of another shape, which 039 stops on`); g.first.push(`DROP INDEX CONCURRENTLY ${stage};`); }
+    if (!shipped) {
+      if (exact(staging)) { g.why.push(`${ship} is missing and ${stage}, of 039's shape, is built`); g.first.push(`ALTER INDEX ${stage} RENAME TO ${ship};`); }
+      else {
+        g.why.push(`${ship} is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`);
+        g.first.push(...(staging?.valid === false ? [`DROP INDEX CONCURRENTLY ${stage};`] : []), create(ship));
+      }
+      continue;
+    }
+    swaps++;
+    if (exact(staging)) continue;
+    g.whyLarge = staging?.valid === false ? `${stage} is INVALID (an interrupted build), and 039 would build it again inside its transaction` : `039 would build ${stage} inside its transaction`;
+    if (staging?.valid === false) g.large.push(`DROP INDEX CONCURRENTLY ${stage};`);
+    g.large.push(create(stage));
+  }
+  // Numbered across the remedy; a { built } marker is a wait before the next statement.
+  let n = 0;
+  const render = (xs) => xs.map((x, i) => (typeof x !== "string" ? "" : `${i === 0 ? "" : " "}${++n}) ${typeof xs[i - 1] === "object" ? "once that build has finished without error (an interrupted one leaves the index INVALID), " : ""}\`${x}\``)).join("");
+  const strings = (xs) => xs.filter((x) => typeof x === "string");
+  const first = groups.flatMap((g) => strings(g.first));
+  const large = groups.flatMap((g) => g.large);
+  const creates = [...first, ...large].filter((x) => x.startsWith("CREATE")).length;
+  const builds = large.filter((x) => x.startsWith("CREATE")).length;
+  if (!first.length && !large.length) return { steps: "", swaps, first, large };
+  const intro = "Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). "
+    + (creates ? "Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (`SELECT count(embedding) FROM <table>`), as `SET maintenance_work_mem = '<size>';`. " : "");
+  const anyBrain = groups.filter((g) => g.first.length).map((g) => `on ${g.table} (${g.why.join(", and ")}): ${render(g.first)}`);
+  const largeTables = groups.filter((g) => g.large.length).map((g) => `on ${g.table} (${g.whyLarge}): ${render(g.large)}`);
+  const steps = intro
+    + (anyBrain.length ? `On any brain, first — ${anyBrain.join("; ")}. ` : "")
+    + (largeTables.length ? `${anyBrain.length ? "Then, where" : "Where"} the table holds more than a million vectors — ${largeTables.join("; ")}; on a smaller table the migrator builds ${builds > 1 ? "them" : "it"} inside its transaction, holding writers, in the migrating role's maintenance_work_mem (\`ALTER ROLE <role> SET maintenance_work_mem = '<size>'\`, RESET after). ` : "");
+  return { steps, swaps, first, large };
+}
+
+/**
+ * The walk index row's remedy (SMD-2880): plan039's steps, then 039 applied
+ * the way the ledger calls for. A locked ledger is waited out, steps and
+ * all: 039 may be what holds it. Where the body already casts and the steps
+ * leave 039's shape under every name, 039 has nothing left to do, so no
+ * stop of the server is asked for. Pure text, so the schema suite holds
+ * every branch's wording.
+ */
+export function walkRemedy({ ledger, plan, bodyCasts = false }) {
+  if (ledger?.state === "locked") return apply039(ledger);
+  if (bodyCasts && plan.swaps === 0 && plan.large.length === 0 && plan.first.length > 0) return `${plan.steps}Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.`;
+  return `${plan.steps}${apply039(ledger)}`;
+}
+
+/**
  * Preflight's two SMD-1499 rows from memorySizing's result: their status,
  * detail and remedy, as text, so test-schema holds every branch's wording —
  * the resident warning's included, which no live test can reach (a pool
@@ -1821,13 +1942,11 @@ export function bytesText(bytes) {
  * (a managed platform may not let the operator change the setting), with the
  * size to set and the way back if postgres then will not start; `filter
  * bitmap memory` is information only, always ok, and recommends nothing.
- * `ledgerHas039` picks how a remedy has 039 applied (SMD-2871): a plain
- * migrator run where the ledger does not record it (false), a re-apply where
- * it does (true; the files are templates only the migrator fills in), and
- * both where the ledger could not be read (null), as preflight's
- * ledgerRemedy says it.
+ * `ledger` picks how a remedy has 039 applied (SMD-2871, SMD-2880:
+ * apply039's states), and `plan`, plan039's result, the steps before it and
+ * how many staging indexes it swaps in — the walk index row's own.
  */
-export function memoryRows(s, { ledgerHas039 = false } = {}) {
+export function memoryRows(s, { ledger = { state: "pending" }, plan = { steps: "", swaps: 0 } } = {}) {
   const r = s.resident;
   const b = s.bitmap;
   const n = (x) => x.toLocaleString("en-US");
@@ -1836,17 +1955,10 @@ export function memoryRows(s, { ledgerHas039 = false } = {}) {
   const many = r.stagedCount > 1;
   const staged = r.stagedCount === 0 ? "" : `. Not counted: ${names(r.stagedTables, "_embedding_halfvec_idx")} (${bytesText(r.stagedBytes)}), ${many ? "staging indexes" : "a staging index"} 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use ${names(r.stagedTables, "_embedding_idx")} until 039 swaps ${many ? "the staging indexes" : "the staging index"} in. Run preflight again after 039`;
   // The warning's remedy has 039 applied before sizing, the way the walk
-  // index row does: a table 039 would build on in its transaction staged
-  // first, then the migrator, as the ledger calls for.
-  const reapply = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
-  const apply = ledgerHas039 === true ? `Re-apply the recorded migrations: ${reapply}.`
-    : ledgerHas039 === null ? `This role could not read schema_migrations, so whether 039 is recorded is unknown: run \`bun db/migrate.ts\`, and if it applies nothing, re-apply the recorded migrations — ${reapply}.`
-    : "Apply 039: `bun db/migrate.ts`.";
-  const buildFirst = r.builds.length
-    ? `First, on a brain past a million rows, build ${names(r.builds, "_embedding_halfvec_idx")} CONCURRENTLY, as 039's header says; otherwise 039 builds ${r.builds.length > 1 ? "them" : "it"} inside its transaction, holding writers while it does. `
-    : "";
-  const adopts = r.stagedCount + r.builds.length === 1 ? "the staging index" : "the staging indexes";
-  const lead = r.stagedCount > 0 ? `${buildFirst}${apply} 039 adopts ${adopts}, which changes the size: run preflight again after 039 and size only if it still warns (the size below is for the indexes as they stand). ` : "";
+  // index row does: plan039's steps first, then the migrator, as the ledger
+  // calls for.
+  const swapped = Math.max(plan.swaps, r.stagedCount) === 1 ? "the staging index" : "the staging indexes";
+  const lead = r.stagedCount > 0 ? `039 is about to swap ${swapped} in, which changes the size, so apply it before sizing. ${ledger.state === "locked" ? "" : plan.steps}${apply039(ledger)} Size only if a fresh run after 039 still warns (the size below is for the indexes as they stand). ` : "";
   const resident = r.needBytes === 0
     ? { name: "vector index memory", status: "ok", detail: "no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold (the walk index check says whether one is missing)" }
     : r.fits
