@@ -10315,6 +10315,24 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await st.end("stopped");
     const two = await row(st.key);
     assert(two?.outcome === "stopped" && two.ended === true && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // Once ended, the row takes no stamp but another end: a pass finishing
+    // after the sleep scheduler's hard stop stamped its word over the end,
+    // inside the scheduler's `during`, and the row read ended and running at
+    // once (SMD-2752 review pass 1).
+    const ending = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:ending@p3", intervalS: 1, minEveryS: 1 });
+    let afterEnd: { running?: boolean; outcome?: string; ended?: boolean } | null = null;
+    await ending.during((async () => {
+      await ending.end("stopped");
+      await ending.alive("ok");
+      await ending.stamp("failed");
+      // Past the 1 s timer's second tick, so a tick that wrote would be read (review pass 2).
+      await Bun.sleep(2300);
+      afterEnd = await row(ending.key);
+    })());
+    await ending.end("failed");
+    const reEnded = await row(ending.key);
+    assert(afterEnd !== null && (afterEnd as { running: boolean }).running === false && (afterEnd as { outcome: string }).outcome === "stopped" && reEnded?.outcome === "failed" && reEnded.ended === true,
+      `once ended, a stamp, an alive and the running timer write nothing, and a second end still does (${JSON.stringify(afterEnd)} → ${JSON.stringify(reEnded)})`);
     // Each stamp writes the whole value: a restarted follower (a new stamper,
     // no block of its own) clears the row's block until it judges one, and an
     // old value of any shape, JSON or not, is replaced.
@@ -10468,6 +10486,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let unavailable = false;
   /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
   let badRequest = false;
+  /** Probes only: held this long before the answer — a pass waiting at its start (SMD-2752). */
+  let probeHold = 0;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -10475,7 +10495,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (probeHold) await Bun.sleep(probeHold);
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const judging = /<thought_a>/.test(prompt);
       if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
@@ -10526,9 +10549,21 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     if (code === -1) { ac.abort(); await run; }
     return code;
   };
+  /**
+   * The suite's client with each statement handed to `handle` first: its text
+   * (the template's strings joined with `$`; "" for a fragment of another
+   * shape) and `run`, which issues it. What `handle` returns is the
+   * statement's result — throw for a database not answering, delay, or run.
+   */
+  const intercept = (handle: (text: string, run: () => unknown) => unknown): SQL =>
+    new Proxy(sql, {
+      apply(t, self, args) {
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
+        return handle(text, () => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
+      },
+    }) as unknown as SQL;
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
-  const around = (before: () => void): SQL =>
-    new Proxy(sql, { apply(t, self, args) { before(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+  const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
@@ -10959,6 +10994,179 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const asleepCode = await bounded(asleepRun, acAsleep);
       assert(asleepCode === 2 && lines.some((l) => /refused: followers are running outside sleep/.test(l)) && !(await claims(EX)).claimed,
         `…and one found asleep stops the passes, returns the lease and ends with 2 (exit ${asleepCode}; claimed ${(await claims(EX)).claimed ?? 0})`);
+    } finally {
+      slowExtract = 0;
+      await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
+    }
+
+    // A pass's start outlasts the database going away (SMD-2752): the
+    // scheduler starts its passes at every sleep, so a restart there must not
+    // end it. Each engine under --follow, on a client whose statements of the
+    // start fail once each as a database starting up — extract's tables
+    // check and its extraction key's read and write, consolidate's tables
+    // check, 079's check and the relations grant read — waits each out and
+    // reaches its pass, nothing recorded failed. The worker key's lookup is
+    // test-worker-bootstrap.ts's. Both at once: each wait is 5 s.
+    {
+      /** The suite's client, whose statements matching each pattern fail once, in any order — or every time — as a database starting up. */
+      const downOnceAt = (patterns: RegExp[], always = false): { sql: SQL; hit: string[] } => {
+        const left = [...patterns];
+        const hit: string[] = [];
+        const client = intercept((text, run) => {
+          const i = left.findIndex((p) => p.test(text));
+          if (i < 0) return run();
+          hit.push(left[i].source);
+          if (!always) left.splice(i, 1);
+          throw startingUp();
+        });
+        return { sql: client, hit };
+      };
+      /** A run's code, or what it threw, or "hung" past `ms`. */
+      const settled = (run: Promise<number>, ms: number) => Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(ms).then(() => "hung")]);
+      const exDown = downOnceAt([/relname IN \('thought_work_claims', 'ob1_entities'/, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/]);
+      const coDown = downOnceAt([/relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, /ob1:linked-tickets-not-paired/, /to_regprocedure\('record_thought_relation/]);
+      // The key unset, so the run writes it: the write is a start statement too.
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      const failedBefore = { ex: (await claims(EX)).failed ?? 0, co: (await claims(CO)).failed ?? 0 };
+      const exLines: string[] = [];
+      const coLines: string[] = [];
+      const acEx = new AbortController();
+      const acCo = new AbortController();
+      let exBegan = false;
+      let coBegan = false;
+      // Stopped as its pass begins: the start is what is under test.
+      const exRun = runExtract({ sql: exDown.sql, env, workers: 1, follow: 1, signal: acEx.signal, onPass: () => { exBegan = true; acEx.abort(); }, writer: { out: (l) => exLines.push(l), err: (l) => exLines.push(l) } });
+      const coRun = runConsolidate({ sql: coDown.sql, env, workers: 1, follow: 1, signal: acCo.signal, onPass: () => { coBegan = true; acCo.abort(); }, writer: { out: (l) => coLines.push(l), err: (l) => coLines.push(l) } });
+      const [exCode, coCode] = await Promise.all([settled(exRun, 45_000).finally(() => acEx.abort()), settled(coRun, 45_000).finally(() => acCo.abort())]);
+      const waits = (ls: string[]) => ls.filter((l) => /the database is not answering \(the database system is starting up\) — waiting for it/.test(l)).length;
+      const keyNow = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value;
+      assert(exCode === 0 && exBegan && exDown.hit.length === 3 && waits(exLines) === 3 && keyNow === EX && ((await claims(EX)).failed ?? 0) === failedBefore.ex,
+        `extract's start waits out the database at its tables check and its key's read and write, then reaches its pass, nothing failed (exit ${exCode}; ${exDown.hit.length} of 3 hit, ${waits(exLines)} wait(s); key ${keyNow})`);
+      assert(coCode === 0 && coBegan && coDown.hit.length === 3 && waits(coLines) === 3 && ((await claims(CO)).failed ?? 0) === failedBefore.co,
+        `consolidate's start waits out the database at its tables check, 079's check and the relations grant read, then reaches its pass, nothing failed (exit ${coCode}; ${coDown.hit.length} of 3 hit, ${waits(coLines)} wait(s))`);
+
+      // The worker key's lookup, on a connection of its own to `url`: here a
+      // closed port, the database not answering it. Each follower waits,
+      // rather than warning and writing its rows unattributed; a stop during
+      // the wait ends it before its pass (130).
+      const keyed = { ...env, OB1_WORKER_KEY: "sleep-lookup-raw", MCP_ACCESS_KEYS: `sleep-lookup:capture:${hashKey("sleep-lookup-raw")}` };
+      const lookup = async (engine: typeof runExtract | typeof runConsolidate) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        let began = false;
+        const run = engine({ sql, url: "postgres://unused@127.0.0.1:1/none", env: keyed, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; ac.abort(); }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)) || began, 10_000);
+        ac.abort();
+        const code = await settled(run, 15_000);
+        return { code, began, waited: ls.some((l) => /the database is not answering .* — waiting for it/.test(l)), warned: ls.some((l) => /could not resolve the worker's identity/.test(l)) };
+      };
+      const [exLookup, coLookup] = await Promise.all([lookup(runExtract), lookup(runConsolidate)]);
+      assert([exLookup, coLookup].every((r) => r.code === 130 && r.waited && !r.warned && !r.began),
+        `a follower whose worker key's lookup finds the database not answering waits, unattributed rows never written, and a stop then ends it with 130 (extract ${JSON.stringify(exLookup)}, consolidate ${JSON.stringify(coLookup)})`);
+
+      // A stop during a start's wait is a stop before the pass began (130),
+      // at each statement — not the start's verdict on one that never
+      // answered ("the tables are missing", 2), a TypeError on its null, nor
+      // a pass run on (review passes 1 and 2).
+      const stopInWait = async (engine: typeof runExtract | typeof runConsolidate, at: RegExp) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        let began = false;
+        const run = engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)), 10_000);
+        ac.abort();
+        const code = await settled(run, 15_000);
+        // Nor says it wrote extraction's key when the write never answered.
+        return { at: at.source.slice(0, 24), code, began, early: ls.some((l) => /stopped before the pass began/.test(l)), missing: ls.some((l) => /are missing/.test(l)) || ls.some((l) => /entity_extraction_key = .* now enqueue/.test(l)) };
+      };
+      // The key unset, so extraction's start writes it.
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      const stoppedIn = await Promise.all([
+        stopInWait(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/),
+        stopInWait(runExtract, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/),
+        stopInWait(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/),
+        stopInWait(runConsolidate, /ob1:linked-tickets-not-paired/),
+        stopInWait(runConsolidate, /to_regprocedure\('record_thought_relation/),
+      ]);
+      // A read beside --follow — --status, --dry-run — is no follower's start:
+      // the outage still rejects it at once rather than waiting (review pass 3).
+      // Stopped once the race settles, so a regression that waits does not go on retrying through the suite (review pass 4).
+      const readBeside = (engine: typeof runExtract | typeof runConsolidate, at: RegExp, o: { status?: boolean; dryRun?: boolean }) => {
+        const ac = new AbortController();
+        return Promise.race([
+          engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, ...o, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => ((e as { errno?: string }).errno === "57P03" ? "rejected" : `threw: ${e.message}`)),
+          Bun.sleep(4_000).then(() => "waited"),
+        ]).finally(() => ac.abort());
+      };
+      const besides = await Promise.all([
+        readBeside(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/, { status: true }),
+        readBeside(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, { dryRun: true }),
+      ]);
+      assert(besides.every((b) => b === "rejected"), `--status and --dry-run beside --follow reject on a database down, not wait (${besides.join(", ")})`);
+      const stoppedAtWrite = await stopInWait(runExtract, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/);
+      stoppedIn.push(stoppedAtWrite);
+      // The key as the suite had it, whichever case runs next (review pass 4).
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${EX}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      assert(stoppedIn.every((r) => r.code === 130 && r.early && !r.began && !r.missing),
+        `a stop while a start statement waits on the database ends the pass with 130, before it began, at each of the six (${JSON.stringify(stoppedIn)})`);
+    }
+
+    // A stop that lands while the scheduler reads, with a pass waiting at its
+    // start (its probe held): the pass settles at once (130) and the read then
+    // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
+    // itself", 130 and the row failed (review pass 1).
+    try {
+      probeHold = 8000;
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const acRace = new AbortController();
+      let landed = false;
+      /** The scheduler's client: its first wake read once asleep aborts the run's signal, then answers 300 ms later. */
+      const stopMidRead = intercept((text, run) => {
+        if (landed || !/FROM thought_audit WHERE created_at > /.test(text) || !lines.some((l) => /asleep:/.test(l))) return run();
+        landed = true;
+        acRace.abort();
+        return Bun.sleep(300).then(run);
+      });
+      const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal }), acRace);
+      const raceBeat = await beat();
+      assert(landed && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
+        `a stop landing mid-read with a pass waiting at its start is a stop: 0, the row ended stopped (exit ${raceCode}; landed ${landed}; ${JSON.stringify(raceBeat)}; ${lines.filter((l) => /ended by itself|stopping/.test(l)).join(" | ").trim()})`);
+    } finally {
+      probeHold = 0;
+    }
+
+    // …and a soft stop that lands in the poll that finds a follower outside
+    // keeps its own: the thought in hand finished, not abandoned, and 0 with
+    // the row ended stopped (review pass 2).
+    try {
+      const inHandNote = await capture("A note the soft stop lets finish.", "sync-sleep", 0, 9);
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      slowExtract = 3000;
+      lines.length = 0;
+      const acSoft = new AbortController();
+      let armed = false;
+      let fired = false;
+      /** The scheduler's client: once armed, its follower read stops the run, then a follower appears, then the read runs. */
+      const stopThenFollower = intercept((text, run) => {
+        if (!armed || fired || !/WHERE key ~ /.test(text)) return run();
+        fired = true;
+        return (async () => {
+          acSoft.abort();
+          await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+          return await run();
+        })();
+      });
+      const softRun = sleepRun({ sql: stopThenFollower, follow: true, minStampEveryS: 1, signal: acSoft.signal });
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      const [inHandNow] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+      armed = true;
+      const softCode = await bounded(softRun, acSoft);
+      const [held] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ${inHandNow?.id ?? inHandNote}::uuid`;
+      const softBeat = await beat();
+      assert(fired && softCode === 0 && held?.status === "succeeded" && softBeat?.ended === true && softBeat.outcome === "stopped" && !lines.some((l) => /refused: followers/.test(l)),
+        `a soft stop in the poll that finds a follower outside lets the thought in hand finish: 0, the row ended stopped (exit ${softCode}; fired ${fired}; ${held?.status}; ${JSON.stringify(softBeat)})`);
     } finally {
       slowExtract = 0;
       await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;

@@ -114,11 +114,12 @@
  * followers keeping it down. Preflight's `sleep` row reads this heartbeat,
  * with its `slept` mark and its `reads` word on the query log, and the compose
  * service (`--profile sleep`) runs `--follow`. The start's reads, like the
- * sleep's, wait out a database not answering yet.
+ * sleep's, wait out a database not answering yet, and so does each pass's
+ * start at every sleep, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
- * Quieter banners, start-time configuration checks, outage waits inside a
- * pass's start, and a word for a pass waiting on its provider (SMD-2752); a budget per pass
+ * Quieter banners, start-time configuration checks, and a word for a pass
+ * waiting on its provider (SMD-2752); a budget per pass
  * (statement_timeout, work_mem) and per sleep (a wall clock), and the
  * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). The frozen-belief
  * scan, decay relabelling and an HNSW heal are their own tickets' passes
@@ -134,7 +135,7 @@ import { consolidateKey } from "../server-portable/consolidate.ts";
 import { STALE_AFTER_INTERVALS } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
-import { databaseUnavailable, outageWait, waitOut } from "./worker-bootstrap.ts";
+import { outageWait, throughOutage } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
@@ -288,26 +289,6 @@ function outsideLine(outside: string[], dryRun: boolean): string {
 
 const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.round((now.getTime() - t.getTime()) / 1000))} s ago` : "none");
 
-/**
- * A database read that outlasts the database going away (SMD-2599's rule):
- * the read again once `SELECT 1` answers, or null when `wake` ends the wait.
- * `said` keeps "not answering" to one line an outage, and "answers again" to
- * after one.
- */
-async function readThrough<T>(sql: SQL, read: () => Promise<T>, wake: AbortSignal, said: { down: boolean }, out: Writer["out"], err: Writer["err"]): Promise<T | null> {
-  for (;;) {
-    try {
-      const r = await read();
-      if (said.down) { out("  the database answers again"); said.down = false; }
-      return r;
-    } catch (e) {
-      if (!databaseUnavailable(e)) throw e;
-      if (!said.down) { err(`  the database is not answering (${(e as Error).message}) — waiting for it`); said.down = true; }
-      if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake }))) return null;
-    }
-  }
-}
-
 /** The scheduler's numbers from its options, or the refusal of the first that breaks its flag's rule. */
 function numbers(opts: SleepOptions): { quiet: number; poll: number; workers: number } | string {
   const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number }): number | string => {
@@ -370,7 +351,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const startSaid = { down: false };
   /** The CLI passes no signal (its handlers come after these reads): a wait then ends only with the database. */
   const startWake = opts.signal ?? new AbortController().signal;
-  const atStart = <T>(read: () => Promise<T>) => readThrough(sql, read, startWake, startSaid, out, err);
+  const atStart = <T>(read: () => Promise<T>) => throughOutage(read, { wake: startWake, said: startSaid, out, err });
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
@@ -525,9 +506,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   if (opts.signal?.aborted) abort();
   opts.onPass?.(stop);
 
-  /** A database read that outlasts the database going away (SMD-2599's rule): null when a stop ended the wait. */
+  /** A database read that outlasts the database going away (worker-bootstrap.ts's throughOutage): null when a stop ended the wait. */
   const said = { down: false };
-  const reading = <T>(read: () => Promise<T>): Promise<T | null> => readThrough(sql, read, onStop.signal, said, out, err);
+  const reading = <T>(read: () => Promise<T>): Promise<T | null> => throughOutage(read, { wake: onStop.signal, said, out, err });
 
   /** Aborted when a pass of the current sleep settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
@@ -664,9 +645,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (live === null) return stopped();
       sleptUntil = live.now;
       if (await outsideNow()) {
-        await stopPasses(true);
+        // A soft stop that landed during the reads keeps its own: the thought
+        // in hand finished, not abandoned (review pass 2).
+        await stopPasses(hardStopped || !stopping);
         return "outside";
       }
+      // A stop that landed during the reads wins: the passes it stopped have
+      // settled, one waiting at its start at once (130), and would read as
+      // ended by themselves — the row failed, not stopped (review pass 1). A
+      // pass that throws still rejects out of the stop, the row ended failed.
+      if (stopping) return stopped();
       // A pass that ended by itself before the wake is read first: a refusal
       // and a live call in one poll would otherwise read as the wake alone.
       const ended = running.find((p) => p.settled);
