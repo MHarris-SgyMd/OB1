@@ -317,15 +317,17 @@ export const BOUNDS_IN_FORCE_SQL: string;
 export const BITMAP_BYTES_PER_PAGE: number;
 /** The least share of heap pages a GIN-routed filter at 037's gate boundary touches, where the gate runs (1 - 1/e, a floor: the boundary rises on heaps under 10 x v_exact pages and at larger match counts). */
 export const BITMAP_PAGE_SHARE_GATED: number;
-/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
-export function memorySizing(input: { hnswBytes: number; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
-  resident: { fits: boolean; needBytes: number; haveBytes: number; recommend: string };
+/** SMD-2871: the valid HNSW indexes' bytes a vector search walks, a staging index 039 is about to adopt (body ordering by the vector column, the vector index under the shipped name, the staging index of 039's shape at `dim`) apart; `builds`, the tables 039 would build its own index on (the vector index under the shipped name, nothing under the staging one). `bodyCasts` null when match_thoughts could not be read. */
+export function residentIndexes(input: { indexes: { name: string; table: string; bytes: number; def: string }[]; dim: number; bodyCasts: boolean | null }): { hnswBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[]; builds: string[] };
+/** SMD-1499: the HNSW indexes against shared_buffers (a warning, with a recommendation; a staging index 039 is about to adopt is passed apart, as stagedBytes and stagedTables, and builds shapes only the remedy — residentIndexes — SMD-2871), and the bitmaps a filter may build against work_mem (information: the boundary filter's on the GIN route, and a generic-plan walk's over the whole heap). Sizes in bytes. */
+export function memorySizing(input: { hnswBytes: number; stagedBytes?: number; stagedTables?: string[]; builds?: string[]; sharedBuffersBytes: number; heapBytes: number; blockSize: number; workMemBytes: number }): {
+  resident: { fits: boolean; needBytes: number; stagedBytes: number; stagedCount: number; stagedTables: string[]; builds: string[]; haveBytes: number; recommend: string };
   bitmap: { fits: boolean; heapPages: number; gated: boolean; bitmapPages: number; needBytes: number; wholeHeapBytes: number; haveBytes: number };
 };
 /** A byte count for a preflight line: kB, MB, or GB to one decimal. */
 export function bytesText(bytes: number): string;
 /** Preflight's two SMD-1499 rows from memorySizing's result: `vector index memory` (ok, or warn with the size and the way back) and `filter bitmap memory` (always ok, information only). */
-export function memoryRows(s: ReturnType<typeof memorySizing>): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
+export function memoryRows(s: ReturnType<typeof memorySizing>, opts?: { ledgerHas039?: boolean | null }): { name: string; status: "ok" | "warn"; detail: string; fix?: string }[];
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
 /** 037's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */
@@ -389,7 +391,7 @@ export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | 
  */
 export type RoleGrant = { table?: string; view?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
 /** The groups ROLE_GRANTS is keyed by. */
-export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "community" | "extensions" | "recipes";
+export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "structure" | "querylog" | "sleep" | "jobs" | "pages" | "community" | "extensions" | "recipes";
 /**
  * Privileges the fork's SECURITY INVOKER functions need to run as their caller,
  * grouped by the role that needs each group — tables for the migrations' own
@@ -402,6 +404,10 @@ export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>
 export const GRANT_LOCK: string;
 /** The order groups are issued and documented in. */
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
+/** The groups a plain `migrate.ts --grant` leaves out: issued only when `--groups` names them (SMD-2678). */
+export const OPT_IN_GRANT_GROUPS: readonly RoleGrantGroup[];
+/** What a plain `migrate.ts --grant <role>` issues: every group but the opt-in ones. */
+export const DEFAULT_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */

@@ -1197,6 +1197,40 @@ jobs:
           worker consolidate -e OB1_WORKER_KEY=not-a-key
           hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
 
+      # SMD-2678: the sleep profile's own command, the same way. Its `sh -c`
+      # refuses without a worker key and on each setting that is not digits;
+      # a well-formed one reaches the scheduler, whose own refusals prove the
+      # exec and the arguments were taken — --poll past a minute, and a claim
+      # follower's fresh heartbeat in this stack's database, beside which it
+      # will not sleep (the two profiles are alternatives), which also proves
+      # it reaches the database on the server's environment.
+      - name: The sleep profile refuses before it sleeps
+        working-directory: deploy
+        run: |
+          sleeper() { set +e; timeout 120 docker compose -f compose.yaml --profile sleep run --rm --no-deps -T "$@" sleep > /tmp/sleep.out 2>&1; CODE=$?; set -e; }
+          hold() { if ! grep -qF -- "$1" /tmp/sleep.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/sleep.out >&2; exit 1; fi; }
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          sleeper -e OB1_WORKER_KEY=
+          hold 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          hold "sleep: OB1_SLEEP_QUIET ('--status'), OB1_SLEEP_POLL ('') and OB1_SLEEP_WORKERS ('') take digits only"
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          hold "OB1_SLEEP_POLL ('1 --dry-run') and OB1_SLEEP_WORKERS ('') take digits only"
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          hold "OB1_SLEEP_WORKERS ('-1') take digits only"
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
+          hold '--poll must be'
+          q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
+          sleeper -e OB1_WORKER_KEY=not-a-key
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
+          hold 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          # The refusal ends heartbeat:sleep on a failure, so preflight's sleep
+          # row names the followers keeping it down; then the row goes, leaving
+          # this stack's later steps the brain they had.
+          stamped="$(q "SELECT (value::jsonb->>'outcome') || ':' || (value::jsonb->>'ended') FROM ob1_config WHERE key = 'heartbeat:sleep'")"
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          [ "$stamped" = "failed:true" ] || { echo "--- expected heartbeat:sleep ended on a failure; got '$stamped' ---" >&2; exit 1; }
+
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
       # rendering rather than the file: the base file publishes exactly one port
@@ -1282,8 +1316,8 @@ jobs:
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
-              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server"])
-              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server"])
+              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server", "sleep"])
+              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
               and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "proxy", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1304,6 +1338,13 @@ jobs:
           # are run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
+          # SMD-2678: the sleep profile's service holds the same, and more of
+          # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
+          # in, SMD-2666), the extract service's grace (120 s), its three
+          # settings handed in, the key guard as its command's first line, and
+          # its last exactly the scheduler's exec'd --follow with them.
+          docker compose -f compose.yaml --profile sleep config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\"\n?$")))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'

@@ -167,7 +167,11 @@ cites a returned id logs no cite row there (SMD-1719). `vector index memory` and
 `filter bitmap memory` (SMD-1499): the server sized for the table. The first
 is a warning, since a managed platform may not let the operator change the
 setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
-`shared_buffers`, with the size to set and the statement that sets it. The OS
+`shared_buffers`, with the size to set and the statement that sets it. A
+staging index built by hand for 039 to adopt is left out while the body still
+orders by the vector column and the vector index (001's, 007's) holds the
+shipped name, since the walk uses that until 039 runs; the row says so, and a
+warning's remedy has 039 applied before sizing (SMD-2871). The OS
 page cache serves a walk too, but measured at ten million rows it gave ten
 connections about a third of the throughput. The second is information only:
 the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
