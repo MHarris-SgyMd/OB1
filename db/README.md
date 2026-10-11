@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2712 assertions: 2712 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2716 assertions: 2716 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -4029,7 +4029,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2712 assertions, PGlite, no container
+bun test-schema.ts                          # 2716 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1238 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
@@ -4831,7 +4831,13 @@ default — are unaffected.
   row with four workers, and the migrator prints the vector count and the
   setting in force just before 039. It adopts staging indexes built beforehand
   with `CREATE INDEX CONCURRENTLY` under the names its header gives, which is
-  the path for a brain past a million rows.
+  the path for a brain past a million rows. The header's statements carry the
+  `{{EMBEDDING_DIM}}` placeholder only the migrator fills in: put the column's
+  width there (`SELECT atttypmod FROM pg_attribute WHERE attrelid =
+  'thoughts'::regclass AND attname = 'embedding'`). Where an index is to
+  be built, dropped or renamed first, the walk index row's remedy — and the
+  vector index memory row's warning while a staging index is left out —
+  prints the statements filled in, with where to run them (SMD-2880).
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.
