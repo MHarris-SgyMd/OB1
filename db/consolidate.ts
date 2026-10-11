@@ -486,6 +486,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
     FOLLOW && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+  /** An atStart wait the caller's signal ended (its null): a stop before the pass began. */
+  const stoppedWaiting = (): number => {
+    stoppedEarly();
+    return 130;
+  };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
@@ -520,10 +525,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const tables = await atStart(async () => Number((await sql`
     SELECT count(*)::int AS tables FROM pg_class
     WHERE relname IN ('thought_work_claims', 'thought_entities', 'supersession_proposals') AND relkind = 'r'`)[0].tables));
-  if (tables === null) {
-    stoppedEarly();
-    return 130;
-  }
+  if (tables === null) return stoppedWaiting();
   if (tables < 3) {
     err("\n  The lease table, the entity tables or the proposal table are missing. Apply migrations 015, 016 and 029 first:\n    cd db && bun migrate.ts --url …");
     return 2;
@@ -600,10 +602,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       warn: err,
       outage: FOLLOW ? lookupOutage : undefined,
     }));
-    if (id === null) {
-      stoppedEarly();
-      return 130;
-    }
+    if (id === null) return stoppedWaiting();
     if (!id.ok) {
       err(id.message);
       return 2;
@@ -1001,10 +1000,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const has079 = await atStart(async () => ((await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
            AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[])[0].has_079);
-  if (has079 === null) {
-    stoppedEarly();
-    return 130;
-  }
+  if (has079 === null) return stoppedWaiting();
   const HAS_079 = has079;
   /**
    * 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and
@@ -1038,10 +1034,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return `this role lacks ${what} — cd db && bun migrate.ts --url <owner's url> --grant ${g.role} --groups ${groups}${structure ? " (the structure group also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)" : ""}`;
   }
   const relations = await atStart(async () => ({ off: await relationsOff() }));
-  if (relations === null) {
-    stoppedEarly();
-    return 130;
-  }
+  if (relations === null) return stoppedWaiting();
   let RELATIONS_OFF: string | null = relations.off;
   /** Whether relations were stored at any point of this run — the summary's counts are then real, beside what was counted only (review pass 4). */
   let RELATIONS_EVER_ON = RELATIONS_OFF === null;

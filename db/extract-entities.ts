@@ -441,6 +441,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
     FOLLOW && !STATUS_ONLY && !DRY_RUN ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+  /** An atStart wait the caller's signal ended (its null): a stop before the pass began. */
+  const stoppedWaiting = (): number => {
+    stoppedEarly();
+    return 130;
+  };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
@@ -479,10 +484,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const tables = await atStart(async () => Number((await sql`
     SELECT count(*)::int AS tables FROM pg_class
     WHERE relname IN ('thought_work_claims', 'ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`)[0].tables));
-  if (tables === null) {
-    stoppedEarly();
-    return 130;
-  }
+  if (tables === null) return stoppedWaiting();
   if (tables < 4) {
     err("\n  The entity tables or the lease table are missing. Apply migrations 015 and 016 first:\n    cd db && bun migrate.ts --url …");
     return 2;
@@ -596,10 +598,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       warn: err,
       outage: FOLLOW ? lookupOutage : undefined,
     }));
-    if (id === null) {
-      stoppedEarly();
-      return 130;
-    }
+    if (id === null) return stoppedWaiting();
     if (!id.ok) {
       err(id.message);
       return 2;
@@ -726,10 +725,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
 
   const recorded = await atStart(async () => ({ key: ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key }));
-  if (recorded === null) {
-    stoppedEarly();
-    return 130;
-  }
+  if (recorded === null) return stoppedWaiting();
   const recordedKey: string | undefined = recorded.key;
   if (recordedKey && recordedKey !== JOB) {
     out(`  ob1_config.entity_extraction_key is ${recordedKey}; this run uses ${JOB} — a different model or prompt version`);
@@ -796,10 +792,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const set = await atStart(() => sql`
       INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`);
-    if (set === null) {
-      stoppedEarly();
-      return 130;
-    }
+    if (set === null) return stoppedWaiting();
     out(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
   }
 

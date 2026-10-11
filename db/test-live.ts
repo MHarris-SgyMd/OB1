@@ -10549,9 +10549,21 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     if (code === -1) { ac.abort(); await run; }
     return code;
   };
+  /**
+   * The suite's client with each statement handed to `handle` first: its text
+   * (the template's strings joined with `$`; "" for a fragment of another
+   * shape) and `run`, which issues it. What `handle` returns is the
+   * statement's result — throw for a database not answering, delay, or run.
+   */
+  const intercept = (handle: (text: string, run: () => unknown) => unknown): SQL =>
+    new Proxy(sql, {
+      apply(t, self, args) {
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
+        return handle(text, () => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
+      },
+    }) as unknown as SQL;
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
-  const around = (before: () => void): SQL =>
-    new Proxy(sql, { apply(t, self, args) { before(); return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args); } }) as unknown as SQL;
+  const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
@@ -11000,20 +11012,17 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const downOnceAt = (patterns: RegExp[], always = false): { sql: SQL; hit: string[] } => {
         const left = [...patterns];
         const hit: string[] = [];
-        const client = new Proxy(sql, {
-          apply(t, self, args) {
-            const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
-            const i = left.findIndex((p) => p.test(text));
-            if (i >= 0) {
-              hit.push(left[i].source);
-              if (!always) left.splice(i, 1);
-              throw startingUp();
-            }
-            return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
-          },
-        }) as unknown as SQL;
+        const client = intercept((text, run) => {
+          const i = left.findIndex((p) => p.test(text));
+          if (i < 0) return run();
+          hit.push(left[i].source);
+          if (!always) left.splice(i, 1);
+          throw startingUp();
+        });
         return { sql: client, hit };
       };
+      /** A run's code, or what it threw, or "hung" past `ms`. */
+      const settled = (run: Promise<number>, ms: number) => Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(ms).then(() => "hung")]);
       const exDown = downOnceAt([/relname IN \('thought_work_claims', 'ob1_entities'/, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/]);
       const coDown = downOnceAt([/relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, /ob1:linked-tickets-not-paired/, /to_regprocedure\('record_thought_relation/]);
       // The key unset, so the run writes it: the write is a start statement too.
@@ -11028,9 +11037,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       // Stopped as its pass begins: the start is what is under test.
       const exRun = runExtract({ sql: exDown.sql, env, workers: 1, follow: 1, signal: acEx.signal, onPass: () => { exBegan = true; acEx.abort(); }, writer: { out: (l) => exLines.push(l), err: (l) => exLines.push(l) } });
       const coRun = runConsolidate({ sql: coDown.sql, env, workers: 1, follow: 1, signal: acCo.signal, onPass: () => { coBegan = true; acCo.abort(); }, writer: { out: (l) => coLines.push(l), err: (l) => coLines.push(l) } });
-      const settle = (run: Promise<number>, ac: AbortController) =>
-        Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(45_000).then(() => "hung")]).finally(() => ac.abort());
-      const [exCode, coCode] = await Promise.all([settle(exRun, acEx), settle(coRun, acCo)]);
+      const [exCode, coCode] = await Promise.all([settled(exRun, 45_000).finally(() => acEx.abort()), settled(coRun, 45_000).finally(() => acCo.abort())]);
       const waits = (ls: string[]) => ls.filter((l) => /the database is not answering \(the database system is starting up\) — waiting for it/.test(l)).length;
       const keyNow = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value;
       assert(exCode === 0 && exBegan && exDown.hit.length === 3 && waits(exLines) === 3 && keyNow === EX && ((await claims(EX)).failed ?? 0) === failedBefore.ex,
@@ -11050,7 +11057,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         const run = engine({ sql, url: "postgres://unused@127.0.0.1:1/none", env: keyed, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; ac.abort(); }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
         await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)) || began, 10_000);
         ac.abort();
-        const code = await Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(15_000).then(() => "hung")]);
+        const code = await settled(run, 15_000);
         return { code, began, waited: ls.some((l) => /the database is not answering .* — waiting for it/.test(l)), warned: ls.some((l) => /could not resolve the worker's identity/.test(l)) };
       };
       const [exLookup, coLookup] = await Promise.all([lookup(runExtract), lookup(runConsolidate)]);
@@ -11068,7 +11075,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         const run = engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
         await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)), 10_000);
         ac.abort();
-        const code = await Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(15_000).then(() => "hung")]);
+        const code = await settled(run, 15_000);
         // Nor says it wrote extraction's key when the write never answered.
         return { at: at.source.slice(0, 24), code, began, early: ls.some((l) => /stopped before the pass began/.test(l)), missing: ls.some((l) => /are missing/.test(l)) || ls.some((l) => /entity_extraction_key = .* now enqueue/.test(l)) };
       };
@@ -11115,17 +11122,12 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const acRace = new AbortController();
       let landed = false;
       /** The scheduler's client: its first wake read once asleep aborts the run's signal, then answers 300 ms later. */
-      const stopMidRead = new Proxy(sql, {
-        apply(t, self, args) {
-          const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
-          if (!landed && /FROM thought_audit WHERE created_at > /.test(text) && lines.some((l) => /asleep:/.test(l))) {
-            landed = true;
-            acRace.abort();
-            return Bun.sleep(300).then(() => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
-          }
-          return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
-        },
-      }) as unknown as SQL;
+      const stopMidRead = intercept((text, run) => {
+        if (landed || !/FROM thought_audit WHERE created_at > /.test(text) || !lines.some((l) => /asleep:/.test(l))) return run();
+        landed = true;
+        acRace.abort();
+        return Bun.sleep(300).then(run);
+      });
       const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal }), acRace);
       const raceBeat = await beat();
       assert(landed && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
@@ -11146,21 +11148,16 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       let armed = false;
       let fired = false;
       /** The scheduler's client: once armed, its follower read stops the run, then a follower appears, then the read runs. */
-      const stopThenFollower = new Proxy(sql, {
-        apply(t, self, args) {
-          const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
-          if (armed && !fired && /WHERE key ~ /.test(text)) {
-            fired = true;
-            return (async () => {
-              acSoft.abort();
-              await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
-                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
-              return await Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
-            })();
-          }
-          return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
-        },
-      }) as unknown as SQL;
+      const stopThenFollower = intercept((text, run) => {
+        if (!armed || fired || !/WHERE key ~ /.test(text)) return run();
+        fired = true;
+        return (async () => {
+          acSoft.abort();
+          await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+          return await run();
+        })();
+      });
       const softRun = sleepRun({ sql: stopThenFollower, follow: true, minStampEveryS: 1, signal: acSoft.signal });
       await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
       const [inHandNow] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
