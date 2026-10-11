@@ -212,11 +212,8 @@ function incomingTrace(header: string | null): string | undefined {
   return m[2];
 }
 
-/** The codes a request is refused with at its key, before any tool runs. */
-const KEY_REFUSALS: ReadonlySet<string> = new Set(["UNAUTHORIZED", "REVOKED", "BUSY", "AUTH_UNREACHABLE"]);
-
 /** The span name and status a request's checked fields give, and its attributes — the line's values, under the HTTP and MCP conventions' names. */
-function spanOf(c: CheckedRecord): { name: string; error: boolean; attributes: otel.Attributes } {
+function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error: boolean; attributes: otel.Attributes } {
   // A status the client was handed: none for one gone first, or cut by the
   // stop — a 408, a REST body read's 500, a 0 are the line's names for that,
   // not answers anyone received.
@@ -227,9 +224,10 @@ function spanOf(c: CheckedRecord): { name: string; error: boolean; attributes: o
   const tool = c.tool === "?" ? undefined : c.tool;
   const mcpMethod = c.rpc === "batch" || c.rpc === "other" ? undefined : c.rpc;
   // A tools/call names its tool; it is an execution only where the call ran — not refused at its key, not unrun
-  // (review pass 6: a keyless caller could count any tool's executions).
+  // (review pass 6: a keyless caller could count any tool's executions). The key's refusal is the route's word,
+  // not a code: a plugin may refuse with UNAUTHORIZED or BUSY of its own, and its call ran (review pass 7).
   const named = mcpMethod === "tools/call" && tool !== undefined;
-  const toolCall = named && c.outcome !== "unrun" && !(c.code !== undefined && KEY_REFUSALS.has(c.code));
+  const toolCall = named && c.outcome !== "unrun" && !refusedAtKey;
   const name = mcpMethod !== undefined ? (named ? `${mcpMethod} ${tool}` : mcpMethod)
     : `${method === "_OTHER" ? "HTTP" : method}${route !== undefined ? ` ${route}` : ""}`;
   return {
@@ -295,6 +293,8 @@ export class RequestTrace {
   code?: string;
   /** Set by a handler whose answer outlives it: the middleware leaves the end to it. */
   deferred = false;
+  /** Set where the request was refused at its key, before any tool could run (the MCP route's refusal). */
+  refusedAtKey = false;
   private done = false;
   /** The request's server span, and the context its handlers run in (run). */
   private readonly span: otel.Span;
@@ -362,7 +362,7 @@ export class RequestTrace {
       this.write(record);
     } finally {
       // The span ends whatever the line's sink does.
-      const span = spanOf(checked(record));
+      const span = spanOf(checked(record), this.refusedAtKey);
       this.span.updateName(span.name);
       this.span.setAttributes(span.attributes);
       if (span.error) this.span.setStatus({ code: otel.SpanStatusCode.ERROR });
@@ -425,6 +425,7 @@ export async function withToolSpan<T>(tool: string, fn: (span: ToolSpan) => Prom
 let tracing: import("./otel-setup.ts").Tracing | undefined;
 let starting: Promise<boolean> | undefined;
 let generation = 0;
+let stopping: Promise<void> | undefined;
 
 /**
  * Sets up the OpenTelemetry SDK where an operator names a collector — on Bun
@@ -466,11 +467,12 @@ export function startTelemetry(
   }
   const where = origin;
   const own = generation;
-  starting = Promise.resolve().then(load).then(({ setUpTracing }) => {
+  // After a stop still in progress, so this start's SDK is never the one it shuts down (review pass 7).
+  starting = (stopping ?? Promise.resolve()).then(load).then(async ({ setUpTracing }) => {
     const set = setUpTracing(serviceName, { report: { origin: where, warn: log } });
-    // A stop came while this loaded: this start is not the SDK's, and goes (review pass 6).
+    // A stop came while this loaded: this start is not the SDK's, and goes before the stop returns (review passes 6–7).
     if (own !== generation) {
-      void set.shutdown();
+      await set.shutdown();
       return undefined;
     }
     tracing = set;
@@ -491,14 +493,26 @@ export function startTelemetry(
   return starting;
 }
 
-/** Shuts the SDK down and forgets its start, so a suite can start it again; spans are no-ops after. A start still loading is waited for, and starts its own SDK's shutdown. */
+/**
+ * Shuts the SDK down and forgets its start, so a suite can start it again;
+ * spans are no-ops after. A start still loading is waited for, its own SDK
+ * shut down before this returns, and a start made meanwhile waits for this.
+ */
 export async function stopTelemetry(): Promise<void> {
   generation += 1;
   const loading = starting;
   starting = undefined;
-  await loading;
-  await tracing?.shutdown();
-  tracing = undefined;
+  const stop = (async () => {
+    await loading;
+    await tracing?.shutdown();
+    tracing = undefined;
+  })();
+  stopping = stop;
+  try {
+    await stop;
+  } finally {
+    if (stopping === stop) stopping = undefined;
+  }
 }
 
 /**

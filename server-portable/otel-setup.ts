@@ -84,6 +84,8 @@ interface WatchedExporter extends SpanExporter {
   dropped(count: number): void;
   /** Says what is still unsaid, whatever the window — the stop's last word on spans not sent. */
   sayRest(): void;
+  /** From now on says each count at once, and says what is held: the provider is shutting down, whether or not its batch reaches this exporter's shutdown. */
+  close(): void;
   /** How many spans were handed to an export, so far. */
   readonly handed: number;
   /** Where things stand, to compare after a flush. */
@@ -154,6 +156,10 @@ export function watchExporter(inner: SpanExporter, { origin, warn, everyMs = 60_
     },
     dropped: (count) => say(count, "queue full"),
     sayRest: sayNow,
+    close: () => {
+      closing = true;
+      sayNow();
+    },
     get handed() {
       return handed;
     },
@@ -259,6 +265,32 @@ export async function flushBatch(provider: { forceFlush(): Promise<void> }, coun
  */
 const MAX_QUEUE = 65_536;
 
+/**
+ * The batch's queue and export size from the operator's variables: the queue
+ * 2,048 by default and held to 65,536; the export size 512 by default and held
+ * to 1..the queue — an export size of 0 sends the batch processor round a loop
+ * that never ends (review pass 7). `notes` says each value held or ignored.
+ */
+export function batchSizes(queueAsked: string | undefined, batchAsked: string | undefined): { queue: number; batch: number; notes: string[] } {
+  const notes: string[] = [];
+  const read = (asked: string | undefined, name: string, fallback: number, max: number) => {
+    if (asked === undefined || asked.trim() === "") return fallback;
+    const n = Number(asked);
+    if (!Number.isInteger(n) || n < 1) {
+      notes.push(`telemetry: ${name} ${JSON.stringify(asked.slice(0, 32))} is not a whole number of at least 1: ${fallback} is used (SMD-1849)`);
+      return fallback;
+    }
+    if (n > max) {
+      notes.push(`telemetry: ${name} ${n} is held to ${max} (SMD-1849)`);
+      return max;
+    }
+    return n;
+  };
+  const queue = read(queueAsked, "OTEL_BSP_MAX_QUEUE_SIZE", 2048, MAX_QUEUE);
+  const batch = read(batchAsked, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", Math.min(512, queue), queue);
+  return { queue, batch, notes };
+}
+
 /** The batch processor's one word on dropped spans, which a diag logger at WARN is handed. */
 const DROPPED = /^Dropped (\d+) spans because maxQueueSize reached$/;
 
@@ -276,10 +308,9 @@ export function setUpTracing(serviceName: string, mode: { exporter: SpanExporter
     .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION }))
     .merge(detectResources({ detectors: [envDetector] }));
   const watched = "report" in mode ? watchExporter(new OTLPTraceExporter(), mode.report) : undefined;
-  const asked = Number(process.env.OTEL_BSP_MAX_QUEUE_SIZE);
-  const queue = Number.isInteger(asked) && asked > 0 ? Math.min(asked, MAX_QUEUE) : 2048;
-  if ("report" in mode && Number.isInteger(asked) && asked > MAX_QUEUE) mode.report.warn(`telemetry: OTEL_BSP_MAX_QUEUE_SIZE ${asked} is held to ${MAX_QUEUE} (SMD-1849)`);
-  const counted = watched ? countingProcessor(new BatchSpanProcessor(watched, { maxQueueSize: queue })) : undefined;
+  const sizes = batchSizes(process.env.OTEL_BSP_MAX_QUEUE_SIZE, process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE);
+  if ("report" in mode) for (const note of sizes.notes) mode.report.warn(note);
+  const counted = watched ? countingProcessor(new BatchSpanProcessor(watched, { maxQueueSize: sizes.queue, maxExportBatchSize: sizes.batch })) : undefined;
   const processor = counted ?? new SimpleSpanProcessor((mode as { exporter: SpanExporter }).exporter);
   const provider = new BasicTracerProvider({ resource, spanProcessors: [processor] });
   const contextManager = new AsyncLocalStorageContextManager().enable();
@@ -307,6 +338,8 @@ export function setUpTracing(serviceName: string, mode: { exporter: SpanExporter
       return flushBatch(provider, counted, watched, drops);
     },
     shutdown: async () => {
+      // The watcher closed first: the batch's shutdown flush may fail, and never reach the exporter's own shutdown (review pass 7).
+      watched?.close();
       await provider.shutdown().catch(() => {});
       trace.disable();
       propagation.disable();

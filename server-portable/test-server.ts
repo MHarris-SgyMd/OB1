@@ -3116,6 +3116,29 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   }
   const { flushTelemetry } = await import("./telemetry.ts");
   assert(raceStarted === false && shut === 1 && (await flushTelemetry()) === undefined, `a stop during a start: the start's SDK shut down, none left to flush (${raceStarted}, ${shut})`);
+  // A start made while that stop is still going is the one left, its SDK not the stop's to shut; and the
+  // stale start's slow shutdown is over before the stop returns (review pass 7).
+  const order: string[] = [];
+  let fastShut = 0;
+  let restarted: boolean | undefined;
+  try {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
+    const stale = startTelemetry("probe", () => {}, async () => {
+      await Bun.sleep(30);
+      return { setUpTracing: () => ({ serviceName: "stale", flush: async () => "failed" as const, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); } }) };
+    });
+    const stopped = stopTelemetry().then(() => { order.push("stop returned"); });
+    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTracing: () => ({ serviceName: "fresh", flush: async () => "sent" as const, shutdown: async () => { fastShut += 1; } }) }));
+    await Promise.all([stale, stopped]);
+    restarted = await fresh;
+  } finally {
+    if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
+  }
+  const freshFlush = await flushTelemetry();
+  await stopTelemetry();
+  assert(restarted === true && freshFlush === "sent" && fastShut === 1 && order.join(" / ") === "stale shut / stop returned",
+    `a start during a stop: its SDK is the one left, shut only by the next stop; the stale start shut before the stop returned (${restarted} ${freshFlush} ${fastShut}; ${order.join(" / ")})`);
   // A loader that throws before it returns a promise is the setup's failure too, not a throw out of startTelemetry.
   const syncSaid: string[] = [];
   let syncStarted: boolean | string;
@@ -3338,6 +3361,40 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   assert(clamped === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE 1000000 is held to 65536 (SMD-1849)", `a queue past 65,536 is held there, and said (${clamped})`);
   assert(drops.length === 1 && drops[0] === "telemetry: 7 spans not sent to http://collector:4318 (queue full) (SMD-1849)",
     `the batch's dropped spans are said as not sent; no other diag text is (${drops.join(" / ")})`);
+  // The export size is held to 1..the queue, a value that is no whole number ignored, each said (review pass 7: 0 hung the stop).
+  const { batchSizes } = await import("./otel-setup.ts");
+  const sizes = [batchSizes(undefined, undefined), batchSizes("100", undefined), batchSizes("100", "500"), batchSizes(undefined, "0"), batchSizes("-3", "1.5"), batchSizes(" ", "64")];
+  assert(JSON.stringify(sizes.map(({ queue, batch }) => [queue, batch])) === JSON.stringify([[2048, 512], [100, 100], [100, 100], [2048, 512], [2048, 512], [2048, 64]])
+    && sizes[2].notes[0] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE 500 is held to 100 (SMD-1849)"
+    && sizes[3].notes[0] === `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`
+    && sizes[4].notes.length === 2 && sizes[0].notes.length + sizes[1].notes.length + sizes[5].notes.length === 0,
+    `the batch's sizes: queue 2,048 and export 512 by default, the export held to the queue, 0 and fractions ignored, each said (${JSON.stringify(sizes)})`);
+  // OTEL_BSP_MAX_EXPORT_BATCH_SIZE=0 against a collector that refuses: the stop returns, and its last export's
+  // failure is said at once though the batch's failed flush never reaches the exporter's shutdown (review pass 7).
+  const refusing = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 400 }) });
+  const zeroSaid: string[] = [];
+  const zeroEnv = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, batch: process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE };
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = `http://127.0.0.1:${refusing.port}`;
+  process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE = "0";
+  let zeroStopped: string;
+  try {
+    const zero = setUpTracing("open-brain-test", { report: { origin: "http://collector:4318", warn: (l: string) => zeroSaid.push(l) } });
+    diag.warn("Dropped 1 spans because maxQueueSize reached");
+    const { trace: api } = await import("@opentelemetry/api");
+    api.getTracer("probe").startSpan("probe").end();
+    zeroStopped = await Promise.race([zero.shutdown().then(() => "stopped"), Bun.sleep(5000).then(() => "hung")]);
+  } finally {
+    for (const [name, value] of [["OTEL_EXPORTER_OTLP_ENDPOINT", zeroEnv.endpoint], ["OTEL_BSP_MAX_EXPORT_BATCH_SIZE", zeroEnv.batch]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    refusing.stop(true);
+  }
+  assert(zeroStopped === "stopped" && zeroSaid.join(" / ") === [
+    `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`,
+    "telemetry: 1 span not sent to http://collector:4318 (queue full) (SMD-1849)",
+    "telemetry: 1 span not sent to http://collector:4318 (HTTP 400) (SMD-1849)",
+  ].join(" / "), `an export size of 0: the stop returns, and the shutdown's failed export is said inside the window (${zeroStopped}; ${zeroSaid.join(" / ")})`);
 
   const exporter = new InMemorySpanExporter();
   const tracing = setUpTracing("open-brain-test", { exporter });
@@ -3377,6 +3434,17 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const refusedAtKey = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
+    // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
+    const byTool = (code: string, atKey: boolean, outcome: "refused" | "unrun") => {
+      exporter.reset();
+      const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
+      Object.assign(t, { rpc: "tools/call", tool: "brain_info", outcome, code, refusedAtKey: atKey });
+      t.end();
+      return attrs(exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER))["gen_ai.tool.name"];
+    };
+    const counted = ["UNAUTHORIZED", "BUSY", "REVOKED", "AUTH_UNREACHABLE"].map((code) => byTool(code, false, "refused"));
+    assert(counted.every((n) => n === "brain_info") && byTool("UNAUTHORIZED", true, "refused") === undefined && byTool("FAILED", false, "unrun") === undefined,
+      `a tool's own UNAUTHORIZED, BUSY, REVOKED or AUTH_UNREACHABLE keeps its gen_ai names; marked at the key or unrun, none (${JSON.stringify(counted)})`);
 
     // A call that answers, with no traceparent: a trace of its own, on the line too; no ERROR.
     exporter.reset();

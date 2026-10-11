@@ -1073,6 +1073,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   /** Refused before any tool ran: the key, the registry; the answer's status and why. */
   const refused = (response: Response, code: string): Response => {
     trace.status = response.status;
+    trace.refusedAtKey = true;
     finish("refused", code);
     return response;
   };

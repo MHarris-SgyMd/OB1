@@ -911,6 +911,7 @@ recorded and sent only when the server's environment names a collector:
 | `OTEL_EXPORTER_OTLP_CERTIFICATE` | the path to a PEM CA certificate, for an https collector with its own; never `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off every certificate check the server makes |
 | `OB1_OTEL_TRUST_TRACEPARENT=1` | continue a caller's `traceparent`, for a deployment whose proxy sets it. Unset — the default — a request starts its own trace and links the caller's: a caller chooses its `traceparent`, and continued it would choose the request's trace (joining any trace it knows, colliding with another request's line) and, under a ratio, its sampling |
 | `OTEL_BSP_MAX_QUEUE_SIZE` | the batch's queue, 2,048 by default and 65,536 at most (said at start when held): each span waiting holds memory (1–2 KB measured) |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | the spans in one export, 512 by default and the queue at most; a value that is no whole number of at least 1 is ignored, and either is said at start |
 | `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none` | off, with an endpoint set; said at start |
 | `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server) or `open-brain-api` |
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment=canary`); a key it names wins, `service.version` included |
