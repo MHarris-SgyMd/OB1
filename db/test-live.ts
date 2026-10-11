@@ -10488,12 +10488,14 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let badRequest = false;
   /** Probes only: held this long before the answer — a pass waiting at its start (SMD-2752). */
   let probeHold = 0;
+  /** Every request naming this model, probes too: not served (a 404 naming it) — the judge's own, say (SMD-2752). */
+  let missingModel: string | null = null;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
-      if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+      if (missing || (missingModel !== null && body.model === missingModel)) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
         if (probeHold) await Bun.sleep(probeHold);
@@ -10702,7 +10704,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const firstJudge = Math.min(...modelCalls.filter((c) => c.kind === "judge").map((c) => c.at));
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
-      `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s))`);
+      `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}`})`);
     assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /both pools drained — the sleep ends/.test(onceText),
       `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
@@ -10795,19 +10797,21 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
-    // A pass refusing at its first start is the configuration's: the
-    // scheduler ends with its code, the row ended failed.
+    // A model not served is the configuration's: the scheduler's check of
+    // each pass's start meets it before the first quiet, and it ends with 2
+    // at once, the row ended failed, no sleep begun (SMD-2752; before, the
+    // first sleep's start met it).
     lines.length = 0;
     missing = true;
-    // Bounded: a scheduler that misses the pass's end would wait for ever.
+    // Bounded: a scheduler that misses the refusal would wait for ever.
     const acFirst = new AbortController();
-    const firstRun = sleepRun({ follow: true, signal: acFirst.signal, minStampEveryS: 1 });
+    const firstRun = sleepRun({ follow: true, quiet: 300, signal: acFirst.signal, minStampEveryS: 1 });
     const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
     missing = false;
     const firstBeat = await beat();
-    assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract ended by itself \(exit 2\)/.test(l)),
-      `a model not served at the first sleep's start ends --follow with 2, the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract's start is refused \(model\) — the scheduler does not start/.test(l)) && !lines.some((l) => /asleep:/.test(l)),
+      `a model not served ends --follow with 2 at its start, before any sleep (a quiet of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
     // The provider refusing the request itself on the first pass — past the
     // start's probe, before any pass finished — is the configuration's too:
     // it ends the run, not a retry for ever (review pass 2).
@@ -11170,6 +11174,109 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     } finally {
       slowExtract = 0;
       await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
+    }
+
+    // SMD-2752 PR 2: each pass's start checked once, before the first quiet;
+    // the passes each sleep starts quiet — no banner, no end-of-run summary
+    // queries; and a start refusal told apart, so one no retry mends ends the
+    // service where it was retried until a restart.
+    const setKey = (key: string) => sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${key}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    const count = (re: RegExp) => lines.filter((l) => re.test(l)).length;
+    try {
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      await setKey(EX);
+
+      // The banner once per process, from the check, and no summary at a wake:
+      // two sleeps, a live read between them.
+      await capture("A note for the quiet passes.", "sync-sleep", 0, 10);
+      lines.length = 0;
+      const acQuiet = new AbortController();
+      const quietRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acQuiet.signal });
+      await pollUntil(async () => count(/asleep:/) >= 1, 20_000);
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake between sleeps')`;
+      await pollUntil(async () => count(/asleep:/) >= 2, 30_000);
+      acQuiet.abort();
+      const quietCode = await bounded(quietRun, acQuiet);
+      const banners = { exJob: count(/\[extract\]\s+job:/), coJob: count(/\[consolidate\]\s+job:/), exEgress: count(/\[extract\]\s+egress:/), noKey: count(/\[extract\]\s+⚠  OB1_WORKER_KEY is not set/), workersLine: count(/worker\(s\), \d+ per claim/), summaries: count(/\[(extract|consolidate)\]\s+(after:|graph:)/), wakes: count(/awake: a live read/), sleeps: count(/asleep:/) };
+      assert(quietCode === 0 && banners.exJob === 1 && banners.coJob === 1 && banners.exEgress === 1 && banners.noKey === 1 && banners.workersLine === 0 && banners.summaries === 0 && banners.wakes >= 1 && banners.sleeps >= 2,
+        `across two sleeps and a wake each pass's banner is said once, by the start's check, and no pass runs its end-of-run summary (exit ${quietCode}; ${JSON.stringify(banners)})`);
+
+      // The judge's model not served: consolidation's start meets it at the
+      // scheduler's start, not once extraction's backlog drains (item 3).
+      lines.length = 0;
+      missingModel = "judge-unserved";
+      const acJudge = new AbortController();
+      const judgeCode = await bounded(sleepRun({ env: { ...env, OB1_JUDGE_MODEL: "judge-unserved" }, follow: true, quiet: 300, minStampEveryS: 1, signal: acJudge.signal }), acJudge);
+      missingModel = null;
+      const judgeBeat = await beat();
+      assert(judgeCode === 2 && count(/consolidate's start is refused \(model\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0 && judgeBeat?.ended === true && judgeBeat.outcome === "failed",
+        `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
+
+      // Extraction's key recorded under another model: refused at the start (item 3).
+      await setKey("extract:another-model@p2");
+      lines.length = 0;
+      const acKey = new AbortController();
+      const keyCode = await bounded(sleepRun({ follow: true, quiet: 300, minStampEveryS: 1, signal: acKey.signal }), acKey);
+      await setKey(EX);
+      assert(keyCode === 2 && count(/extract's start is refused \(key\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0,
+        `an extraction key recorded under another model ends the service with 2 at its start (exit ${keyCode})`);
+
+      // Another process's --switch-key between sleeps: the next start refuses
+      // the key, which no retry mends — the service ends (2) where it was
+      // retried until a restart, the pass having got through its start before (item 6).
+      await capture("A note the switch interrupts.", "sync-sleep", 0, 11);
+      slowExtract = 3000;
+      lines.length = 0;
+      const acSwitch = new AbortController();
+      const switchRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acSwitch.signal });
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      await setKey("extract:another-model@p2");
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the switched key')`;
+      const switchCode = await bounded(switchRun, acSwitch);
+      slowExtract = 0;
+      await setKey(EX);
+      assert(switchCode === 2 && count(/extract's start is refused \(key\) — no retry mends that, so the scheduler ends/) === 1 && count(/tries it again/) === 0,
+        `another process's --switch-key between sleeps ends the service with 2 at the next start, not a retry until a restart (exit ${switchCode})`);
+
+      // The worker key revoked between sleeps: the next start's identity
+      // refusal ends the service too (item 6).
+      const rawKey = "sleep-revoked-raw";
+      const keyedEnv = { ...env, OB1_WORKER_KEY: rawKey, MCP_ACCESS_KEYS: `sleep-revoked:capture:${hashKey(rawKey)}` };
+      await capture("A note the revocation interrupts.", "sync-sleep", 0, 12);
+      slowExtract = 3000;
+      lines.length = 0;
+      const acRevoke = new AbortController();
+      const revokeRun = sleepRun({ env: keyedEnv, follow: true, minStampEveryS: 1, signal: acRevoke.signal });
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      await sql`SELECT revoke_agent_key(${hashKey(rawKey)}, 'SMD-2752 live')`;
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the revoked key')`;
+      const revokeCode = await bounded(revokeRun, acRevoke);
+      slowExtract = 0;
+      assert(revokeCode === 2 && count(/start is refused \(identity\) — no retry mends that, so the scheduler ends/) === 1 && count(/The worker's key was revoked at .+ \(SMD-2752 live\)/) >= 1 && count(/tries it again/) === 0 && count(/\[extract\]\s+agent:  sleep-revoked/) === 1,
+        `a worker key revoked between sleeps ends the service with 2 at the next start, not a retry until a restart, its agent line said once (exit ${revokeCode}; ${count(/\[extract\]\s+agent:/)} agent line(s))`);
+
+      // A model the check saw served, gone at the first sleep's start (Ollama
+      // pulling it again): the check got that pass through its start, so the
+      // refusal is retried, as one after a sleep that ran is (item 6).
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      // A live read now: the scheduler stays awake its 2 s quiet after the
+      // check, stamping as it waits, so the model goes before the first sleep.
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check')`;
+      const acChecked = new AbortController();
+      const checkedRun = sleepRun({ follow: true, quiet: 2, minStampEveryS: 1, signal: acChecked.signal });
+      await pollUntil(async () => (await beat()) !== null, 10_000);
+      missing = true;
+      await pollUntil(async () => count(/tries it again/) >= 1, 20_000);
+      missing = false;
+      acChecked.abort();
+      const checkedCode = await bounded(checkedRun, acChecked);
+      assert(checkedCode === 0 && count(/extract refused at its start, which it passed earlier in this process, so the next sleep tries it again/) >= 1,
+        `a model the start's check saw served, missing at the first sleep's start, is retried rather than ending the service (exit ${checkedCode})`);
+    } finally {
+      missingModel = null;
+      slowExtract = 0;
+      await setKey(EX);
     }
   } finally {
     stub.stop(true);

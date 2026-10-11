@@ -9,7 +9,7 @@
  *   bun db/sleep.ts --url … --dry-run               # the idle reading and each pass's pool; writes nothing
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
  *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
- *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, followers running outside sleep, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
+ *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model or provider refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
  * The brain is awake while it is used: a read the server logged (query_log,
@@ -73,19 +73,31 @@
  * --quiet seconds after the newest live event — at most a minute apart.
  *
  * ── Refusals ────────────────────────────────────────────────────────────────
+ * Before its first quiet the scheduler runs each pass's start once (the
+ * engines' `check`, SMD-2752): the banner, the egress gate, the tables, the
+ * model's probe, the worker key and extraction's recorded key. A refusal
+ * there ends it with 2 at once — a bad worker key, a model not served, the
+ * judge's included, which a sleep would meet only once extraction's backlog
+ * drained. A provider that does not answer is no refusal: each pass waits for
+ * it at its own start. The passes each sleep starts leave their banner to it,
+ * and their end-of-run summary out (the counts and graph, scans the
+ * scheduler would wait for at a wake).
  * Every sleep starts its passes afresh, so each meets its start's refusals
- * again (the model not served, the key refused). One rule, on a fact the
- * scheduler has — whether the pass got past its start (the engines' onPass):
- *  - a refusal at the start of a pass that got past its start earlier in
- *    this process is retried under --follow on SMD-2599's outage schedule,
- *    heartbeat:sleep failed and re-stamped through the wait, until a pass of
- *    a later sleep stamps. What a retry can mend: a model re-pulled, a 402
- *    cleared by topping up credit, a gateway's passing 401/403/404. What it
- *    cannot, retried until the scheduler is restarted: a worker key revoked
- *    (the environment is read once; a revoked key stays so), another
- *    process's --switch-key (this process's job key is fixed);
- *  - a refusal at a pass's first start, or mid-pass (the provider refusing
- *    the request itself, a key refused on a real call), is the
+ * again. Each says which it is (worker-bootstrap.ts's StartRefusal), and one
+ * rule reads that and whether the pass got through its start in this process
+ * (the check, or onPass):
+ *  - one no retry mends — the worker key revoked (the environment is read
+ *    once, and the registry does not unrevoke), the extraction key another
+ *    process's --switch-key moved, the tables, the egress policy — ends the
+ *    scheduler with 2;
+ *  - the model not served or the provider refusing the call, at the start of
+ *    a pass that got through its start earlier, is retried under --follow on
+ *    SMD-2599's outage schedule, heartbeat:sleep failed and re-stamped
+ *    through the wait, until a pass of a later sleep stamps: a model
+ *    re-pulled, a 402 cleared by topping up credit, a gateway's passing
+ *    401/403/404;
+ *  - the same at a pass's first start, or a refusal mid-pass (the provider
+ *    refusing the request itself, a key refused on a real call), is the
  *    configuration's, as it is for a follower: it ends the scheduler with 2.
  *    So the same 402 or 401 ends it when it lands mid-pass, and is retried
  *    when a sleep's start meets it first;
@@ -118,8 +130,7 @@
  * start at every sleep, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
- * Quieter banners, start-time configuration checks, and a word for a pass
- * waiting on its provider (SMD-2752); a budget per pass
+ * A word for a pass waiting on its provider (SMD-2752); a budget per pass
  * (statement_timeout, work_mem) and per sleep (a wall clock), and the
  * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). The frozen-belief
  * scan, decay relabelling and an HNSW heal are their own tickets' passes
@@ -135,7 +146,7 @@ import { consolidateKey } from "../server-portable/consolidate.ts";
 import { STALE_AFTER_INTERVALS } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
-import { outageWait, throughOutage } from "./worker-bootstrap.ts";
+import { outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
@@ -335,7 +346,7 @@ export async function run(opts: SleepOptions): Promise<number> {
 }
 
 /** A pass the scheduler started: its run, its stop once the pass began, and the signal that stops it before. */
-type Running = { name: PassName; done: Promise<number>; settled: boolean; code: number | null; stop: PassStop | null; abort: AbortController; hushed: boolean };
+type Running = { name: PassName; done: Promise<number>; settled: boolean; code: number | null; stop: PassStop | null; abort: AbortController; hushed: boolean; start: StartResult | null };
 
 async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: number; poll: number; workers: number }, out: Writer["out"], err: Writer["err"]): Promise<number> {
   const { quiet: QUIET, poll: POLL, workers: WORKERS } = n;
@@ -380,21 +391,34 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     err(STOPPED_EARLY);
     return 130;
   }
+  /**
+   * A pass's lines, each tagged with its name, and its own words for a stop
+   * the scheduler made it take left out once `hushed` says so.
+   */
+  const tagged = (name: PassName, hushed: () => boolean): Writer => {
+    const tag = (line: string) => line.split("\n").map((l) => (l.trim() ? `  [${name}]${l}` : l)).join("\n");
+    const say = (write: Writer["out"]) => (l: string) => { if (!(hushed() && PASS_STOP_LINE.test(l))) write(tag(l)); };
+    return { out: say(out), err: say(err) };
+  };
+  /**
+   * A refusal at the start, under --follow said on the row too, ended on a
+   * failure, so preflight's `sleep` row names what keeps the service down
+   * rather than reading it as never run, or as one to start again (review
+   * pass 3). The row's last sleep is carried over, since a stamp writes the
+   * whole value (review pass 4).
+   */
+  const endAtStart = async (): Promise<void> => {
+    if (!FOLLOW) return;
+    const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
+    once.watching?.(logState);
+    const last = await lastSlept(sql).catch(() => null);
+    if (last) once.slept?.(last);
+    await once.end("failed");
+  };
   if (outside.length) {
     err(outsideLine(outside, opts.dryRun === true));
     if (!opts.dryRun) {
-      // Under --follow the refusal is said on the row too, ended on a failure,
-      // so preflight's `sleep` row names the followers rather than reading a
-      // service the refusal keeps down as never run, or as one to start again
-      // (review pass 3). The row's last sleep is carried over, since a stamp
-      // writes the whole value (review pass 4).
-      if (FOLLOW) {
-        const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
-        once.watching?.(logState);
-        const last = await lastSlept(sql).catch(() => null);
-        if (last) once.slept?.(last);
-        await once.end("failed");
-      }
+      await endAtStart();
       return 2;
     }
   }
@@ -418,6 +442,44 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     return 0;
   }
 
+  // ── The passes' starts, checked once (SMD-2752) ──────────────────────────
+  // Each pass's own start — its banner, the egress gate, the tables, the
+  // model's probe, the worker key, extraction's recorded key — run once here
+  // (the engines' `check`), so a misconfiguration ends the service at its
+  // start rather than at the first quiet, or after extraction's backlog for
+  // consolidation's judge. The passes each sleep starts leave their banner to
+  // this. A provider that does not answer is no refusal: each pass waits for
+  // it at its own start, as before.
+  /**
+   * The passes whose start got through in this process — the provider
+   * answered their probe, the keys resolved — at this check or at a sleep's
+   * start (onPass). A model or provider refusal at a later start is then one
+   * a re-pull or a top-up can mend, and is retried (review pass 3 of
+   * SMD-1794; the check feeds it since SMD-2752).
+   */
+  const begun = new Set<PassName>();
+  for (const pass of PASSES) {
+    // Written in the callback, which control-flow analysis does not follow:
+    // the cast keeps the declared type (SMD-1932's idiom).
+    let result = null as StartResult | null;
+    const code = await (pass === "extract" ? runExtract : runConsolidate)({
+      url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: opts.signal, check: true,
+      onStart: (r) => { result = r; }, writer: tagged(pass, () => false),
+    });
+    // The engine said its own "stopped before the pass began".
+    if (code === 130) return 130;
+    if (code !== 0) {
+      err(`  ${pass}'s start is refused${result && !result.ok ? ` (${result.refused})` : ""} — the scheduler does not start: fix what it names, then start the service again`);
+      await endAtStart();
+      return code;
+    }
+    if (result?.ok && result.provider === "up") begun.add(pass);
+  }
+  // A stop during the checks, landed after the last of them returned: a stop before the run began.
+  if (opts.signal?.aborted) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
@@ -432,14 +494,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const words: Partial<Record<PassName, PassOutcome>> = {};
   let malformed: MalformedBlock | null | undefined;
   const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
-  /**
-   * The passes that have got past their start in this process (onPass): the
-   * provider answered their probe and the key resolved, at least once. A
-   * refusal at a later start — before onPass — is then one a restart could
-   * meet as well, and is retried (review pass 3, replacing passes 1 and 2's
-   * "has run").
-   */
-  const begun = new Set<PassName>();
   /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
     key: stamper.key,
@@ -514,13 +568,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   let passEnded = new AbortController();
   const start = (name: PassName): Running => {
     const abort = new AbortController();
-    const tag = (line: string) => line.split("\n").map((l) => (l.trim() ? `  [${name}]${l}` : l)).join("\n");
-    const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort, hushed: false };
-    const say = (write: Writer["out"]) => (l: string) => { if (!(p.hushed && PASS_STOP_LINE.test(l))) write(tag(l)); };
+    const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort, hushed: false, start: null };
+    // Its banner and its summary's queries are left out: the check said the
+    // one at the scheduler's start, and the other is a scan the scheduler
+    // would wait for at a wake (SMD-2752). Its start is reported, so a
+    // refusal is told apart.
     const common = {
       url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
+      banner: false, summary: false,
+      onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
-      writer: { out: say(out), err: say(err) },
+      writer: tagged(name, () => p.hushed),
     };
     const ended = passEnded;
     p.done = (name === "extract" ? runExtract(common) : runConsolidate(common)).then((code) => {
@@ -622,7 +680,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * got past its start in this sleep; or "outside" when a poll found a
    * follower running outside it, the passes stopped (hard) first.
    */
-  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | "outside" | { pass: PassName; code: number; started: boolean }> => {
+  const asleep = async (since: Date): Promise<"woken" | "done" | "stopped" | "outside" | { pass: PassName; code: number; started: boolean; refused?: StartRefusal }> => {
     for (const k of PASSES) delete words[k];
     passEnded = new AbortController();
     const wake = AbortSignal.any([onStop.signal, passEnded.signal]);
@@ -664,7 +722,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         await stopPasses(true);
         const code = ended.code || 1;
         err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
-        return { pass: ended.name, code, started: ended.stop !== null };
+        return { pass: ended.name, code, started: ended.stop !== null, refused: ended.start && !ended.start.ok ? ended.start.refused : undefined };
       }
       const woke = newer(live.read, live.write);
       if (woke !== null) {
@@ -740,7 +798,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // start, or mid-pass (the provider refusing the request itself, a key
         // refused on a real call), is the configuration's, as for a follower;
         // any other code is no refusal: each ends the run (review pass 3).
-        if (!FOLLOW || r.code !== 2 || r.started || !begun.has(r.pass)) {
+        // A refusal the pass names as one no retry mends — the worker key
+        // revoked, the extraction key another run switched, the tables, the
+        // egress policy — ends it too, where it was retried until a restart:
+        // the environment is read once, and the registry does not unrevoke
+        // (SMD-2752).
+        const permanent = r.refused !== undefined && PERMANENT_REFUSALS.has(r.refused);
+        if (FOLLOW && r.code === 2 && !r.started && permanent) err(`  ${r.pass}'s start is refused (${r.refused}) — no retry mends that, so the scheduler ends: fix what it names, then start the service again`);
+        if (!FOLLOW || r.code !== 2 || r.started || permanent || !begun.has(r.pass)) {
           await stamper.end("failed", malformed ?? undefined);
           return r.code;
         }

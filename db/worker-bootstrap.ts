@@ -249,6 +249,28 @@ export function databaseUnavailable(e: unknown): boolean {
 }
 
 /**
+ * Which of a pass's start refusals it hit (SMD-2752): its options
+ * (`usage`), the egress gate (`egress`), the lease and entity tables
+ * (`tables`), a model the provider does not serve (`model`), the provider
+ * refusing the call itself — a key, a base URL, a 402 (`provider`), the
+ * worker key (`identity`), or the extraction key another run recorded
+ * (`key`). The sleep scheduler ends on the ones no retry mends, and retries
+ * `model` and `provider`, which a re-pull or a top-up can.
+ */
+export type StartRefusal = "usage" | "egress" | "tables" | "model" | "provider" | "identity" | "key";
+
+/** A pass's start, as its run reports it to `onStart`: through, with the provider answering at its probe or not yet; or refused, and why. */
+export type StartResult = { ok: true; provider: "up" | "out" } | { ok: false; refused: StartRefusal };
+
+/** The start refusals a retry cannot mend: the scheduler reads its environment once, and the database's tables, keys and registry do not change under it by waiting. */
+export const PERMANENT_REFUSALS: ReadonlySet<StartRefusal> = new Set(["usage", "egress", "tables", "identity", "key"]);
+
+/** The refusal a start probe's answer is: the model not served, or the provider refusing the call. */
+export function probeRefusal(p: Probe): StartRefusal {
+  return p.state === "missing" ? "model" : "provider";
+}
+
+/**
  * Whether the worker key's lookup should wait on a database error: an outage
  * of databaseUnavailable's, but not too many connections (53300). The lookup
  * opens a connection of its own beside the pass's pool, so at

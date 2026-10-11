@@ -2790,7 +2790,7 @@ bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ev
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, followers running outside sleep, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model or provider refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as its own service: `--profile sleep`
@@ -2831,15 +2831,29 @@ of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A thought
 longer than every sleep is never finished while the brain keeps waking, and
 consolidation does not join while it is pending (SMD-2694). A failed row stays
-failed: `--retry-failed` is the operator's. A pass refusing at its start (the
-model not served, the key refused) after it got past its start earlier in this
-process is retried on SMD-2599's schedule (5 s, doubling, at most 5 min): that
-mends a model re-pulled, a 402 cleared by topping up credit, a gateway's
-passing 401/403/404 — not a revoked worker key or another process's
-`--switch-key`, which are retried until you restart it with the right key. A
-refusal at a pass's first start, or mid-pass (the provider refusing the
-request itself), ends the scheduler with 2, as it ends a follower — so the
-same 402 ends it mid-pass and is retried when a sleep's start meets it first.
+failed: `--retry-failed` is the operator's.
+
+**Its start, and refusals.** Before its first quiet it runs each pass's start
+once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
+the model's probe, the worker key, extraction's recorded key. A refusal there
+ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
+not served (the judge's met there, not once extraction's backlog drains), or an
+`entity_extraction_key` recorded under another model. A provider that does not
+answer is no refusal; each pass waits for it at its own start. The passes each
+sleep starts then print no banner and run no end-of-run summary (its counts
+and graph, scans a wake would wait for). Every sleep's passes meet their start's
+refusals again, and each names which it is:
+- the worker key revoked, the extraction key moved by another process's
+  `--switch-key`, the tables, the egress policy — no retry mends these, and
+  the scheduler ends with 2 (until SMD-2752 they were retried until a restart);
+- the model not served or the provider refusing the call, at the start of a
+  pass that got through its start before (the check, or an earlier sleep), is
+  retried on SMD-2599's schedule (5 s, doubling, at most 5 min) — a model
+  re-pulled, a 402 cleared by topping up credit, a gateway's passing
+  401/403/404 — and at a pass's first start ends it with 2;
+- a refusal mid-pass (the provider refusing the request itself) ends the
+  scheduler with 2, as it ends a follower — so the same 402 ends it mid-pass
+  and is retried when a sleep's start meets it first.
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
 with `slept`, the current or last sleep's start and, once it is over, its
@@ -2883,8 +2897,7 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); quieter banners, configuration checks at its start and the
-provider-wait word (SMD-2752).
+(SMD-2679); the provider-wait word (SMD-2752).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -4035,7 +4048,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2716 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1246 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1252 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

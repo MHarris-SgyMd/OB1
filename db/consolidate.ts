@@ -154,7 +154,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -266,6 +266,20 @@ export interface ConsolidateOptions {
    * (SMD-1794). Null stamps nothing. Unused by a one-shot run.
    */
   stamper?: PassStamper | null;
+  /**
+   * A follower's start alone (SMD-2752), as extract-entities.ts's: the
+   * banner, the egress gate, the tables, the judge model's probe, the worker
+   * key — then 0, before the first write, without waiting for a provider
+   * that does not answer; or the start's refusal (2). Needs `follow`, and is
+   * a run's, not a review's.
+   */
+  check?: boolean;
+  /** False leaves out the start's banner — the job, model and egress lines, the agent line or the no-key warning, the workers line — for a pass the sleep scheduler drives (SMD-2752). */
+  banner?: boolean;
+  /** False leaves out the end-of-run summary — the counts and the queue — and a stopping pass's last count of the pool, which the scheduler waits for at a wake (SMD-2752). */
+  summary?: boolean;
+  /** How the start went (worker-bootstrap.ts's StartResult), called once (SMD-2752). */
+  onStart?: (r: StartResult) => void;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -373,33 +387,29 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" |
  */
 export async function run(opts: ConsolidateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  /** A refusal of the options themselves: said, reported as the start's `usage`, 2. */
+  const usage = (line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: "usage" });
+    return 2;
+  };
   // A blank value where the CLI's scanner refuses one first, in its words and
   // with its flag list: `--job ""` reaches no run (SMD-2425, as reembed's).
   const blank = blankProblem(FLAGS, { dump: opts.dump, list: opts.list, accept: opts.accept, reject: opts.reject, direction: opts.direction, note: opts.note });
-  if (blank !== null) {
-    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
-    return 2;
-  }
+  if (blank !== null) return usage(`${blank}\n${flagList(FLAGS, HINTS)}`);
   // databaseUrl's two refusals without its exit, then the numbers and the
   // review flags. A URL beside a caller's client is the worker key's (above),
   // so it is held to the rule too.
   const noUrl = opts.url == null || opts.url.trim() === "";
   const urlProblem = noUrl ? (opts.sql == null ? NO_DATABASE_URL : null) : databaseUrlProblem(opts.url as string);
-  if (urlProblem !== null) {
-    err(urlProblem);
-    return 2;
-  }
+  if (urlProblem !== null) return usage(urlProblem);
   const settled = numbers(opts);
-  if (typeof settled === "string") {
-    err(settled);
-    return 2;
-  }
+  if (typeof settled === "string") return usage(settled);
   const review = reviewProblem(opts);
-  if (review !== null) {
-    err(review);
-    return 2;
-  }
+  if (review !== null) return usage(review);
   const reviewing = opts.list != null || opts.accept != null || opts.reject != null || settled.stale > 0;
+  // The check is a follower run's start, its probe included (SMD-2752).
+  if (opts.check && (!settled.follow || reviewing || opts.status === true || opts.dryRun === true)) return usage("consolidate.ts: check is a follower run's start — pass follow beside it, and no review, --status or --dry-run.");
   const deciding = opts.accept != null || opts.reject != null;
   // A run and a decision write — resolve the key, and stop under an aborted
   // signal; --status, --dry-run, --list and --stale only read (review pass 2:
@@ -411,8 +421,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
     // other workers — and a rollback from the database.
     const handle = opts.sql as { release?: unknown; savepoint?: unknown };
     if (typeof handle.release === "function" || typeof handle.savepoint === "function") {
-      err("consolidate.ts needs a pool, not a reserved connection or a transaction's handle: either is one connection whatever max it reports, and a transaction's claims are no other worker's until it commits. Pass the client itself, or a URL.");
-      return 2;
+      return usage("consolidate.ts needs a pool, not a reserved connection or a transaction's handle: either is one connection whatever max it reports, and a transaction's claims are no other worker's until it commits. Pass the client itself, or a URL.");
     }
     // One connection per worker and one spare: the heartbeat (db/lease.ts)
     // beats through the pool, and a worker parked on a lock or a long statement
@@ -421,12 +430,10 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
     // lapse 031 removed. Bun's default pool is ten.
     const max = Number((opts.sql as { options?: { max?: number } }).options?.max ?? 10);
     if (max < settled.workers + 1) {
-      err(`consolidate.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts). Pass a client opened with a larger max option, or a URL.`);
-      return 2;
+      return usage(`consolidate.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts). Pass a client opened with a larger max option, or a URL.`);
     }
     if (noUrl && (opts.env ?? process.env).OB1_WORKER_KEY && writes) {
-      err("consolidate.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
-      return 2;
+      return usage("consolidate.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
     }
   }
   // A signal aborted before the call: nothing opened, nothing written. --status,
@@ -491,6 +498,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     stoppedEarly();
     return 130;
   };
+  /** The start alone, for the sleep scheduler's check (SMD-2752): run() refused it beside anything but a follower run. */
+  const CHECK = opts.check === true;
+  /** The start's banner, which a pass the scheduler drives leaves to its check (SMD-2752). */
+  const say: Writer["out"] = opts.banner === false ? () => {} : out;
+  /** The end-of-run summary's queries, which a pass the scheduler drives leaves out (SMD-2752). */
+  const SUMMARY = opts.summary !== false;
+  /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
+  const refused = (kind: StartRefusal, line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: kind });
+    return 2;
+  };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
@@ -498,14 +517,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // another pass — --status and preflight report each by name.
   const JOB = consolidateKey(cfg.judgeModel);
 
-  out(`  job:    ${JOB}`);
+  say(`  job:    ${JOB}`);
   // Which knob named it is read off the resolved pair, not the raw variable: a
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
-  if (!REVIEW_ONLY) out(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
+  if (!REVIEW_ONLY) say(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
-  if (!REVIEW_ONLY) out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+  if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
   {
     // A policy that refuses whatever the row (SMD-1903): stop before claiming,
     // rather than fail every row in the pool one at a time. A dry run and
@@ -514,10 +533,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // worker key's name as the actor when one is set — re-checked below once
     // the key has, or has not, resolved (third review pass).
     const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "judged", localKnobKey: localKnob(cfg, "chat") });
-    if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
-      err(`\n  ${blanket}`);
-      return 2;
-    }
+    if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) return refused("egress", `\n  ${blanket}`);
   }
 
   // ── The database's side ─────────────────────────────────────────────────────
@@ -526,10 +542,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     SELECT count(*)::int AS tables FROM pg_class
     WHERE relname IN ('thought_work_claims', 'thought_entities', 'supersession_proposals') AND relkind = 'r'`)[0].tables));
   if (tables === null) return stoppedWaiting();
-  if (tables < 3) {
-    err("\n  The lease table, the entity tables or the proposal table are missing. Apply migrations 015, 016 and 029 first:\n    cd db && bun migrate.ts --url …");
-    return 2;
-  }
+  if (tables < 3) return refused("tables", "\n  The lease table, the entity tables or the proposal table are missing. Apply migrations 015, 016 and 029 first:\n    cd db && bun migrate.ts --url …");
 
   // ── The provider, for a follower (SMD-2599) ─────────────────────────────────
 
@@ -572,10 +585,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (stoppedEarly()) return 130;
     const first = await probe(undefined, opts.signal);
     const refusal = startRefusal(first);
-    if (refusal) {
-      err(refusal);
-      return 2;
-    }
+    if (refusal) return refused(probeRefusal(first), refusal);
     if (first.state === "out") startOut = first.why;
   }
 
@@ -596,17 +606,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
     // A follower's lookup waits a database outage out, rather than writing its proposals unattributed.
+    // The agent line and the no-key warning are the banner's; a lookup that
+    // could not resolve is warned of whatever the banner (SMD-2752).
     const id = await atStart(() => workerIdentity(opts.url ?? "", env, {
-      noKeyWarning: `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
-      write: out,
-      warn: err,
+      noKeyWarning: opts.banner === false ? "" : `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
+      write: say,
+      warn: (l) => { if (l) err(l); },
       outage: FOLLOW ? lookupOutage : undefined,
     }));
     if (id === null) return stoppedWaiting();
-    if (!id.ok) {
-      err(id.message);
-      return 2;
-    }
+    if (!id.ok) return refused("identity", id.message);
     agentId = id.identity.agentId;
     keyName = id.identity.keyName;
     // The audit label above is not an actor; the resolved key's name, when there
@@ -616,10 +625,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // check above credited one, so it is asked again without (third review pass).
     if (env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
       const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
-      if (again) {
-        err(`\n  ${regateMessage("judged", again)}`);
-        return 2;
-      }
+      if (again) return refused("egress", `\n  ${regateMessage("judged", again)}`);
     }
   }
 
@@ -1069,6 +1075,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (079)`);
   }
 
+  // The check ends here, before the first write — --retry-failed's, the
+  // pool's — and without waiting for a provider that does not answer: each
+  // pass waits for it at its own start (SMD-2752).
+  if (CHECK) {
+    // The run's relations note, said once here for the passes that leave their banner out.
+    if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged then gets no relation until its claim is cleared`);
+    if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
+    opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
+    return 0;
+  }
+
   if (STATUS_ONLY || DRY_RUN) {
     const c = await counts();
     printCounts(c, STATUS_ONLY ? "status" : "before");
@@ -1104,10 +1121,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out");
     if (answered) {
       const refusal = startRefusal(answered);
-      if (refusal) {
-        err(refusal);
-        return 2;
-      }
+      if (refusal) return refused(probeRefusal(answered), refusal);
       out(`  the provider answers after ${Math.round((Date.now() - down) / 1000)} s`);
     }
   }
@@ -1774,6 +1788,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   };
   if (stoppedEarly()) return 130;
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
+  // Through the start: the provider answered its probe, at once or after the wait (SMD-2752).
+  opts.onStart?.({ ok: true, provider: "up" });
   opts.onPass?.(stop);
 
   /**
@@ -1851,10 +1867,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
     if (thrown) throw thrown.reason;
     progress(true);
-    return counts();
+    // A stopping pass's count is read only for the summary (SMD-2752), as extract-entities.ts's.
+    return stopping && !SUMMARY ? before : counts();
   }
 
-  out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
+  say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
   /**
    * A follower's pass, which a database outage does not end (SMD-2599), as
@@ -1887,7 +1904,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
-  if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
+  if (RELATIONS_OFF) say(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
   let after = await followedPass();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
@@ -1960,15 +1977,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (after === null) {
     // A follower stopped while it waited for the database: the counts
     // cannot be read, and are not guessed (SMD-2599).
-    err(`\n  stopped while the database was not answering: the pool's counts and the queue are not read — --status reads them once it answers`);
+    if (SUMMARY) err(`\n  stopped while the database was not answering: the pool's counts and the queue are not read — --status reads them once it answers`);
     if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
     return configError ? 2 : hardStopped ? 130 : 0;
   }
-  printCounts(after, "after");
-  await printQueue();
-  if (after.failed > 0) {
-    err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
-    await printFailures();
+  // The summary's queries are the run's report, not a pass the scheduler
+  // drives: it waits for them at a wake (SMD-2752).
+  if (SUMMARY) {
+    printCounts(after, "after");
+    await printQueue();
+    if (after.failed > 0) {
+      err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
+      await printFailures();
+    }
   }
   if (after.claimed > 0 && !stopping) {
     err(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat; --status names each holder, and a dead one's rows return at once with SELECT release_claims_for_worker(job, worker_id).`);
