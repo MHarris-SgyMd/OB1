@@ -2848,6 +2848,7 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_OTEL_TRUST_TRACEPARENT: "the telemetry settings (SMD-1849 PR 2b), which reach the servers beside the OTEL_* variables by the observability profile (PR 3) or a second -f file, never this file's forwards: trusting a caller's traceparent is a proxy deployment's to say, not the stack's default",
   OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
@@ -5298,7 +5299,7 @@ const INDEX_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./render.ts", "*"],
     // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
     ["./oauth-edge.ts", "*"],
-    // The request's JSON line (SMD-1849): an allow-list and a sink, no store, no provider.
+    // The request's JSON line and its spans (SMD-1849): an allow-list, a sink and the OpenTelemetry API; the SDK only through startTelemetry; no store, no provider.
     ["./telemetry.ts", "*"],
     // The core's deadlines and filter parser — its operations are reached through createCore.
     ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
@@ -5331,8 +5332,8 @@ const API_ROLE: TransportRole = {
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
-    // The stop's lines for what it cuts (SMD-1849): request records, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849): request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "flushTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",

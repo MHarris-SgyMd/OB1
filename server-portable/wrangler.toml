@@ -25,6 +25,9 @@ OB1_STORE = "postgrest"
 
 # store-sql.ts imports Bun's Postgres client. Workers never selects that store
 # (OB1_STORE above), but the bundler still has to resolve the specifier — map it
-# to a stub that throws with an explanation if it is somehow reached.
+# to a stub that throws with an explanation if it is somehow reached. Likewise
+# otel-setup.ts, the OpenTelemetry SDK, which telemetry.ts loads only on Bun:
+# unmapped, the bundler would put the whole SDK in the Worker (SMD-1849 PR 2b).
 [alias]
 bun = "./shims/bun-unavailable.ts"
+"./otel-setup.ts" = "./shims/otel-unavailable.ts"

@@ -20,7 +20,7 @@ import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOpti
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
-import { beginRequest, endsWithStream, errorCode, knowTools, logRequest, outcomeOf, requestLine, traceOf, type RequestRecord } from "../telemetry.ts";
+import { beginRequest, endsWithStream, errorCode, knowTools, logRequest, outcomeOf, requestLine, traceOf, withToolSpan, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -72,6 +72,24 @@ async function boundedBody(req: Request, limit: number): Promise<Uint8Array | nu
   let at = 0;
   for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
   return out;
+}
+
+/**
+ * An operation's call under its tool's span (telemetry.ts, PR 2b), ended with
+ * how the operation ended: `ok`, a refusal with its code, or — thrown — an
+ * error with the code its answer will carry.
+ */
+function traced<O extends { ok: boolean }>(tool: string, faultCode: string, call: () => Promise<O>): Promise<O> {
+  return withToolSpan(tool, async (span) => {
+    try {
+      const outcome = await call();
+      span.end(outcome.ok ? "ok" : "refused", (outcome as { refusal?: { code?: string } }).refusal?.code);
+      return outcome;
+    } catch (err) {
+      span.end("error", faultCode);
+      throw err;
+    }
+  });
 }
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
@@ -207,7 +225,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const trace = beginRequest("api", c.req.raw, write);
     try {
       deps.init();
-      await next();
+      // Under the request's span, so the operation's span is its child (PR 2b).
+      await trace.run(next);
     } catch (err) {
       // An Error goes on to onError, whose 500 says FAILED; a non-Error escapes, with no body.
       trace.end({ status: 500, outcome: "error", code: err instanceof Error ? "FAILED" : undefined });
@@ -406,7 +425,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
 
       let outcome;
       try {
-        outcome = await route.call(deps.core, p, read.input as never, { track: deps.track });
+        outcome = await traced(name, route.fault ?? "FAILED", () => route.call(deps.core, p, read.input as never, { track: deps.track }));
       } catch (err) {
         // A fault: FAILED with what was thrown, as the MCP tool's text says it
         // to the same key; no `retryable` until SMD-2461 classifies faults —
@@ -467,7 +486,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (head) return head;
     let outcome;
     try {
-      outcome = await runOperation(op, { core: deps.core, principal: p, track: deps.track }, read.input);
+      outcome = await traced(op.tool, "FAILED", () => runOperation(op, { core: deps.core, principal: p, track: deps.track }, read.input));
     } catch (err) {
       return c.json(failure(err), 500);
     }

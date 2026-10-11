@@ -410,6 +410,18 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   // tool's error — the operation ran, through the server's registration.
   const ran = (await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 2 } })).result as { isError?: boolean; content?: { text: string }[] } | undefined;
   assert(ran?.isError === true && /^Error: .*DATABASE_URL/.test(ran.content?.[0]?.text ?? ""), `a read key's call runs the operation through to the core, whose fault is the tool's error (${ran?.content?.[0]?.text?.slice(0, 120)})`);
+  // Its line says how the call ended, as a core tool's does (SMD-1849 PR 2b: a plugin call told its request nothing, so the line read `unrun`).
+  const { useRequestLog } = await import("./telemetry.ts");
+  const said: string[] = [];
+  const before = useRequestLog((l) => said.push(l));
+  try {
+    await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 2 } });
+    await Bun.sleep(30);
+  } finally {
+    useRequestLog(before);
+  }
+  const line = JSON.parse(said[0] ?? "{}") as Record<string, unknown>;
+  assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
   const bad = await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 50 } });
   assert(JSON.stringify(bad).includes("limit") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument past its schema is refused before the operation runs");
 }
@@ -728,6 +740,31 @@ console.log("\n[12] verifyTimestamped: the HMAC over prefix, timestamp, separato
   let thrown = "";
   try { v({ "x-ts": String(at), "x-sig": sig(String(at)) }, at * 1000, -5); } catch (e) { thrown = (e as Error).message; }
   assert(/toleranceSeconds -5 is not a positive number/.test(thrown), "a tolerance that is no positive number is the plugin's fault: thrown");
+}
+
+console.log("\n[13] A plugin operation over REST has its span under its request's, as a core route's does (SMD-1849 PR 2b review pass 2)");
+{
+  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { setUpTracing } = await import("./otel-setup.ts");
+  const exporter = new InMemorySpanExporter();
+  const tracing = setUpTracing("open-brain-api-test", { exporter });
+  try {
+    answer = async () => coreOk({ thoughts: [] });
+    await (await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" })).text();
+    answer = async () => coreRefuse({ code: "REFUSED_SINCE", retryable: false, since: "x" } as never);
+    await (await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" })).text();
+    const spans = exporter.getFinishedSpans();
+    const requests = spans.filter((sp) => sp.kind === SpanKind.SERVER);
+    const ops = spans.filter((sp) => sp.name === "execute_tool example_recent");
+    const under = ops.every((op, i) => op.parentSpanContext?.spanId === requests[i]?.spanContext().spanId);
+    assert(requests.length === 2 && requests[0]?.name === "GET /v1/plugins/example/recent" && ops.length === 2 && under
+      && ops[0]?.attributes["ob1.outcome"] === "ok" && ops[1]?.attributes["ob1.outcome"] === "refused" && ops[1]?.attributes["ob1.code"] === "CORE_REFUSED",
+      `each call's operation span under its request's: \`ok\`, then \`refused\` with the plugin's code (${JSON.stringify(spans.map((sp) => [sp.name, sp.attributes["ob1.outcome"], sp.attributes["ob1.code"]]))})`);
+  } finally {
+    answer = async () => coreOk({ thoughts: [] });
+    await tracing.shutdown();
+  }
 }
 
 report();

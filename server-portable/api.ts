@@ -12,7 +12,7 @@ import { createCore } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
-import { cutOpenRequests } from "./telemetry.ts";
+import { cutOpenRequests, flushTelemetry, startTelemetry } from "./telemetry.ts";
 
 /**
  * The door a write through this server names in its actor (`via`), which
@@ -46,6 +46,8 @@ if (SERVES_ON_BUN) {
   // jobs carry its door and its start-up reconcile touches only those, so the
   // MCP server's live jobs on the same database are left alone (migration 078).
   serveHere(API_DOOR);
+  // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849 PR 2b).
+  void startTelemetry(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({
@@ -53,6 +55,8 @@ if (SERVES_ON_BUN) {
     server: () => bunServer,
     calls,
     close: closeStore,
+    // The spans still batched go beside the pool's close, under its bound, said on their own.
+    flush: flushTelemetry,
     onCut: () => {
       // Every request still in flight gets its line — `cut`, or `abandoned`
       // for a client already gone — before the process exits — the middleware would write it after the handler, and

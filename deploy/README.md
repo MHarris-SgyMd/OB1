@@ -841,9 +841,11 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
+| `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
 
-A line never holds the URL, its query string, a header, a key, a body, a
-tool's arguments or a thought's or a search's text. Search text has its own
+A line never holds the URL, its query string, a header (but an incoming
+`traceparent`'s trace id, the `trace` key), a key, a body, a tool's arguments
+or a thought's or a search's text. Search text has its own
 home, the query log (migration 034), behind its own switch and retention; this
 is not a second copy. `test-server.ts` [21] sends a key in `?key=`, planted
 search text and a tool name carrying a line break and planted text through the
@@ -894,6 +896,100 @@ replaces an engine-wide default an operator has set (journald, a log shipper's
 driver); to keep one, set each service's `logging:` in a second `-f` file
 (an anchor is read within its own file, so an `x-logging` there changes
 nothing here).
+
+### Traces
+
+Each request is also an OpenTelemetry span, and each tool call (an MCP
+`tools/call`, a REST operation, a plugin's) a span under it (SMD-1849 PR 2b) —
+recorded and sent only when the server's environment names a collector:
+
+| Variable | What it does |
+| -- | -- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP/HTTP base URL (`http://lgtm:4318`); spans go to `<it>/v1/traces` as JSON, batched. With neither this nor the next set — the default — nothing is recorded or sent, and a span costs the server well under a microsecond. One that is no http(s) URL sends nothing, and the server says so at start |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | the traces URL itself, over the base |
+| `OTEL_EXPORTER_OTLP_HEADERS` | headers for the collector (`authorization=Bearer …`) |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE` | the CA certificate for an https collector with its own; never `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off every certificate check the server makes |
+| `OB1_OTEL_TRUST_TRACEPARENT=1` | continue a caller's `traceparent`, for a deployment whose proxy sets it. Unset — the default — a request starts its own trace and links the caller's: a caller chooses its `traceparent`, and continued it would choose the request's trace (joining any trace it knows, colliding with another request's line) and, under a ratio, its sampling |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | the batch's queue, 2,048 by default and 65,536 at most (said at start when held): each span waiting costs about 6 KB |
+| `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none` | off, with an endpoint set; said at start |
+| `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server) or `open-brain-api` |
+| `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment=canary`); a key it names wins, `service.version` included |
+| `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id. Under `always_off` a line names a trace no span was exported for |
+
+In `deploy/`'s compose stacks the server's and the REST core's environments
+are listed, and no `OTEL_*` variable is among them until the `observability`
+profile (SMD-1849 PR 3) brings a collector and the variables with it; until
+then, name them in a second `-f` file.
+
+At start the server says where its spans go — the variable, the endpoint's
+origin and the service's name (held to printable ASCII), so a credential in
+the URL stays out of the log. Spans not sent
+— an export that failed, or spans the batch's full queue (2,048) dropped —
+are said on stderr at most once a minute: how many, the origin and the kind
+(`HTTP 400`, `ECONNREFUSED`, `DEPTH_ZERO_SELF_SIGNED_CERT`, `timed out`,
+`retryable status, retries spent`, `too many exports at once`, `queue full`) — each kind with its count when a
+minute held more than one, five at most and the rest as `others` — never the
+error's message or a header. A count held inside a minute is said when the
+minute ends; at the stop, what is still unsaid is said, the stop's own
+flush's failures included when the flush ends inside the stop's bound (a
+collector that is down retries until its export's timeout, so the stop says
+only `; spans not sent within N ms`) and the full queue's drops counted
+exactly. Spans a collector answers 200 but rejects (an OTLP partial success)
+are not counted. A throw while the SDK loads leaves the server serving, said
+by the error's name alone. The stop sends what is
+still batched, and waits for what is on its way, beside closing its pool and
+under the same bound, and says which on its own: `; spans sent`, `; spans not
+sent` (an export failed), `; no spans left to send`, or `; spans not sent
+within N ms` (or `: a second signal`) — never as the pool's.
+
+A span holds the line's values and nothing else: its name (`tools/call
+capture_thought`, `GET /v1/thoughts/:id`), `http.request.method` (`_OTHER` for
+a method outside the known set), `http.route`, `http.response.status_code`
+(only for an answer the client was handed — none for an `abandoned` or a `cut`
+request), `http.response.body.size`, `mcp.method.name` (with
+`gen_ai.operation.name` and `gen_ai.tool.name` for a `tools/call` of a known
+tool that ran — not one refused at its key, nor one that never ran), and
+`ob1.door`, `ob1.tool`, `ob1.agent`, `ob1.outcome` and `ob1.code` as the line
+has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
+method outside the schema's). No `url.*`: the path is a key's or an id's, and
+behind the proxy the scheme is not the server's to know. A tool call's span is
+`execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
+operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none);
+a REST capture saved without its vector is an `ok` request (its 201) over a
+`refused` operation (`EMBEDDING_NOT_ATTACHED`), as the MCP tool says it. A
+request's span is an ERROR for a 5xx it answered (a 503 `BUSY` refusal
+included, as the HTTP conventions have it) or an `error`, `stalled` or `cut`
+request, a tool call's for an `error` or a `cut`; `error.type` is its code, else
+its outcome. A refusal answered below 500 — a 4xx, or a refusal as a value
+inside an MCP 200 — is not an ERROR: the request was served, and `ob1.outcome`
+and `ob1.code` say it was refused. Of a caller's W3C headers only
+`traceparent` is read — a `tracestate`, its text, is left behind — and it is
+a link on the request's span (its trace and span ids, as the caller sent
+them), not its parent, unless trusted. Never the
+URL, a query string, another header, a key, a body, an argument or any text —
+`test-server.ts` [22] sends each and looks for it in every span's name,
+attributes, events, status, trace state and resource; `test-rest.ts` [12]
+sends a key, query strings (one a `query=` at `/v1/search`) and a fault's message and looks in each span's name,
+attributes, events and status, and in what a real `bun api.ts` exports.
+
+Where the spans go is the operator's decision: the brain is personal data, and
+a collector off this machine is a place it then goes; the `observability`
+profile (SMD-1849 PR 3) will keep them on it. What leaves is usage metadata:
+per request `http.request.method`, `http.route`, `http.response.status_code`,
+`http.response.body.size`, `mcp.method.name`, `gen_ai.operation.name`,
+`gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
+`ob1.outcome`, `ob1.code` and `error.type`; per tool call `gen_ai.tool.name`,
+`ob1.outcome`, `ob1.code` and `error.type`; the trace, span and linked ids,
+timestamps to the nanosecond, and a resource of `service.name`,
+`service.version` and `telemetry.sdk.*` (no host, no process). Together they
+are a timeline of which client called which tool, when, and how much came
+back — so name keys after clients, not people (`ob1.agent`), before pointing
+at a collector elsewhere. Any client can fill the batch's queue (a keyless
+flood, or a 100-call batch, 101 spans), and while the collector lags the
+spans past it are dropped — said as `queue full` — though every line is still
+written. Cloudflare Workers runs the
+API's no-ops alone — `wrangler.toml` keeps the SDK out of the Worker, and CI
+holds that.
 
 ## Keeping the board in the brain
 
