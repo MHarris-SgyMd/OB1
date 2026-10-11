@@ -82,7 +82,10 @@
  * and waited out, checking after 5 s and twice as long each time up to 5 min
  * (worker-bootstrap.ts, waitOut), and polling resumes when it answers. A
  * thought in hand is recorded nothing; its lease is returned when the
- * database is back. A run without --follow still exits 1 on it.
+ * database is back. Its start waits the same way, every statement up to the
+ * first claim — the worker key's lookup too, which would otherwise go on
+ * unattributed — since the sleep scheduler starts a follower at every sleep
+ * (SMD-2752). A run without --follow still exits 1 on it.
  *
  * It outlasts the provider going away too. Three things are outages:
  *   - a rate limit, a server error or a lost connection still failing after
@@ -153,7 +156,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -423,6 +426,17 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     err(STOPPED_EARLY);
     return true;
   };
+  /**
+   * A statement of the start, before the first claim: a follower's outlasts
+   * the database going away (worker-bootstrap.ts's throughOutage), since the
+   * sleep scheduler starts a pass at every sleep and meets a restarting
+   * database there, where a follower meets it once (SMD-2752). Null when the
+   * caller's signal ends the wait; the CLI's, before its handlers, ends the
+   * process instead. A run without --follow still rejects on the error.
+   */
+  const startSaid = { down: false };
+  const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
+    FOLLOW ? throughOutage(run, { check: () => sql`SELECT 1`, wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
@@ -458,10 +472,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   // ── The database's side ─────────────────────────────────────────────────────
 
-  const [{ tables }] = await sql`
+  const tables = await atStart(async () => Number((await sql`
     SELECT count(*)::int AS tables FROM pg_class
-    WHERE relname IN ('thought_work_claims', 'ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`;
-  if (Number(tables) < 4) {
+    WHERE relname IN ('thought_work_claims', 'ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`)[0].tables));
+  if (tables === null) {
+    stoppedEarly();
+    return 130;
+  }
+  if (tables < 4) {
     err("\n  The entity tables or the lease table are missing. Apply migrations 015 and 016 first:\n    cd db && bun migrate.ts --url …");
     return 2;
   }
@@ -567,11 +585,17 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   if (!STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
-    const id = await workerIdentity(opts.url ?? "", env, {
+    // A follower's lookup waits a database outage out, rather than writing its rows unattributed.
+    const id = await atStart(() => workerIdentity(opts.url ?? "", env, {
       noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
       write: out,
       warn: err,
-    });
+      outage: FOLLOW ? databaseUnavailable : undefined,
+    }));
+    if (id === null) {
+      stoppedEarly();
+      return 130;
+    }
     if (!id.ok) {
       err(id.message);
       return 2;
@@ -697,7 +721,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
-  const recordedKey: string | undefined = ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key;
+  const recorded = await atStart(async () => ({ key: ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key }));
+  if (recorded === null) {
+    stoppedEarly();
+    return 130;
+  }
+  const recordedKey: string | undefined = recorded.key;
   if (recordedKey && recordedKey !== JOB) {
     out(`  ob1_config.entity_extraction_key is ${recordedKey}; this run uses ${JOB} — a different model or prompt version`);
     if (!SWITCH_KEY && !STATUS_ONLY && !DRY_RUN) {
@@ -760,9 +789,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
   if (stoppedEarly()) return 130;
   if (recordedKey !== JOB) {
-    await sql`
+    const set = await atStart(() => sql`
       INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`);
+    if (set === null) {
+      stoppedEarly();
+      return 130;
+    }
     out(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
   }
 
@@ -770,11 +803,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let returned = 0;
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
-    const [{ n }] = await sql`
+    const r = await atStart(async () => (await sql`
       WITH retried AS (
         UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
-      SELECT count(*)::int AS n FROM retried`;
+      SELECT count(*)::int AS n FROM retried`)[0] as { n: number });
+    if (r === null) {
+      stoppedEarly();
+      return 130;
+    }
+    const { n } = r;
     returned += n;
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
@@ -787,14 +825,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // reading replaces the old one's rows (record_thought_entities). Each row's
     // kinds are read before the caveat is cleared, so the message can say what
     // each gets — a row of both kinds is a prefix too (review pass 1).
-    const [{ n, left_out: leftOut, left_out_over: both }] = await sql`
+    const r = await atStart(async () => (await sql`
       WITH old AS (
         SELECT thought_id, strpos(last_error, ${MALFORMED_WINDOWS_MARK}) > 0 AS left_out, strpos(last_error, ${OVER_BOUND_MARK}) > 0 AS over FROM thought_work_claims
         WHERE work_type = ${JOB} AND ${RETRY_PARTIAL ? partialRow() : leftOutRow()} FOR UPDATE),
       retried AS (
         UPDATE thought_work_claims w SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         FROM old WHERE w.work_type = ${JOB} AND w.thought_id = old.thought_id RETURNING old.left_out, old.over)
-      SELECT count(*)::int AS n, count(*) FILTER (WHERE left_out)::int AS left_out, count(*) FILTER (WHERE left_out AND over)::int AS left_out_over FROM retried`;
+      SELECT count(*)::int AS n, count(*) FILTER (WHERE left_out)::int AS left_out, count(*) FILTER (WHERE left_out AND over)::int AS left_out_over FROM retried`)[0] as { n: number; left_out: number; left_out_over: number });
+    if (r === null) {
+      stoppedEarly();
+      return 130;
+    }
+    const { n, left_out: leftOut, left_out_over: both } = r;
     // A prefix is read afresh under the bound in force, which may be smaller
     // than the one it was read under: say both directions (review pass 1).
     // Counted, not inferred: a prefix-only row is every partial row without the

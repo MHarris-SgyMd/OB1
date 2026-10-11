@@ -76,7 +76,9 @@
  * extract-entities.ts's does: an error that says it is not answering is said
  * once and waited out on worker-bootstrap.ts's schedule (5 s, doubling, at
  * most 5 min), the thought in hand recorded nothing and its lease returned
- * when the database is back. A run without --follow still exits 1 on it.
+ * when the database is back. Its start waits the same way, every statement
+ * up to the first claim, the worker key's lookup included (SMD-2752). A run
+ * without --follow still exits 1 on it.
  * It outlasts the provider going away too, by extract-entities.ts's rules.
  * Three things are outages:
  *   - a transient error past the pauses;
@@ -151,7 +153,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import {
   actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -471,6 +473,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     err(ACCEPT !== undefined || REJECT !== undefined ? DECISION_STOPPED : STOPPED_EARLY);
     return true;
   };
+  /**
+   * A statement of the start, before the first claim: a follower's outlasts
+   * the database going away, as extract-entities.ts's does (SMD-2752) — the
+   * sleep scheduler starts a pass at every sleep. Null when the caller's
+   * signal ends the wait; a run without --follow still rejects on the error.
+   */
+  const startSaid = { down: false };
+  const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
+    FOLLOW ? throughOutage(run, { check: () => sql`SELECT 1`, wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
   const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
@@ -503,10 +514,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // ── The database's side ─────────────────────────────────────────────────────
 
-  const [{ tables }] = await sql`
+  const tables = await atStart(async () => Number((await sql`
     SELECT count(*)::int AS tables FROM pg_class
-    WHERE relname IN ('thought_work_claims', 'thought_entities', 'supersession_proposals') AND relkind = 'r'`;
-  if (Number(tables) < 3) {
+    WHERE relname IN ('thought_work_claims', 'thought_entities', 'supersession_proposals') AND relkind = 'r'`)[0].tables));
+  if (tables === null) {
+    stoppedEarly();
+    return 130;
+  }
+  if (tables < 3) {
     err("\n  The lease table, the entity tables or the proposal table are missing. Apply migrations 015, 016 and 029 first:\n    cd db && bun migrate.ts --url …");
     return 2;
   }
@@ -575,11 +590,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (writes) {
     if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
-    const id = await workerIdentity(opts.url ?? "", env, {
+    // A follower's lookup waits a database outage out, rather than writing its proposals unattributed.
+    const id = await atStart(() => workerIdentity(opts.url ?? "", env, {
       noKeyWarning: `  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`,
       write: out,
       warn: err,
-    });
+      outage: FOLLOW ? databaseUnavailable : undefined,
+    }));
+    if (id === null) {
+      stoppedEarly();
+      return 130;
+    }
     if (!id.ok) {
       err(id.message);
       return 2;
@@ -974,9 +995,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * --status and --dry-run because the ticket asked that a run say how many
    * pairs it skipped (SMD-2448's second Work item).
    */
-  const [{ has_079: HAS_079 }] = (await sql`
+  const has079 = await atStart(async () => ((await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc WHERE oid = to_regprocedure('consolidation_candidates(uuid, int, float)')), false)
-           AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[];
+           AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[])[0].has_079);
+  if (has079 === null) {
+    stoppedEarly();
+    return 130;
+  }
+  const HAS_079 = has079;
   /**
    * 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and
    * duplicate verdicts as relations — the migration applied, and this role
@@ -1008,7 +1034,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const groups = [capture && "capture", structure && "structure"].filter(Boolean).join(",");
     return `this role lacks ${what} — cd db && bun migrate.ts --url <owner's url> --grant ${g.role} --groups ${groups}${structure ? " (the structure group also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)" : ""}`;
   }
-  let RELATIONS_OFF: string | null = await relationsOff();
+  const relations = await atStart(async () => ({ off: await relationsOff() }));
+  if (relations === null) {
+    stoppedEarly();
+    return 130;
+  }
+  let RELATIONS_OFF: string | null = relations.off;
   /** Whether relations were stored at any point of this run — the summary's counts are then real, beside what was counted only (review pass 4). */
   let RELATIONS_EVER_ON = RELATIONS_OFF === null;
   /** A change in whether relations are stored, said once, whichever worker or poll sees it first. */
@@ -1086,11 +1117,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
-    const [{ n }] = await sql`
+    const r = await atStart(async () => (await sql`
       WITH retried AS (
         UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
-      SELECT count(*)::int AS n FROM retried`;
+      SELECT count(*)::int AS n FROM retried`)[0] as { n: number });
+    if (r === null) {
+      stoppedEarly();
+      return 130;
+    }
+    const { n } = r;
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
 

@@ -8,13 +8,15 @@
  * parameters, one remedy tail), and the identity re-gate wording — with the
  * drop-the-gate mutant, that a remote endpoint under the default deny is
  * refused while a local one proceeds. And the outage slice (SMD-2599): which
- * database errors a follower waits out, and the wait's schedule.
+ * database errors a follower waits out, and the wait's schedule; a statement
+ * run through it, and a worker key's lookup that meets the database down — a
+ * closed loopback port, the one URL dialled, refused at once (SMD-2752).
  */
 
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -179,6 +181,32 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   let thrown: unknown = null;
   await waitOut({ check: async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "28P01"); }, outage: databaseUnavailable, wake: new AbortController().signal, sleep }).catch((e) => { thrown = e; });
   ok((thrown as { errno?: string } | null)?.errno === "28P01", "a check that fails for another reason is thrown, not waited on for ever");
+
+  // throughOutage: the statement again once the check answers, the outage said
+  // once and its end once; null on a stop; another error thrown (SMD-2752).
+  const lines: string[] = [];
+  const say = { out: (l: string) => lines.push(`out${l}`), err: (l: string) => lines.push(`err${l}`) };
+  let runs = 0;
+  const twiceDown = await throughOutage(async () => { if (++runs < 3) throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); return "rows"; }, { check: async () => {}, wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} });
+  ok(twiceDown === "rows" && runs === 3 && lines.length === 2 && /^err {2}the database is not answering \(m\) — waiting for it$/.test(lines[0]) && lines[1] === "out  the database answers again",
+    `throughOutage runs the statement again after each wait, saying the outage and its end once each (${runs} runs: ${lines.join(" | ")})`);
+  const ended = new AbortController();
+  const none = await throughOutage(async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, { check: async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, wake: ended.signal, said: { down: false }, ...say, sleep: async () => { ended.abort(); } });
+  ok(none === null, "a stop during throughOutage's wait gives null");
+  let other: unknown = null;
+  await throughOutage(async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "42P01"); }, { check: async () => {}, wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} }).catch((e) => { other = e; });
+  ok((other as { errno?: string } | null)?.errno === "42P01", "a statement that fails for another reason is thrown by throughOutage, not retried");
+
+  // workerIdentity's lookup with the database not answering (a closed port):
+  // warned about and unattributed by default, thrown under `outage` for a
+  // follower's start to wait out (SMD-2752).
+  const listed = { OB1_WORKER_KEY: "raw", MCP_ACCESS_KEYS: `sleeper:capture:${hashKey("raw")}` };
+  const warnedDown: string[] = [];
+  const unattributed = await workerIdentity(UNUSED_URL, listed, { noKeyWarning: "unused", warn: (l) => warnedDown.push(l) });
+  let lookup: unknown = null;
+  await workerIdentity(UNUSED_URL, listed, { noKeyWarning: "unused", warn: () => {}, outage: databaseUnavailable }).catch((e) => { lookup = e; });
+  ok(unattributed.ok && unattributed.identity.agentId === null && warnedDown.some((l) => /could not resolve the worker's identity/.test(l)) && databaseUnavailable(lookup),
+    `a lookup with the database down warns and goes on unattributed, and under \`outage\` throws for the caller to wait out (${(lookup as Error | null)?.message ?? "not thrown"})`);
 }
 
 // ---------------------------------------------------------------------------

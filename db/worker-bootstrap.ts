@@ -112,6 +112,12 @@ export async function workerIdentity(
     noKeyWarning: string;
     write?: (line: string) => void;
     warn?: (line: string) => void;
+    /**
+     * An error of the lookup's that this says is the database not answering
+     * is thrown, for the caller to wait out (a follower's start, SMD-2752),
+     * rather than warned about with the rows going on unattributed.
+     */
+    outage?: (e: unknown) => boolean;
   },
 ): Promise<{ ok: true; identity: WorkerIdentity } | { ok: false; message: string }> {
   const write = opts.write ?? ((l: string) => console.log(l));
@@ -145,6 +151,7 @@ export async function workerIdentity(
   try {
     res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
   } catch (e) {
+    if (opts.outage?.(e)) throw e;
     warn(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
     return { ok: true, identity: none };
   } finally {
@@ -537,6 +544,37 @@ export async function waitOut(opts: {
       return true;
     } catch (e) {
       if (!opts.outage(e)) throw e;
+    }
+  }
+}
+
+/**
+ * A statement that outlasts the database going away (SMD-2599's rule): run
+ * again once `check` (the caller's `SELECT 1`) answers, or null when `wake`
+ * ends the wait. `said` keeps "not answering" to one line an outage, and
+ * "answers again" to after one. Any error not databaseUnavailable's is
+ * thrown. The sleep scheduler's reads (SMD-2678), and a follower's start
+ * before its first claim (SMD-2752): the scheduler starts a pass at every
+ * sleep, and meets a restarting database there where a follower meets it once.
+ */
+export async function throughOutage<T>(run: () => Promise<T>, opts: {
+  check: () => Promise<unknown>;
+  wake: AbortSignal;
+  said: { down: boolean };
+  out: (line: string) => void;
+  err: (line: string) => void;
+  /** waitOut's sleep, for the suite. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<T | null> {
+  for (;;) {
+    try {
+      const r = await run();
+      if (opts.said.down) { opts.out("  the database answers again"); opts.said.down = false; }
+      return r;
+    } catch (e) {
+      if (!databaseUnavailable(e)) throw e;
+      if (!opts.said.down) { opts.err(`  the database is not answering (${(e as Error).message}) — waiting for it`); opts.said.down = true; }
+      if (!(await waitOut({ check: opts.check, outage: databaseUnavailable, wake: opts.wake, sleep: opts.sleep }))) return null;
     }
   }
 }

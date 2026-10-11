@@ -10963,6 +10963,77 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       slowExtract = 0;
       await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
     }
+
+    // A pass's start outlasts the database going away (SMD-2752): the
+    // scheduler starts its passes at every sleep, so a restart there must not
+    // end it. Each engine under --follow, on a client whose statements of the
+    // start fail once each as a database starting up — extract's tables
+    // check and its extraction key's read and write, consolidate's tables
+    // check, 079's check and the relations grant read — waits each out and
+    // reaches its pass, nothing recorded failed. The worker key's lookup is
+    // test-worker-bootstrap.ts's. Both at once: each wait is 5 s.
+    {
+      /** The suite's client, whose statements matching each pattern fail once, in any order, as a database starting up. */
+      const downOnceAt = (patterns: RegExp[]): { sql: SQL; hit: string[] } => {
+        const left = [...patterns];
+        const hit: string[] = [];
+        const client = new Proxy(sql, {
+          apply(t, self, args) {
+            const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
+            const i = left.findIndex((p) => p.test(text));
+            if (i >= 0) {
+              hit.push(left[i].source);
+              left.splice(i, 1);
+              throw startingUp();
+            }
+            return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
+          },
+        }) as unknown as SQL;
+        return { sql: client, hit };
+      };
+      const exDown = downOnceAt([/relname IN \('thought_work_claims', 'ob1_entities'/, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/]);
+      const coDown = downOnceAt([/relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, /ob1:linked-tickets-not-paired/, /to_regprocedure\('record_thought_relation/]);
+      // The key unset, so the run writes it: the write is a start statement too.
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      const failedBefore = { ex: (await claims(EX)).failed ?? 0, co: (await claims(CO)).failed ?? 0 };
+      const exLines: string[] = [];
+      const coLines: string[] = [];
+      const acEx = new AbortController();
+      const acCo = new AbortController();
+      let exBegan = false;
+      let coBegan = false;
+      // Stopped as its pass begins: the start is what is under test.
+      const exRun = runExtract({ sql: exDown.sql, env, workers: 1, follow: 1, signal: acEx.signal, onPass: () => { exBegan = true; acEx.abort(); }, writer: { out: (l) => exLines.push(l), err: (l) => exLines.push(l) } });
+      const coRun = runConsolidate({ sql: coDown.sql, env, workers: 1, follow: 1, signal: acCo.signal, onPass: () => { coBegan = true; acCo.abort(); }, writer: { out: (l) => coLines.push(l), err: (l) => coLines.push(l) } });
+      const settle = (run: Promise<number>, ac: AbortController) =>
+        Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(45_000).then(() => "hung")]).finally(() => ac.abort());
+      const [exCode, coCode] = await Promise.all([settle(exRun, acEx), settle(coRun, acCo)]);
+      const waits = (ls: string[]) => ls.filter((l) => /the database is not answering \(the database system is starting up\) — waiting for it/.test(l)).length;
+      const keyNow = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value;
+      assert(exCode === 0 && exBegan && exDown.hit.length === 3 && waits(exLines) === 3 && keyNow === EX && ((await claims(EX)).failed ?? 0) === failedBefore.ex,
+        `extract's start waits out the database at its tables check and its key's read and write, then reaches its pass, nothing failed (exit ${exCode}; ${exDown.hit.length} of 3 hit, ${waits(exLines)} wait(s); key ${keyNow})`);
+      assert(coCode === 0 && coBegan && coDown.hit.length === 3 && waits(coLines) === 3 && ((await claims(CO)).failed ?? 0) === failedBefore.co,
+        `consolidate's start waits out the database at its tables check, 079's check and the relations grant read, then reaches its pass, nothing failed (exit ${coCode}; ${coDown.hit.length} of 3 hit, ${waits(coLines)} wait(s))`);
+
+      // The worker key's lookup, on a connection of its own to `url`: here a
+      // closed port, the database not answering it. Each follower waits,
+      // rather than warning and writing its rows unattributed; a stop during
+      // the wait ends it before its pass (130).
+      const keyed = { ...env, OB1_WORKER_KEY: "sleep-lookup-raw", MCP_ACCESS_KEYS: `sleep-lookup:capture:${hashKey("sleep-lookup-raw")}` };
+      const lookup = async (engine: typeof runExtract | typeof runConsolidate) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        let began = false;
+        const run = engine({ sql, url: "postgres://unused@127.0.0.1:1/none", env: keyed, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; ac.abort(); }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)) || began, 10_000);
+        ac.abort();
+        const code = await Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(15_000).then(() => "hung")]);
+        return { code, began, waited: ls.some((l) => /the database is not answering .* — waiting for it/.test(l)), warned: ls.some((l) => /could not resolve the worker's identity/.test(l)) };
+      };
+      const [exLookup, coLookup] = await Promise.all([lookup(runExtract), lookup(runConsolidate)]);
+      assert([exLookup, coLookup].every((r) => r.code === 130 && r.waited && !r.warned && !r.began),
+        `a follower whose worker key's lookup finds the database not answering waits, unattributed rows never written, and a stop then ends it with 130 (extract ${JSON.stringify(exLookup)}, consolidate ${JSON.stringify(coLookup)})`);
+    }
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
