@@ -11081,6 +11081,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         stopInWait(runConsolidate, /ob1:linked-tickets-not-paired/),
         stopInWait(runConsolidate, /to_regprocedure\('record_thought_relation/),
       ]);
+      // A read beside --follow — --status, --dry-run — is no follower's start:
+      // the outage still rejects it at once rather than waiting (review pass 3).
+      const readBeside = (engine: typeof runExtract | typeof runConsolidate, at: RegExp, o: { status?: boolean; dryRun?: boolean }) =>
+        Promise.race([
+          engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, ...o, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => ((e as { errno?: string }).errno === "57P03" ? "rejected" : `threw: ${e.message}`)),
+          Bun.sleep(4_000).then(() => "waited"),
+        ]);
+      const besides = await Promise.all([
+        readBeside(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/, { status: true }),
+        readBeside(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, { dryRun: true }),
+      ]);
+      assert(besides.every((b) => b === "rejected"), `--status and --dry-run beside --follow reject on a database down, not wait (${besides.join(", ")})`);
       const stoppedAtWrite = await stopInWait(runExtract, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/);
       stoppedIn.push(stoppedAtWrite);
       assert(stoppedIn.every((r) => r.code === 130 && r.early && !r.began && !r.missing),

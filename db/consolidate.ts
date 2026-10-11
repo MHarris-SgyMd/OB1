@@ -478,12 +478,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * A statement of the start, before the first claim: a follower's outlasts
    * the database going away, as extract-entities.ts's does (SMD-2752) — the
    * sleep scheduler starts a pass at every sleep. Null when the caller's
-   * signal ends the wait; a run without --follow still rejects on the error.
+   * signal ends the wait (the CLI's, before its handlers: SMD-2666). A run
+   * without --follow, and a read or review beside it, still rejects on the
+   * error (review pass 3).
    */
+  const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
-    FOLLOW ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
-  const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
+    FOLLOW && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata

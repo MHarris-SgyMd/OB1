@@ -432,12 +432,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * the database going away (worker-bootstrap.ts's throughOutage), since the
    * sleep scheduler starts a pass at every sleep and meets a restarting
    * database there, where a follower meets it once (SMD-2752). Null when the
-   * caller's signal ends the wait; the CLI's, before its handlers, ends the
-   * process instead. A run without --follow still rejects on the error.
+   * caller's signal ends the wait. The CLI has no handlers yet: a signal
+   * ends the process outside a container, and inside one bun as PID 1
+   * ignores it until compose's grace runs out (SMD-2666, the provider's
+   * start wait's too). A run without --follow, and --status or --dry-run
+   * beside it, still rejects on the error (review pass 3).
    */
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
-    FOLLOW ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+    FOLLOW && !STATUS_ONLY && !DRY_RUN ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
