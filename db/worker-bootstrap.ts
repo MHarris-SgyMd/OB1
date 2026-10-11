@@ -249,6 +249,18 @@ export function databaseUnavailable(e: unknown): boolean {
 }
 
 /**
+ * Whether the worker key's lookup should wait on a database error: an outage
+ * of databaseUnavailable's, but not too many connections (53300). The lookup
+ * opens a connection of its own beside the pass's pool, so at
+ * max_connections the pool still answers while the lookup is refused for as
+ * long as the brain is busy — a wait with no end, at every sleep. That one is
+ * warned about and the rows go unattributed, as before (SMD-2752 review pass 2).
+ */
+export function lookupOutage(e: unknown): boolean {
+  return databaseUnavailable(e) && (e as { errno?: unknown }).errno !== "53300";
+}
+
+/**
  * Whether a database error is one no wait mends (SMD-2599, review pass 4):
  * a statement or object the server refuses — SQLSTATE class 42 (a function
  * or table missing, a privilege revoked) or 28 (authorization) — or a

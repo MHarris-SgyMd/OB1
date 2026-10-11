@@ -645,12 +645,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (live === null) return stopped();
       sleptUntil = live.now;
       if (await outsideNow()) {
-        await stopPasses(true);
+        // A soft stop that landed during the reads keeps its own: the thought
+        // in hand finished, not abandoned (review pass 2).
+        await stopPasses(hardStopped || !stopping);
         return "outside";
       }
       // A stop that landed during the reads wins: the passes it stopped have
       // settled, one waiting at its start at once (130), and would read as
-      // ended by themselves — the row failed, not stopped (review pass 1).
+      // ended by themselves — the row failed, not stopped (review pass 1). A
+      // pass that throws still rejects out of the stop, the row ended failed.
       if (stopping) return stopped();
       // A pass that ended by itself before the wake is read first: a refusal
       // and a live call in one poll would otherwise read as the wake alone.

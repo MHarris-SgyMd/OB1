@@ -16,7 +16,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -198,6 +198,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   let other: unknown = null;
   await throughOutage(async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "42P01"); }, { wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} }).catch((e) => { other = e; });
   ok((other as { errno?: string } | null)?.errno === "42P01", "a statement that fails for another reason is thrown by throughOutage, not retried");
+
+  // The lookup's predicate: an outage but too many connections, which the
+  // lookup's own connection meets while the pass's pool answers (review pass 2).
+  ok(lookupOutage(pg("ERR_POSTGRES_CONNECTION_REFUSED")) && lookupOutage(pg("ERR_POSTGRES_SERVER_ERROR", "57P03")) && !lookupOutage(pg("ERR_POSTGRES_SERVER_ERROR", "53300")) && databaseUnavailable(pg("ERR_POSTGRES_SERVER_ERROR", "53300")) && !lookupOutage(pg("ERR_POSTGRES_SERVER_ERROR", "42P01")),
+    "the key's lookup waits on a database refused or starting up, not on too many connections, which a follower's statements still wait on");
 
   // workerIdentity's lookup with the database not answering (a closed port):
   // warned about and unattributed by default, thrown under `outage` for a
