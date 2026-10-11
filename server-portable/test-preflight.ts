@@ -886,7 +886,12 @@ else {
   const rawBody = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(rawBody.code === 0 && /walk index.*orders its walk by the vector column but thoughts_embedding_idx is over embedding::halfvec; thought_chunks_embedding_idx is over embedding::halfvec/s.test(rawBody.out),
          "038 re-applied over 039: the check names the raw-column body over both halfvec indexes, as a warning");
-  assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql[^\n]*then db\/migrations\/074_min_trust\.sql, the last definer of match_thoughts/.test(rawBody.out), "…with 039 as the remedy, then 074 — 039's file alone re-creates the 6-argument form beside 074's (second review pass)");
+  // SMD-2880: the migrator, never the file by hand (the files are templates,
+  // and 039's refusal of the unrendered shape would name a good staging
+  // index), so no 074 after it; nothing to build, the indexes being 039's.
+  const rawFix = fix(rawBody.out, "walk index");
+  assert(rawFix.includes("→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
+         `…with the migrator as the remedy: no file by hand, no 074 after it, nothing to build first (${rawFix.trim().slice(0, 60)}…)`);
   /**
    * SMD-2871: 039's window. The raw-column body is 038's, as before 039;
    * 001's vector index goes back under the shipped name on thoughts, and the
@@ -924,6 +929,37 @@ else {
   const vecIdx = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column —/s.test(vecIdx.out) && !/thought_chunks_embedding_idx is over/.test(vecIdx.out),
          "001's DDL re-run by hand: the check names the vector index under the cast body and leaves the chunk index unmentioned");
+  assert(fix(vecIdx.out, "walk index").trim().startsWith(`→ Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (\`SELECT count(embedding) FROM <table>\`), as \`SET maintenance_work_mem = '<size>';\`. Where the table holds more than a million vectors — on thoughts (039 would build thoughts_embedding_halfvec_idx inside its transaction): 1) \`CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);\`; on a smaller table the migrator builds it`),
+         "…and its remedy says where to run the statements and how to size their memory, then has the staging index 039 would build in its transaction built first on a large table, the statement at the column's width (SMD-2880)");
+  // A ledger with a hole — a later file recorded, 039 not — is the re-apply:
+  // a plain run would apply 039 alone after 074 (review pass 2).
+  const holed = new SQL({ url: LIVE, max: 1 });
+  let holeRun = { code: -1, out: "" };
+  try {
+    await holed.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+    await holed.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('074_min_trust.sql', 'test')`);
+    holeRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await holed.unsafe(`DROP TABLE IF EXISTS schema_migrations`);
+    await holed.close();
+  }
+  assert(fix(holeRun.out, "walk index").includes("The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: stop the server and every worker") && !/Apply the (pending )?migrations/.test(fix(holeRun.out, "walk index")),
+         "…and with 074 recorded and 039 not, the re-apply rather than a plain run, which would apply 039 alone after 074 (SMD-2880)");
+  // The staging index left INVALID — what an interrupted run of that
+  // statement leaves — is dropped before the build, or the CREATE meets the
+  // taken name (review pass 1).
+  const interrupted = new SQL({ url: LIVE, max: 1 });
+  let afterBreak = { code: -1, out: "" };
+  try {
+    await interrupted.unsafe(STAGE_SQL);
+    await interrupted.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('thoughts_embedding_halfvec_idx')`);
+    afterBreak = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await interrupted.unsafe(`DROP INDEX IF EXISTS thoughts_embedding_halfvec_idx`);
+    await interrupted.close();
+  }
+  assert(fix(afterBreak.out, "walk index").includes(`— on thoughts (thoughts_embedding_halfvec_idx is INVALID (an interrupted build), and 039 would build it again inside its transaction): 1) \`DROP INDEX CONCURRENTLY thoughts_embedding_halfvec_idx;\` 2) \`CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts`),
+         "…and with the staging index left INVALID, the remedy drops it CONCURRENTLY before building it again (SMD-2880)");
   const remedy = new SQL({ url: LIVE, max: 1 });
   await remedy.unsafe(STAGE_SQL);
   await remedy.close();
@@ -931,6 +967,8 @@ else {
   const castRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(new RegExp(`${memRow(underCast.total)}\\s*$`, "m").test(castRun.out),
          `…and a staging index built under the cast body, the walk index remedy's way, is the one walked: counted with the rest, no clause (${bytesText(underCast.total)})`);
+  assert(fix(castRun.out, "walk index").trim() === "→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
+         "…and the walk index remedy, the staging index built, asks for 039 alone: nothing left to build first (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   const afterAdopt = await hnswSizes();
@@ -949,6 +987,8 @@ else {
   const invalid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*thoughts_embedding_idx is INVALID \(an interrupted CREATE INDEX CONCURRENTLY\), which the planner ignores — although migration 039 is recorded as applied/s.test(invalid.out),
          "an INVALID index under the name is named as such, with the ledger's suffix when 039 is recorded");
+  assert(/CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts [^\n]*Re-apply the recorded migrations: stop the server and every worker, run `cd db && bun migrate\.ts --url … --reapply`/.test(fix(invalid.out, "walk index")),
+         "…its remedy the staging index first, then the re-apply a recorded 039 needs (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuiltValid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*over that expression \(039\)/s.test(rebuiltValid.out), "…and the remedy — 039 again — rebuilds it");
@@ -959,9 +999,34 @@ else {
   const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*thought_chunks_embedding_idx does not exist — the planner has no index path/s.test(missing.out) && !/although migration 039 is recorded/.test(missing.out),
          "a missing index is named, without the ledger's suffix when nothing records 039");
+  const FREE_CHUNKS = "On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own): 1) ";
+  const NOTHING_LEFT = ". Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.";
+  assert(fix(missing.out, "walk index").includes(`${FREE_CHUNKS}\`CREATE INDEX CONCURRENTLY thought_chunks_embedding_idx ON thought_chunks USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);\`${NOTHING_LEFT}`) && !/stop the server/.test(fix(missing.out, "walk index")),
+         "…its remedy the free name built under itself on any brain, and under a casting body nothing left for 039: preflight again, no server stopped (SMD-2880)");
+  // A staging index of 039's shape beside the free name is renamed onto it:
+  // a re-apply's 007 would otherwise build a vector index there first (review pass 1).
+  const besideFree = new SQL({ url: LIVE, max: 1 });
+  let renameRun = { code: -1, out: "" };
+  try {
+    await besideFree.unsafe(`CREATE INDEX thought_chunks_embedding_halfvec_idx ON thought_chunks USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops)`);
+    renameRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await besideFree.unsafe(`DROP INDEX IF EXISTS thought_chunks_embedding_halfvec_idx`);
+    await besideFree.close();
+  }
+  assert(fix(renameRun.out, "walk index").trim() === "→ Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing and thought_chunks_embedding_halfvec_idx, of 039's shape, is built): 1) `ALTER INDEX thought_chunks_embedding_halfvec_idx RENAME TO thought_chunks_embedding_idx;`. Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.",
+         "…and a staging index of 039's shape beside it is renamed onto the name, nothing built (SMD-2880)");
+  // Followed as printed: the statement alone, and the walk reads ok with no
+  // migrator run (SMD-2880, review pass 3); 039 applied over it then keeps it.
+  const freeStatements = [...fix(missing.out, "walk index").matchAll(/`(CREATE INDEX CONCURRENTLY [^`]+)`/g)].map((m) => m[1]);
+  const followed = new SQL({ url: LIVE, max: 1 });
+  try { for (const st of freeStatements) await followed.unsafe(st); } finally { await followed.close(); }
+  const filled = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(freeStatements.length === 1 && /✓\s+walk index\s+match_thoughts orders its walk by embedding::halfvec and both HNSW indexes are over that expression \(039\)/.test(filled.out),
+         "…and followed as printed, the one statement and no migrator, the walk index row reads ok (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const restored039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 builds it where the name is free");
+  assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 applied over it keeps it");
   // 039's file alone, as the walk-index probes above applied it, is the state
   // 040's header names for its clause and 041's for its pins: 039's CREATE
   // carries 019's clauses and neither 040's nor 041's, so the candidate-scan
@@ -2552,6 +2617,42 @@ else {
          "…and the consolidate pass check, which reads the same table, says so too");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
 
+  // SMD-2880's Verify: the walk index remedy followed literally. A ledger
+  // the migrator wrote (--baseline over the full apply) records 039. 038
+  // re-applied by hand on a current brain puts a 6-argument form beside 074's
+  // 7-argument one — the search signatures row's to report, the walk reading
+  // the 7 — so the walk index is moved by the other half, 001's DDL re-run
+  // after a drop: a vector index under the cast body. The remedy's statement
+  // is run as printed, then the re-apply, and walk index, search signatures
+  // and vector index memory read ok, the staging index adopted. The ledger
+  // goes after, as every block here that makes one drops it.
+  {
+    await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
+    const recorded = await migrate(["--url", LIVE, "--baseline"]);
+    assert(recorded.code === 0, `migrate.ts --baseline records every file, 039 among them (exit ${recorded.code})`);
+    try {
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
+      await claims.unsafe(`DROP INDEX thoughts_embedding_idx`);
+      await claims.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+      const moved = await run(SQL_ENV);
+      const walkFix = fix(moved.out, "walk index");
+      const statements = [...walkFix.matchAll(/`(CREATE INDEX CONCURRENTLY [^`]+)`/g)].map((m) => m[1]);
+      assert(/!\s+walk index\s+match_thoughts orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column — although migration 039 is recorded as applied/.test(row(moved.out, "walk index"))
+             && /^\s*[!✗]/.test(row(moved.out, "search signatures"))
+             && statements.length === 1 && walkFix.includes("Re-apply the recorded migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && !/file alone|direct connection|074_min_trust/.test(walkFix),
+             `038 by hand and 001's DDL under a recorded 039: the walk index row warns, its remedy one statement then the re-apply, no file by hand (${walkFix.trim().slice(0, 70)}…)`);
+      for (const st of statements) await claims.unsafe(st);
+      const reapplied = await migrate(["--url", LIVE, "--reapply"]);
+      const after = await run(SQL_ENV);
+      const ok = (name: string) => /^\s*✓/.test(row(after.out, name));
+      const [{ staged }] = await claims`SELECT to_regclass('public.thoughts_embedding_halfvec_idx') IS NOT NULL AS staged`;
+      assert(reapplied.code === 0 && ok("walk index") && ok("search signatures") && ok("vector index memory") && staged === false,
+             `…and followed as printed — the statement, then the re-apply — walk index, search signatures and vector index memory read ok, the staging index adopted (exit ${reapplied.code}: ${["walk index", "search signatures", "vector index memory"].map((n) => row(after.out, n).trim().slice(0, 40)).join(" | ")})`);
+    } finally {
+      await claims.unsafe("DROP TABLE IF EXISTS schema_migrations");
+    }
+  }
+
   // The capture path's SECURITY INVOKER writers run as the calling role. A role
   // that can read everything and write thoughts, but cannot INSERT/DELETE
   // thought_chunks or INSERT thought_audit, fails every windowed capture and the
@@ -3430,6 +3531,10 @@ else {
     // read times out, and the row says it could not verify — not that the
     // role lacks a grant.
     {
+      // The walk index row warns meanwhile, so its remedy reads the unread
+      // ledger with the reason, as ledgerRemedy does (SMD-2880).
+      const [{ chunkIdx }] = await claims`SELECT pg_get_indexdef(to_regclass('thought_chunks_embedding_idx')) AS "chunkIdx"`;
+      if (chunkIdx) await claims.unsafe("DROP INDEX thought_chunks_embedding_idx");
       const locker = new SQL({ url: LIVE!, max: 1 });
       let release: () => void = () => {};
       const held = new Promise<void>((r) => { release = r; });
@@ -3448,6 +3553,7 @@ else {
         release();
         await tx;
         await locker.close();
+        if (chunkIdx) await claims.unsafe(chunkIdx);
       }
       assert(/!\s+migration ledger\s+could not verify: schema_migrations could not be read \(canceling statement due to lock timeout\)/.test(busy.out) && !/not readable by this role/.test(row(busy.out, "migration ledger") ?? ""),
              `a locked ledger is could-not-verify, not a missing grant (${row(busy.out, "migration ledger")})`);
@@ -3455,6 +3561,8 @@ else {
       // says it could not verify rather than ✓ "unknown" (review pass 3).
       assert(/!\s+schema version\s+could not verify against the ledger: .* schema_migrations could not be read: canceling statement due to lock timeout/.test(busy.out),
              `a locked ledger leaves the version row unverified, not ✓ (${row(busy.out, "schema version")})`);
+      assert(fix(busy.out, "walk index").trim() === "→ The ledger is locked (schema_migrations could not be read: canceling statement due to lock timeout): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.",
+             `…and the walk index remedy waits a locked ledger out — no steps, no server stopped — as the ledger row does (${fix(busy.out, "walk index").trim().slice(0, 80)}…)`);
     }
 
     // Back to the harness's unrecorded schema for the sections below.
