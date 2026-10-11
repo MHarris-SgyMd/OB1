@@ -77,7 +77,8 @@
  * once and waited out on worker-bootstrap.ts's schedule (5 s, doubling, at
  * most 5 min), the thought in hand recorded nothing and its lease returned
  * when the database is back. Its start waits the same way, every statement
- * up to the first claim, the worker key's lookup included (SMD-2752). A run
+ * up to the first claim but --retry-failed's, the worker key's lookup
+ * included (SMD-2752). A run
  * without --follow still exits 1 on it.
  * It outlasts the provider going away too, by extract-entities.ts's rules.
  * Three things are outages:
@@ -481,7 +482,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
-    FOLLOW ? throughOutage(run, { check: () => sql`SELECT 1`, wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+    FOLLOW ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
   const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
@@ -1117,16 +1118,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
-    const r = await atStart(async () => (await sql`
+    // An operator's flag, never the scheduler's: not under the start's wait,
+    // since a count committed and then lost with its connection would be
+    // retried into a false 0 (review pass 1).
+    const [{ n }] = await sql`
       WITH retried AS (
         UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
-      SELECT count(*)::int AS n FROM retried`)[0] as { n: number });
-    if (r === null) {
-      stoppedEarly();
-      return 130;
-    }
-    const { n } = r;
+      SELECT count(*)::int AS n FROM retried`;
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
 

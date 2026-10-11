@@ -83,9 +83,10 @@
  * (worker-bootstrap.ts, waitOut), and polling resumes when it answers. A
  * thought in hand is recorded nothing; its lease is returned when the
  * database is back. Its start waits the same way, every statement up to the
- * first claim — the worker key's lookup too, which would otherwise go on
- * unattributed — since the sleep scheduler starts a follower at every sleep
- * (SMD-2752). A run without --follow still exits 1 on it.
+ * first claim but an operator's --retry-* — the worker key's lookup too,
+ * which would otherwise go on unattributed — since the sleep scheduler starts
+ * a follower at every sleep (SMD-2752). A run without --follow still exits 1
+ * on it.
  *
  * It outlasts the provider going away too. Three things are outages:
  *   - a rate limit, a server error or a lost connection still failing after
@@ -436,7 +437,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    */
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
-    FOLLOW ? throughOutage(run, { check: () => sql`SELECT 1`, wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+    FOLLOW ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
@@ -803,16 +804,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let returned = 0;
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
-    const r = await atStart(async () => (await sql`
+    // An operator's flag, never the scheduler's: not under the start's wait,
+    // since a count committed and then lost with its connection would be
+    // retried into a false 0 (review pass 1).
+    const [{ n }] = await sql`
       WITH retried AS (
         UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
-      SELECT count(*)::int AS n FROM retried`)[0] as { n: number });
-    if (r === null) {
-      stoppedEarly();
-      return 130;
-    }
-    const { n } = r;
+      SELECT count(*)::int AS n FROM retried`;
     returned += n;
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
@@ -825,19 +824,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // reading replaces the old one's rows (record_thought_entities). Each row's
     // kinds are read before the caveat is cleared, so the message can say what
     // each gets — a row of both kinds is a prefix too (review pass 1).
-    const r = await atStart(async () => (await sql`
+    const [{ n, left_out: leftOut, left_out_over: both }] = await sql`
       WITH old AS (
         SELECT thought_id, strpos(last_error, ${MALFORMED_WINDOWS_MARK}) > 0 AS left_out, strpos(last_error, ${OVER_BOUND_MARK}) > 0 AS over FROM thought_work_claims
         WHERE work_type = ${JOB} AND ${RETRY_PARTIAL ? partialRow() : leftOutRow()} FOR UPDATE),
       retried AS (
         UPDATE thought_work_claims w SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
         FROM old WHERE w.work_type = ${JOB} AND w.thought_id = old.thought_id RETURNING old.left_out, old.over)
-      SELECT count(*)::int AS n, count(*) FILTER (WHERE left_out)::int AS left_out, count(*) FILTER (WHERE left_out AND over)::int AS left_out_over FROM retried`)[0] as { n: number; left_out: number; left_out_over: number });
-    if (r === null) {
-      stoppedEarly();
-      return 130;
-    }
-    const { n, left_out: leftOut, left_out_over: both } = r;
+      SELECT count(*)::int AS n, count(*) FILTER (WHERE left_out)::int AS left_out, count(*) FILTER (WHERE left_out AND over)::int AS left_out_over FROM retried`;
     // A prefix is read afresh under the bound in force, which may be smaller
     // than the one it was read under: say both directions (review pass 1).
     // Counted, not inferred: a prefix-only row is every partial row without the

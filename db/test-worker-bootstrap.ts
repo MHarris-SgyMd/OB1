@@ -182,19 +182,21 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   await waitOut({ check: async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "28P01"); }, outage: databaseUnavailable, wake: new AbortController().signal, sleep }).catch((e) => { thrown = e; });
   ok((thrown as { errno?: string } | null)?.errno === "28P01", "a check that fails for another reason is thrown, not waited on for ever");
 
-  // throughOutage: the statement again once the check answers, the outage said
-  // once and its end once; null on a stop; another error thrown (SMD-2752).
+  // throughOutage: the statement again after each wait — its own check, on
+  // the schedule carried across tries — the outage said once and its end
+  // once; null on a stop; another error thrown (SMD-2752).
   const lines: string[] = [];
   const say = { out: (l: string) => lines.push(`out${l}`), err: (l: string) => lines.push(`err${l}`) };
   let runs = 0;
-  const twiceDown = await throughOutage(async () => { if (++runs < 3) throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); return "rows"; }, { check: async () => {}, wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} });
-  ok(twiceDown === "rows" && runs === 3 && lines.length === 2 && /^err {2}the database is not answering \(m\) — waiting for it$/.test(lines[0]) && lines[1] === "out  the database answers again",
-    `throughOutage runs the statement again after each wait, saying the outage and its end once each (${runs} runs: ${lines.join(" | ")})`);
+  const waited: number[] = [];
+  const twiceDown = await throughOutage(async () => { if (++runs < 4) throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); return "rows"; }, { wake: new AbortController().signal, said: { down: false }, ...say, sleep: async (ms) => { waited.push(ms); } });
+  ok(twiceDown === "rows" && runs === 4 && waited.join(",") === "5000,10000,20000" && lines.length === 2 && /^err {2}the database is not answering \(m\) — waiting for it$/.test(lines[0]) && lines[1] === "out  the database answers again",
+    `throughOutage runs the statement again after each wait, the waits doubling across tries, saying the outage and its end once each (${runs} runs, waits ${waited.join(",")}: ${lines.join(" | ")})`);
   const ended = new AbortController();
-  const none = await throughOutage(async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, { check: async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, wake: ended.signal, said: { down: false }, ...say, sleep: async () => { ended.abort(); } });
+  const none = await throughOutage(async () => { throw pg("ERR_POSTGRES_CONNECTION_REFUSED"); }, { wake: ended.signal, said: { down: false }, ...say, sleep: async () => { ended.abort(); } });
   ok(none === null, "a stop during throughOutage's wait gives null");
   let other: unknown = null;
-  await throughOutage(async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "42P01"); }, { check: async () => {}, wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} }).catch((e) => { other = e; });
+  await throughOutage(async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "42P01"); }, { wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} }).catch((e) => { other = e; });
   ok((other as { errno?: string } | null)?.errno === "42P01", "a statement that fails for another reason is thrown by throughOutage, not retried");
 
   // workerIdentity's lookup with the database not answering (a closed port):

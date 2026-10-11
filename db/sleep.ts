@@ -289,10 +289,6 @@ function outsideLine(outside: string[], dryRun: boolean): string {
 
 const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.round((now.getTime() - t.getTime()) / 1000))} s ago` : "none");
 
-/** A database read that outlasts the database going away (worker-bootstrap.ts's throughOutage): null when `wake` ends the wait. */
-const readThrough = <T>(sql: SQL, read: () => Promise<T>, wake: AbortSignal, said: { down: boolean }, out: Writer["out"], err: Writer["err"]): Promise<T | null> =>
-  throughOutage(read, { check: () => sql`SELECT 1`, wake, said, out, err });
-
 /** The scheduler's numbers from its options, or the refusal of the first that breaks its flag's rule. */
 function numbers(opts: SleepOptions): { quiet: number; poll: number; workers: number } | string {
   const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number }): number | string => {
@@ -355,7 +351,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const startSaid = { down: false };
   /** The CLI passes no signal (its handlers come after these reads): a wait then ends only with the database. */
   const startWake = opts.signal ?? new AbortController().signal;
-  const atStart = <T>(read: () => Promise<T>) => readThrough(sql, read, startWake, startSaid, out, err);
+  const atStart = <T>(read: () => Promise<T>) => throughOutage(read, { wake: startWake, said: startSaid, out, err });
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
@@ -510,9 +506,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   if (opts.signal?.aborted) abort();
   opts.onPass?.(stop);
 
-  /** A database read that outlasts the database going away (SMD-2599's rule): null when a stop ended the wait. */
+  /** A database read that outlasts the database going away (worker-bootstrap.ts's throughOutage): null when a stop ended the wait. */
   const said = { down: false };
-  const reading = <T>(read: () => Promise<T>): Promise<T | null> => readThrough(sql, read, onStop.signal, said, out, err);
+  const reading = <T>(read: () => Promise<T>): Promise<T | null> => throughOutage(read, { wake: onStop.signal, said, out, err });
 
   /** Aborted when a pass of the current sleep settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
@@ -652,6 +648,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         await stopPasses(true);
         return "outside";
       }
+      // A stop that landed during the reads wins: the passes it stopped have
+      // settled, one waiting at its start at once (130), and would read as
+      // ended by themselves — the row failed, not stopped (review pass 1).
+      if (stopping) return stopped();
       // A pass that ended by itself before the wake is read first: a refusal
       // and a live call in one poll would otherwise read as the wake alone.
       const ended = running.find((p) => p.settled);

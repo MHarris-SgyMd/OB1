@@ -10315,6 +10315,23 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await st.end("stopped");
     const two = await row(st.key);
     assert(two?.outcome === "stopped" && two.ended === true && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // Once ended, the row takes no stamp but another end: a pass finishing
+    // after the sleep scheduler's hard stop stamped its word over the end,
+    // inside the scheduler's `during`, and the row read ended and running at
+    // once (SMD-2752 review pass 1).
+    const ending = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:ending@p3", intervalS: 1, minEveryS: 1 });
+    let afterEnd: { running?: boolean; outcome?: string; ended?: boolean } | null = null;
+    await ending.during((async () => {
+      await ending.end("stopped");
+      await ending.alive("ok");
+      await ending.stamp("failed");
+      await Bun.sleep(1300);
+      afterEnd = await row(ending.key);
+    })());
+    await ending.end("failed");
+    const reEnded = await row(ending.key);
+    assert(afterEnd !== null && (afterEnd as { running: boolean }).running === false && (afterEnd as { outcome: string }).outcome === "stopped" && reEnded?.outcome === "failed" && reEnded.ended === true,
+      `once ended, a stamp, an alive and the running timer write nothing, and a second end still does (${JSON.stringify(afterEnd)} → ${JSON.stringify(reEnded)})`);
     // Each stamp writes the whole value: a restarted follower (a new stamper,
     // no block of its own) clears the row's block until it judges one, and an
     // old value of any shape, JSON or not, is replaced.
@@ -10468,6 +10485,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let unavailable = false;
   /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
   let badRequest = false;
+  /** Probes only: held this long before the answer — a pass waiting at its start (SMD-2752). */
+  let probeHold = 0;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -10475,7 +10494,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (probeHold) await Bun.sleep(probeHold);
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const judging = /<thought_a>/.test(prompt);
       if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
@@ -10973,8 +10995,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     // reaches its pass, nothing recorded failed. The worker key's lookup is
     // test-worker-bootstrap.ts's. Both at once: each wait is 5 s.
     {
-      /** The suite's client, whose statements matching each pattern fail once, in any order, as a database starting up. */
-      const downOnceAt = (patterns: RegExp[]): { sql: SQL; hit: string[] } => {
+      /** The suite's client, whose statements matching each pattern fail once, in any order — or every time — as a database starting up. */
+      const downOnceAt = (patterns: RegExp[], always = false): { sql: SQL; hit: string[] } => {
         const left = [...patterns];
         const hit: string[] = [];
         const client = new Proxy(sql, {
@@ -10983,7 +11005,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
             const i = left.findIndex((p) => p.test(text));
             if (i >= 0) {
               hit.push(left[i].source);
-              left.splice(i, 1);
+              if (!always) left.splice(i, 1);
               throw startingUp();
             }
             return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
@@ -11033,6 +11055,55 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const [exLookup, coLookup] = await Promise.all([lookup(runExtract), lookup(runConsolidate)]);
       assert([exLookup, coLookup].every((r) => r.code === 130 && r.waited && !r.warned && !r.began),
         `a follower whose worker key's lookup finds the database not answering waits, unattributed rows never written, and a stop then ends it with 130 (extract ${JSON.stringify(exLookup)}, consolidate ${JSON.stringify(coLookup)})`);
+
+      // A stop during a start's wait is a stop before the pass began (130),
+      // not the start's verdict on a statement that never answered — "the
+      // tables are missing" and 2 (review pass 1).
+      const stopInWait = async (engine: typeof runExtract | typeof runConsolidate, tablesAt: RegExp) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        const run = engine({ sql: downOnceAt([tablesAt], true).sql, env, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)), 10_000);
+        ac.abort();
+        const code = await Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(15_000).then(() => "hung")]);
+        return { code, early: ls.some((l) => /stopped before the pass began/.test(l)), missing: ls.some((l) => /are missing/.test(l)) };
+      };
+      const [exStopped, coStopped] = await Promise.all([
+        stopInWait(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/),
+        stopInWait(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/),
+      ]);
+      assert([exStopped, coStopped].every((r) => r.code === 130 && r.early && !r.missing),
+        `a stop while a start waits on the database ends the pass with 130, before it began, not as tables missing (extract ${JSON.stringify(exStopped)}, consolidate ${JSON.stringify(coStopped)})`);
+    }
+
+    // A stop that lands while the scheduler reads, with a pass waiting at its
+    // start (its probe held): the pass settles at once (130) and the read then
+    // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
+    // itself", 130 and the row failed (review pass 1).
+    try {
+      probeHold = 8000;
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const acRace = new AbortController();
+      let landed = false;
+      /** The scheduler's client: its first wake read once asleep aborts the run's signal, then answers 300 ms later. */
+      const stopMidRead = new Proxy(sql, {
+        apply(t, self, args) {
+          const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
+          if (!landed && /FROM thought_audit WHERE created_at > /.test(text) && lines.some((l) => /asleep:/.test(l))) {
+            landed = true;
+            acRace.abort();
+            return Bun.sleep(300).then(() => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
+          }
+          return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
+        },
+      }) as unknown as SQL;
+      const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal }), acRace);
+      const raceBeat = await beat();
+      assert(landed && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
+        `a stop landing mid-read with a pass waiting at its start is a stop: 0, the row ended stopped (exit ${raceCode}; landed ${landed}; ${JSON.stringify(raceBeat)}; ${lines.filter((l) => /ended by itself|stopping/.test(l)).join(" | ").trim()})`);
+    } finally {
+      probeHold = 0;
     }
   } finally {
     stub.stop(true);

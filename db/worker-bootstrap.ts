@@ -550,23 +550,28 @@ export async function waitOut(opts: {
 
 /**
  * A statement that outlasts the database going away (SMD-2599's rule): run
- * again once `check` (the caller's `SELECT 1`) answers, or null when `wake`
- * ends the wait. `said` keeps "not answering" to one line an outage, and
- * "answers again" to after one. Any error not databaseUnavailable's is
- * thrown. The sleep scheduler's reads (SMD-2678), and a follower's start
- * before its first claim (SMD-2752): the scheduler starts a pass at every
- * sleep, and meets a restarting database there where a follower meets it once.
+ * again after each of outageWait's waits until it answers, or null when
+ * `wake` ends the wait. The statement is its own check: a `SELECT 1` on
+ * another connection can answer while it cannot — the worker key's lookup
+ * opens one of its own on `url`, refused a slot while the pool holds one
+ * (53300) — and every pass of such a loop would begin the schedule at 5 s
+ * again (SMD-2752 review pass 1). `said` keeps "not answering" to one line an
+ * outage, and "answers again" to after one. Any error not
+ * databaseUnavailable's is thrown. The sleep scheduler's reads (SMD-2678),
+ * and a follower's start before its first claim (SMD-2752): the scheduler
+ * starts a pass at every sleep, and meets a restarting database there where a
+ * follower meets it once.
  */
 export async function throughOutage<T>(run: () => Promise<T>, opts: {
-  check: () => Promise<unknown>;
   wake: AbortSignal;
   said: { down: boolean };
   out: (line: string) => void;
   err: (line: string) => void;
-  /** waitOut's sleep, for the suite. */
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
   sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
 }): Promise<T | null> {
-  for (;;) {
+  const sleep = opts.sleep ?? sleepUnless;
+  for (let step = 0; ; step++) {
     try {
       const r = await run();
       if (opts.said.down) { opts.out("  the database answers again"); opts.said.down = false; }
@@ -574,7 +579,8 @@ export async function throughOutage<T>(run: () => Promise<T>, opts: {
     } catch (e) {
       if (!databaseUnavailable(e)) throw e;
       if (!opts.said.down) { opts.err(`  the database is not answering (${(e as Error).message}) — waiting for it`); opts.said.down = true; }
-      if (!(await waitOut({ check: opts.check, outage: databaseUnavailable, wake: opts.wake, sleep: opts.sleep }))) return null;
+      await sleep(outageWait(step), opts.wake);
+      if (opts.wake.aborted) return null;
     }
   }
 }
