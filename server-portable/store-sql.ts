@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -38,6 +38,7 @@ import type {
   Derivative,
   ListFilters,
   DeleteResult,
+  ResetStampResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
@@ -741,6 +742,13 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
+  }
+
+  async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
+    // 086: one statement, as the note and the restamp are made; the function
+    // decides who may, and names the actor in the event it appends.
+    const rows = await this.sql`SELECT ob1_reset_capture_stamp(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseResetStamp(rows[0]?.r);
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {

@@ -525,9 +525,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // tickets Linear links never paired for judgement, SMD-2448), 080 (a
   // capture-only key's re-capture leaves the row, SMD-2539), 082 (a
   // capture-only key's pointer lapses when another takes its target,
-  // SMD-2638), 084 (the judge's relations stored, SMD-1873) and 085 (a
+  // SMD-2638), 084 (the judge's relations stored, SMD-1873), 085 (a
   // capture-only key's stamp yields to the first classified key that can read
-  // at a higher trust, SMD-2664) stay recorded and
+  // at a higher trust, SMD-2664), 086 (the operator resets such a label,
+  // SMD-2744) and 087 (what the findings step posted to the board,
+  // SMD-2681) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -634,13 +636,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // thoughts and thought_facets and the lineage kind, refusing by name
   // without 042, 053, 061 or 064 ([20af]); 085 adds the restamp and
   // redefines 073's backfill_thought_actors on its own body, refusing by
-  // name without 055, 060, 073 or 074 ([20ag]) — all
+  // name without 055, 060, 073 or 074 ([20ag]); 086 adds the reset and
+  // redefines 085's restamp and backfill on their own bodies, refusing by
+  // name without 046 or 085 ([20ah]); 087 adds a table and
+  // needs nothing ([20ai]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 56, `030 is among the last fifty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 58, `030 is among the last fifty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3806,6 +3811,96 @@ console.log("\n[20ag] Migration 085: refused by name without 074; onto a populat
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the085 });
   assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 085 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20ah] Migration 086: refused by name without 085; onto a populated brain at the file before it — the reset, the restamp and the backfill's new bodies, no row and no audit row moved; after it, a row an agent key settled under 085 and one it moved there are reset by the operator, and its re-capture moves each; a backfill pass changes nothing; a re-apply a no-op (SMD-2744)");
+{
+  const the086 = MIGRATIONS.find((f) => f.endsWith("_capture_stamp_reset.sql"))!;  // by name: renumbered when main takes its number
+  const the085 = MIGRATIONS.find((f) => f.endsWith("_recapture_restamps_trust.sql"))!;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the085 });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the086 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 086 needs 046 and 085 (ob1_registry_kind, ob1_restamp_recapture); this schema lacks it",
+    `086 on a schema stopped before 085 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the086 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const agent = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  await sql`SELECT set_agent_kind('hook-key', 'agent')`;
+  await sql`SELECT set_agent_kind('bot-key', 'agent')`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const HOOK = { name: "hook-key", agent_id: await agent("d", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const BOT = { name: "bot-key", agent_id: await agent("e", "bot-key", "write"), via: "open-brain" };
+  const OP = { name: "op-key", agent_id: await agent("f", "op-key", "write"), via: "open-brain" };
+  const cap = async (content: string, payload: Record<string, unknown>) =>
+    (await sql`SELECT upsert_thought(${content}::text, ${payload}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string; existed: boolean };
+  /** A re-capture as the stores make it: the capture, 082's note, 085's restamp. */
+  const recapture = async (content: string, actor: Record<string, unknown>, trust: string | null = null) => {
+    const r = await cap(content, { metadata: { source: "mcp" }, actor, ...(trust ? { event: { trust } } : {}) });
+    await sql`SELECT ob1_note_recapture(${r.id}::uuid, ${actor}::jsonb)`;
+    return ((await sql`SELECT ob1_restamp_recapture(${r.id}::uuid, ${r.fingerprint}::text, ${actor}::jsonb, ${trust}::text) AS m`)[0] as { m: boolean }).m;
+  };
+  const marks = async (id: string) => {
+    const m = ((await sql`SELECT metadata AS m FROM thoughts WHERE id = ${id}::uuid`)[0] as { m: Record<string, unknown> }).m;
+    return `${m.actor_kind ?? "-"}/${m.actor_name ?? "-"}/${m.trust ?? "-"}`;
+  };
+  // A brain at 085: the hook's outside text an agent key re-sent at its equal
+  // trust — settled — and one it re-sent undeclared — moved to it.
+  const S = "upgrade 086: the hook's text an agent settled";
+  const M = "upgrade 086: the hook's text an agent moved";
+  const settled = await cap(S, { metadata: { source: "codex" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" });
+  const moved = await cap(M, { metadata: { source: "codex" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" });
+  assert((await recapture(S, BOT, "ingested")) === false && (await recapture(S, OP)) === false && (await recapture(M, BOT)) === true
+      && (await marks(settled.id)) === "agent/hook-key/ingested" && (await marks(moved.id)) === "agent/bot-key/agent",
+    "[20ah] setup: at 085 the agent's equal re-capture settled one row against the operator, and its re-capture moved the other");
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the086 });
+  const [made] = await sql`SELECT
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'ob1_reset_capture_stamp' AND prosrc LIKE '%ob1:reset-is-the-operators%') AS fn,
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'ob1_restamp_recapture' AND prosrc LIKE '%v_since%') AS rs,
+      (SELECT count(*)::int FROM pg_proc WHERE proname = 'backfill_thought_actors' AND prosrc LIKE '%a.diff ? ''restamp_reset''%') AS bf`;
+  assert(made?.fn === 1 && made?.rs === 1 && made?.bf === 1, `the reset with its sentinel, the restamp reading since a reset, and the backfill reading a reset (${JSON.stringify(made)})`);
+  assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
+  // After it: the operator resets both, and its re-capture moves each.
+  const reset = async (id: string, actor: Record<string, unknown>) => (await sql`SELECT ob1_reset_capture_stamp(${id}::uuid, ${actor}::jsonb) AS r`)[0].r as { ok: boolean; error?: string; reset?: boolean; restored?: boolean; declines?: number };
+  const byAgent = await reset(settled.id, BOT);
+  const freed = await reset(settled.id, OP);
+  const putBack = await reset(moved.id, OP);
+  assert(byAgent.error === "NOT_OPERATOR" && freed.reset === true && freed.declines === 1 && putBack.restored === true && (await marks(moved.id)) === "agent/hook-key/ingested",
+    `the agent key is refused; the operator frees the row settled under 085 and puts back the stamp moved there (${JSON.stringify([byAgent, freed, putBack])})`);
+  assert((await recapture(S, OP)) === true && (await recapture(M, OP)) === true && (await marks(settled.id)) === "operator/op-key/operator" && (await marks(moved.id)) === "operator/op-key/operator",
+    "…and the operator's re-capture then moves each to it");
+  const bf = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { differing: number };
+  assert(bf.differing === 0, `…and a backfill pass after it changes nothing (${JSON.stringify(bf)})`);
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the086 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 086 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20ai] Migration 087: onto a populated brain at the file before it — the table, its key and its index, no thought moved; a row recorded after it; a re-apply a no-op that keeps the row (SMD-2681)");
+{
+  await dropSchema(URL_);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the087 = MIGRATIONS.find((f) => f.endsWith("_board_findings_posted.sql"))!;  // by name: renumbered when main takes its number
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the087 });
+  await sql`INSERT INTO thoughts (content, metadata) VALUES ('upgrade 087: a ticket row', '{"issue": "SMD-1"}'::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at FROM thoughts ORDER BY id`);
+  const before = await rows();
+  assert((await sql`SELECT to_regclass('board_findings_posted') IS NULL AS absent`)[0].absent === true, "before 087 there is no posted record");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the087 });
+  const [shape] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS t, to_regclass('board_findings_posted_at_idx') IS NOT NULL AS i`;
+  assert(shape.t && shape.i && (await rows()) === before, "087 onto the populated brain: the table and the cap's index, and no thought moved");
+  await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('SMD-1', 'SMD-2', 'related', 'SMD-2', 'posted', 'c1', ARRAY[gen_random_uuid()])`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the087 });
+  const [n] = await sql`SELECT count(*)::int AS n FROM board_findings_posted`;
+  assert(n.n === 1 && (await rows()) === before, "a re-apply of 087 is a no-op: the posted row kept, no thought moved");
   await sql.close();
 }
 

@@ -2118,6 +2118,75 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       `…an unclassified key landing first (noted by 082) settles nothing: the operator after it moves the stamp (${JSON.stringify(uncStamp)})`);
   }
 
+  // [13g] SMD-2744's way out (migration 086): the hook's outside text that an
+  // agent key re-sent first, at its equal trust, is settled — the operator's
+  // re-capture moves nothing. A key that is not the operator is refused the
+  // reset, and a capture-only key never sees the tool. The operator's key
+  // resets it, in its own name, and its re-capture then moves the label.
+  {
+    const K = captureAs(CAPTURE_KEY);
+    const T = "[13g] smd2744probe a page the hook labels outside text and an agent re-sends first";
+    await K({ content: T, trust: "ingested" });
+    const row = idIn(await call("capture_thought", { content: T, trust: "ingested" }, "bot-raw"));
+    const stampOf = async () => {
+      const [m] = await sql`SELECT metadata->>'actor_kind' AS kind, metadata->>'actor_name' AS name, metadata->>'trust' AS trust FROM thoughts WHERE id = ${row}::uuid`;
+      return `${m?.kind}/${m?.name}/${m?.trust}`;
+    };
+    assert(idIn(await call("capture_thought", { content: T }, "op-raw")) === row && (await stampOf()) === "agent/session-hook/ingested",
+      `[13g] setup: the agent key's equal re-capture settled the hook's row, and the operator's re-capture lands there and moves nothing (${await stampOf()})`);
+    const listed = textOf(await rpc("tools/list", {}));
+    const refusedAs = async (key: string) => { try { await call("reset_capture_stamp", { id: row }, key); return "accepted"; } catch (e) { return (e as Error).message; } };
+    const agentTry = await refusedAs("bot-raw");
+    const legacyTry = await refusedAs("e2e-key");
+    assert(!listed.includes("reset_capture_stamp") && /only a key the operator classified `operator`/.test(agentTry) && /only a key the operator classified `operator`/.test(legacyTry) && (await stampOf()) === "agent/session-hook/ingested",
+      `a capture-only key is not offered the reset; an agent key and an unclassified write key are refused it, and nothing moves (${agentTry.slice(0, 90)})`);
+    assert(/This key, bot-key, is classified agent: use the operator's own key — classifying this one operator would raise the trust of everything it writes\./.test(agentTry)
+        && /This key, MCP_ACCESS_KEY, is unclassified\. If it is the operator's own, classify it: SELECT set_agent_kind\('MCP_ACCESS_KEY', 'operator'\)/.test(legacyTry),
+      `…each refusal naming the key and what it is: an agent key told to use the operator's own, an unclassified one given its line (${agentTry.slice(0, 120)} | ${legacyTry.slice(0, 160)})`);
+    /** The whole reply, as op-key: the text and the structured content (review pass 1: nothing pinned the latter). */
+    const asOperator = async (args: Record<string, unknown>) => {
+      const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": "op-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "reset_capture_stamp", arguments: args } }) });
+      const t = await r.text();
+      const body = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+      return { text: textOf(body), sc: (body.result?.structuredContent ?? {}) as Record<string, unknown>, isError: body.result?.isError === true };
+    };
+    const [{ at }] = await sql`SELECT now()::text AS at`;
+    const reply = await asOperator({ id: row });
+    const done = reply.text;
+    const [ev] = await sql`SELECT a.actor_name, a.actor_kind, a.canonical_agent_id::text = g.canonical_agent_id::text AS own_id FROM thought_audit a, ob1_agents g
+       WHERE a.thought_id = ${row}::uuid AND a.diff ? 'restamp_reset' AND g.label = 'op-key'`;
+    assert(/^Reset [0-9a-f-]{36}: 1 decline \(by bot-key\) no longer counts\. Its label: session-hook — kind agent, trust ingested\./.test(done)
+        && /Re-capture the text with your key now, exactly as stored — fetch shows this outside text under a notice line that is not part of it/.test(done)
+        && /- plainly: the label moves to your key at trust operator — the outside-text notice goes, and min_trust searches include it\./.test(done)
+        && /- with trust "ingested": the label stays as it is, outside text, and the row is settled against every other key/.test(done)
+        && ev?.actor_name === "op-key" && ev?.actor_kind === "operator" && ev?.own_id === true,
+      `the operator's key resets it, the reply saying what it cleared and both ways on, the event in its name and agent id (${done.split("\n")[0]}; ${JSON.stringify(ev)})`);
+    assert(JSON.stringify(reply.sc) === JSON.stringify({ id: row, reset: true, restored: false, declines: 1, actorKind: "agent", trust: "ingested", text: done }),
+      `…and its structured content is the reset's values, the key's name left out (${JSON.stringify(reply.sc).slice(0, 160)})`);
+    const idle = await asOperator({ id: row });
+    assert(!idle.isError && /^Nothing to reset on [0-9a-f-]{36}: no re-capture has settled or moved its label since its capture or its last reset \(a re-capture is weighed only while the text is the one captured\)\. Its label: session-hook — kind agent, trust ingested\.$/.test(idle.text) && idle.sc.reset === false,
+      `a second reset at once has nothing to reset, and says so (${idle.text.slice(0, 80)})`);
+    assert(idIn(await call("capture_thought", { content: T }, "op-raw")) === row && (await stampOf()) === "operator/op-key/operator",
+      `…and the operator's re-capture then moves the label to it (${await stampOf()})`);
+    const feed = await call("thought_changes", { since: new Date(String(at)).toISOString(), agent: "op-key", actions: ["update"] }, "op-raw");
+    assert(new RegExp(`reset by op-key \\(operator\\) — ID: ${row}\\n   the capture-only key's label unsettled: the next re-capture by a classified key`).test(feed),
+      `thought_changes reads the reset as the operator's (${(feed.split("\n").find((l) => l.includes("reset by")) ?? "").slice(0, 120)})`);
+    // A label an agent's re-capture moved: the reply names the key whose move it undid.
+    const MOVED = "[13g] smd2744probe a page the hook labels outside text and an agent lifts";
+    await K({ content: MOVED, trust: "ingested" });
+    const moved = idIn(await call("capture_thought", { content: MOVED }, "bot-raw"));
+    const back = await asOperator({ id: moved });
+    assert(/^Reset [0-9a-f-]{36}: the label bot-key's re-capture moved is back to the capture-only key's\. Its label: session-hook — kind agent, trust ingested\./.test(back.text) && back.sc.restored === true,
+      `a moved label is put back, the reply naming the key whose move it undid (${back.text.split("\n")[0]})`);
+    // The operator's own row, and no row: refused by name, through the tool.
+    const own = idIn(await call("capture_thought", { content: "[13g] smd2744probe the operator's own note" }, "op-raw"));
+    const notCapture = await asOperator({ id: own });
+    const missing = await asOperator({ id: "00000000-0000-4000-8000-0000000013a7" });
+    assert(notCapture.isError && notCapture.sc.code === "REFUSED_NOT_CAPTURE_STAMP" && /label is not one a reset can put back/.test(notCapture.text)
+        && missing.isError && missing.sc.code === "NOT_FOUND",
+      `the operator's own row is refused NOT_CAPTURE_STAMP, a missing id NOT_FOUND (${notCapture.sc.code}, ${missing.sc.code})`);
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).

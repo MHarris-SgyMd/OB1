@@ -369,8 +369,18 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   const kept = weighed.find((e) => /re-captured by laptop \(operator\)/.test(e) && /label kept/.test(e)) ?? "";
   assert(/\n   the capture-only key's label moved to this key \(metadata: actor_kind, actor_name, trust\)$/.test(moved) && !/edited|restated/.test(moved),
     `a restamp reads "re-captured", the label moved to the key, the marks that moved named (${moved.split("\n").join(" | ")})`);
-  assert(/\n   the capture-only key's label kept: this key's trust is not higher/.test(kept) && !/edited|restated/.test(kept),
-    `a decline reads "re-captured", the label kept (${kept.split("\n").join(" | ")})`);
+  assert(/\n   the capture-only key's label kept: the trust this re-capture was weighed at is not higher, and no other key's re-capture will move it \(an operator key's reset_capture_stamp can reopen it while the text stands\)$/.test(kept) && !/edited|restated/.test(kept),
+    `a decline reads "re-captured", the label kept, the way out named (${kept.split("\n").join(" | ")})`);
+  // 086's reset (SMD-2744): the operator's, with the label put back or not.
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name, actor_kind) VALUES (${B}::uuid, 'update', '{"restamp_reset": true, "metadata": {"before": {"actor_name": "laptop", "actor_kind": "operator", "trust": "operator", "source": "mcp"}, "after": {"actor_name": "hook", "actor_kind": "agent", "trust": "ingested", "source": "mcp"}}}'::jsonb, 'laptop', 'operator')`;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name, actor_kind) VALUES (${B}::uuid, 'update', '{"restamp_reset": true}'::jsonb, 'laptop', 'operator')`;
+  const resets = entriesOf(await laptop.call("thought_changes", { since: cursor0 })).filter((e) => /reset by laptop \(operator\)/.test(e));
+  const putBack = resets.find((e) => /label restored/.test(e)) ?? "";
+  const unsettled = resets.find((e) => /unsettled/.test(e)) ?? "";
+  assert(/\n   the capture-only key's label restored \(metadata: actor_kind, actor_name, trust\): the next re-capture by a classified key that can read is weighed again$/.test(putBack) && !/edited|restated|re-captured/.test(putBack),
+    `a reset that put the label back reads "reset", the marks named (${putBack.split("\n").join(" | ")})`);
+  assert(/\n   the capture-only key's label unsettled: the next re-capture by a classified key that can read is weighed again$/.test(unsettled) && !/edited|restated|re-captured/.test(unsettled),
+    `a reset that only cleared declines reads "reset", the label unsettled (${unsettled.split("\n").join(" | ")})`);
   let bad = "";
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
   assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);

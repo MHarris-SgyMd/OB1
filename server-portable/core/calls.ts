@@ -38,6 +38,7 @@ export const CALLS = {
   capture_thought: (c, p, i) => c.capture(p, i),
   update_thought: (c, p, i) => c.updateThought(p, i),
   delete_thought: (c, p, i) => c.deleteThought(p, i),
+  reset_capture_stamp: (c, p, i) => c.resetCaptureStamp(p, i),
   retry_failed: (c, p, i) => c.retryFailed(p, i),
   release_stale_leases: (c, p, i) => c.releaseStaleLeases(p, i),
   run_worker: (c, p, i) => c.runWorker(p, i),

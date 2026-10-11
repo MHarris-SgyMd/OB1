@@ -19,14 +19,14 @@
 
 import { displayDate } from "./thoughts.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY, TRUST } from "./core/filter.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
-import type { Captured, Deleted, HeadWindow, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, HeadWindow, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -716,7 +716,9 @@ function renderChange(c: AuditChange, n: number): string {
   // key's text and was weighed against its label — moved to it, or kept.
   const restamped = c.action === "update" && c.changed.includes("restamped");
   const declined = c.action === "update" && c.changed.includes("restamp_declined");
-  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (restamped || declined ? "re-captured" : marksOnly ? "marked" : "edited") : "deleted";
+  // 086's (SMD-2744): the operator reset such a label.
+  const reset = c.action === "update" && c.changed.includes("restamp_reset");
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (reset ? "reset" : restamped || declined ? "re-captured" : marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
   const text = c.head === null ? null : snipText(c.head, 200);
@@ -726,11 +728,14 @@ function renderChange(c: AuditChange, n: number): string {
   // is in its delete row, not gone (both caught: cold-read, pass 1).
   if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
   if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
-  if (restamped) {
+  if (reset) {
+    const keys = c.metadataKeys.filter((k) => ACTOR_MARKS.has(k));
+    lines.push(`   the capture-only key's label ${keys.length ? `restored (metadata: ${keys.join(", ")})` : "unsettled"}: the next re-capture by a classified key that can read is weighed again`);
+  } else if (restamped) {
     const keys = c.metadataKeys.filter((k) => ACTOR_MARKS.has(k));
     lines.push(`   the capture-only key's label moved to this key${keys.length ? ` (metadata: ${keys.join(", ")})` : ""}`);
   } else if (declined) {
-    lines.push("   the capture-only key's label kept: this key's trust is not higher, and no other key's re-capture will move it");
+    lines.push("   the capture-only key's label kept: the trust this re-capture was weighed at is not higher, and no other key's re-capture will move it (an operator key's reset_capture_stamp can reopen it while the text stands)");
   } else if (c.action === "update") {
     const parts: string[] = [];
     if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
@@ -1123,6 +1128,91 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
   return render(o, (v) => `Deleted ${v.id}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
     mutationRefusalText, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
+
+/**
+ * A row's three stamp keys as one phrase: name, kind and trust, a key it
+ * lacks said so. The row's metadata is a raw writer's to plant, so the kind
+ * and the trust are held to their word lists, as every reply holds them
+ * (review pass 1), and the name goes through snipText.
+ */
+const stampText = (s: ActorStamp): string =>
+  `${s.actorName !== null ? snipText(s.actorName, 80) : "no key"} — kind ${oneOf(SAID_BY, s.actorKind) ?? "not classified"}, trust ${oneOf(TRUST, s.trust) ?? "none"}`;
+
+/**
+ * reset_capture_stamp's reply (086, SMD-2744): what the reset cleared and the
+ * label it left, then the step it exists for — the caller's re-capture, which
+ * the next key to land would otherwise be weighed in place of. Both outcomes
+ * of that re-capture are named, and the text it must carry: fetch shows an
+ * outside text under the notice line, and a re-capture of that line and the
+ * text is a new thought, not this one (walkthrough, review pass 1).
+ */
+export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>): Reply {
+  return render(o, (v) => {
+    if (!v.reset) return `Nothing to reset on ${v.id}: no re-capture has settled or moved its label since its capture or its last reset (a re-capture is weighed only while the text is the one captured). Its label: ${stampText(v.stamp)}.`;
+    // The caller's own move or keep said so (review pass 3: a client cannot
+    // tell its own key's name from another's).
+    const mine = (n: string) => n.trim() === v.caller.trim();
+    const whose = (n: string) => (mine(n) ? `yours (${snipText(n, 80)})` : snipText(n, 80));
+    const mover = v.movedBy === null ? "a" : mine(v.movedBy) ? `your key's (${snipText(v.movedBy, 80)})` : `${snipText(v.movedBy, 80)}'s`;
+    const what = [
+      v.restored ? `the label ${mover} re-capture moved is back to the capture-only key's` : null,
+      v.declines ? `${v.declines} decline${v.declines === 1 ? "" : "s"}${v.declinedBy.length ? ` (by ${v.declinedBy.map(whose).join(", ")})` : ""} no longer count${v.declines === 1 ? "s" : ""}` : null,
+    ].filter(Boolean).join(", and ");
+    const keptByCaller = v.declinedBy.some(mine);
+    // The ways on, by the trust the row is left at: 085 moves the label only
+    // to a classified re-capture whose trust ranks strictly above it, and
+    // records any other as a decline that settles the row against every
+    // other key — the same key's own later re-capture is still weighed
+    // (review passes 2 and 3: one wording for every label was false at the
+    // ends of the ladder, and "settled" overclaimed for the operator's own).
+    const trust = oneOf(TRUST, v.stamp.trust);
+    const head = `Reset ${v.id}: ${what}. Its label: ${stampText(v.stamp)}.`;
+    if (trust === "operator")
+      return `${head}\nNo re-capture can move this label: no key's trust outranks operator. A text edit (update_thought) is what stamps the thought as yours.`;
+    const ways = trust === null
+      ? ["- the label has no trust, so a re-capture by any classified key moves it: plainly, to your key at trust operator;",
+         "- with trust \"ingested\": to your key at trust ingested, kept outside text. Either settles the row."]
+      : [`- plainly: the label moves to your key at trust operator${trust === "ingested" ? " — the outside-text notice goes, and min_trust searches include it" : ""}.`,
+         trust === "ingested"
+           ? "- with trust \"ingested\": the label stays as it is, outside text, and the row is settled against every other key — the way to keep outside text another key lifted labelled as outside text (your own key's later plain re-capture still moves it)."
+           : `- with trust "ingested": the label stays at ${trust} and the row is settled against every other key (it does not mark the text as outside text; your own key's later plain re-capture still moves it).`];
+    // fetch shows an ingested row under the outside-text notice, which is not
+    // the stored text; other rows it shows as stored.
+    const asStored = trust === "ingested"
+      ? "exactly as stored — fetch shows this outside text under a notice line that is not part of it (REST GET /v1/thoughts/{id} gives the content alone)"
+      : "exactly as stored (fetch's text)";
+    return `${head}\n`
+      + (keptByCaller ? "This undid your own key's keep: re-capture with trust \"ingested\" to keep it again.\n" : "")
+      + `Re-capture the text with your key now, ${asStored}:\n${ways.join("\n")}\n`
+      + "Until you do, the next classified key that can read to re-capture it is the one weighed. fetch's label, or thought_changes, shows which way it went.";
+  }, (r) => {
+    switch (r.code) {
+      case "REFUSED_NOT_OPERATOR": {
+        // The fix depends on what the key is (review pass 2): an unclassified
+        // key may be the operator's, and its line is given; a key classified
+        // otherwise is someone else's, and classifying it operator would
+        // raise the trust of everything it writes.
+        const key = snipText(r.key, 80);
+        const lead = "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.";
+        if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
+        // The line only for a name set_agent_kind takes as written — no
+        // control character, nothing it trims — or the line would classify
+        // another label (review pass 3: a mangled name created an operator row).
+        const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
+        if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
+        return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
+      }
+      case "REFUSED_NOT_CAPTURE_STAMP": return `Refused: ${r.id}'s label is not one a reset can put back — a capture-only key did not capture it (or captured it before the server marked such captures), or its text was changed since. Its label is its writer's: a text edit restamps it.`;
+      default: return mutationRefusalText(r);
+    }
+  }, (v) => ({ id: v.id, reset: v.reset, restored: v.restored, declines: v.declines, actorKind: oneOf(SAID_BY, v.stamp.actorKind), trust: oneOf(TRUST, v.stamp.trust) }));
+}
+
+/** reset_capture_stamp's fault: a database before 086 has no such function. */
+export const resetHint = (msg: string): string =>
+  /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied, or PostgREST has not reloaded its schema cache"
+    : "";
 
 // ── The worker actions (SMD-2283 PR 3) ───────────────────────────────────────
 // Each answers its result as JSON, the value itself beside it; a refusal its

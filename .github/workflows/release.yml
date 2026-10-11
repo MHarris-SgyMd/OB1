@@ -237,8 +237,9 @@ jobs:
       # checkout: the same deploy/.env shape (a provider address that is neither
       # the code's default nor the compose fallback, declared local; the query
       # log on), and `up` with `--pull never` so nothing here is built or fetched
-      # behind the overlay's back. Postgres and the proxy (SMD-1846, pinned by
-      # digest in compose.yaml itself) are pulled by name first — a fresh
+      # behind the overlay's back. Postgres, the proxy (SMD-1846) and the
+      # forwarder in front of it (SMD-2583), the last two pinned by digest in
+      # compose.yaml itself, are pulled by name first — a fresh
       # runner has no image at all, and `--pull never` refused the pgvector pull
       # too on the first rehearsal (caught: run-it, PR #119) — and on a tag the
       # two OB1 images with them, which proves the registry serves what was
@@ -275,10 +276,10 @@ jobs:
           SERVER_PORT=8010
           EOF
           # What compose makes of the overlay: every service the release names
-          # runs the release's image, Ollama's by digest, and the proxy keeps
-          # compose.yaml's digest (the overlay does not name it).
+          # runs the release's image, Ollama's by digest, and the proxy and the
+          # forwarder keep compose.yaml's digests (the overlay names neither).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
           # the images it pins and their pull policy, on any service but the
           # proxy, as fork-checks' "The proxy loads only the held route tables"
@@ -295,10 +296,11 @@ jobs:
           list="$(docker compose -f compose.yaml config --profiles)"
           profiles=()
           while read -r p; do if [ -n "$p" ]; then profiles+=("--profile=$p"); fi; done <<<"$list"
-          # An image and its pull policy, on any service but the proxy: not a
-          # list the generator keeps, which a change to it could widen
-          # (SMD-2685 review pass 2).
-          pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
+          # An image and its pull policy, on any service but the proxy and the
+          # forwarder in front of it, which carry every client's bytes and keep
+          # compose.yaml's pinned images: not a list the generator keeps, which
+          # a change to it could widen (SMD-2685 review pass 2; SMD-2583).
+          pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy" and . != "forwarder") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           rest='delpaths($pins) | with_entries(select(.key | startswith("x-") | not))'
           for public in no api hooks; do
@@ -313,7 +315,7 @@ jobs:
                 | jq -c --argjson pins "$pins" "$rest" | jq -e --argjson base "$base" '. == $base' >/dev/null
             done
           done
-          pull=(postgres proxy)
+          pull=(postgres proxy forwarder)
           if [ "$PUBLISH" = true ]; then pull+=(server api migrate); fi
           docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240

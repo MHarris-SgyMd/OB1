@@ -47,6 +47,7 @@ export const TOOLS = [
   { name: "capture_thought", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
+  { name: "reset_capture_stamp", scope: "write" },
   { name: "retry_failed", scope: "write" },
   { name: "release_stale_leases", scope: "write" },
   { name: "run_worker", scope: "write" },

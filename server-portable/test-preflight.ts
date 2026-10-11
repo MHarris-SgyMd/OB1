@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -166,7 +166,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 23, "…twenty-three of them as the catalog-only skip (061's lineage, the workers' heartbeats, the proposal queue and the plugin tables among them), the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 26, "…twenty-six of them as the catalog-only skip (061's lineage, the workers' and the sleep scheduler's heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -737,6 +737,43 @@ else {
          "…and dropped, the claim functions are the shipped four, said as such");
 
   /**
+   * SMD-1499: the server sized for the table. On this small fixture both rows
+   * are ok. `filter bitmap memory` is information only: a thoughts heap past
+   * what a lowered work_mem's bitmap covers is still an ok row, saying the
+   * routing count's bitmap goes lossy at little cost and pointing at SMD-1464,
+   * with nothing recommending a larger work_mem. The heap here is under 037's
+   * gate (8,192 pages), so the broadest filter may touch every page; the
+   * fixture's own heap is empty, so its row says no filter builds a bitmap.
+   * shared_buffers cannot be lowered for one database (it is the
+   * postmaster's), so the index row's warning is held by test-schema on
+   * memoryRows' wording, and here only as ok.
+   */
+  const ungatedRow = /✓\s+filter bitmap memory\s+on a heap under 8,192 pages every filter takes the GIN route, the broadest touching up to all ([\d,]+) of its pages: its routing count's bitmap/;
+  assert(/vector index memory\s+the HNSW indexes \([^)]+\) fit shared_buffers \([^)]+\)/.test(withKw.out)
+         && /✓\s+filter bitmap memory\s+the thoughts heap is empty, so no filter builds a bitmap\. Information only/.test(withKw.out),
+         "a small brain on the image's defaults: the HNSW indexes fit shared_buffers, and an empty heap builds no bitmap, said as information");
+  {
+    // Rows of ~1.9 KB stay inline (under the TOAST threshold, four a page), so
+    // 6,000 of them fill ~1,500 heap pages: past the 1,024 that 64 kB of
+    // work_mem covers at 64 bytes each, with room if a column shifts the fit.
+    const sizing = new SQL({ url: LIVE, max: 1 });
+    try {
+      await sizing.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'pf sizing ' || i || repeat(md5(i::text), 59), '{"type": "note", "source": "pf-sizing"}'::jsonb FROM generate_series(1, 6000) i`);
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I SET work_mem = %L', current_database(), '64kB'); END $s$`);
+      const lowered = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      const pages = Number(ungatedRow.exec(lowered.out)?.[1]?.replace(/,/g, "") ?? NaN);
+      assert(lowered.code === 0 && pages > 1024
+             && new RegExp(`${ungatedRow.source} \\(\\d+ kB\\) passes work_mem \\(64 kB\\) and goes lossy, which costs little: under LIMIT v_exact \\+ 1 it rechecks pages only until it has its rows\\. Information only: whether match_thoughts takes a generic plan is SMD-1464's to settle`).test(lowered.out)
+             && !/Set work_mem|SET work_mem/.test(lowered.out),
+             `a heap past a lowered work_mem's bitmap is information, not a warning: the routing count's lossy bitmap costs little, SMD-1464 named, no work_mem recommended (${pages} pages; exit ${lowered.code})`);
+    } finally {
+      await sizing.unsafe(`DO $s$ BEGIN EXECUTE format('ALTER DATABASE %I RESET work_mem', current_database()); END $s$`);
+      await sizing.unsafe(`DELETE FROM thoughts WHERE metadata->>'source' = 'pf-sizing'`);
+      await sizing.close();
+    }
+  }
+
+  /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
    * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
    * event: same signature, no iterative scan. A warning, because every search
@@ -849,7 +886,41 @@ else {
   const rawBody = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(rawBody.code === 0 && /walk index.*orders its walk by the vector column but thoughts_embedding_idx is over embedding::halfvec; thought_chunks_embedding_idx is over embedding::halfvec/s.test(rawBody.out),
          "038 re-applied over 039: the check names the raw-column body over both halfvec indexes, as a warning");
-  assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql[^\n]*then db\/migrations\/074_min_trust\.sql, the last definer of match_thoughts/.test(rawBody.out), "…with 039 as the remedy, then 074 — 039's file alone re-creates the 6-argument form beside 074's (second review pass)");
+  // SMD-2880: the migrator, never the file by hand (the files are templates,
+  // and 039's refusal of the unrendered shape would name a good staging
+  // index), so no 074 after it; nothing to build, the indexes being 039's.
+  const rawFix = fix(rawBody.out, "walk index");
+  assert(rawFix.includes("→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
+         `…with the migrator as the remedy: no file by hand, no 074 after it, nothing to build first (${rawFix.trim().slice(0, 60)}…)`);
+  /**
+   * SMD-2871: 039's window. The raw-column body is 038's, as before 039;
+   * 001's vector index goes back under the shipped name on thoughts, and the
+   * staging index is built beside it as 039's header has an operator on a
+   * large brain do. The walk uses 001's until 039 runs, so the staging index
+   * is left out and said to be; 039 below then adopts it, which is the
+   * window closing. A staging index under the cast body (the walk index
+   * remedy's rebuild, further down) is the one walked, so it is counted.
+   */
+  const hnswSizes = async () => {
+    const c = new SQL({ url: LIVE, max: 1 });
+    const [z] = await c.unsafe(`
+      SELECT (SELECT sum(pg_relation_size(i.indexrelid)) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
+               WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN ('thoughts'::regclass, 'thought_chunks'::regclass))::bigint AS total,
+             COALESCE(pg_relation_size(to_regclass('thoughts_embedding_halfvec_idx')), 0)::bigint AS staged`);
+    await c.close();
+    return { total: Number(z.total), staged: Number(z.staged) };
+  };
+  const STAGE_SQL = `CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops)`;
+  const memRow = (indexes: number) => `✓\\s+vector index memory\\s+the HNSW indexes \\(${rx(bytesText(indexes))}\\) fit shared_buffers \\([^)]+\\)`;
+  const opened = new SQL({ url: LIVE, max: 1 });
+  await opened.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await opened.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  await opened.unsafe(STAGE_SQL);
+  await opened.close();
+  const inWindow = await hnswSizes();
+  const windowRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(inWindow.staged > 0 && new RegExp(`${memRow(inWindow.total - inWindow.staged)}${rx(`. Not counted: thoughts_embedding_halfvec_idx (${bytesText(inWindow.staged)}), a staging index 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx until 039 swaps the staging index in. Run preflight again after 039`)}\\s*$`, "m").test(windowRun.out),
+         `039's window: the staging index built beside 001's is left out, its size said (${bytesText(inWindow.total - inWindow.staged)} counted, ${bytesText(inWindow.staged)} not)`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuilt = new SQL({ url: LIVE, max: 1 });
   await rebuilt.unsafe(`DROP INDEX thoughts_embedding_idx`);
@@ -858,9 +929,52 @@ else {
   const vecIdx = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column —/s.test(vecIdx.out) && !/thought_chunks_embedding_idx is over/.test(vecIdx.out),
          "001's DDL re-run by hand: the check names the vector index under the cast body and leaves the chunk index unmentioned");
+  assert(fix(vecIdx.out, "walk index").trim().startsWith(`→ Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (\`SELECT count(embedding) FROM <table>\`), as \`SET maintenance_work_mem = '<size>';\`. Where the table holds more than a million vectors — on thoughts (039 would build thoughts_embedding_halfvec_idx inside its transaction): 1) \`CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);\`; on a smaller table the migrator builds it`),
+         "…and its remedy says where to run the statements and how to size their memory, then has the staging index 039 would build in its transaction built first on a large table, the statement at the column's width (SMD-2880)");
+  // A ledger with a hole — a later file recorded, 039 not — is the re-apply:
+  // a plain run would apply 039 alone after 074 (review pass 2).
+  const holed = new SQL({ url: LIVE, max: 1 });
+  let holeRun = { code: -1, out: "" };
+  try {
+    await holed.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+    await holed.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('074_min_trust.sql', 'test')`);
+    holeRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await holed.unsafe(`DROP TABLE IF EXISTS schema_migrations`);
+    await holed.close();
+  }
+  assert(fix(holeRun.out, "walk index").includes("The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: stop the server and every worker") && !/Apply the (pending )?migrations/.test(fix(holeRun.out, "walk index")),
+         "…and with 074 recorded and 039 not, the re-apply rather than a plain run, which would apply 039 alone after 074 (SMD-2880)");
+  // The staging index left INVALID — what an interrupted run of that
+  // statement leaves — is dropped before the build, or the CREATE meets the
+  // taken name (review pass 1).
+  const interrupted = new SQL({ url: LIVE, max: 1 });
+  let afterBreak = { code: -1, out: "" };
+  try {
+    await interrupted.unsafe(STAGE_SQL);
+    await interrupted.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('thoughts_embedding_halfvec_idx')`);
+    afterBreak = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await interrupted.unsafe(`DROP INDEX IF EXISTS thoughts_embedding_halfvec_idx`);
+    await interrupted.close();
+  }
+  assert(fix(afterBreak.out, "walk index").includes(`— on thoughts (thoughts_embedding_halfvec_idx is INVALID (an interrupted build), and 039 would build it again inside its transaction): 1) \`DROP INDEX CONCURRENTLY thoughts_embedding_halfvec_idx;\` 2) \`CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts`),
+         "…and with the staging index left INVALID, the remedy drops it CONCURRENTLY before building it again (SMD-2880)");
+  const remedy = new SQL({ url: LIVE, max: 1 });
+  await remedy.unsafe(STAGE_SQL);
+  await remedy.close();
+  const underCast = await hnswSizes();
+  const castRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(new RegExp(`${memRow(underCast.total)}\\s*$`, "m").test(castRun.out),
+         `…and a staging index built under the cast body, the walk index remedy's way, is the one walked: counted with the rest, no clause (${bytesText(underCast.total)})`);
+  assert(fix(castRun.out, "walk index").trim() === "→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
+         "…and the walk index remedy, the staging index built, asks for 039 alone: nothing left to build first (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  const afterAdopt = await hnswSizes();
   assert(/walk index.*over that expression \(039\)/s.test(paired.out), "…and re-applying 039 pairs them again");
+  assert(afterAdopt.staged === 0 && new RegExp(`${memRow(afterAdopt.total)}\\s*$`, "m").test(paired.out),
+         `…adopting the staging index, after which the memory row counts the indexes there are, no clause (${bytesText(afterAdopt.total)})`);
   // The other two branches, and the ledger's suffix (review pass 3): an
   // INVALID index under the name — what an interrupted CONCURRENTLY build
   // leaves, made here by flipping the catalog flag as test-upgrade [16] does —
@@ -873,6 +987,8 @@ else {
   const invalid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*thoughts_embedding_idx is INVALID \(an interrupted CREATE INDEX CONCURRENTLY\), which the planner ignores — although migration 039 is recorded as applied/s.test(invalid.out),
          "an INVALID index under the name is named as such, with the ledger's suffix when 039 is recorded");
+  assert(/CREATE INDEX CONCURRENTLY thoughts_embedding_halfvec_idx ON thoughts [^\n]*Re-apply the recorded migrations: stop the server and every worker, run `cd db && bun migrate\.ts --url … --reapply`/.test(fix(invalid.out, "walk index")),
+         "…its remedy the staging index first, then the re-apply a recorded 039 needs (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuiltValid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*over that expression \(039\)/s.test(rebuiltValid.out), "…and the remedy — 039 again — rebuilds it");
@@ -883,9 +999,34 @@ else {
   const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*thought_chunks_embedding_idx does not exist — the planner has no index path/s.test(missing.out) && !/although migration 039 is recorded/.test(missing.out),
          "a missing index is named, without the ledger's suffix when nothing records 039");
+  const FREE_CHUNKS = "On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own): 1) ";
+  const NOTHING_LEFT = ". Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.";
+  assert(fix(missing.out, "walk index").includes(`${FREE_CHUNKS}\`CREATE INDEX CONCURRENTLY thought_chunks_embedding_idx ON thought_chunks USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);\`${NOTHING_LEFT}`) && !/stop the server/.test(fix(missing.out, "walk index")),
+         "…its remedy the free name built under itself on any brain, and under a casting body nothing left for 039: preflight again, no server stopped (SMD-2880)");
+  // A staging index of 039's shape beside the free name is renamed onto it:
+  // a re-apply's 007 would otherwise build a vector index there first (review pass 1).
+  const besideFree = new SQL({ url: LIVE, max: 1 });
+  let renameRun = { code: -1, out: "" };
+  try {
+    await besideFree.unsafe(`CREATE INDEX thought_chunks_embedding_halfvec_idx ON thought_chunks USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops)`);
+    renameRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  } finally {
+    await besideFree.unsafe(`DROP INDEX IF EXISTS thought_chunks_embedding_halfvec_idx`);
+    await besideFree.close();
+  }
+  assert(fix(renameRun.out, "walk index").trim() === "→ Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing and thought_chunks_embedding_halfvec_idx, of 039's shape, is built): 1) `ALTER INDEX thought_chunks_embedding_halfvec_idx RENAME TO thought_chunks_embedding_idx;`. Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.",
+         "…and a staging index of 039's shape beside it is renamed onto the name, nothing built (SMD-2880)");
+  // Followed as printed: the statement alone, and the walk reads ok with no
+  // migrator run (SMD-2880, review pass 3); 039 applied over it then keeps it.
+  const freeStatements = [...fix(missing.out, "walk index").matchAll(/`(CREATE INDEX CONCURRENTLY [^`]+)`/g)].map((m) => m[1]);
+  const followed = new SQL({ url: LIVE, max: 1 });
+  try { for (const st of freeStatements) await followed.unsafe(st); } finally { await followed.close(); }
+  const filled = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(freeStatements.length === 1 && /✓\s+walk index\s+match_thoughts orders its walk by embedding::halfvec and both HNSW indexes are over that expression \(039\)/.test(filled.out),
+         "…and followed as printed, the one statement and no migrator, the walk index row reads ok (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const restored039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 builds it where the name is free");
+  assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 applied over it keeps it");
   // 039's file alone, as the walk-index probes above applied it, is the state
   // 040's header names for its clause and 041's for its pins: 039's CREATE
   // carries 019's clauses and neither 040's nor 041's, so the candidate-scan
@@ -2476,6 +2617,42 @@ else {
          "…and the consolidate pass check, which reads the same table, says so too");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
 
+  // SMD-2880's Verify: the walk index remedy followed literally. A ledger
+  // the migrator wrote (--baseline over the full apply) records 039. 038
+  // re-applied by hand on a current brain puts a 6-argument form beside 074's
+  // 7-argument one — the search signatures row's to report, the walk reading
+  // the 7 — so the walk index is moved by the other half, 001's DDL re-run
+  // after a drop: a vector index under the cast body. The remedy's statement
+  // is run as printed, then the re-apply, and walk index, search signatures
+  // and vector index memory read ok, the staging index adopted. The ledger
+  // goes after, as every block here that makes one drops it.
+  {
+    await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
+    const recorded = await migrate(["--url", LIVE, "--baseline"]);
+    assert(recorded.code === 0, `migrate.ts --baseline records every file, 039 among them (exit ${recorded.code})`);
+    try {
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
+      await claims.unsafe(`DROP INDEX thoughts_embedding_idx`);
+      await claims.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+      const moved = await run(SQL_ENV);
+      const walkFix = fix(moved.out, "walk index");
+      const statements = [...walkFix.matchAll(/`(CREATE INDEX CONCURRENTLY [^`]+)`/g)].map((m) => m[1]);
+      assert(/!\s+walk index\s+match_thoughts orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column — although migration 039 is recorded as applied/.test(row(moved.out, "walk index"))
+             && /^\s*[!✗]/.test(row(moved.out, "search signatures"))
+             && statements.length === 1 && walkFix.includes("Re-apply the recorded migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && !/file alone|direct connection|074_min_trust/.test(walkFix),
+             `038 by hand and 001's DDL under a recorded 039: the walk index row warns, its remedy one statement then the re-apply, no file by hand (${walkFix.trim().slice(0, 70)}…)`);
+      for (const st of statements) await claims.unsafe(st);
+      const reapplied = await migrate(["--url", LIVE, "--reapply"]);
+      const after = await run(SQL_ENV);
+      const ok = (name: string) => /^\s*✓/.test(row(after.out, name));
+      const [{ staged }] = await claims`SELECT to_regclass('public.thoughts_embedding_halfvec_idx') IS NOT NULL AS staged`;
+      assert(reapplied.code === 0 && ok("walk index") && ok("search signatures") && ok("vector index memory") && staged === false,
+             `…and followed as printed — the statement, then the re-apply — walk index, search signatures and vector index memory read ok, the staging index adopted (exit ${reapplied.code}: ${["walk index", "search signatures", "vector index memory"].map((n) => row(after.out, n).trim().slice(0, 40)).join(" | ")})`);
+    } finally {
+      await claims.unsafe("DROP TABLE IF EXISTS schema_migrations");
+    }
+  }
+
   // The capture path's SECURITY INVOKER writers run as the calling role. A role
   // that can read everything and write thoughts, but cannot INSERT/DELETE
   // thought_chunks or INSERT thought_audit, fails every windowed capture and the
@@ -2751,6 +2928,15 @@ else {
              `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
       assert(/GRANT INSERT ON query_log TO "ob1_pf_capture";/.test(grant.out),
              "…including the opt-in query log's INSERT (querylog group, SMD-1295)");
+      // The sleep group's read of the log is opt-in (SMD-2678): the log holds
+      // every search's text, so a plain --grant leaves it out and only --groups
+      // names it. (This role already reads every table, from its setup above,
+      // so the statements are what is asserted, not what it holds.)
+      assert(!/GRANT SELECT[^;\n]* ON query_log TO/.test(grant.out),
+             "…but not the sleep group's SELECT on it: a plain --grant leaves the opt-in group out");
+      const sleepGrant = await migrate(["--grant", "ob1_pf_capture", "--groups", "sleep", "--url", LIVE]);
+      assert(sleepGrant.code === 0 && /GRANT SELECT ON query_log TO "ob1_pf_capture";/.test(sleepGrant.out),
+             `…which --groups sleep issues (exit ${sleepGrant.code})`);
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
              `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
@@ -3354,6 +3540,10 @@ else {
     // read times out, and the row says it could not verify — not that the
     // role lacks a grant.
     {
+      // The walk index row warns meanwhile, so its remedy reads the unread
+      // ledger with the reason, as ledgerRemedy does (SMD-2880).
+      const [{ chunkIdx }] = await claims`SELECT pg_get_indexdef(to_regclass('thought_chunks_embedding_idx')) AS "chunkIdx"`;
+      if (chunkIdx) await claims.unsafe("DROP INDEX thought_chunks_embedding_idx");
       const locker = new SQL({ url: LIVE!, max: 1 });
       let release: () => void = () => {};
       const held = new Promise<void>((r) => { release = r; });
@@ -3372,6 +3562,7 @@ else {
         release();
         await tx;
         await locker.close();
+        if (chunkIdx) await claims.unsafe(chunkIdx);
       }
       assert(/!\s+migration ledger\s+could not verify: schema_migrations could not be read \(canceling statement due to lock timeout\)/.test(busy.out) && !/not readable by this role/.test(row(busy.out, "migration ledger") ?? ""),
              `a locked ledger is could-not-verify, not a missing grant (${row(busy.out, "migration ledger")})`);
@@ -3379,6 +3570,8 @@ else {
       // says it could not verify rather than ✓ "unknown" (review pass 3).
       assert(/!\s+schema version\s+could not verify against the ledger: .* schema_migrations could not be read: canceling statement due to lock timeout/.test(busy.out),
              `a locked ledger leaves the version row unverified, not ✓ (${row(busy.out, "schema version")})`);
+      assert(fix(busy.out, "walk index").trim() === "→ The ledger is locked (schema_migrations could not be read: canceling statement due to lock timeout): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.",
+             `…and the walk index remedy waits a locked ledger out — no steps, no server stopped — as the ledger row does (${fix(busy.out, "walk index").trim().slice(0, 80)}…)`);
     }
 
     // Back to the harness's unrecorded schema for the sections below.
@@ -3489,12 +3682,108 @@ else {
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a live follower whose last pass hit a down provider says so");
 
-    // The sleep scheduler's row (SMD-1794): named "sleep", and gone stale, its restart from a checkout.
-    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    await beat("heartbeat:sleep", v({ every_s: 60 }), 600);
-    const sleepOut = await run(SQL_ENV);
-    assert(/!\s+workers\s+sleep stale \(last stamped 10 min ago, every 60 s\)$/.test(row(sleepOut.out, "workers")) && /sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile workers run --rm --no-deps extract bun db\/sleep\.ts --follow, .*; from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\./.test(fix(sleepOut.out, "workers")),
-      `a stale heartbeat:sleep reads as the sleep scheduler's and names its restart (${row(sleepOut.out, "workers")} | ${fix(sleepOut.out, "workers")})`);
+    // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
+    // workers row; the row says asleep or awake with its last sleep, and what
+    // wakes it — a search only with the log on (OB1_QUERY_LOG) and readable
+    // by this role, each lesser case a warning with its fix; gone stale, its
+    // restart is the compose service.
+    {
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const LOG_ON = { ...SQL_ENV, OB1_QUERY_LOG: "on" };
+      /** An instant `agoS` seconds before the database's now(), as pass-stamp's SleepMark writes one. */
+      const at = async (agoS: number): Promise<string> => new Date((await claims`SELECT now() - make_interval(secs => ${agoS}) AS t`)[0].t).toISOString();
+      const noneOut = await run(LOG_ON);
+      assert(/·\s+sleep\s+the sleep scheduler has not run on this brain — `--profile sleep` runs it, as an alternative to `--profile workers`/.test(row(noneOut.out, "sleep")),
+        `a brain the scheduler never ran on says so, as a skip (${row(noneOut.out, "sleep")})`);
+
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null } }), 10);
+      const asleepOut = await run(LOG_ON);
+      assert(/·\s+workers\s+no long-running worker has stamped a heartbeat on this brain but the sleep scheduler \(its own row, below\)\.$/.test(row(asleepOut.out, "workers")),
+        `the scheduler's heartbeat is not the workers row's (${row(asleepOut.out, "workers")})`);
+      // Beside another worker's, too: the workers row names board-sync alone (review pass 2's mutant run).
+      await beat("heartbeat:board-sync", v(), 120);
+      const mixedOut = await run(LOG_ON);
+      await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+      assert(/✓\s+workers\s+board-sync alive \(last stamped 2 min ago, every 300 s\)$/.test(row(mixedOut.out, "workers")) && /✓\s+sleep\s+running a pass/.test(row(mixedOut.out, "sleep")),
+        `beside board-sync's heartbeat the workers row names board-sync alone, the scheduler its own row (${row(mixedOut.out, "workers")})`);
+      assert(/✓\s+sleep\s+running a pass \(last stamped 10 s ago, every 60 s\); asleep, its passes running — for 2 min; a search or a write wakes it$/.test(row(asleepOut.out, "sleep")),
+        `asleep: the row says so, for how long, and that a search wakes it (${row(asleepOut.out, "sleep")})`);
+
+      await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
+      const awakeOut = await run(LOG_ON);
+      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a search or a write wakes it$/.test(row(awakeOut.out, "sleep")),
+        `awake: when the last sleep ended and how long it lasted (${row(awakeOut.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60 }), 20);
+      assert(/awake, its passes waiting for the brain to go quiet — no sleep yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no sleep recorded says no sleep yet");
+
+      // The log off: writes alone wake it, a warning with the switch.
+      await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
+      const offOut = await run(SQL_ENV);
+      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d server api — so/.test(fix(offOut.out, "sleep")),
+        `the log off warns that a search does not wake it, with the switch (${row(offOut.out, "sleep")} | ${fix(offOut.out, "sleep")})`);
+
+      // The log on but this role cannot read it: the opt-in sleep group is the fix; granted it, a search wakes it.
+      await claims.unsafe("CREATE ROLE pf_sleep LOGIN PASSWORD 'pf'");
+      try {
+        const u = new URL(LIVE!); u.username = "pf_sleep"; u.password = "pf";
+        await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_sleep; GRANT SELECT ON thoughts, ob1_config TO pf_sleep");
+        const deniedOut = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
+        assert(/!\s+sleep\s+.*; writes alone wake it — this role cannot read query_log \(the scheduler has not said whether its own can\)$/.test(row(deniedOut, "sleep")) && /Grant the scheduler's role the opt-in sleep group, `bun db\/migrate\.ts --grant <role> --groups <its groups>,sleep`/.test(fix(deniedOut, "sleep")),
+          `a role that cannot read the log warns, naming the opt-in group (${row(deniedOut, "sleep")} | ${fix(deniedOut, "sleep")})`);
+        await claims.unsafe("GRANT SELECT ON query_log TO pf_sleep");
+        const grantedOut = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
+        assert(/✓\s+sleep\s+.*; a search or a write wakes it$/.test(row(grantedOut, "sleep")), `…and granted SELECT on it, a search wakes it (${row(grantedOut, "sleep")})`);
+        // The scheduler's own word wins over preflight's role (review pass 1):
+        // it says it reads the log, so a preflight role that cannot still reads ok…
+        await claims.unsafe("REVOKE SELECT ON query_log FROM pf_sleep");
+        await beat("heartbeat:sleep", v({ every_s: 60, reads: "yes", slept: { from: await at(400), to: await at(60) } }), 20);
+        const itsYes = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
+        assert(/✓\s+sleep\s+.*; a search or a write wakes it$/.test(row(itsYes, "sleep")), `the scheduler reading the log is believed over a preflight role that cannot (${row(itsYes, "sleep")})`);
+      } finally {
+        await claims.unsafe("REVOKE ALL ON thoughts, ob1_config, query_log FROM pf_sleep; REVOKE USAGE ON SCHEMA public FROM pf_sleep; DROP ROLE pf_sleep");
+      }
+      // …and it saying it cannot warns, though the owner's preflight could.
+      await beat("heartbeat:sleep", v({ every_s: 60, reads: "denied", slept: { from: await at(400), to: await at(60) } }), 20);
+      const itsDenied = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*; writes alone wake it — its role cannot read query_log, as it found at its start$/.test(row(itsDenied.out, "sleep")) && /restart it \(its start reads the privilege once\)/.test(fix(itsDenied.out, "sleep")),
+        `the scheduler not reading the log warns, though this preflight's role could, its fix naming the restart (${row(itsDenied.out, "sleep")} | ${fix(itsDenied.out, "sleep")})`);
+      // Its start found no log, applied since: a restart, not a migration, is the fix (review pass 2).
+      await beat("heartbeat:sleep", v({ every_s: 60, reads: "missing", slept: { from: await at(400), to: await at(60) } }), 20);
+      const itsMissing = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*; writes alone wake it — its start found no query log, which is applied since$/.test(row(itsMissing.out, "sleep")) && /→ Restart it so its start finds the query log, applied since it began — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(itsMissing.out, "sleep")),
+        `a scheduler that found no log, applied since, is told to restart (${row(itsMissing.out, "sleep")} | ${fix(itsMissing.out, "sleep")})`);
+
+      // Fresh, its last pass failed: a warning with the scheduler's remedy.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed" }), 20);
+      const failedOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+alive, its last pass failed/.test(row(failedOut.out, "sleep")) && /→ Its last pass failed — a pass refused at its start, which it retries on its own/.test(fix(failedOut.out, "sleep")),
+        `a failed last pass warns with the scheduler's remedy (${row(failedOut.out, "sleep")} | ${fix(failedOut.out, "sleep")})`);
+
+      // Gone stale: its restart is the compose service, then the checkout's.
+      await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
+      const sleepOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+        `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
+      // Killed while asleep: the sleep never ended, so the row says when it began.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(900), to: null } }), 600);
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep began 15 min ago;/.test(row((await run(LOG_ON)).out, "sleep")), "a scheduler gone stale mid-sleep says when that sleep began");
+
+      // Refused beside the workers' followers (review pass 3): the scheduler's
+      // row ended on a failure, a follower fresh — the fix is the choice of
+      // profile, not a restart that would refuse again…
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
+      const keptDown = await run(LOG_ON);
+      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a search or a write wakes it$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, take sleep out of COMPOSE_PROFILES in deploy\/\.env and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
+        `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
+      // …and a follower stopped for a scheduler running here is retired, not started again.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const retired = await run(LOG_ON);
+      assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
+        `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    }
 
     // Each claim worker's restart, and a stale row with an alarm told its restart first.
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;

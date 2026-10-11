@@ -216,6 +216,27 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const dr = rendered((v) => say.renderDelete(ok(v)), swap(d.body, dm.sc));
   assert(d.status === 200 && dr.content[0].text === dm.text && same(dr.structuredContent, dm.sc), `delete_thought: the same reply (${d.status}; first difference: ${firstDiff(dr.structuredContent, dm.sc)})`);
 
+  // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
+  // classified for it here and unclassified after. Each door resets the
+  // hook's own row, which nothing settled: the same "nothing to reset".
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const hookRest = await rest("POST", "/v1/thoughts", { content: "omega: the hook's outside text, for REST's reset", trust: "ingested" }, KEYS.hook);
+  const hookMcp = await rest("POST", "/v1/thoughts", { content: "omega: the hook's outside text, for MCP's reset", trust: "ingested" }, KEYS.hook);
+  const rs = await rest("POST", `/v1/thoughts/${hookRest.body.id}/reset-capture-stamp`, {});
+  const rsm = await mcp("reset_capture_stamp", { id: String(hookMcp.body.id) });
+  const rsr = rendered((v) => say.renderResetCaptureStamp(ok(v)), swap(rs.body, rsm.sc));
+  // Its refusals at their statuses, as numbers — [5] reads the status table
+  // against itself, which a swapped entry passes (review pass 1).
+  const ownRow = await rest("POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {});
+  const noRow = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a4/reset-capture-stamp", {});
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+  const notOperator = await rest("POST", `/v1/thoughts/${hookRest.body.id}/reset-capture-stamp`, {});
+  assert(ownRow.status === 409 && ownRow.body.code === "REFUSED_NOT_CAPTURE_STAMP" && noRow.status === 404 && noRow.body.code === "NOT_FOUND"
+      && notOperator.status === 403 && notOperator.body.code === "REFUSED_NOT_OPERATOR",
+    `reset_capture_stamp's refusals: another key's row 409, no row 404, a key not the operator 403 (${ownRow.status} ${noRow.status} ${notOperator.status})`);
+  assert(rs.status === 200 && rs.body.reset === false && rsr.content[0].text === rsm.text && same(rsr.structuredContent, rsm.sc),
+    `reset_capture_stamp: the same reply (${rs.status} ${JSON.stringify(rs.body).slice(0, 90)}; first difference: ${firstDiff(rsr.structuredContent, rsm.sc)})`);
+
   // Each door acts on its own seeded pool or holder, so both act on a row.
   const workers: [string, Record<string, unknown>, Record<string, unknown>, string, (v: never) => say.Reply, string[]][] = [
     ["retry_failed", { work_type: "extract:rest@p1" }, { work_type: "extract:mcp@p1" }, "/v1/workers/retry", (v) => say.renderRetryFailed(ok(v)), ["workType", "ids"]],
@@ -288,6 +309,9 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     ["update_thought", { id: ids[2] }, "PATCH", `/v1/thoughts/${ids[2]}`, {}],
     ["update_thought", { id: missing, content: "zeta" }, "PATCH", `/v1/thoughts/${missing}`, { content: "zeta" }],
     ["delete_thought", { id: missing }, "DELETE", `/v1/thoughts/${missing}`, undefined],
+    // The writer is unclassified: the database refuses it the reset (SMD-2744).
+    ["reset_capture_stamp", { id: ids[0] }, "POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {}],
+    ["reset_capture_stamp", { id: "not-a-uuid" }, "POST", "/v1/thoughts/not-a-uuid/reset-capture-stamp", {}],
     ["retry_failed", { work_type: "  " }, "POST", "/v1/workers/retry", { work_type: "  " }],
     ["release_stale_leases", { include_live: true }, "POST", "/v1/workers/release-leases", { include_live: true }],
     ["run_worker", { work_type: "extract:none@p1" }, "POST", "/v1/workers/run", { work_type: "extract:none@p1" }],
