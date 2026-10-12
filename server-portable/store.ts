@@ -840,7 +840,7 @@ export type ResetStampResult =
  * disagree about what a refusal looks like.
  */
 export type MutationEnvelope =
-  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number }
+  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number; stamp?: Record<string, unknown>; sameText?: boolean; metadataMerged?: boolean; patchDropped?: boolean }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
@@ -848,7 +848,13 @@ export type MutationEnvelope =
  * before migration 003's fingerprint. The edit was kept and this row's
  * fingerprint left NULL; the caller is told so the pair can be resolved.
  */
-export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string };
+export type UpdateResult = MutationResult & {
+  updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string;
+  /** 088 (SMD-2744): the row's actor_kind, actor_name and trust after the write; whether the text counts as the same; whether the patch merged anything. Absent from a database before 088. */
+  stamp?: Record<string, unknown>; sameText?: boolean; metadataMerged?: boolean;
+  /** 088: the row's metadata is SQL NULL (a raw writer's), which merges no patch, and the patch named a key the server does not set. */
+  patchDropped?: boolean;
+};
 
 /**
  * Both SQL functions return the same {ok, id|error} envelope; this turns it into
@@ -874,6 +880,11 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
       // Another row holds this text's key under different text — a stale
       // fingerprint — so this row could not take the fingerprint it should have.
       fingerprintHeldBy: r.fingerprint_held_by ? String(r.fingerprint_held_by) : undefined,
+      // 088's answer (SMD-2744); absent before it, and read as saying nothing.
+      stamp: r.stamp !== null && typeof r.stamp === "object" && !Array.isArray(r.stamp) ? (r.stamp as Record<string, unknown>) : undefined,
+      sameText: typeof r.same_text === "boolean" ? r.same_text : undefined,
+      metadataMerged: typeof r.metadata_merged === "boolean" ? r.metadata_merged : undefined,
+      patchDropped: r.patch_dropped === true ? true : undefined,
     };
   }
   return {

@@ -353,15 +353,41 @@
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
  *      their database; the tiers file is check 27's)
+ *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
+ *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
+ *      file git tracks or would track names a tag of the version
+ *      server-portable/Dockerfile's FROM names; a Dockerfile's FROM, a
+ *      compose `image:` or a workflow's `container:` names a tag; one tag pinned by digest names one
+ *      digest. changes/ and CHANGELOG.md, which record what was, are not
+ *      read. That a digest is its tag's image is the registry's fact: CI's
+ *      "The stack runs the pinned Bun" asks the running forwarder
+ *  34. every suite is run (SMD-2895): each `test-*` script in a file git
+ *      tracks or would track is one a fork-checks.yml step runs — `bun` or
+ *      `node` naming it from the step's working-directory, the job's or a `cd`
+ *      in the step, where its failure fails the job (no `continue-on-error`,
+ *      `if: false` or `|| true`), a comment line or a quoted string read as
+ *      nothing — or one SUITES_NOT_RUN names with why; an entry there that a
+ *      workflow runs, that names no suite or that gives no reason is reported
+ *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
+ *      passed unrun for weeks; `eval-*` files are measurements, not suites,
+ *      and are not read
+ *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
+ *      fork-checks.yml step runs (check 34's reader) is a `run` line of
+ *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
+ *      does not, from a directory the step may run it from, with the same
+ *      flags and environment (the database URLs aside); every typecheck step
+ *      is a `typecheck` line; a line no step runs as written is stale; and
+ *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
+ *      — an excuse for what CI no longer has is reported too
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29 and 32 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34 and 35 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
 import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, dirname, relative, sep } from "node:path";
+import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
@@ -2180,7 +2206,7 @@ function checkSupabaseIsms() {
 // `"ports":` key — and each time compose rendered the mapping with no host_ip
 // while the check passed; a walk over YAML text is not a YAML reader, and the
 // fourth spelling would have been found by the next pass. Bun.YAML.parse
-// (Bun 1.2+; CI and the Dockerfile pin 1.4.0) resolves anchors, aliases and
+// (Bun 1.2+; CI and the images pin the one version check 33 holds) resolves anchors, aliases and
 // merge keys (quoted or bare — a probe found no spelling it leaves unfolded),
 // normalises key spellings, reads flow and block sequences alike and refuses
 // tabs, so what this rule sees is what compose sees — with two exceptions it
@@ -5947,7 +5973,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a catch-all router to working behind U+0085 on a route table comment (run live, pass 6)", ["    routers:\n", "    routers:\n      # note\u0085      all:\u0085        rule: \"PathPrefix(`/`)\"\u0085        priority: 100\u0085        entryPoints: [web]\u0085        service: working\n"]],
   ["a catch-all router to working on a line led by a no-break space (run live, pass 7)", ["    routers:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: working}\n"]],
   ["a tab before a route table comment, which Traefik refuses whole (run live, pass 7)", ["    services:\n      stable:\n", "    services:\n      \t# a note\n      stable:\n"]],
-  ["a service answering as stable behind U+2028 on a comment", ["  ollama-pull:\n", "  # a note\u2028  shadow:\u2028    image: oven/bun:1.4.0-alpine\u2028    networks:\u2028      mesh:\u2028        aliases: [mcp.ob1.internal]\n  ollama-pull:\n"]],
+  ["a service answering as stable behind U+2028 on a comment", ["  ollama-pull:\n", "  # a note\u2028  shadow:\u2028    image: oven/bun:1.4.3-alpine\u2028    networks:\u2028      mesh:\u2028        aliases: [mcp.ob1.internal]\n  ollama-pull:\n"]],
   ["a !reset on the proxy's query-string drop, which compose honours and Bun.YAML reads past", ["QUERYPARAMETERS_DEFAULTMODE: drop", "QUERYPARAMETERS_DEFAULTMODE: !reset drop"]],
   ["a !reset through a %TAG handle on canary's mesh name (run live, pass 7)", ["# The three-brain promotion pipeline", "%TAG !0! !\n---\n# The three-brain promotion pipeline"], ["        aliases: [mcp.canary.ob1.internal]", "        aliases: !0!reset [mcp.canary.ob1.internal]"]],
   ["an octal retry count", ["    retries: 12\n", "    retries: 012\n"]],
@@ -5960,7 +5986,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["an include beside the services", ["\nvolumes:\n", "\ninclude: [other.yaml]\n\nvolumes:\n"]],
   ["another project's name", ["name: open-brain-tiers\n", "name: open-brain\n"]],
   ["the canary's volume named as stable's", ["  canary-pgdata:\n  working-pgdata:\n", "  canary-pgdata: {name: open-brain-tiers_stable-pgdata}\n  working-pgdata:\n"]],
-  ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\n  # ── the proxy "]],
+  ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\n  # ── the proxy "]],
   ["Ollama extending the canary's server", ["  ollama:\n    image: *ollama-image\n", "  ollama:\n    extends: {service: canary-server}\n    image: *ollama-image\n"]],
   ["a hosts entry on the proxy naming a tier", ["    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"]],
   ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
@@ -6146,7 +6172,7 @@ const PROXY_SERVICE = {
 const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
 /** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy. */
 const FORWARDER_SERVICE = {
-  image: "docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb",
+  image: "docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373",
   user: "65534:65534",
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
@@ -6384,22 +6410,22 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
   ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
   ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
-  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.0-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
   ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
   ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
   // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
   ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
   ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
   ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
-  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.0-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
+  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.3-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
   ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
   ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
   ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
   ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
-  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.0-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
+  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.3-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
   ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
-  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\nnetworks:\n  # The ADR's networks"],
+  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
   ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
@@ -6427,11 +6453,11 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // The forwarder and the proxy behind it (SMD-2583).
   ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
   ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "    networks: [edge, front]\n", "    networks: [edge, front, mesh]\n"],
-  ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
+  ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
   ["the forwarder's inline script dialling whatever its lookup answers", "compose.yaml", "return addresses.find((a) => own.has(a.toLowerCase()) === false", "return addresses[0] ?? addresses.find((a) => own.has(a.toLowerCase()) === false"],
   ["the forwarder's label a script other than its config's", "compose.yaml", "    labels:\n      ob1.forwarder: *forwarder\n", "    labels:\n      ob1.forwarder: \"an older script\"\n"],
   ["compose.yaml's front given a route out", "compose.yaml", "  front:\n    internal: true\n", "  front: {}\n"],
-  ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.0-alpine\n"],
+  ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.3-alpine\n"],
 ];
 function checkRouteTables() {
   // Every compose file under deploy/, an overlay added later included.
@@ -6939,6 +6965,431 @@ function checkRestartPolicies() {
   }
 }
 checkRestartPolicies();
+
+// ── 33. One Bun, pinned everywhere (SMD-2894) ────────────────────────────────
+//
+// CI's setup-bun steps, every image built FROM oven/bun and compose's oven/bun
+// services each name a Bun version, and nothing held them together: from
+// 2026-10-11 a maintainer's machine ran 1.4.3 while every pin named 1.4.0, and
+// a suite passed in CI and failed there (SMD-2885). Each is held to
+// server-portable/Dockerfile's FROM, the image the stack serves from, so a bump
+// is every pin or none. A tag is the version alone or with a variant
+// (`1.4.3-alpine`); a run line in a README or a header is read too, since it is
+// copied as written. A Dockerfile's FROM, a compose `image:` or a workflow's
+// `container:` with no tag is Docker's `latest`, which is no pin. That a digest is its tag's image is the
+// registry's fact, not the tree's: CI's "The stack runs the pinned Bun" asks the
+// running forwarder, the one service pinned by digest.
+const BUN_PIN_REF = "server-portable/Dockerfile";
+/** An `oven/bun:<tag>` reference, with its digest when pinned by one. */
+const BUN_IMAGE_TAG = /\boven\/bun:([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:@sha256:([0-9a-f]{64}))?/g;
+/** A Dockerfile's FROM (any case, as Docker reads it), a compose `image:` or a workflow's `container:` naming oven/bun with no tag, or by digest alone. */
+const BUN_IMAGE_UNTAGGED = /^\s*(?:FROM\s+(?:--platform=\S+\s+)?|-?\s*(?:image|container):\s*["']?)(?:docker\.io\/)?oven\/bun(@sha256:[0-9a-f]{64})?(?![:\w/@-])/gim;
+type BunPin = { where: string; tag: string | null; digest?: string };
+/** Every Bun image a text names, by line: its tag (null for none) and digest. */
+function bunImagesIn(rel: string, text: string): BunPin[] {
+  const lineOf = lineIndexer(text);
+  const pins: BunPin[] = [...text.matchAll(BUN_IMAGE_TAG)].map((m) => ({ where: `${rel}:${lineOf(m.index!)}`, tag: m[1], digest: m[2] }));
+  for (const m of text.matchAll(BUN_IMAGE_UNTAGGED)) pins.push({ where: `${rel}:${lineOf(m.index! + m[0].length - 1)}`, tag: null, digest: m[1]?.slice("@sha256:".length) });
+  return pins;
+}
+/** Every setup-bun step in a parsed workflow: its `bun-version` as a string, or null when it names none. */
+function setupBunPinsIn(rel: string, doc: unknown): BunPin[] {
+  const pins: BunPin[] = [];
+  const jobs = isMapping(doc) && isMapping(doc.jobs) ? doc.jobs : {};
+  for (const [job, def] of Object.entries(jobs)) {
+    const steps = isMapping(def) && Array.isArray(def.steps) ? def.steps : [];
+    steps.forEach((step, i) => {
+      if (!isMapping(step) || typeof step.uses !== "string" || !step.uses.startsWith("oven-sh/setup-bun@")) return;
+      const v = isMapping(step.with) ? step.with["bun-version"] : undefined;
+      pins.push({ where: `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`, tag: v === undefined || v === null ? null : String(v) });
+    });
+  }
+  return pins;
+}
+/** What strays from `version`: a setup-bun pin is the version, an image's tag is it or it with a variant, one tag has one digest. */
+function bunPinProblems(pins: BunPin[], version: string, setup: BunPin[]): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  for (const p of setup) {
+    if (p.tag === null) problems.push([p.where, `uses oven-sh/setup-bun with no bun-version, which installs the latest Bun — pin ${version}`]);
+    else if (p.tag !== version) problems.push([p.where, `pins bun-version ${p.tag}, not ${version}`]);
+  }
+  const digests = new Map<string, BunPin>();
+  for (const p of pins) {
+    if (p.tag === null) {
+      problems.push([p.where, p.digest
+        ? `names oven/bun by digest alone, which names no version this check can hold — pin oven/bun:${version}-<variant>@sha256:…`
+        : `names oven/bun with no tag, which is Docker's latest — pin oven/bun:${version}-<variant>`]);
+      continue;
+    }
+    if (p.tag !== version && !p.tag.startsWith(`${version}-`)) { problems.push([p.where, `names oven/bun:${p.tag}, not Bun ${version}`]); continue; }
+    if (!p.digest) continue;
+    const first = digests.get(p.tag);
+    if (first === undefined) digests.set(p.tag, p);
+    else if (first.digest !== p.digest) problems.push([p.where, `pins oven/bun:${p.tag} at sha256:${p.digest.slice(0, 12)}…, where ${first.where} pins it at sha256:${first.digest!.slice(0, 12)}… — one tag is one image`]);
+  }
+  return problems;
+}
+const BUN_PROBE_DIGEST_A = "a".repeat(64), BUN_PROBE_DIGEST_B = "b".repeat(64);
+/** [what, text, the 1-based lines the rule reports]. Read as one file at version 9.9.9. */
+const BUN_IMAGE_PROBES: [string, string, number[]][] = [
+  ["a FROM, a compose image by digest twice and prose, all as pinned", `FROM oven/bun:9.9.9-alpine AS deps\n    image: docker.io/oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n# a stock oven/bun image, \`oven/bun\` the reverse\n`, []],
+  ["a FROM left behind", "FROM oven/bun:9.9.9-alpine AS deps\nFROM oven/bun:9.9.8-alpine\n", [2]],
+  ["a run line in a README left behind", "  docker run --rm oven/bun:9.9.8-alpine sh -c 'bun x.ts'\n", [1]],
+  ["a version alone, no variant", "FROM oven/bun:9.9.9\n", []],
+  ["a version that only starts with the pin", "FROM oven/bun:9.9.90-alpine\n", [1]],
+  ["latest by name", "    image: oven/bun:latest\n", [1]],
+  ["a FROM with no tag", "FROM oven/bun AS deps\n", [1]],
+  ["a FROM with a platform and no tag", "FROM --platform=linux/amd64 oven/bun\n", [1]],
+  ["a compose image with no tag, quoted", "    image: \"docker.io/oven/bun\"\n", [1]],
+  ["a lowercase from with no tag (review pass 1)", "from oven/bun\n", [1]],
+  ["a workflow job's container with no tag, and prose (review pass 1)", "    container: oven/bun\n    container: the oven/bun image\n", [1]],
+  ["a compose image by digest alone (review pass 2)", `    image: docker.io/oven/bun@sha256:${BUN_PROBE_DIGEST_A}\n`, [1]],
+  ["one tag at two digests", `    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_B}\n`, [2]],
+  ["two tags, each at its own digest", `    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-slim@sha256:${BUN_PROBE_DIGEST_B}\n`, []],
+];
+/** [what, workflow YAML, the steps (by name) the rule reports]. */
+const SETUP_BUN_PROBES: [string, string, string[]][] = [
+  ["every setup-bun step pinned, another action beside", `jobs:\n  a:\n    steps:\n      - uses: actions/checkout@x\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: "9.9.9"\n`, []],
+  ["a setup-bun step with no bun-version", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n`, ["Bun"]],
+  ["a setup-bun step left behind", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: "9.9.8"\n  b:\n    steps:\n      - name: Bun too\n        uses: oven-sh/setup-bun@x\n        with: { bun-version: 9.9.9 }\n`, ["Bun"]],
+  ["a setup-bun step on latest", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: latest\n`, ["Bun"]],
+];
+function checkBunPins() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 33 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2894)`);
+    return;
+  }
+  for (const [what, text, expected] of BUN_IMAGE_PROBES) {
+    const got = bunPinProblems(bunImagesIn("probe", text), "9.9.9", []).map(([where]) => Number(where.split(":").pop()));
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 33 no longer reports exactly lines ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  // A digest alone is exact, so not "latest": its message says what it lacks (review pass 2).
+  const digestOnly = bunPinProblems(bunImagesIn("probe", `\n    image: oven/bun@sha256:${BUN_PROBE_DIGEST_A}\n`), "9.9.9", []);
+  if (digestOnly.length !== 1 || digestOnly[0][0] !== "probe:2" || !digestOnly[0][1].includes("by digest alone")) fail(SELF, `check 33 no longer says a pin by digest alone names no version, on its line (reported ${JSON.stringify(digestOnly)})`);
+  for (const [what, yaml, expected] of SETUP_BUN_PROBES) {
+    const got = bunPinProblems([], "9.9.9", setupBunPinsIn("probe.yml", Bun.YAML.parse(yaml))).map(([where]) => JSON.parse(where.split(", step ").pop()!));
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 33 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  const ref = /^FROM\s+oven\/bun:(\d+\.\d+\.\d+)(?:-[a-z0-9]+)*\b/m.exec(readFileSync(join(ROOT, BUN_PIN_REF), "utf8"))?.[1];
+  if (!ref) { fail(BUN_PIN_REF, "names no `FROM oven/bun:<version>`, which check 33 holds every Bun pin to (SMD-2894)"); return; }
+  const files = citationFiles().filter((rel) => !rel.startsWith("changes/") && rel !== "CHANGELOG.md");
+  const workflows = files.filter((rel) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(rel));
+  if (!workflows.includes(".github/workflows/fork-checks.yml") || !files.includes(BUN_PIN_REF)) fail(SELF, "check 33's listing does not reach fork-checks.yml and the server's Dockerfile — the listing is broken, not the tree clean");
+  const setup: BunPin[] = [];
+  for (const rel of workflows) {
+    try { setup.push(...setupBunPinsIn(rel, Bun.YAML.parse(readFileSync(join(ROOT, rel), "utf8")))); } catch (e) { fail(rel, `does not parse, so check 33 cannot read its setup-bun steps: ${(e as Error).message}`); }
+  }
+  if (!setup.length) fail(SELF, "check 33 found no setup-bun step in the workflows — the reading is broken, not the tree clean");
+  const pins = files.flatMap((rel) => bunImagesIn(rel, readFileSync(join(ROOT, rel), "utf8")));
+  for (const [where, detail] of bunPinProblems(pins, ref, setup)) fail(where, `${detail} — every Bun pin names the version ${BUN_PIN_REF} does (${ref}): bump them in one commit (check 33, SMD-2894)`);
+}
+checkBunPins();
+
+// ── 34. Every suite is run (SMD-2895) ────────────────────────────────────────
+//
+// fork-checks.yml exists because upstream's suites ran in no workflow and one
+// asserted the opposite of production for months. The fork repeated it in
+// small: db/test-weekly-digest.ts (31 assertions, SMD-2239) and
+// server-portable/test-jobs.ts (45, SMD-2273) were listed in no step, so they
+// passed when someone ran them by hand and were checked by nothing else. A
+// suite is a `test-*` script; a step of fork-checks.yml, the workflow every
+// pull request runs, runs it when its `run` calls bun or node on it, read from
+// the step's working-directory, the job's or the workflow's, or a directory a
+// `cd` in the same step names (which of those applies is the shell's to say, so
+// each is taken). release.yml is not read: it runs on a tag, and on a pull
+// request only when its own paths change. A run counts only if the suite's
+// failure fails the job, so nothing counts from a step or job with
+// `continue-on-error` or `if: false`, or from a command followed by `|| true`
+// or `|| :`, a continued line read as one. A comment line runs nothing, and a
+// quoted string is read as nothing either: an echo that names a suite does not
+// run it, and so a suite run only inside `sh -c "…"`, or only through `bun run`
+// and a package script, reads as unrun, which is the loud direction. What
+// no workflow should run is named in SUITES_NOT_RUN with why, and an entry
+// there that a workflow does run is stale.
+const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
+const SUITES_NOT_RUN: Record<string, string> = {
+  "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
+  "server-portable/test-support.ts": "the server suites' shared helpers, imported by them; it runs nothing itself",
+  "db/test-bench-reuse.ts": "nine bench runs at 150,000 rows, about three minutes; run by hand with with-postgres.sh (db/README.md, db/ci-parity.sh)",
+  "recipes/atomizer/test-atomize.mjs": "calls a live model provider with the operator's key; a reachability check, not a suite",
+  "recipes/authorship-edges/test-attribution.mjs": "an upstream recipe's own self-test, run by hand as its README says (the maintainer's call, SMD-2895)",
+};
+/** A tracked `test-*` script: what check 34 calls a suite. */
+const SUITE_FILE = /(?:^|\/)test-[\w.-]*\.(?:ts|mts|mjs|js|cjs)$/;
+/** bun or node, its flags, the script it runs, then the script's own flags. */
+const SCRIPT_RUN = /\b(?:bun|node)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s;&|()<>'"`]+\.(?:ts|mts|mjs|js|cjs))(?![\w.])((?:[ \t]+--?[\w-]+(?:=[^\s;&|()<>'"`]+)?)*)/g;
+/** A `cd` in a run line, and the directory it names. */
+const SHELL_CD = /\bcd\s+([^\s;&|()<>'"`]+)/g;
+/** The `NAME=value` assignments that open a command, as the shell passes them to it. */
+const SHELL_ASSIGNS = /^\s*((?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()<>'"`]*\s+)*)/;
+/** A script a step runs, at one path it can resolve to, and the step. */
+type SuiteRun = { path: string; where: string };
+/** A script a step runs: every directory it may run from (the step's, then each a `cd` names), its own flags, the environment the step and the command give it, and where. */
+type ScriptRun = { dirs: string[]; script: string; args: string; env: Record<string, string>; job: string; where: string };
+/** A quoted string in a run line, read as nothing. */
+const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
+/** What follows a command that swallows its failure, up to the end of its line or a `;`. */
+const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
+/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
+const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35). */
+function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
+  const out: ScriptRun[] = [];
+  const wdOf = (v: unknown): string | undefined => {
+    const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
+    return typeof d === "string" ? d : undefined;
+  };
+  const envOf = (v: Mapping): Record<string, string> => isMapping(v.env) ? Object.fromEntries(Object.entries(v.env).map(([k, x]) => [k, String(x)])) : {};
+  const top = isMapping(doc) ? wdOf(doc.defaults) : undefined;
+  const topEnv = isMapping(doc) ? envOf(doc) : {};
+  const jobs = isMapping(doc) && isMapping(doc.jobs) ? doc.jobs : {};
+  for (const [job, def] of Object.entries(jobs)) {
+    if (!isMapping(def) || failureIgnored(def)) continue;
+    const jobWd = wdOf(def.defaults) ?? top ?? ".";
+    const jobEnv = { ...topEnv, ...envOf(def) };
+    const steps = Array.isArray(def.steps) ? def.steps : [];
+    steps.forEach((step, i) => {
+      if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+      const wd = posix.normalize(typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd);
+      const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
+      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
+      const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
+      const stepEnv = { ...jobEnv, ...envOf(step) };
+      for (const m of text.matchAll(SCRIPT_RUN)) {
+        if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
+        // The command's own assignments open the segment it is in: after the
+        // last newline, `;`, `&`, `|` or `(` before it.
+        const before = text.slice(0, m.index!);
+        const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
+        const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+        out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
+      }
+    });
+  }
+  return out;
+}
+/** Every script a parsed workflow's steps run whose failure fails the job, at every path it can resolve to (check 34). */
+function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
+  return scriptRunsIn(rel, doc).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
+}
+/** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
+function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  for (const s of suites) {
+    const by = run.find((r) => r.path === s);
+    if (s in notRun) {
+      if (by) problems.push([s, `is in SUITES_NOT_RUN ("${notRun[s]}"), but ${by.where} runs it — take it off the list`]);
+    } else if (!by) problems.push([s, `is a suite no ${SUITE_WORKFLOW} step runs where its failure fails the job, so it passes or fails unseen — add a step that runs it, or name it in SUITES_NOT_RUN with why`]);
+  }
+  for (const [p, why] of Object.entries(notRun)) {
+    if (!suites.includes(p)) problems.push([SELF, `SUITES_NOT_RUN names ${p}, which is no test-* script in the tree — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `SUITES_NOT_RUN names ${p} with no reason`]);
+  }
+  return problems;
+}
+/** [what, workflow YAML, the paths it runs, deduplicated and sorted]. */
+const SUITE_RUN_PROBES: [string, string, string[]][] = [
+  ["a step's working-directory", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: bun test-a.ts\n`, ["db/test-a.ts"]],
+  ["a path from the root, and node", `jobs:\n  a:\n    steps:\n      - run: bun recipes/x/test-b.mjs\n      - run: node y/test-c.mjs\n`, ["recipes/x/test-b.mjs", "y/test-c.mjs"]],
+  ["the job's default working-directory, and the workflow's", `defaults:\n  run:\n    working-directory: w\njobs:\n  a:\n    defaults:\n      run:\n        working-directory: server-portable\n    steps:\n      - run: bun test-d.ts\n  b:\n    steps:\n      - run: bun test-e.ts\n`, ["server-portable/test-d.ts", "w/test-e.ts"]],
+  ["a cd in a subshell, behind a timeout", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: |\n          (cd ../server-portable && exec timeout --kill-after=10s "$limit" bun test-f.ts) > "$RUNNER_TEMP/f.log" 2>&1 &\n`, ["db/test-f.ts", "server-portable/test-f.ts"]],
+  ["flags, and two runs in one line", `jobs:\n  a:\n    steps:\n      - run: bun --smol x/test-g.ts && bun x/test-h.ts --self-check\n`, ["x/test-g.ts", "x/test-h.ts"]],
+  ["a comment line and an echo run nothing", `jobs:\n  a:\n    steps:\n      - run: |\n          # bun x/test-i.ts\n          echo "x/test-j.ts failed"\n          echo "::error::bun x/test-k.tsx"\n`, []],
+  ["an echo that names bun on a suite runs nothing (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: |\n          echo "bun x/test-l.ts failed"\n          printf '%s\\n' 'run bun x/test-m.ts by hand'\n`, []],
+  ["a suite only inside sh -c reads as unrun (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: sh -c "bun x/test-n.ts"\n`, []],
+  ["a failure swallowed by || true or || : (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: |\n          bun x/test-o.ts > "$RUNNER_TEMP/o.log" 2>&1 || true\n          bun x/test-p.ts && echo ok || :\n          bun x/test-q.ts || { echo "q failed"; exit 1; }\n          bun x/test-r.ts; false || true\n`, ["x/test-q.ts", "x/test-r.ts"]],
+  ["a swallow on a continued line, and a package script (review pass 2)", `jobs:\n  a:\n    steps:\n      - run: |\n          bun x/test-y.ts \\\n            --flag || true\n          bun x/test-z.ts \\\n            --flag\n      - working-directory: s\n        run: bun run test:sql\n`, ["x/test-z.ts"]],
+  ["continue-on-error or if: false on a step or a job (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: bun x/test-s.ts\n        continue-on-error: true\n      - run: bun x/test-t.ts\n        continue-on-error: \${{ matrix.experimental }}\n      - run: bun x/test-u.ts\n        if: false\n      - run: bun x/test-v.ts\n        if: \${{ !cancelled() }}\n        continue-on-error: false\n  b:\n    continue-on-error: true\n    steps:\n      - run: bun x/test-w.ts\n  c:\n    if: false\n    steps:\n      - run: bun x/test-x.ts\n`, ["x/test-v.ts"]],
+];
+/** [what, suites, runs, not-run list, the wheres reported]. */
+const SUITE_PROBLEM_PROBES: [string, string[], string[], Record<string, string>, string[]][] = [
+  ["every suite run or excused", ["a/test-a.ts", "a/test-b.ts"], ["a/test-a.ts"], { "a/test-b.ts": "why" }, []],
+  ["a suite nothing runs", ["a/test-a.ts", "a/test-b.ts"], ["a/test-a.ts"], {}, ["a/test-b.ts"]],
+  ["an excused suite a workflow runs", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-a.ts": "why" }, ["a/test-a.ts"]],
+  ["an excuse for a file that is gone", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-gone.ts": "why" }, [SELF]],
+  ["an excuse with no reason", ["a/test-a.ts"], [], { "a/test-a.ts": " " }, [SELF]],
+];
+function checkSuitesRun() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 34 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2895)`);
+    return;
+  }
+  for (const [what, yaml, expected] of SUITE_RUN_PROBES) {
+    const got = [...new Set(suitesRunIn("probe.yml", Bun.YAML.parse(yaml)).map((r) => r.path))].sort();
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 34 no longer reads exactly ${JSON.stringify(expected)} as run for its probe "${what}" (read ${JSON.stringify(got)})`);
+  }
+  for (const [what, suites, run, notRun, expected] of SUITE_PROBLEM_PROBES) {
+    const got = suiteProblems(suites, run.map((path) => ({ path, where: "probe.yml" })), notRun).map(([where]) => where);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 34 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  const files = citationFiles();
+  const suites = files.filter((rel) => SUITE_FILE.test(rel));
+  const run: SuiteRun[] = [];
+  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
+  // were either missed, the reading is broken, not the tree clean.
+  for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
+    if (!run.some((r) => r.path === known)) fail(SELF, `check 34 does not read ${known} as run by fork-checks.yml — the reading is broken, not the tree clean`);
+  }
+  for (const [where, detail] of suiteProblems(suites, run, SUITES_NOT_RUN)) fail(where, `${detail} (check 34, SMD-2895)`);
+}
+checkSuitesRun();
+
+// ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
+//
+// ci-parity.sh is CI's local equivalent, and nothing held it to the workflow:
+// by SMD-2895 it missed fourteen of the suites fork-checks.yml runs and every
+// --self-check step, and ran the suites of CI's database-free jobs with
+// DATABASE_URL set. Each script a fork-checks.yml step runs (check 34's reader:
+// the same directories, flags, quoting and swallowed failures) is a line of
+// ci-parity.sh's — `run` where the step sets DATABASE_URL, `nodb` where it does
+// not — from one of the directories the step may run it from, with the same
+// flags and the same environment besides the database URLs, which are the
+// harness's; every typecheck step is a `typecheck` line. And the other way: a
+// line no step runs as written is stale. What ci-parity.sh cannot run is
+// excused by job or by script with why.
+const PARITY_SCRIPT = "db/ci-parity.sh";
+const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
+  jobs: {
+    "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
+    "auth-poc": "the authorization POC's own stacks in Docker (eval-auth.ts --up)",
+  },
+  scripts: {
+    "scripts/check-landing.ts": "reads a pull request's or merge group's commit range from the event",
+    "scripts/migrate-to-sql-shim.ts": "the codemod's round-trip rewrites tracked files and judges them by git diff, so a working tree with changes would be rewritten",
+  },
+};
+/** A line of ci-parity.sh that runs a script: its verb, directory, script, flags, the assignments before it, and its line. */
+type ParityRun = { verb: "run" | "nodb"; dir: string; script: string; args: string; env: Record<string, string>; line: number };
+/** `[NAME=value …] run|nodb DIR SCRIPT [FLAG…]`, and `typecheck DIR`, each a line of main(). */
+const PARITY_RUN_LINE = /^\s*((?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)(run|nodb)\s+(\S+)\s+(\S+\.(?:ts|mts|mjs|js|cjs))((?:\s+--?[\w-]+(?:=\S+)?)*)\s*$/;
+const PARITY_TYPECHECK_LINE = /^\s*typecheck\s+(\S+)\s*$/;
+/** Any line whose command is run, nodb or typecheck, read or not: one the two shapes above miss is reported, since bash runs it all the same. */
+const PARITY_VERB_LINE = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*(?:run|nodb|typecheck)(?:\s|$)/;
+function parityLinesIn(text: string): { runs: ParityRun[]; typechecks: { dir: string; line: number }[]; unread: number[] } {
+  const runs: ParityRun[] = [];
+  const typechecks: { dir: string; line: number }[] = [];
+  const unread: number[] = [];
+  text.split("\n").forEach((raw, i) => {
+    if (/^\s*#/.test(raw)) return;
+    const l = raw.replace(/\s+#.*$/, "");
+    const m = PARITY_RUN_LINE.exec(l);
+    if (m) {
+      const env = Object.fromEntries(m[1].trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1).replace(/^(["'])(.*)\1$/, "$2")]));
+      runs.push({ verb: m[2] as "run" | "nodb", dir: posix.normalize(m[3]), script: m[4], args: m[5].trim().split(/\s+/).filter(Boolean).join(" "), env, line: i + 1 });
+      return;
+    }
+    const t = PARITY_TYPECHECK_LINE.exec(l);
+    if (t) typechecks.push({ dir: posix.normalize(t[1]), line: i + 1 });
+    else if (PARITY_VERB_LINE.test(l)) unread.push(i + 1);
+  });
+  return { runs, typechecks, unread };
+}
+/** The environment the comparison holds: the database URLs are the harness's, so not compared; the verb says whether DATABASE_URL is set. */
+const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL"));
+const heldEnv = (env: Record<string, string>): string => JSON.stringify(heldEntries(env).sort(([a], [b]) => a.localeCompare(b)));
+const parityLine = (verb: string, dir: string, script: string, args: string, env: Record<string, string>): string =>
+  [...heldEntries(env).map(([k, v]) => `${k}=${v}`), verb, dir, script, args].filter(Boolean).join(" ");
+/** What check 35 reports, both ways, for CI's script runs and typecheck directories against ci-parity.sh's lines. */
+function parityProblems(ci: ScriptRun[], ciTsc: string[], ciJobs: string[], parity: ReturnType<typeof parityLinesIn>, notRun: typeof PARITY_NOT_RUN): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  const excused = (r: ScriptRun) => r.job in notRun.jobs || r.dirs.some((d) => posix.join(d, r.script) in notRun.scripts);
+  const verbOf = (r: ScriptRun): "run" | "nodb" => ("DATABASE_URL" in r.env ? "run" : "nodb");
+  const matches = (r: ScriptRun, p: ParityRun) => r.dirs.includes(p.dir) && r.script === p.script && r.args === p.args && verbOf(r) === p.verb && heldEnv(r.env) === heldEnv(p.env);
+  for (const r of ci) {
+    if (excused(r) || parity.runs.some((p) => matches(r, p))) continue;
+    problems.push([r.where, `runs ${r.script}${r.args ? ` ${r.args}` : ""}, which ${PARITY_SCRIPT} does not run as CI does — add \`${parityLine(verbOf(r), r.dirs[r.dirs.length - 1], r.script, r.args, r.env)}\` at its place in CI's order, or excuse it in PARITY_NOT_RUN with why`]);
+  }
+  for (const p of parity.runs) {
+    if (ci.some((r) => !excused(r) && matches(r, p))) continue;
+    problems.push([`${PARITY_SCRIPT}:${p.line}`, `\`${parityLine(p.verb, p.dir, p.script, p.args, p.env)}\` is run by no ${SUITE_WORKFLOW} step as written (directory, flags, environment, and whether DATABASE_URL is set) — match the step, or take the line out if CI no longer runs it`]);
+  }
+  for (const n of parity.unread) problems.push([`${PARITY_SCRIPT}:${n}`, "runs a script check 35 cannot read — write it `[NAME=value …] run|nodb DIR SCRIPT [--flag …]` or `typecheck DIR`, with no quoted value and no argument but flags, so it can be held to the workflow"]);
+  const parityTsc = parity.typechecks.map((t) => t.dir);
+  const ciTscDirs = new Set(ciTsc.map((x) => posix.normalize(x)));
+  for (const d of ciTscDirs) if (!parityTsc.includes(d)) problems.push([SUITE_WORKFLOW, `type-checks ${d}, which ${PARITY_SCRIPT} does not — add \`typecheck ${d}\``]);
+  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or add the step`]);
+  for (const [job, why] of Object.entries(notRun.jobs)) {
+    if (!ciJobs.includes(job)) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job}, which ${SUITE_WORKFLOW} no longer has — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job} with no reason`]);
+  }
+  for (const [script, why] of Object.entries(notRun.scripts)) {
+    if (!ci.some((r) => r.dirs.some((d) => posix.join(d, r.script) === script))) problems.push([SELF, `PARITY_NOT_RUN excuses ${script}, which no ${SUITE_WORKFLOW} step runs — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses ${script} with no reason`]);
+  }
+  return problems;
+}
+/** [what, workflow YAML, each run as `dir|script|args|env` for its last directory, sorted]. */
+const SCRIPT_RUN_PROBES: [string, string, string[]][] = [
+  ["flags kept, a redirect and a chain not", `jobs:\n  a:\n    steps:\n      - working-directory: evals\n        run: bun eval-a.ts --self-check > "$RUNNER_TEMP/a.log" && bun eval-b.ts --gate --x=1\n`, ['evals|eval-a.ts|--self-check|{}', 'evals|eval-b.ts|--gate --x=1|{}']],
+  ["the step's env, a command's own assignments on a continued line, and not a flag's =", `jobs:\n  a:\n    env:\n      J: "1"\n    steps:\n      - working-directory: db\n        env:\n          DATABASE_URL: postgres://x\n          S: two\n        run: |\n          timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/d.log" 2>&1 &\n          OB1_W=768 OB1_M=n \\\n            timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/n.log" 2>&1 &\n`, ['db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","OB1_M":"n","OB1_W":"768","S":"two"}', 'db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","S":"two"}']],
+  ["a lowercase assignment opening the command (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: limit=5 bun x/test-l.ts\n`, ['.|x/test-l.ts||{"limit":"5"}']],
+  ["a cd's directory last", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: (cd ../server-portable && exec bun test-p.ts) &\n`, ['server-portable|test-p.ts||{}']],
+];
+const PARITY_PROBE_TEXT = [
+  "run() { suite db \"$@\"; }",
+  "  # run db test-commented.ts",
+  "  run db                 test-live.ts",
+  "  OB1_FIXTURE_RESET=1 run evals eval-p.ts --fixture-check",
+  "  nodb .                 deploy/forwarder.ts --self-check",
+  "  nodb db                test-cli.ts",
+  "  typecheck db",
+  "  typecheck jev",
+].join("\n");
+const PARITY_PROBE_CI = (): ScriptRun[] => [
+  { dirs: ["db"], script: "test-live.ts", args: "", env: { DATABASE_URL: "x" }, job: "db-live", where: "w:live" },
+  { dirs: ["evals"], script: "eval-p.ts", args: "--fixture-check", env: { DATABASE_URL: "x", OB1_FIXTURE_RESET: "1" }, job: "data-layer", where: "w:p" },
+  { dirs: ["."], script: "deploy/forwarder.ts", args: "--self-check", env: {}, job: "repo", where: "w:fwd" },
+  { dirs: ["db"], script: "test-cli.ts", args: "", env: {}, job: "replay", where: "w:cli" },
+  { dirs: ["db", "server-portable"], script: "test-pre.ts", args: "", env: { DATABASE_URL: "x", UPGRADE_DATABASE_URL: "y" }, job: "data-layer", where: "w:pre" },
+  { dirs: ["."], script: "scripts/check-landing.ts", args: "--event", env: { EVENT: "${{ github.event_name }}" }, job: "repo", where: "w:landing" },
+  { dirs: ["deploy"], script: "x.ts", args: "", env: {}, job: "stack", where: "w:stack" },
+];
+const PARITY_PROBE_NOT_RUN = { jobs: { stack: "why" }, scripts: { "scripts/check-landing.ts": "why" } };
+/** [what, the probe's ci-parity text changed, its CI runs changed, CI's tsc dirs, the wheres reported]. */
+const PARITY_PROBES: [string, (t: string) => string, (c: ScriptRun[]) => ScriptRun[], string[], string[]][] = [
+  ["the probe as written, a cd's directory taken", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c, ["db", "jev"], []],
+  ["a step ci-parity.sh lacks", (t) => t, (c) => c, ["db", "jev"], ["w:pre"]],
+  ["a line no step runs", (t) => `${t}\n  run server-portable test-pre.ts\n  nodb db test-gone.ts`, (c) => c, ["db", "jev"], [`${PARITY_SCRIPT}:10`]],
+  ["the database verb wrong", (t) => t.replace("nodb db                test-cli.ts", "run db test-cli.ts") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:cli", `${PARITY_SCRIPT}:6`]],
+  ["an environment variable dropped", (t) => t.replace("OB1_FIXTURE_RESET=1 run", "run") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:p", `${PARITY_SCRIPT}:4`]],
+  ["a flag changed", (t) => t.replace("--fixture-check", "--gate") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:p", `${PARITY_SCRIPT}:4`]],
+  ["the same script from the wrong directory", (t) => `${t}\n  run db test-pre.ts`.replace("nodb db                test-cli.ts", "nodb server-portable test-cli.ts"), (c) => c, ["db", "jev"], ["w:cli", `${PARITY_SCRIPT}:6`]],
+  ["a typecheck missing, and one CI does not run", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c, ["db", "evals"], [SUITE_WORKFLOW, `${PARITY_SCRIPT}:8`]],
+  ["lines check 35 cannot read, which bash runs all the same (review pass 1)", (t) => `${t}\n  run server-portable test-pre.ts  # a trailing comment is read\n  run db test-a.ts --role reader\n  OB1_X="a b" run db test-a.ts\n  nodb db some-binary\n  typecheck`, (c) => c, ["db", "jev"], [`${PARITY_SCRIPT}:10`, `${PARITY_SCRIPT}:11`, `${PARITY_SCRIPT}:12`, `${PARITY_SCRIPT}:13`]],
+  ["an excuse for a job and a script CI no longer has", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c.filter((r) => r.job !== "stack" && r.script !== "scripts/check-landing.ts"), ["db", "jev"], [SELF, SELF]],
+];
+function checkCiParity() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 35 parses the workflow with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2903)`);
+    return;
+  }
+  for (const [what, yaml, expected] of SCRIPT_RUN_PROBES) {
+    const got = scriptRunsIn("probe.yml", Bun.YAML.parse(yaml)).map((r) => `${r.dirs[r.dirs.length - 1]}|${r.script}|${r.args}|${JSON.stringify(Object.fromEntries(Object.entries(r.env).sort(([a], [b]) => a.localeCompare(b))))}`).sort();
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 35 no longer reads exactly ${JSON.stringify(expected)} for its probe "${what}" (read ${JSON.stringify(got)})`);
+  }
+  const probeLines = parityLinesIn(PARITY_PROBE_TEXT);
+  if (probeLines.runs.length !== 4 || probeLines.typechecks.length !== 2 || probeLines.runs[1].env.OB1_FIXTURE_RESET !== "1") fail(SELF, `check 35 no longer reads its probe ci-parity text as four runs (one with OB1_FIXTURE_RESET) and two typechecks (read ${JSON.stringify(probeLines)})`);
+  for (const [what, text, ci, tsc, expected] of PARITY_PROBES) {
+    const runs = ci(PARITY_PROBE_CI());
+    const got = parityProblems(runs, tsc, [...new Set(runs.map((r) => r.job))], parityLinesIn(text(PARITY_PROBE_TEXT)), PARITY_PROBE_NOT_RUN).map(([where]) => where);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 35 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 35 cannot read what its steps run: ${(e as Error).message}`); return; }
+  const ci = scriptRunsIn(SUITE_WORKFLOW, doc);
+  const ciTsc = tscStepsIn(doc as WorkflowDoc);
+  const ciJobs = isMapping(doc) && isMapping(doc.jobs) ? Object.keys(doc.jobs) : [];
+  const parity = parityLinesIn(readFileSync(join(ROOT, PARITY_SCRIPT), "utf8"));
+  // FORK.md says to run it as ./db/ci-parity.sh, which a lost executable bit
+  // refuses (review pass 3: a restore by copy dropped it); a checkout carries
+  // the committed mode, so the file's mode is what a commit would hold.
+  if (!(statSync(join(ROOT, PARITY_SCRIPT)).mode & 0o100)) fail(PARITY_SCRIPT, "is not executable, so `./db/ci-parity.sh`, as FORK.md runs it, is refused — `chmod +x db/ci-parity.sh` (check 35, SMD-2903)");
+  // Were these missed, the reading is broken, not the two files in step.
+  if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
+  for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+}
+checkCiParity();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

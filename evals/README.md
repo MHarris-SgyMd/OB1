@@ -5781,7 +5781,7 @@ machine's `host.containers.internal`):
 ```sh
 podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
-  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  -v "$PWD":/repo:ro -w /repo/evals oven/bun:1.4.3-alpine sh -c \
   'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts'
 ```
 
@@ -5849,7 +5849,7 @@ pre-registration commit.
 mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
 podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
-  -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
+  -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.3-alpine sh -c \
   'export DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/openbrain"; exec bun eval-jev-gate.ts --cache /cache/jev-gate.json'
 ```
 

@@ -56,7 +56,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
@@ -85,9 +85,9 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18, 20 and 23 parse YAML with
-      # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, and the workflows' runner and action pins
+      # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
+      # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, and db/ci-parity.sh running what CI runs
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -139,7 +139,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: server-portable
@@ -176,6 +176,14 @@ jobs:
       - name: Thought vocabulary and presentation rules
         working-directory: server-portable
         run: bun test-thoughts.ts
+
+      # SMD-2273 + SMD-2318. The async job registry in memory: the lifecycle,
+      # ownership, the SSE frames, retention and the cap on an injected clock,
+      # and the durable sink through a fake. Over a real database it is
+      # test-e2e-sql's. Ran in no job until SMD-2895.
+      - name: Async job registry
+        working-directory: server-portable
+        run: bun test-jobs.ts
 
       - name: Typecheck
         working-directory: server-portable
@@ -433,7 +441,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         id: install
@@ -526,7 +534,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: db
@@ -579,11 +587,19 @@ jobs:
       - name: Worker bootstrap (egress, no database)
         working-directory: db
         run: bun test-worker-bootstrap.ts
+
       # SMD-2681: the findings poster's grouping, comment, marker read-back,
       # cap and egress subject. No database, no Linear.
       - name: Board findings (no database)
         working-directory: db
         run: bun test-board-findings.ts
+
+      # SMD-2239: the weekly digest's ranking, Telegram chunking, egress subject
+      # and gate, and its endpoint (a base's user and password sent as Basic,
+      # SMD-2885). No database, no Telegram. Ran in no job until SMD-2895.
+      - name: Weekly digest (no database)
+        working-directory: db
+        run: bun test-weekly-digest.ts
 
   db-live:
     name: Schema against real Postgres
@@ -613,7 +629,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: db
@@ -663,7 +679,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: server-portable
@@ -929,7 +945,7 @@ jobs:
       # drives the SvelteKit one against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       # SMD-2251. The three dashboards need nothing from the stack, and built in
       # series after it they added 35 s to this job. So they build here, in the
@@ -1386,6 +1402,21 @@ jobs:
             if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then
               echo "the probe on open-brain_egress did not answer for itself (exit $rc): $out" >&2; exit 1
             fi
+          done
+
+      # SMD-2894: check 33 holds every Bun pin to one version, by its text.
+      # That the forwarder's digest is its tag's image is the registry's fact,
+      # so the running forwarder is asked; and the server, built FROM its tag.
+      - name: The stack runs the pinned Bun
+        working-directory: deploy
+        run: |
+          img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
+          want="${img#*oven/bun:}"; want="${want%%[-@]*}"
+          [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
+          for s in forwarder server; do
+            got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
+            echo "$s: Bun $got"
+            [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
           done
 
       # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
@@ -2744,7 +2775,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install the evals' pinned packages
         working-directory: evals
@@ -2815,7 +2846,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: compat/supabase-sql
@@ -2875,7 +2906,7 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
       - name: commitlint the pushed range against the house grammar
         env:
           EVENT: ${{ github.event_name }}

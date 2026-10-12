@@ -10,6 +10,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BrainInfo } from "../server-portable/brain-info.ts";
 import {
   boardSyncDelta,
@@ -347,6 +350,11 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   ok(s?.base === "http://h:1/mcp" && s.urlKey === "SEKRIT", `splitKeyFromUrl lifts ?key= off a trimmed base (${JSON.stringify(s)})`);
   ok(splitKeyFromUrl("http://h:1/")?.urlKey === undefined, "splitKeyFromUrl: no ?key= → undefined key");
   ok(splitKeyFromUrl("not a url") === null, "splitKeyFromUrl: an invalid URL → null");
+  // A user and password come off the base as a Basic credential, decoded (SMD-2894).
+  const u = splitKeyFromUrl("http://us%40er:p%3Ass@h:1/mcp/?key=SEKRIT");
+  ok(u?.base === "http://h:1/mcp" && u.urlKey === "SEKRIT" && u.basic === Buffer.from("us@er:p:ss").toString("base64"),
+    `splitKeyFromUrl takes a user and password off the base as Basic, decoded (${JSON.stringify(u)})`);
+  ok(s?.basic === undefined, "splitKeyFromUrl: no userinfo → no Basic");
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +394,44 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
     let threw = "";
     try { await getBrainInfo({ ...ep, key: "wrong" }); } catch (e) { threw = (e as Error).message; }
     ok(/not the record|not admitted/.test(threw), "getBrainInfo: a non-reader key gets \"ok\", read as not-admitted");
+  } finally { server.stop(true); }
+}
+
+// A URL's user and password reach a front before the brain as Basic, beside the
+// key, on every Bun; the label and the base carry neither (SMD-2894).
+{
+  const seen: { authorization: string | null; key: string | null }[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      seen.push({ authorization: req.headers.get("authorization"), key: req.headers.get("x-brain-key") });
+      return Response.json(baseInfo({}));
+    },
+  });
+  try {
+    const ep = await resolveBrain(`http://op:pa%20ss@127.0.0.1:${server.port}/mcp`, KEY, undefined);
+    ok(ep.label === `127.0.0.1:${server.port}/mcp` && ep.base === `http://127.0.0.1:${server.port}/mcp`,
+      `resolveBrain keeps the userinfo out of the label and the base (${ep.label}, ${ep.base})`);
+    await getBrainInfo(ep);
+    await getBrainInfo(await resolveBrain(`http://127.0.0.1:${server.port}/mcp`, KEY, undefined));
+    ok(seen[0]?.authorization === `Basic ${Buffer.from("op:pa ss").toString("base64")}` && seen[0]?.key === KEY,
+      `the URL's user and password are sent as Basic beside x-brain-key (${JSON.stringify(seen[0])})`);
+    ok(seen[1]?.authorization === null && seen[1]?.key === KEY, `no userinfo, no Authorization (${JSON.stringify(seen[1])})`);
+    // A connector's URL, read from `claude mcp get` (a stand-in first on PATH,
+    // in a child: a spawn finds its command on the PATH the process started
+    // with), the same.
+    const bin = mkdtempSync(join(tmpdir(), "ob1-claude-"));
+    try {
+      writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '  URL: http://op:pa%%20ss@127.0.0.1:${server.port}/mcp\\n  Headers:\\n    x-brain-key: ${KEY}\\n'\n`, { mode: 0o755 });
+      seen.length = 0;
+      const child = Bun.spawn(["bun", "-e", `import { resolveBrain, getBrainInfo } from "./brain-compare.ts"; const ep = await resolveBrain("stand-in", undefined, undefined); await getBrainInfo(ep); console.log(ep.base);`],
+        { cwd: import.meta.dir, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      ok(code === 0 && out.trim() === `http://127.0.0.1:${server.port}/mcp` && seen[0]?.authorization === `Basic ${Buffer.from("op:pa ss").toString("base64")}` && seen[0]?.key === KEY,
+        `a connector's URL's user and password are sent as Basic, out of its base (exit ${code}, ${out.trim()}, ${JSON.stringify(seen[0])}${err.trim() ? `, ${err.trim().split("\n").pop()}` : ""})`);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   } finally { server.stop(true); }
 }
 

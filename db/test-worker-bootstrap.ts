@@ -16,7 +16,7 @@
 import { providerEndpoint } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, modelMissing, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -198,6 +198,13 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   let other: unknown = null;
   await throughOutage(async () => { throw pg("ERR_POSTGRES_SERVER_ERROR", "42P01"); }, { wake: new AbortController().signal, said: { down: false }, ...say, sleep: async () => {} }).catch((e) => { other = e; });
   ok((other as { errno?: string } | null)?.errno === "42P01", "a statement that fails for another reason is thrown by throughOutage, not retried");
+
+  // The start refusals the sleep scheduler ends on, and those it retries once
+  // a pass got through its start (SMD-2752): a lookup that did not name the
+  // key may name it next time, so it is retried, not ended on (review pass 1).
+  ok([...PERMANENT_REFUSALS].sort().join(",") === "egress,identity,key,tables,usage" && !PERMANENT_REFUSALS.has("lookup") && !PERMANENT_REFUSALS.has("model") && !PERMANENT_REFUSALS.has("provider")
+    && probeRefusal({ state: "missing", why: "" }) === "model" && probeRefusal({ state: "refused", why: "" }) === "provider",
+    `the permanent start refusals are usage, egress, tables, identity and key — not model, provider or lookup; a probe's missing model is "model", its refusal "provider" (${[...PERMANENT_REFUSALS].join(",")})`);
 
   // The lookup's predicate: an outage but too many connections, which the
   // lookup's own connection meets while the pass's pool answers (review pass 2).

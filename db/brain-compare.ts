@@ -62,6 +62,7 @@
  */
 
 import type { BrainInfo } from "../server-portable/brain-info.ts";
+import { splitUserinfo } from "../server-portable/embed.ts";
 
 // ---------------------------------------------------------------------------
 // Reaching a brain — a reference resolves to a base URL and a read key.
@@ -71,10 +72,12 @@ import type { BrainInfo } from "../server-portable/brain-info.ts";
 export interface BrainEndpoint {
   /** The label shown in the report — the connector name, or the URL's host and path. */
   label: string;
-  /** The MCP base URL, no trailing slash and no ?key= (the key rides a header). */
+  /** The MCP base URL, no trailing slash, no ?key= (the key rides a header) and no userinfo. */
   base: string;
   /** The read key sent as x-brain-key; never printed. */
   key: string;
+  /** The URL's user and password as a Basic credential, for a front before the brain: sent beside the key, on every Bun (SMD-2894). */
+  basic?: string;
 }
 
 /** Strip a trailing slash (or several) so `${base}/` is exactly one — the shape the POST route wants. */
@@ -88,14 +91,17 @@ export function trimBase(url: string): string {
  * Split a `?key=` off a URL: the base with the query cleared and trailing slashes
  * trimmed, and the key it carried. Null for an unparseable URL. The key travels as
  * a header, never on the POST/GET target a proxy would log — the one normalization
- * both the URL and the connector paths use (boyscout: it was inline in each).
+ * both the URL and the connector paths use (boyscout: it was inline in each). A
+ * user and password come off too, by embed.ts's splitUserinfo (which says why), and
+ * go as `basic` (SMD-2894).
  */
-export function splitKeyFromUrl(url: string): { base: string; urlKey: string | undefined } | null {
+export function splitKeyFromUrl(url: string): { base: string; urlKey: string | undefined; basic?: string } | null {
   try {
     const u = new URL(url);
     const urlKey = u.searchParams.get("key") ?? undefined;
     u.search = "";
-    return { base: trimBase(u.toString()), urlKey };
+    const { base, basic } = splitUserinfo(trimBase(u.toString()));
+    return { base, urlKey, basic };
   } catch {
     return null;
   }
@@ -122,7 +128,7 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;
     if (!key) throw new Error(`--compare: no read key for ${label}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
-    return { label, base: parsed.base, key };
+    return { label, base: parsed.base, key, basic: parsed.basic };
   }
   // A connector name — resolve it the way canary.sh does, reading the URL and the
   // x-brain-key header out of `claude mcp get`, and echoing neither back.
@@ -158,7 +164,7 @@ export async function resolveConnector(name: string, keyArg: string | undefined,
   if (!parsed) throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
   const key = keyArg ?? headerKey ?? parsed.urlKey ?? envKey;
   if (!key) throw new Error(`--compare: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass --a-key/--b-key or set OB1_COMPARE_KEY.`);
-  return { label: name, base: parsed.base, key };
+  return { label: name, base: parsed.base, key, basic: parsed.basic };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +181,9 @@ const HTTP_TIMEOUT_MS = 20_000;
  */
 async function fetchOrThrow(ep: BrainEndpoint, url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+    const headers = new Headers(init.headers);
+    if (ep.basic) headers.set("authorization", `Basic ${ep.basic}`);
+    return await fetch(url, { ...init, headers, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
   } catch (e) {
     const why = e instanceof Error && e.name === "TimeoutError" ? `no reply within ${HTTP_TIMEOUT_MS} ms` : (e as Error).message;
     throw new Error(`${ep.label}: could not be reached — ${why}`);

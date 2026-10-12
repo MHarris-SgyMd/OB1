@@ -1047,7 +1047,7 @@ Never the URL, a query string, another header, a key, a body, an argument or
 any text — `test-server.ts` [22] sends each and looks for it in every span's
 name, attributes, events, status, trace state and resource, and a real
 `bun index.ts` looks for the key, the query string and the text in all it
-exports; [24] looks for a planted query string in every point's labels and
+exports; [25] looks for a planted query string in every point's labels and
 log record, and for a key's name on any point; `test-rest.ts` [12] sends a key, query strings (one a `query=` at
 `/v1/search`) and a fault's message and looks in each span's name, attributes,
 events and status, and in what a real `bun api.ts` exports.
@@ -1423,8 +1423,18 @@ itself, in the foreground and beside any live traffic, as it does under
 `workers`; only consolidation's new pool — the thoughts re-pooled under the
 new key — waits for the brain to go quiet.
 
-It has no budget yet (SMD-2679). Quieter banners and configuration checks at
-its start are SMD-2752.
+It has no budget yet (SMD-2679). Since SMD-2752 it checks each pass's start
+once, before its first quiet: a bad `OB1_WORKER_KEY`, a model not served (the
+judge's too) or an extraction key recorded under another model ends each
+start at once (exit 2, `heartbeat:sleep` ended failed); `on-failure:3`
+restarts it three times, each refused the same way, and then `ps` shows it
+exited, so `podman logs` on `sleep` names the cause within seconds of the
+first start, not at the first quiet. As with the `workers` profile, a model
+`ollama-pull` is still pulling at a first boot is refused the same way: start
+`sleep` once the pull is done. A worker key revoked later, or the key moved by
+a `--switch-key` run elsewhere, ends it at the next sleep rather than retrying
+until a restart. Each pass's banner is said once there, not at every sleep;
+progress lines (`pool:`, `before:`) still come with each sleep's work.
 
 ## Refreshing a tier
 
@@ -1433,7 +1443,7 @@ its start are SMD-2752.
 `pg_dump` / `pg_restore`, `pg_dump` at least both servers' major (it reads
 `--to` too, to show it reaches it before the reset), and no image here
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
-(`oven/bun:1.4.0-alpine` plus `postgresql16-client`, the major of the postgres
+(`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
 in it, mounted read-only, on the stack's networks — `data`, where Postgres
 is, and `egress`, where a replay's embedding model is:
@@ -1969,6 +1979,11 @@ cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
 #   then recreate the servers (compose up -d server api; a restart keeps the old keys) and provision again
 ```
+
+`--url` names n8n's origin where it is not `http://127.0.0.1:$N8N_PORT`. A
+user and password in it (`http://user:pass@host`, for a front before n8n)
+are sent as Basic on every request, beside n8n's own key or session, on any
+Bun, and printed as `***@` (SMD-2894).
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
 hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its

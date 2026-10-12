@@ -44,7 +44,7 @@ chat only, beside Ollama:
 | `OB1_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/v1`. Ollama works. Embeddings — and chat, unless the next row says otherwise |
 | `OB1_LLM_API_KEY` | falls back to `OPENROUTER_API_KEY` | Omitted entirely for a loopback endpoint |
 | `OB1_CHAT_BASE_URL` | the embeddings endpoint | Where `/chat/completions` goes when that is a different provider; `OB1_METADATA_MODEL` then names a model this endpoint serves |
-| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY` or `OPENROUTER_API_KEY` (both are the embeddings endpoint's), so a local chat model beside a hosted embedder is not handed the hosted key, and local embeddings with OpenRouter for chat means this knob, not `OPENROUTER_API_KEY`. Preflight fails a hosted chat endpoint with no key of its own and names the fix |
+| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one (a chat base with a user and password of its own is a different endpoint) | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY` or `OPENROUTER_API_KEY` (both are the embeddings endpoint's), so a local chat model beside a hosted embedder is not handed the hosted key, and local embeddings with OpenRouter for chat means this knob, not `OPENROUTER_API_KEY`. A user and password in a base URL are that endpoint's credential too, sent as Basic unless a key is set (SMD-2885). Preflight fails a hosted chat endpoint with neither of its own and names the fix |
 | `OB1_LLM_TIMEOUT` | `120` seconds | Per provider call, both endpoints — embedding, blurb and metadata extraction alike; a call that never returns fails as such instead of hanging |
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
@@ -802,14 +802,16 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1006 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
+bun test-server.ts        # 1013 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
 bun test-rest.ts          # 351 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 258 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span and a webhook fault's
+bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
+bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 160 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 161 — the REST core beside the MCP server on one database: every operation through both
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

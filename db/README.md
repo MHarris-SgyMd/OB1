@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2716 assertions: 2716 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
+`bun test-schema.ts` prints `2733 assertions: 2733 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-eight (88) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1351,6 +1351,27 @@ only inserted — a posted one after Linear answers, in the transaction that
 posted — so a failed post records nothing. It needs nothing before it. See
 [What it tells the board](#the-board-in-the-brain-smd-1954). test-schema [78],
 test-upgrade [20ai], test-live [41].
+
+Migration 088 has `update_thought` say what it did (SMD-2744's second Work
+item). A `metadata_patch` naming `trust`, `actor_kind` or `actor_name` is
+merged in name only — the server sets them (050, 073) — and the server's
+reply said "metadata merged". Its success answer now carries `stamp`, the
+row's `actor_kind`, `actor_name` and `trust` after the call; `same_text`,
+whether the text counts as the one it held by 003's fingerprint; and, when a
+patch was given, `metadata_merged`, whether the patch moved a key the server
+does not set or had its trust — a word — taken by a change of text; the stamp
+moving on its own to a new text's writer is not the patch's. It is never null.
+A row whose metadata is SQL NULL (a raw writer's) merges no patch: it answers
+`patch_dropped` when the patch named a key the server does not set, and
+merged only when a change of text — which writes the stamp over the NULL —
+took the patch's trust. Each is read inside the write, with the row locked,
+so no other write, backfill pass or clock stands between the answer and the
+row (a read after the write, which the server tried first, met each of those
+in turn). The server's reply names each named stamp key the thought did not
+take, at the value it holds. The body is 073's, the signature the same, the
+grants kept; it carries 073's mechanism for an earlier form a re-applied
+older file left, and refuses to apply without 073. test-schema [79], test-upgrade [20aj],
+server-portable/test-update-delete.ts [11], test-server.ts [23].
 
 ## What changed relative to the guide
 
@@ -2790,7 +2811,7 @@ bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ev
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, followers running outside sleep, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as its own service: `--profile sleep`
@@ -2831,15 +2852,30 @@ of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A thought
 longer than every sleep is never finished while the brain keeps waking, and
 consolidation does not join while it is pending (SMD-2694). A failed row stays
-failed: `--retry-failed` is the operator's. A pass refusing at its start (the
-model not served, the key refused) after it got past its start earlier in this
-process is retried on SMD-2599's schedule (5 s, doubling, at most 5 min): that
-mends a model re-pulled, a 402 cleared by topping up credit, a gateway's
-passing 401/403/404 — not a revoked worker key or another process's
-`--switch-key`, which are retried until you restart it with the right key. A
-refusal at a pass's first start, or mid-pass (the provider refusing the
-request itself), ends the scheduler with 2, as it ends a follower — so the
-same 402 ends it mid-pass and is retried when a sleep's start meets it first.
+failed: `--retry-failed` is the operator's.
+
+**Its start, and refusals.** Before its first quiet it runs each pass's start
+once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
+the model's probe, the worker key, extraction's recorded key. A refusal there
+ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
+not served (the judge's met there, not once extraction's backlog drains), or an
+`entity_extraction_key` recorded under another model. A provider that does not
+answer is no refusal; each pass waits for it at its own start. The passes each
+sleep starts then print no banner and run no end-of-run summary queries (its counts
+and graph, scans a wake would wait for). Every sleep's passes meet their start's
+refusals again, and each names which it is:
+- the worker key revoked, the extraction key moved by another process's
+  `--switch-key`, the tables, the egress policy — no retry mends these, and
+  the scheduler ends with 2 (until SMD-2752 they were retried until a restart);
+- the model not served, the provider refusing the call, or the key's lookup
+  not naming it under an actor-only egress policy, at the start of a
+  pass that got through its start before (the check, or an earlier sleep), is
+  retried on SMD-2599's schedule (5 s, doubling, at most 5 min) — a model
+  re-pulled, a 402 cleared by topping up credit, a gateway's passing
+  401/403/404 — and at a pass's first start ends it with 2;
+- a refusal mid-pass (the provider refusing the request itself) ends the
+  scheduler with 2, as it ends a follower — so the same 402 ends it mid-pass
+  and is retried when a sleep's start meets it first.
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
 with `slept`, the current or last sleep's start and, once it is over, its
@@ -2883,8 +2919,7 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); quieter banners, configuration checks at its start and the
-provider-wait word (SMD-2752).
+(SMD-2679); the provider-wait word (SMD-2752).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -3576,7 +3611,7 @@ and a `pg_dump`/`pg_restore`, `pg_dump` at a major version of at least both
 servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
-builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
+builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
 stack server's major) and runs this checkout's `tier.ts` in it on the stack's
 network, so a refresh migrates forward with the tree it was run from —
 `deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
@@ -3619,7 +3654,10 @@ same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
 key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
 `OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
-each labelled by host and path.
+each labelled by host and path. A user and password in a URL
+(`http://user:pass@host/mcp`, for a front before the brain) are sent as
+Basic beside the key, on any Bun, and are in neither the label nor the
+request's URL (SMD-2894).
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
 runs the refresh/replay/diff against the **published** images through the merge
@@ -4034,8 +4072,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2716 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1246 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2733 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1255 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

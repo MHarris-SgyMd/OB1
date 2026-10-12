@@ -209,6 +209,19 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const ur = rendered((v) => say.renderUpdate(ok(v)), swap(u.body, um.sc));
   assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
 
+  // A patch naming a stamp key (SMD-2744): REST carries `kept` with the
+  // values, MCP the keys and the note, one render of the other; an echo
+  // carries none (review pass 1 of PR 2: nothing held REST's).
+  const stampRest = String((await rest("POST", "/v1/thoughts", { content: "theta: a note REST relabels", source: "rest-suite" })).body.id);
+  const stampMcp = String((await mcp("capture_thought", { content: "theta: a note MCP relabels", source: "rest-suite" })).sc.id);
+  const k = await rest("PATCH", `/v1/thoughts/${stampRest}`, { metadata_patch: { trust: "ingested", topic: "theta" } });
+  const km = await mcp("update_thought", { id: stampMcp, metadata_patch: { trust: "ingested", topic: "theta" } });
+  const kr = rendered((v) => say.renderUpdate(ok(v)), swap(k.body, km.sc));
+  const echo = await rest("PATCH", `/v1/thoughts/${stampRest}`, { metadata_patch: { trust: null, topic: "theta, again" } });
+  assert(k.status === 200 && JSON.stringify(k.body.kept) === '[{"key":"trust","value":null,"present":false}]' && JSON.stringify(km.sc.kept) === '["trust"]'
+      && kr.content[0].text === km.text && same(kr.structuredContent, km.sc) && echo.status === 200 && !("kept" in echo.body),
+    `a stamp-key patch: REST's kept with its values, MCP's the same reply; an echo none (${JSON.stringify(k.body.kept)} | first difference: ${firstDiff(kr.structuredContent, km.sc)})`);
+
   const doomedRest = String(r.body.id), doomedMcp = String(m.sc.id);
   const d = await rest("DELETE", `/v1/thoughts/${doomedRest}`);
   assert(d.body.id === doomedRest && (await rest("GET", `/v1/thoughts/${doomedRest}`)).status === 404, "the REST delete answers the thought it removed, and it is gone");

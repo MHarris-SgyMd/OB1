@@ -409,10 +409,10 @@ import {
   UPDATE_THOUGHT_SIGNATURE_10,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstrap.ts";
-import { actorPayload, maskUrl, UUID_RE } from "../server-portable/store.ts";
+import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
@@ -723,7 +723,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   })();
 
   out(`  job:       ${JOB}`);
-  out(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${maskUrl(embedConfig.embeddings.base)}, ${embedConfig.timeoutMs / 1000} s per call`);
+  out(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${shownBase(embedConfig.embeddings)}, ${embedConfig.timeoutMs / 1000} s per call`);
   // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
   // naming the rule, retried by --retry-failed once the policy or the endpoint
   // changes; the text never went anywhere.
@@ -747,7 +747,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const blurbs = embedConfig.chunkContext ? egressRefusal(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
     if (blurbs) err(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
   }
-  out(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
+  out(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${shownBase(embedConfig.chat)})` : "off"}`);
 
   // ── The database's side of the contract ─────────────────────────────────────
 

@@ -5,12 +5,12 @@
 # deploy's pages and fetches through its guard, and every piece reads the
 # deploy's layout: deploy/auth/'s three dependency-free modules sit at the path
 # the imports name. The root .dockerignore lets these files in.
-FROM oven/bun:1.4.0-alpine AS deps
+FROM oven/bun:1.4.3-alpine AS deps
 WORKDIR /app/evals/auth
 COPY evals/auth/package.json evals/auth/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 WORKDIR /app/evals/auth
 ENV NODE_ENV=production
 COPY --from=deps /app/evals/auth/node_modules ./node_modules

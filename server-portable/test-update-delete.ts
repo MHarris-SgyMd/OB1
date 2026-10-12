@@ -398,6 +398,132 @@ console.log("\n[10] A thought cited as a source is refused by name and detached 
   await sql`DROP TABLE zz_pin_1712`;
 }
 
+console.log("\n[11] A patch naming trust, actor_kind or actor_name says which the thought kept, at what — not \"metadata merged\" for a key the server sets (SMD-2744)");
+{
+  const idOf = (reply: string) => reply.match(/id ([0-9a-f-]{36})/)?.[1] ?? "";
+  await sql`SELECT set_agent_kind('laptop', 'agent')`;
+  const id = idOf(await writer.call("capture_thought", { content: "[11] a note the laptop wrote" }));
+  const stamp = async () => {
+    const [m] = await sql`SELECT metadata->>'actor_kind' AS k, metadata->>'actor_name' AS n, metadata->>'trust' AS t, metadata->>'topic' AS topic FROM thoughts WHERE id = ${id}::uuid`;
+    return `${m?.k}/${m?.n}/${m?.t}/${m?.topic ?? "-"}`;
+  };
+  assert((await stamp()) === "agent/laptop/agent/-", `setup: the laptop's note at its kind (${await stamp()})`);
+  const full = async (args: Record<string, unknown>) => {
+    const body = (await writer.rpc("tools/call", { name: "update_thought", arguments: { id, ...args } })) as { result?: { content?: { text?: string }[]; structuredContent?: Record<string, unknown> } };
+    return { text: (body.result?.content ?? []).map((c) => c.text ?? "").join("\n"), sc: body.result?.structuredContent ?? {} };
+  };
+
+  // The ticket's case: a trust patch on the same text changed nothing, and said "metadata merged".
+  const lowered = await full({ metadata_patch: { trust: "ingested" } });
+  assert(/^Updated [0-9a-f-]{36} \(trust not taken\)\./.test(lowered.text) && /Note: not taken from the patch — trust is agent\./.test(lowered.text) && /An edit that leaves the text — letter case and runs of whitespace aside — keeps all three\./.test(lowered.text)
+      && /To set the trust — no higher than your key's kind — send it with a change of the text; your key then becomes the thought's writer/.test(lowered.text) && /an operator key's reset_capture_stamp puts it back/.test(lowered.text)
+      && lowered.sc.metadataMerged === false && JSON.stringify(lowered.sc.kept) === '["trust"]' && (await stamp()) === "agent/laptop/agent/-",
+    `a trust patch on the same text is reported as kept, at the trust the row holds, the metadata unchanged (${lowered.text.split("\n")[0]} | ${JSON.stringify(lowered.sc.kept)})`);
+  // An echo of what the caller read is not reported; the other key merges.
+  const echo = await full({ metadata_patch: { trust: "agent", topic: "[11] reviewed" } });
+  assert(/\(metadata merged\)\./.test(echo.text) && !/Note: not taken/.test(echo.text) && !("kept" in echo.sc) && (await stamp()) === "agent/laptop/agent/[11] reviewed",
+    `a write-back of the trust the row holds is no kept key: the rest merges, and nothing is said (${echo.text.split("\n")[0]})`);
+  // A name: kept beside a key that merges.
+  const renamed = await full({ metadata_patch: { actor_name: "someone-else", topic: "[11] renamed" } });
+  assert(/\(metadata merged, actor_name not taken\)\./.test(renamed.text) && /Note: not taken from the patch — actor_name is laptop\./.test(renamed.text) && !/To set the trust/.test(renamed.text) && (await stamp()) === "agent/laptop/agent/[11] renamed",
+    `a patched name is kept, the key beside it merged (${renamed.text.split("\n")[0]})`);
+  // With a change of content, a lower trust is a declaration and stands; a higher one is held to the key's kind.
+  const declared = await full({ content: "[11] a note the laptop rewrote, as outside text", metadata_patch: { trust: "ingested" } });
+  assert(!/Note: not taken/.test(declared.text) && (await stamp()) === "agent/laptop/ingested/[11] renamed",
+    `with a change of content a lower trust stands, and nothing is reported (${await stamp()})`);
+  const raised = await full({ content: "[11] a note the laptop rewrote again", metadata_patch: { trust: "operator" } });
+  assert(/Note: not taken from the patch — trust is agent\./.test(raised.text) && !/To set the trust/.test(raised.text) && /A trust above your key's kind is held to it\./.test(raised.text) && /\(content re-embedded, trust not taken\)/.test(raised.text) && (await stamp()) === "agent/laptop/agent/[11] renamed",
+    `…a trust above the key's kind is held to it, and reported as kept (${raised.text.split("\n")[0]})`);
+  // A change of case is no change of the text (003's fingerprint): the trust is kept, and the reply says the patch was not taken.
+  const before = await stamp();
+  const recased = await full({ content: "[11] A NOTE THE LAPTOP REWROTE AGAIN", metadata_patch: { trust: "ingested" } });
+  assert(/\(content re-embedded, trust not taken\)/.test(recased.text) && /The text you sent counts as the same — letter case and runs of whitespace aside — so the thought keeps its trust/.test(recased.text) && (await stamp()) === before,
+    `an edit of case alone leaves the text, and the trust with it (${recased.text.split("\n")[0]}; ${await stamp()})`);
+  // A write-back of all three stamp keys with the trust lowered, on the same
+  // text: nothing merged — two echoes and a trust not taken; and a patch of
+  // echoes alone merges nothing either (review pass 3: both read "merged").
+  const writeBack = await full({ metadata_patch: { actor_kind: "agent", actor_name: "laptop", trust: "ingested" } });
+  const echoOnly = await full({ metadata_patch: { actor_kind: "agent" } });
+  assert(/^Updated [0-9a-f-]{36} \(trust not taken\)\./.test(writeBack.text) && writeBack.sc.metadataMerged === false
+      && /^Updated [0-9a-f-]{36} \(metadata unchanged: it already held what the patch named\)\./.test(echoOnly.text) && echoOnly.sc.metadataMerged === false && !/Note:/.test(echoOnly.text),
+    `a write-back of the stamp keys merges nothing, and says so (${writeBack.text.split("\n")[0]} | ${echoOnly.text.split("\n")[0]})`);
+  // The same text sent again with a trust the row holds: nothing merged,
+  // though content was sent (review pass 4: it read "merged" — the reply
+  // took "content sent" for "text changed"; 088 answers the write's own verdict).
+  const current = String((await sql`SELECT content FROM thoughts WHERE id = ${id}::uuid`)[0].content);
+  const [{ t: heldTrust }] = await sql`SELECT metadata->>'trust' AS t FROM thoughts WHERE id = ${id}::uuid`;
+  const resent = await full({ content: current, metadata_patch: { trust: heldTrust } });
+  assert(/metadata unchanged: it already held what the patch named/.test(resent.text) && !/metadata merged/.test(resent.text) && resent.sc.metadataMerged === false,
+    `the same text resent with the trust the row holds merges nothing (${resent.text.split("\n")[0]})`);
+  // A number sent as the trust with a change of text declares nothing, and the reply says so (review pass 6).
+  const numbered11 = await full({ content: "[11] the laptop's note, renumbered", metadata_patch: { trust: 5 } });
+  assert(/A null or a non-string trust declares nothing, so the change of text took your key's own\./.test(numbered11.text), `a number for the trust, with a change of text: declares nothing (${(numbered11.text.split("\n").find((l) => l.startsWith("Note:")) ?? "").slice(-90)})`);
+  // A null for a trust the row lacks is an echo: nothing reported.
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'laptop'`;
+  const bare = idOf(await writer.call("capture_thought", { content: "[11] a note the laptop wrote while unclassified" }));
+  const nulled = await writer.call("update_thought", { id: bare, metadata_patch: { trust: null, topic: "[11] nulled" } });
+  await sql`SELECT set_agent_kind('laptop', 'agent')`;
+  assert(/\(metadata merged\)\./.test(nulled) && !/not taken/.test(nulled), `a null trust on a row with none is an echo, and nothing is reported (${nulled.split("\n")[0]})`);
+  const absent = await writer.call("update_thought", { id: bare, metadata_patch: { trust: "operator" } });
+  assert(/Note: not taken from the patch — trust is unset\./.test(absent), `a trust patched onto a row with none is kept, and said to be unset — not an unrecognised value (${(absent.split("\n").find((l) => l.startsWith("Note:")) ?? "").slice(0, 70)})`);
+  // Values a raw writer planted are shown cleaned, held to their word
+  // lists, and a value that is not a string is not said to be unset — and
+  // none of them makes the reply throw after the write (review pass 1 of PR 2).
+  const planted = idOf(await writer.call("capture_thought", { content: "[11] a note a raw writer relabelled" }));
+  const plant = async (meta: Record<string, unknown>) => {
+    await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`;
+    await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`;
+    await sql`UPDATE thoughts SET metadata = metadata || ${meta}::jsonb WHERE id = ${planted}::uuid`;
+    await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`;
+    await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`;
+  };
+  await plant({ actor_name: "a\u001b[2Jb\nc\u202ed", actor_kind: "op\u001b[31mx", trust: "agent\u0007" });
+  const dirty = await writer.call("update_thought", { id: planted, metadata_patch: { actor_name: "x", actor_kind: "operator", trust: "operator" } });
+  assert(/^Updated [0-9a-f-]{36} \(actor_kind, actor_name, trust not taken\)\./.test(dirty), `a patch of three stamp keys, none taken: all three named, no metadata merged (${dirty.split("\n")[0]})`);
+  const note = dirty.split("\n").find((l) => l.startsWith("Note: not taken")) ?? "";
+  assert(/actor_kind is not a recognised value;/.test(note) && /trust is not a recognised value\./.test(note) && /actor_name is a\[2Jb cd;/.test(note) && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(note),
+    `planted values are cleaned and held to their word lists in the note (${JSON.stringify(note.slice(0, 120))})`);
+  await plant({ actor_name: 5 });
+  let numbered = "";
+  try { numbered = await writer.call("update_thought", { id: planted, metadata_patch: { actor_name: "x" } }); } catch (e) { numbered = `threw: ${(e as Error).message}`; }
+  assert(/Note: not taken from the patch — actor_name is not a recognised value\./.test(numbered), `a name that is not a string is said so, and the reply does not throw (${numbered.split("\n").slice(-1)[0].slice(0, 100)})`);
+  // A row holding no stamp keys at all: the write answers an empty stamp, and a stamp-key patch is kept as unset (review pass 5).
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`;
+  await sql`UPDATE thoughts SET metadata = '{}'::jsonb WHERE id = ${planted}::uuid`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`;
+  const emptyStamp = await writer.call("update_thought", { id: planted, metadata_patch: { trust: "operator" } });
+  assert(/\(trust not taken\)/.test(emptyStamp) && /Note: not taken from the patch — trust is unset\./.test(emptyStamp), `a row with no stamp keys: the patch's trust kept, unset (${emptyStamp.split("\n")[0]})`);
+  // A row whose metadata is SQL NULL, through the server: the patch's keys said not merged (review pass 6: no cell drove the store's reading of it).
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`;
+  await sql`UPDATE thoughts SET metadata = NULL WHERE id = ${planted}::uuid`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`;
+  const onNull = await writer.call("update_thought", { id: planted, metadata_patch: { topic: "[11] onto NULL" } });
+  assert(/the patch not merged: the thought's metadata was SQL NULL, a raw writer's — a change of the text gives it metadata/.test(onNull) && !/metadata merged|already held/.test(onNull), `a patch onto NULL metadata is said not merged (${onNull.split("\n")[0]})`);
+  // Stamp keys alone drop nothing the server would not set: "trust not taken", no NULL line (review pass 7's mutant of the store's reading).
+  const stampOnNull = await writer.call("update_thought", { id: planted, metadata_patch: { trust: "operator" } });
+  assert(/\(trust not taken\)/.test(stampOnNull) && !/SQL NULL/.test(stampOnNull), `a stamp key alone onto NULL metadata: not taken, nothing dropped (${stampOnNull.split("\n")[0]})`);
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`;
+  await sql`UPDATE thoughts SET metadata = '{}'::jsonb WHERE id = ${planted}::uuid`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`;
+  await plant({ trust: null });
+  const nullTrust = await writer.call("update_thought", { id: planted, metadata_patch: { trust: "operator" } });
+  assert(/Note: not taken from the patch — trust is unset\./.test(nullTrust), `a JSON null a raw writer left is no trust: unset (${(nullTrust.split("\n").find((l) => l.startsWith("Note:")) ?? "").slice(0, 60)})`);
+  // A row with no updated_at (the column is nullable; update_thought answers
+  // its created_at) is this write's own, not another's (review pass 2).
+  const legacy = idOf(await writer.call("capture_thought", { content: "[11] a legacy note with no updated_at" }));
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER USER`;
+  await sql`UPDATE thoughts SET updated_at = NULL WHERE id = ${legacy}::uuid`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER USER`;
+  const legacyReply = await writer.call("update_thought", { id: legacy, metadata_patch: { actor_name: "someone" } });
+  assert(/^Updated [0-9a-f-]{36} \(actor_name not taken\)\./.test(legacyReply), `a row with no updated_at still has its kept key reported (${legacyReply.split("\n")[0]})`);
+}
+
 await sql.close();
 server.stop();
 provider.stop();
