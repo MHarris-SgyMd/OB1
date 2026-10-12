@@ -109,6 +109,7 @@ main() {
   run server-portable    test-rest.ts
   run server-portable    test-plugins.ts
   run server-portable    test-thoughts.ts
+  run server-portable    test-jobs.ts
   typecheck server-portable
   typecheck compat/supabase-sql
   typecheck db

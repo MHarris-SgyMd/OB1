@@ -85,9 +85,9 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18, 20 and 23 parse YAML with
-      # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, and one Bun pinned everywhere
+      # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
+      # 29, 32, 33 and 34 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, and every suite run by a workflow
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -176,6 +176,14 @@ jobs:
       - name: Thought vocabulary and presentation rules
         working-directory: server-portable
         run: bun test-thoughts.ts
+
+      # SMD-2273 + SMD-2318. The async job registry in memory: the lifecycle,
+      # ownership, the SSE frames, retention and the cap on an injected clock,
+      # and the durable sink through a fake. Over a real database it is
+      # test-e2e-sql's. Ran in no job until SMD-2895.
+      - name: Async job registry
+        working-directory: server-portable
+        run: bun test-jobs.ts
 
       - name: Typecheck
         working-directory: server-portable
@@ -579,11 +587,19 @@ jobs:
       - name: Worker bootstrap (egress, no database)
         working-directory: db
         run: bun test-worker-bootstrap.ts
+
       # SMD-2681: the findings poster's grouping, comment, marker read-back,
       # cap and egress subject. No database, no Linear.
       - name: Board findings (no database)
         working-directory: db
         run: bun test-board-findings.ts
+
+      # SMD-2239: the weekly digest's ranking, Telegram chunking, egress subject
+      # and gate, and its endpoint (a base's user and password sent as Basic,
+      # SMD-2885). No database, no Telegram. Ran in no job until SMD-2895.
+      - name: Weekly digest (no database)
+        working-directory: db
+        run: bun test-weekly-digest.ts
 
   db-live:
     name: Schema against real Postgres
