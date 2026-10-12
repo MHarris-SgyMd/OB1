@@ -11226,11 +11226,17 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       // `check` beside --status or --dry-run skips the probe and the key, so
       // either engine refuses it as usage rather than report a start through
       // (review pass 1).
+      // Each engine beside each flag (review pass 2: one of each held neither guard whole).
+      const checkBeside = (engine: typeof runExtract | typeof runConsolidate, o: { status?: boolean; dryRun?: boolean }) =>
+        new Promise<string>((done) => {
+          let r = "none";
+          engine({ url: URL_!, env, workers: 1, follow: 1, check: true, ...o, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`));
+        });
       const usageBeside = await Promise.all([
-        new Promise<string>((done) => { let r = "none"; runExtract({ url: URL_!, env, workers: 1, follow: 1, check: true, status: true, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`)); }),
-        new Promise<string>((done) => { let r = "none"; runConsolidate({ url: URL_!, env, workers: 1, follow: 1, check: true, dryRun: true, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`)); }),
+        checkBeside(runExtract, { status: true }), checkBeside(runExtract, { dryRun: true }),
+        checkBeside(runConsolidate, { status: true }), checkBeside(runConsolidate, { dryRun: true }),
       ]);
-      assert(usageBeside.every((u) => u === "2 usage"), `check beside --status or --dry-run is refused as usage, never reported through (${usageBeside.join(", ")})`);
+      assert(usageBeside.every((u) => u === "2 usage"), `check beside --status or --dry-run is refused as usage by either engine, never reported through (${usageBeside.join(", ")})`);
 
       // Extraction's key recorded under another model: refused at the start (item 3).
       await setKey("extract:another-model@p2");
