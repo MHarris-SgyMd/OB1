@@ -10862,7 +10862,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const refusedNeverStarted = await Promise.race([probeRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedNeverStarted === "hung") { acProbe.abort(); await probeRun; }
     missing = false;
-    assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)),
+    assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)) && lines.some((l) => /extract's start is refused \(model\) — it had not got through its start in this process, so the scheduler ends/.test(l)),
       `woken while waiting at its start, then refused at the next: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted})`);
     // A pass that throws (here its Writer, at its first line) rejects the
     // scheduler with its error once the other pass stops, and leaves no
@@ -11236,6 +11236,17 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const judgeBeat = await beat();
       assert(judgeCode === 2 && count(/consolidate's start is refused \(model\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0 && judgeBeat?.ended === true && judgeBeat.outcome === "failed" && (judgeBeat as { refused?: string }).refused === "model",
         `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed and naming the refusal, model (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
+      // A restarted scheduler's first row carries the last process's sleep,
+      // which preflight reads, until it sleeps itself (SMD-2752 PR 3, review pass 1).
+      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true, slept: lastMark })})
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      const carryRun = followRun({ quiet: 300 });
+      let carried = null as { slept?: unknown; ended?: boolean } | null;
+      await pollUntil(async () => (carried = (await beat()) as typeof carried) !== null && carried.ended !== true, 15_000);
+      const carryCode = await carryRun.stop();
+      assert(JSON.stringify(carried?.slept) === JSON.stringify(lastMark) && carried?.ended !== true && carryCode === 0,
+        `a restarted scheduler's first row carries the last sleep until it sleeps (${JSON.stringify(carried)}; exit ${carryCode})`);
       // brain-info's copy of the refusal kinds is the engines' list (SMD-2752 PR 3).
       assert(JSON.stringify([...SLEEP_REFUSALS]) === JSON.stringify([...START_REFUSALS]), `brain-info's SLEEP_REFUSALS is worker-bootstrap's START_REFUSALS (${SLEEP_REFUSALS.join(",")} | ${START_REFUSALS.join(",")})`);
 
@@ -11318,13 +11329,15 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       // as the first sleep starts its passes.
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       await capture("A note for the waiting pass.", "sync-sleep", 0, 13);
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check, again')`;
-      const waitingRun = followRun({ quiet: 4 });
+      // Unavailable from the start: the check does not wait on a provider that
+      // is out, so the first sleep's pass waits at its start every time. A
+      // minute's floor for the row's timer, as in production, so `waiting`
+      // must come from the pass's own word, written as it is said (review pass 1).
+      unavailable = true;
+      const waitingRun = followRun({ quiet: 2, minStampEveryS: 60 });
       try {
-        await pollUntil(async () => (await beat()) !== null, 10_000);
-        unavailable = true;
         let waitingBeat = null as { waiting?: string[]; running?: boolean } | null;
-        await pollUntil(async () => ((waitingBeat = (await beat()) as typeof waitingBeat)?.waiting?.length ?? 0) > 0, 20_000);
+        await pollUntil(async () => ((waitingBeat = (await beat()) as typeof waitingBeat)?.waiting?.length ?? 0) > 0, 15_000);
         unavailable = false;
         let answeredBeat = null as { waiting?: string[] } | null;
         await pollUntil(async () => (answeredBeat = (await beat()) as typeof answeredBeat) !== null && answeredBeat.waiting === undefined, 20_000);

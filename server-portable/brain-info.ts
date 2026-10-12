@@ -896,7 +896,10 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
-  return `${h.running ? "running a pass" : "alive"}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
+  // A pass the sleep scheduler started that waits at its start for the
+  // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3).
+  const state = h.running ? (h.waiting?.length ? "waiting at a pass's start" : "running a pass") : "alive";
+  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

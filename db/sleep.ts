@@ -522,6 +522,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // What wakes it, on its own row: preflight's `sleep` row reads this, not its
   // own role's privileges (SMD-2678, review pass 1).
   stamper.watching?.(logState);
+  // The last process's sleep, carried until this one sleeps: a stamp writes
+  // the whole value, and a restarted scheduler's first row read "no sleep
+  // yet" in preflight (review pass 1 of SMD-2752 PR 3; SMD-2678's mark).
+  if (FOLLOW) {
+    const last = await lastSlept(sql).catch(() => null);
+    if (last) stamper.slept?.(last);
+  }
   const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
   /** Each pass's last word in this sleep, and extraction's last judged block. */
   const words: Partial<Record<PassName, PassOutcome>> = {};
@@ -655,8 +662,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     else for (const p of running) softStop(p);
     const results = await Promise.allSettled(running.map((p) => p.done));
     running.length = 0;
-    // A stopped pass waits for nothing; each says so as its wait ends, and
-    // this holds it if one threw first (the next stamp carries it).
+    // A stopped pass waits for nothing, and each says so as its wait ends (the
+    // engines' finally): defensive only, the set is empty here (review pass 1).
     if (waitingAtStart.size) {
       waitingAtStart.clear();
       stamper.waiting?.([]);
@@ -860,6 +867,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // (SMD-2752).
         const permanent = r.refused !== undefined && PERMANENT_REFUSALS.has(r.refused);
         if (FOLLOW && r.code === 2 && !r.started && permanent) err(refusedLine(r.pass, r.refused, "no retry mends that, so the scheduler ends"));
+        // One of the kinds a retry can mend, at a pass's first start in this
+        // process: the configuration's, said as such (review pass 1 of PR 3 — the
+        // log had only the pass's own lines).
+        else if (FOLLOW && r.code === 2 && !r.started && r.refused && !begun.has(r.pass)) err(refusedLine(r.pass, r.refused, "it had not got through its start in this process, so the scheduler ends"));
         if (!FOLLOW || r.code !== 2 || r.started || permanent || !begun.has(r.pass)) {
           // A start refusal that ends it is said on the row by its kind, so
           // preflight gives its remedy, not "start it again" (SMD-2752).

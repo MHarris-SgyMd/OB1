@@ -207,6 +207,8 @@ export function passStamper(opts: {
     async end(o, m) {
       outcome = o;
       ended = true;
+      // An ended row waits on nothing (SMD-2752 PR 3, review pass 1).
+      waiting = [];
       if (m !== undefined) malformed = m;
       await write(false);
     },

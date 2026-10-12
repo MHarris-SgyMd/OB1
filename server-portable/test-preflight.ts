@@ -3770,7 +3770,7 @@ else {
       // the row says so, not that its passes run, and warns with the provider.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null } }), 10);
       const waitOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+running a pass \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
+      assert(/!\s+sleep\s+waiting at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
         `a pass waiting at its start for the provider is said, a warning naming the provider (${row(waitOut.out, "sleep")} | ${fix(waitOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract", "consolidate"], slept: { from: await at(130), to: null } }), 10);
       assert(/asleep, extract and consolidate waiting for the provider at their start/.test(row((await run(LOG_ON)).out, "sleep")), "both passes waiting are named, at their start");
