@@ -341,19 +341,22 @@ const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql and db
  */
 const THEN_060 = " Then apply db/migrations/060_append_then_project.sql — it last defines the audit trigger 055 also holds, so 055 alone puts its 055 body back (bun migrate.ts --reapply runs every file in order).";
 /**
- * 060 and 061 also hold the write functions, which 073 (update_thought) and
- * 080 (upsert_thought) last define (SMD-1724, SMD-2539): either applied by
- * hand alone puts its bodies back, which stamp no declared trust on the row —
- * so every remedy that names 060 or 061 names 073 and 080 after it.
+ * 060 and 061 also hold the write functions, which 088 (update_thought, on
+ * 073's body) and 080 (upsert_thought) last define (SMD-1724, SMD-2539,
+ * SMD-2744): either applied by hand alone puts its bodies back, which stamp
+ * no declared trust on the row — so every remedy that names 060 or 061 names
+ * 073, 080 and 088 after it.
  */
-const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql and db/migrations/080_recapture_keep.sql — 073 last defines update_thought and 080 upsert_thought, which 060 and 061 also hold, so one of them applied alone puts its bodies back, which stamp no declared trust (bun migrate.ts --reapply runs every file in order).";
+const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql, db/migrations/080_recapture_keep.sql and db/migrations/088_update_thought_says_what_it_did.sql — 088 last defines update_thought (on 073's body) and 080 upsert_thought, which 060 and 061 also hold, so one of them applied alone puts its bodies back, which stamp no declared trust (bun migrate.ts --reapply runs every file in order).";
 /**
- * 073 also holds upsert_thought, which 080 last defines (SMD-2539): 073
- * applied by hand alone puts its bodies back, which merge a capture-only
- * key's re-capture into the row it lands on — so every remedy that names 073
- * names 080 after it.
+ * 073 also holds upsert_thought, which 080 last defines (SMD-2539), and
+ * update_thought, which 088 last defines (SMD-2744): 073 applied by hand
+ * alone puts its bodies back — upsert_thought's merge a capture-only key's
+ * re-capture into the row it lands on, update_thought's answers no stamp, so
+ * the reply to a patch naming trust says "merged" again — so every remedy
+ * that names 073 names 080 and 088 after it.
  */
-const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql — it last defines upsert_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on (bun migrate.ts --reapply runs every file in order).";
+const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql and db/migrations/088_update_thought_says_what_it_did.sql — they last define upsert_thought and update_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on and answer an edit with no stamp (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
@@ -1714,7 +1717,7 @@ if (configFailed) {
          */
         const writersRemedy = (apply073: string, reapplied = ""): string =>
           ledgerRead && !ledger.has("061")
-            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073 and 080 — the write functions' last definers — among them.`)
+            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073, 080 and 088 — the write functions' last definers, and the body 088 carries — among them.`)
             : ledgerRemedy("073", apply073, reapplied);
         /**
          * upsert_thought's remedy: 080, its last definer — except where 080's
@@ -1727,7 +1730,7 @@ if (configFailed) {
           ledgerRead && !ledger.has("073")
             ? writersRemedy(`${APPLY_073} The migrator applies the files after it, 080 — upsert_thought's last definer — among them.`)
             : ledgerRemedy("080", pre073 && !ledgerRead
-              ? `Apply db/migrations/073_thought_trust_on_the_row.sql, then db/migrations/080_recapture_keep.sql${why}`
+              ? `Apply db/migrations/073_thought_trust_on_the_row.sql, then db/migrations/080_recapture_keep.sql and db/migrations/088_update_thought_says_what_it_did.sql${why}`
               : `Apply db/migrations/080_recapture_keep.sql${why}`);
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
@@ -3247,7 +3250,7 @@ if (configFailed) {
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is from before migration 073 (061 re-applied by hand?): the trust an edit declares never reaches the row, and a patch's metadata.trust above the key is dropped without being filed (SMD-1724)`,
                 writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body (which 088 carries) — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
           } else if (current.length) {
             add("edit signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
