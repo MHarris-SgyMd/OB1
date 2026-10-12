@@ -11,8 +11,15 @@
 // that reaches a field by mistake is `?`, not the string.
 //
 // Lines go to stdout, which compose's log rotation bounds (deploy/compose.yaml,
-// x-logging). Nothing here sends anything anywhere.
+// x-logging). Each request is also an OpenTelemetry span (PR 2b), whose
+// attributes are the line's checked values and nothing else; the spans are
+// the API's no-ops, recorded and sent nowhere, until an operator names a
+// collector (OTEL_EXPORTER_OTLP_ENDPOINT or its traces variable), when
+// startTelemetry loads the SDK (otel-setup.ts). Nothing here sends anything
+// anywhere on its own.
 
+import * as otel from "@opentelemetry/api";
+import type { FlushResult } from "./shutdown.ts";
 import { TOOLS } from "./tools.ts";
 import { labelPart } from "./sse.ts";
 
@@ -86,9 +93,11 @@ export interface RequestRecord {
   ms: number;
   /** The bytes of the answer's body, where the server counted them: a stream's (an MCP answer, either job stream). */
   bytes?: number;
+  /** The W3C trace id the request's span has — a continued `traceparent`'s, or its own — or, with no collector set, an incoming `traceparent`'s. */
+  trace?: string;
 }
 
-const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"]);
 /**
  * The JSON-RPC methods an MCP client sends this server (the 2025-06-18
  * schema's, client to server), and `batch`, which the MCP server writes for a
@@ -112,35 +121,49 @@ const OUTCOMES: ReadonlySet<string> = new Set<RequestOutcome>(["ok", "refused", 
 const ROUTE = /^(?:\/[A-Za-z0-9_.:-]+)+$|^\/$/;
 /** A refusal's or a fault's code: the core's enum spelling. */
 const CODE = /^[A-Z][A-Z0-9_]{0,47}$/;
+/** A W3C trace id: 32 lower-case hex digits, not all zero. */
+const TRACE_ID = /^(?!0{32})[0-9a-f]{32}$/;
 
 const count = (n: number | undefined): number | undefined => (n === undefined || !Number.isFinite(n) || n < 0 ? undefined : Math.round(n));
 
+const known = (v: string | undefined, set: ReadonlySet<string>, other = "?") => (v === undefined ? undefined : set.has(v) ? v : other);
+const spelled = (v: string | undefined, rule: RegExp) => (v === undefined ? undefined : rule.test(v) ? v : "?");
+/** A tool's name held to the manifest's and the enabled plugins' (`?` for any other). */
+const toolName = (v: string | undefined) => (v !== undefined && PLUGIN_TOOLS.has(v) ? v : known(v, TOOL_NAMES));
+
+/** A record's fields, each held to its rule: what a line, and a span, may say of a request. */
+type CheckedRecord = ReturnType<typeof checked>;
+
 /**
- * The line for a request: JSON with `ts` first, then the record's fields in
- * RequestRecord's order, each held to its rule — a method, an RPC method, a
- * tool and an outcome to their known sets, a route and a code to their
- * spellings, the agent's name to printable ASCII of at most 64 characters,
- * numbers to non-negative integers; what fails its rule is `?`, and an absent
- * field is left out.
+ * A record's fields in RequestRecord's order, each held to its rule — a
+ * method, an RPC method, a tool and an outcome to their known sets, a route,
+ * a code and a trace id to their spellings, the agent's name to printable
+ * ASCII of at most 64 characters, numbers to non-negative integers; what
+ * fails its rule is `?` (a trace id that fails is left out), and an absent
+ * field is undefined. The line and the span read these, never the record's
+ * own strings, which a caller may have put there (the tool a body names, the
+ * method a request says).
  */
-export function requestLine(r: RequestRecord, now: Date = new Date()): string {
-  const known = (v: string | undefined, set: ReadonlySet<string>, other = "?") => (v === undefined ? undefined : set.has(v) ? v : other);
-  const spelled = (v: string | undefined, rule: RegExp) => (v === undefined ? undefined : rule.test(v) ? v : "?");
-  const line = {
-    ts: now.toISOString(),
-    door: r.door === "api" ? "api" : "mcp",
+function checked(r: RequestRecord) {
+  return {
+    door: r.door === "api" ? "api" as const : "mcp" as const,
     method: known(r.method, METHODS),
     route: spelled(r.route, ROUTE),
     rpc: known(r.rpc, RPC_METHODS, "other"),
-    tool: r.tool !== undefined && PLUGIN_TOOLS.has(r.tool) ? r.tool : known(r.tool, TOOL_NAMES),
+    tool: toolName(r.tool),
     agent: r.agent === undefined ? undefined : labelPart(r.agent),
     status: count(r.status) ?? 0,
-    outcome: known(r.outcome, OUTCOMES),
+    outcome: known(r.outcome, OUTCOMES) as RequestOutcome | "?" | undefined,
     code: spelled(r.code, CODE),
     ms: count(r.ms) ?? 0,
     bytes: count(r.bytes),
+    trace: r.trace !== undefined && TRACE_ID.test(r.trace) ? r.trace : undefined,
   };
-  return JSON.stringify(line);
+}
+
+/** The line for a request: JSON with `ts` first, then its checked fields (an absent one left out). */
+export function requestLine(r: RequestRecord, now: Date = new Date()): string {
+  return JSON.stringify({ ts: now.toISOString(), ...checked(r) });
 }
 
 let sink: (line: string) => void = (line) => console.log(line);
@@ -157,8 +180,82 @@ export function useRequestLog(next: (line: string) => void): (line: string) => v
   return previous;
 }
 
-/** What a request's record is told on its way: every RequestRecord field but the door, the method and the time, which the record keeps itself. */
-export type RequestFields = Partial<Omit<RequestRecord, "door" | "method" | "ms">>;
+/** What a request's record is told on its way: every RequestRecord field but the door, the method, the time and the trace id, which the record keeps itself. */
+export type RequestFields = Partial<Omit<RequestRecord, "door" | "method" | "ms" | "trace">>;
+
+/**
+ * The tracer every span here comes from: the API's no-op until otel-setup.ts
+ * registers a provider. Read each time: a suite's shutdown (trace.disable())
+ * replaces the API's proxy, so a tracer held from before would miss the next
+ * provider.
+ */
+const tracer = () => otel.trace.getTracer("ob1");
+
+/**
+ * A request's `traceparent` for the W3C propagator, and nothing else: the
+ * propagator would also carry a client's `tracestate` — its text — on every
+ * span to the collector (review pass 1).
+ */
+const HEADERS: otel.TextMapGetter<Headers> = { get: (h, key) => (key === "traceparent" ? h.get(key) ?? undefined : undefined), keys: () => ["traceparent"] };
+
+/** Whether a caller's `traceparent` is continued: only where the operator says its proxy sets it. */
+const trustsTraceparent = () => process.env.OB1_OTEL_TRUST_TRACEPARENT === "1";
+
+/**
+ * A trusted incoming `traceparent`'s trace id, for the line when no collector is set,
+ * read as the W3C propagator reads one: version `ff` invalid, version `00`
+ * exactly four fields, a later version more; no id of all zeros.
+ */
+function incomingTrace(header: string | null): string | undefined {
+  const m = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}(-.*)?$/.exec(header ?? "");
+  if (!m || m[1] === "ff" || (m[1] === "00" && m[4] !== undefined) || /^0+$/.test(m[2]) || /^0+$/.test(m[3])) return undefined;
+  return m[2];
+}
+
+/** The span name and status a request's checked fields give, and its attributes — the line's values, under the HTTP and MCP conventions' names. */
+function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error: boolean; attributes: otel.Attributes } {
+  // A status the client was handed: none for one gone first, or cut by the
+  // stop — a 408, a REST body read's 500, a 0 are the line's names for that,
+  // not answers anyone received.
+  const answered = c.status > 0 && c.outcome !== "abandoned" && c.outcome !== "cut";
+  const error = (answered && c.status >= 500) || c.outcome === "error" || c.outcome === "stalled" || c.outcome === "cut";
+  const method = c.method === "?" ? "_OTHER" : c.method;
+  const route = c.route === "?" ? undefined : c.route;
+  const tool = c.tool === "?" ? undefined : c.tool;
+  const mcpMethod = c.rpc === "batch" || c.rpc === "other" ? undefined : c.rpc;
+  // A tools/call names its tool; it is an execution only where the call ran — not refused at its key, not unrun
+  // (review pass 6: a keyless caller could count any tool's executions). The key's refusal is the route's word,
+  // not a code: a plugin may refuse with UNAUTHORIZED or BUSY of its own, and its call ran (review pass 7).
+  const named = mcpMethod === "tools/call" && tool !== undefined;
+  const toolCall = named && c.outcome !== "unrun" && !refusedAtKey;
+  const name = mcpMethod !== undefined ? (named ? `${mcpMethod} ${tool}` : mcpMethod)
+    : `${method === "_OTHER" ? "HTTP" : method}${route !== undefined ? ` ${route}` : ""}`;
+  return {
+    name,
+    error,
+    attributes: {
+      "http.request.method": method,
+      "http.route": route,
+      "http.response.status_code": answered ? c.status : undefined,
+      "http.response.body.size": c.bytes,
+      "mcp.method.name": mcpMethod,
+      // A tool call's, under the MCP conventions' names too: the operation's
+      // name here alone, not on the call's own span, so a backend counting
+      // tool executions counts a single MCP call once (review pass 2); a REST
+      // operation's and a batch's calls carry none.
+      "gen_ai.operation.name": toolCall ? "execute_tool" : undefined,
+      "gen_ai.tool.name": toolCall ? tool : undefined,
+      "ob1.door": c.door,
+      // Only what mcp.method.name cannot say: a batch, or a method outside the schema's.
+      "ob1.rpc": mcpMethod === undefined ? c.rpc : undefined,
+      "ob1.tool": tool,
+      "ob1.agent": c.agent,
+      "ob1.outcome": c.outcome,
+      "ob1.code": c.code,
+      "error.type": error ? c.code ?? (c.outcome !== undefined && c.outcome !== "ok" ? c.outcome : String(c.status)) : undefined,
+    },
+  };
+}
 
 /** The records not yet ended, so the stop can end each (cutOpenRequests). */
 const OPEN = new Set<RequestTrace>();
@@ -167,13 +264,15 @@ const RECORDS = new WeakMap<Request, RequestTrace>();
 
 /**
  * One request, from its arrival to its line (SMD-1849 PR 2a): the one record
- * a server's first middleware makes for every request it is handed, filled
+ * a server's first middleware makes for every request it is handed but the
+ * keyless liveness probe (notFound makes one for a path it never sees), filled
  * in by the handler that serves it — the route, the tool, the key's name —
  * and ended exactly once, where the request ends. The middleware ends it when
  * the handler returns; a handler whose answer outlives it (a stream) marks it
  * `deferred` and ends it itself, at the stream's end. A second `end` does
- * nothing, so every request has one line and no more. PR 2b's span reads the
- * same record.
+ * nothing, so every request has one line and no more. The record is the
+ * request's span too (PR 2b): started with it, its handlers run under it
+ * (`run`), and ended with the line, from the line's checked values.
  */
 export class RequestTrace {
   /** When the request arrived (performance.now()). */
@@ -194,15 +293,52 @@ export class RequestTrace {
   code?: string;
   /** Set by a handler whose answer outlives it: the middleware leaves the end to it. */
   deferred = false;
+  /** Set where the request was refused at its key, before any tool could run (the MCP route's refusal). */
+  refusedAtKey = false;
   private done = false;
+  /** The request's server span, and the context its handlers run in (run). */
+  private readonly span: otel.Span;
+  private readonly context: otel.Context;
+  /** The trace id an incoming `traceparent` names, for the line when the span has none of its own. */
+  private readonly incoming?: string;
 
-  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal?: AbortSignal) {
+  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal: AbortSignal, headers: Headers) {
     OPEN.add(this);
+    // A caller's traceparent is its own choice: continued, it would pick this
+    // request's trace — joining any trace it knows, colliding with another
+    // request's line, deciding the ratio sampler — so by default the request
+    // starts its own trace and links the caller's, as OpenTelemetry advises
+    // for a public endpoint; an operator whose proxy sets the header trusts it
+    // (OB1_OTEL_TRUST_TRACEPARENT=1) and it is continued (review pass 6).
+    const remote = otel.propagation.extract(otel.ROOT_CONTEXT, headers, HEADERS);
+    const trusted = trustsTraceparent();
+    const parent = trusted ? remote : otel.ROOT_CONTEXT;
+    const caller = trusted ? undefined : otel.trace.getSpanContext(remote);
+    this.incoming = trusted ? incomingTrace(headers.get("traceparent")) : undefined;
+    const name = METHODS.has(method) ? method : "?";
+    this.span = tracer().startSpan(name === "?" ? "HTTP" : name, {
+      kind: otel.SpanKind.SERVER,
+      startTime: this.started,
+      attributes: { "http.request.method": name === "?" ? "_OTHER" : name, "ob1.door": door },
+      links: caller && otel.isSpanContextValid(caller) ? [{ context: caller }] : undefined,
+    }, parent);
+    this.context = otel.trace.setSpan(parent, this.span);
+  }
+
+  /** The request's trace id: its span's, or, where no collector is set, a trusted incoming `traceparent`'s. */
+  get traceId(): string | undefined {
+    const own = this.span.spanContext();
+    return otel.isSpanContextValid(own) ? own.traceId : this.incoming;
+  }
+
+  /** Runs `fn` with the request's span current, so a tool's span (withToolSpan) is its child. */
+  run<T>(fn: () => T): T {
+    return otel.context.with(this.context, fn);
   }
 
   /** Whether the client is gone: its request's signal aborted. */
   get clientGone(): boolean {
-    return this.signal?.aborted === true;
+    return this.signal.aborted;
   }
 
   /** Whether the line is written. */
@@ -221,13 +357,176 @@ export class RequestTrace {
     this.done = true;
     OPEN.delete(this);
     const { route, rpc, tool, agent, status, outcome, code } = this;
-    this.write({ door: this.door, method: this.method, route, rpc, tool, agent, status, outcome, code, ...fields, ms: at - this.started });
+    const record: RequestRecord = { door: this.door, method: this.method, route, rpc, tool, agent, status, outcome, code, ...fields, ms: at - this.started, trace: this.traceId };
+    try {
+      this.write(record);
+    } finally {
+      // The span ends whatever the line's sink does.
+      const span = spanOf(checked(record), this.refusedAtKey);
+      this.span.updateName(span.name);
+      this.span.setAttributes(span.attributes);
+      if (span.error) this.span.setStatus({ code: otel.SpanStatusCode.ERROR });
+      this.span.end(at);
+    }
   }
+}
+
+/**
+ * One tool call's span, a child of its request's (PR 2b): `execute_tool
+ * <tool>`, its tool's name held to the manifest's (`gen_ai.tool.name`), ended
+ * once with how the call ended — the outcomes a call can have — and its code.
+ * Its name is held to the manifest's tools and the enabled plugins'.
+ */
+export interface ToolSpan {
+  end(outcome: "ok" | "refused" | "error" | "cut", code?: string): void;
+}
+
+/** The tool calls' spans not yet ended, so the stop's cut ends them with their requests (cutOpenRequests). */
+const OPEN_TOOLS = new Set<ToolSpan>();
+
+/**
+ * Runs one tool call under its own span, current while it runs (so what the
+ * call starts is its child): `fn` ends it with how the call ended; one that
+ * throws first ends it as an error, and one that returns without ending it
+ * ends it `ok`.
+ */
+export async function withToolSpan<T>(tool: string, fn: (span: ToolSpan) => Promise<T>): Promise<T> {
+  const name = toolName(tool) ?? "?";
+  const parent = otel.context.active();
+  const span = tracer().startSpan(`execute_tool ${name}`, {
+    kind: otel.SpanKind.INTERNAL,
+    attributes: { "gen_ai.tool.name": name },
+  }, parent);
+  let done = false;
+  const handle: ToolSpan = {
+    end: (outcome, code) => {
+      if (done) return;
+      done = true;
+      OPEN_TOOLS.delete(handle);
+      const checkedCode = spelled(code, CODE);
+      span.setAttributes({ "ob1.outcome": outcome, "ob1.code": checkedCode });
+      // A fault, or a call the stop cut off, as a request's span says either.
+      if (outcome === "error" || outcome === "cut") span.setAttributes({ "error.type": checkedCode ?? outcome }).setStatus({ code: otel.SpanStatusCode.ERROR });
+      span.end();
+    },
+  };
+  OPEN_TOOLS.add(handle);
+  try {
+    const value = await otel.context.with(otel.trace.setSpan(parent, span), () => fn(handle));
+    handle.end("ok");
+    return value;
+  } catch (err) {
+    handle.end("error");
+    throw err;
+  }
+}
+
+/** The SDK, once startTelemetry has set it up; `starting` while it loads, so a second call waits on the first; `generation`, so a stop during a start wins. */
+let tracing: import("./otel-setup.ts").Tracing | undefined;
+let starting: Promise<boolean> | undefined;
+let generation = 0;
+let stopping: Promise<void> | undefined;
+
+/**
+ * Sets up the OpenTelemetry SDK where an operator names a collector — on Bun
+ * only: a server calls it where it serves on Bun, and Workers' bundle aliases
+ * otel-setup.ts to a stub (wrangler.toml). The endpoint is
+ * OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, else OTEL_EXPORTER_OTLP_ENDPOINT, and
+ * must be an http(s) URL; OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none
+ * turns it off, as the SDK's own variables do elsewhere. Says where the spans
+ * go — the variable and the endpoint's origin alone, so a credential in it
+ * stays out of the log — or why none are sent, or that its SDK could not be
+ * loaded or set up, by the error's name alone (a message can carry the URL).
+ * A request that arrives before the SDK has loaded (tens of milliseconds) has
+ * a no-op span. `load` is otel-setup.ts but for a suite. Returns whether it
+ * set one up.
+ */
+export function startTelemetry(
+  serviceName: string,
+  log: (line: string) => void = (line) => console.warn(line),
+  load: () => Promise<Pick<typeof import("./otel-setup.ts"), "setUpTracing">> = () => import("./otel-setup.ts"),
+): Promise<boolean> {
+  if (starting) return starting;
+  const variable = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ? "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" : "OTEL_EXPORTER_OTLP_ENDPOINT";
+  const endpoint = process.env[variable];
+  if (!endpoint) return Promise.resolve(false);
+  const off = process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true" ? "OTEL_SDK_DISABLED=true"
+    : process.env.OTEL_TRACES_EXPORTER?.trim().toLowerCase() === "none" ? "OTEL_TRACES_EXPORTER=none" : undefined;
+  if (off) {
+    log(`telemetry: ${variable} is set, but ${off}: no spans are sent (SMD-1849)`);
+    return Promise.resolve(false);
+  }
+  let origin: string | undefined;
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol === "http:" || url.protocol === "https:") origin = url.origin;
+  } catch {}
+  if (!origin) {
+    log(`telemetry: ${variable} is not an http(s) URL: no spans are sent (SMD-1849)`);
+    return Promise.resolve(false);
+  }
+  const where = origin;
+  const own = generation;
+  // After a stop still in progress, so this start's SDK is never the one it shuts down (review pass 7).
+  starting = (stopping ?? Promise.resolve()).then(load).then(async ({ setUpTracing }) => {
+    const set = setUpTracing(serviceName, { report: { origin: where, warn: log } });
+    // A stop came while this loaded: this start is not the SDK's, and goes before the stop returns (review passes 6–7).
+    if (own !== generation) {
+      await set.shutdown();
+      return undefined;
+    }
+    tracing = set;
+    return set;
+  }).catch((err: unknown) => {
+    // The import's failure or the setup's, a server that serves either way (review pass 4: a throw in the setup killed it).
+    log(`telemetry: not started (${err instanceof Error ? err.name : "error"}): no spans are sent (SMD-1849)`);
+    return undefined;
+  }).then((set) => {
+    // Said outside the guard, of this start's own SDK: a sink that throws here leaves it running, and is not read as a failed start (review pass 5).
+    if (set) {
+      try {
+        log(`telemetry: ${labelPart(set.serviceName)}'s spans go to ${where} over OTLP/HTTP (${variable}, SMD-1849)`);
+      } catch {}
+    }
+    return set !== undefined;
+  });
+  return starting;
+}
+
+/**
+ * Shuts the SDK down and forgets its start, so a suite can start it again;
+ * spans are no-ops after. A start still loading is waited for, its own SDK
+ * shut down before this returns, and a start made meanwhile waits for this.
+ */
+export async function stopTelemetry(): Promise<void> {
+  generation += 1;
+  const loading = starting;
+  starting = undefined;
+  const stop = (async () => {
+    await loading;
+    await tracing?.shutdown();
+    tracing = undefined;
+  })();
+  stopping = stop;
+  try {
+    await stop;
+  } finally {
+    if (stopping === stop) stopping = undefined;
+  }
+}
+
+/**
+ * Sends the spans still batched and waits for those on their way: how that
+ * ended, or undefined with no collector set. A server's stop runs it beside
+ * closing its pool, under the pool's bound, and says which (shutdown.ts).
+ */
+export async function flushTelemetry(): Promise<FlushResult | undefined> {
+  return tracing?.flush();
 }
 
 /** A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest unless a suite says). */
 export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest): RequestTrace {
-  const trace = new RequestTrace(door, req.method, write, req.signal);
+  const trace = new RequestTrace(door, req.method, write, req.signal, req.headers);
   RECORDS.set(req, trace);
   return trace;
 }
@@ -280,6 +579,8 @@ export function endsWithStream(trace: RequestTrace, signal: AbortSignal): Stream
  * handler returned first.
  */
 export function cutOpenRequests(): void {
+  // A tool call still running is cut with it: its span ends too, so the export carries it (review pass 1).
+  for (const call of [...OPEN_TOOLS]) call.end("cut");
   for (const trace of [...OPEN]) trace.end({ outcome: trace.clientGone ? "abandoned" : "cut" });
 }
 

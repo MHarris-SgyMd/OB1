@@ -222,8 +222,12 @@ OB1_EGRESS_ALLOW=marker:#public              # what may leave for tagging — un
 
 A credential belongs to an endpoint: a different chat endpoint gets
 `OB1_CHAT_API_KEY` and never inherits `OB1_LLM_API_KEY`, so a local chat model
-beside a hosted embedder is not handed the hosted key. `preflight.ts` prints a
-row for each endpoint, fails a hosted one with no key of its own, and probes
+beside a hosted embedder is not handed the hosted key. A user and password in
+a base URL (`https://user:pass@proxy.example/v1`, a Basic-auth front) are that
+endpoint's credential too: sent as `Authorization: Basic`, unless a key is set,
+which is sent as `Bearer` in their place (SMD-2885). `OB1_JEV_BASE_URL` and
+`OB1_TELEGRAM_API_BASE` follow the same rule. `preflight.ts` prints a
+row for each endpoint, fails a hosted one with no credential of its own, and probes
 each by name — a local one on every start, a hosted one with `--deep` — so a
 chat endpoint that is down fails its own row while the embeddings row still
 passes (SMD-1875). Note what leaves the host under this

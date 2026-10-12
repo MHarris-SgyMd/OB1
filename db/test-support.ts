@@ -741,6 +741,83 @@ export function requestHead(method: string, target: string, host: string | null)
   return [`${method} ${target} HTTP/${host === null ? "1.0" : "1.1"}`, ...(host === null ? [] : [`host: ${host}`])];
 }
 
+/**
+ * A child's output stream (serveChild's stderr), drained as it arrives — so
+ * a child that writes a lot there is never blocked on a full pipe (review
+ * pass 4) — with `until`, which
+ * waits for a pattern (or `ms`, or the stream's end) and says whether it came,
+ * and `rest`, all of it once the stream ends (SMD-1849 PR 2b: a child's suite
+ * waits for its "spans go to" line, not a fixed sleep).
+ */
+export function watchStream(stream: ReadableStream<Uint8Array>): { until: (pattern: RegExp, ms: number) => Promise<boolean>; rest: () => Promise<string> } {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let got = "";
+  const ended = (async () => {
+    for (;;) {
+      const read = await reader.read();
+      if (read.done) {
+        got += decoder.decode();
+        return;
+      }
+      got += decoder.decode(read.value, { stream: true });
+    }
+  })().catch(() => {});
+  return {
+    until: async (pattern, ms) => {
+      const deadline = Date.now() + ms;
+      while (!pattern.test(got) && Date.now() < deadline) {
+        if (await Promise.race([ended.then(() => true), Bun.sleep(50).then(() => false)])) break;
+      }
+      return pattern.test(got);
+    },
+    rest: async () => {
+      await ended;
+      return got;
+    },
+  };
+}
+
+/**
+ * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
+ * free port, with `env` beside PATH, HOME and PORT and no other: `up` once its
+ * /health answers (15 s at most, each poll 1 s, none once it has exited or a
+ * signal killed it), `sdk`
+ * once it says where its spans go (with `waitForSdk`, 10 s at most — its SDK
+ * loaded, not a fixed wait), `stop` its SIGTERM (SIGKILL past 8 s) and then
+ * its stdout and stderr together, `kill` for a `finally`.
+ */
+export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; stop: () => Promise<string>; kill: () => void }> {
+  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = free.port!;
+  free.stop(true);
+  const child = Bun.spawn([process.execPath, "--no-env-file", entry], {
+    cwd,
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const err = watchStream(child.stderr);
+  let up = false;
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
+  const sdk = waitForSdk ? await err.until(/spans go to/, 10_000) : false;
+  let stopped: Promise<string> | undefined;
+  return {
+    port,
+    up,
+    sdk,
+    stop: () => (stopped ??= (async () => {
+      child.kill("SIGTERM");
+      const killer = setTimeout(() => child.kill("SIGKILL"), 8_000);
+      await child.exited;
+      clearTimeout(killer);
+      return await new Response(child.stdout).text() + await err.rest();
+    })()),
+    kill: () => child.kill("SIGKILL"),
+  };
+}
+
 /** One request over a raw socket at `host`, and the status and body it got. */
 export async function askRaw(port: number, method: string, target: string, host: string | null, headers: string[] = [], body = ""): Promise<{ status: number; body: string }> {
   const head = [...requestHead(method, target, host), ...headers, "connection: close", `content-length: ${Buffer.byteLength(body)}`];

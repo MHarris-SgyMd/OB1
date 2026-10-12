@@ -11,7 +11,7 @@
  *   bun test-rest.ts
  */
 
-import { createAssert, RuntimeUrl } from "../db/test-support.ts";
+import { createAssert, RuntimeUrl, serveChild } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
@@ -758,40 +758,176 @@ console.log("\n[11] `bun api.ts` stopped with a search in flight: the stop's bou
   // A provider that answers no embedding for 5 s, so the search is in flight
   // when the stop's bound (OB1_STOP_GRACE=3: 1 s) cuts it.
   const slow = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(5_000); return Response.json({ data: [{ embedding: [0] }] }); } });
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
-  const child = Bun.spawn([process.execPath, "--no-env-file", "api.ts"], {
-    cwd: import.meta.dir,
-    env: {
-      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STOP_GRACE: "3",
-      MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub",
-      OB1_LLM_BASE_URL: `http://127.0.0.1:${slow.port}/v1`, OB1_LLM_LOCAL: "1",
-    },
-    stdout: "pipe", stderr: "pipe",
+  const api = await serveChild(import.meta.dir, "api.ts", {
+    OB1_STOP_GRACE: "3", MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub",
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${slow.port}/v1`, OB1_LLM_LOCAL: "1",
   });
   let out = "";
-  let up = false;
   try {
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline && !(up = await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false))) await Bun.sleep(100);
-    const inFlight = fetch(`http://127.0.0.1:${port}/v1/search`, { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "a search the stop cuts" }) })
+    const inFlight = fetch(`http://127.0.0.1:${api.port}/v1/search`, { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "a search the stop cuts" }) })
       .then((r) => `answered ${r.status}`, () => "cut off");
     await Bun.sleep(400);
-    child.kill("SIGTERM");
-    const killer = setTimeout(() => child.kill("SIGKILL"), 8_000);
-    await child.exited;
-    clearTimeout(killer);
+    out = await api.stop();
     await inFlight;
-    out = await new Response(child.stdout).text() + await new Response(child.stderr).text();
   } finally {
-    child.kill("SIGKILL");
+    api.kill();
     slow.stop(true);
   }
+  const up = api.up;
   assert(up, `bun api.ts came up (${out.slice(-400)})`);
   const cut = out.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.outcome === "cut");
   assert(cut.length === 1 && cut[0]?.route === "/v1/search" && cut[0]?.tool === "search_thoughts" && cut[0]?.agent === "w" && cut[0]?.door === "api",
     `the search the stop cut has one line, \`cut\`, by its route, operation and key (${JSON.stringify(cut)}; ${out.slice(-400)})`);
+}
+
+console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named for its route, and the operation's under it; a fault an ERROR, a refusal its code; no key or query text in any; a real `bun api.ts` sends its spans to a collector at its stop");
+{
+  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { setUpTracing } = await import("./otel-setup.ts");
+  const TID = "0af7651916cd43dd8448eb211c80319c";
+  const PARENT = "b7ad6b7169203331";
+  const PLANTED = "planted-rest-span-91c2";
+  const exporter = new InMemorySpanExporter();
+  const tracing = setUpTracing("open-brain-api-test", { exporter });
+  type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
+  const attrs = (sp: Span | undefined) => (sp?.attributes ?? {}) as Record<string, unknown>;
+  const send = (path: string, headers: Record<string, string> = {}) =>
+    Promise.resolve(app.fetch(new Request(`http://api${path}`, { headers: { "x-brain-key": "read-raw", ...headers } }))).then((r) => r.text());
+  const realAnswer = answer;
+  try {
+    exporter.reset();
+    lines.length = 0;
+    await send(`/v1/thoughts?limit=3&topic=${PLANTED}`, { traceparent: `00-${TID}-${PARENT}-01` });
+    let spans = exporter.getFinishedSpans();
+    const listed = spans.find((sp) => sp.kind === SpanKind.SERVER);
+    const listedOp = spans.find((sp) => sp.name === "execute_tool list_thoughts");
+    const listedLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert(listed?.name === "GET /v1/thoughts" && attrs(listed)["http.route"] === "/v1/thoughts" && attrs(listed)["ob1.tool"] === "list_thoughts" && attrs(listed)["ob1.agent"] === "r"
+      && attrs(listed)["http.response.status_code"] === 200 && listed.spanContext().traceId !== TID && listed.parentSpanContext === undefined
+      && listed.links[0]?.context.traceId === TID && listed.links[0]?.context.spanId === PARENT && listedLine.trace === listed.spanContext().traceId,
+      `the request's span: its route's template, its operation, the key's name, its 200; its own trace, on the line, the caller's linked (${listed?.name} ${JSON.stringify(attrs(listed))} ${listedLine.trace})`);
+    assert(listedOp?.parentSpanContext?.spanId === listed?.spanContext().spanId && attrs(listedOp)["ob1.outcome"] === "ok" && listedOp?.status.code === SpanStatusCode.UNSET,
+      `the operation's span is its child, \`ok\` (${listedOp?.name} ${JSON.stringify(attrs(listedOp))})`);
+
+    exporter.reset();
+    answer = async () => { throw new Error(`the store fell over near ${PLANTED}`); };
+    await send("/v1/thoughts");
+    spans = exporter.getFinishedSpans();
+    const fault = spans.find((sp) => sp.kind === SpanKind.SERVER);
+    const faultOp = spans.find((sp) => sp.name === "execute_tool list_thoughts");
+    assert(fault?.status.code === SpanStatusCode.ERROR && attrs(fault)["error.type"] === "FAILED" && attrs(fault)["http.response.status_code"] === 500 && faultOp?.status.code === SpanStatusCode.ERROR && attrs(faultOp)["error.type"] === "FAILED",
+      `a fault: the request's span and the operation's are ERROR, FAILED, with no message of its own (${JSON.stringify([attrs(fault), attrs(faultOp)])})`);
+    // Nothing of the fault's message, which carries planted text, in any of its spans (review pass 5: the scan ran only after a reset).
+    const faultTold = JSON.stringify(spans.map((sp) => ({ name: sp.name, attributes: sp.attributes, events: sp.events, status: sp.status, links: sp.links })));
+    assert(spans.length === 2 && !faultTold.includes(PLANTED) && !faultTold.includes("fell over"), `a fault's message reaches none of its spans: name, attributes, events, status (${faultTold.length} chars)`);
+    // Capture's fault is answered with its route's code; its operation's span says that code too.
+    exporter.reset();
+    await Promise.resolve(app.fetch(new Request("http://api/v1/thoughts", { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ content: "a capture that faults" }) }))).then((r) => r.text());
+    const captureOp = exporter.getFinishedSpans().find((sp) => sp.name === "execute_tool capture_thought");
+    assert(attrs(captureOp)["ob1.code"] === "STORE_UNAVAILABLE" && attrs(captureOp)["error.type"] === "STORE_UNAVAILABLE", `a capture's fault: its operation's span says its route's code, STORE_UNAVAILABLE (${JSON.stringify(attrs(captureOp))})`);
+
+    exporter.reset();
+    answer = async () => refuse({ code: "NOT_FOUND", retryable: false, id: "nope" });
+    await send(`/v1/thoughts/${crypto.randomUUID()}`);
+    spans = exporter.getFinishedSpans();
+    const missing = spans.find((sp) => sp.kind === SpanKind.SERVER);
+    const missingOp = spans.find((sp) => sp.name.startsWith("execute_tool "));
+    assert(missing?.status.code === SpanStatusCode.UNSET && attrs(missing)["ob1.code"] === "NOT_FOUND" && attrs(missing)["ob1.outcome"] === "refused" && attrs(missing)["http.response.status_code"] === 404
+      && attrs(missingOp)["ob1.outcome"] === "refused" && attrs(missingOp)["ob1.code"] === "NOT_FOUND" && missingOp?.status.code === SpanStatusCode.UNSET,
+      `a refusal: its code on both spans, not an ERROR (${JSON.stringify([attrs(missing), attrs(missingOp)])})`);
+
+    exporter.reset();
+    await Promise.resolve(app.fetch(new Request("http://api/v1/thoughts")));
+    const keyless = exporter.getFinishedSpans();
+    assert(keyless.length === 1 && attrs(keyless[0])["ob1.code"] === "UNAUTHORIZED", `refused at its key, a request runs no operation, so has no operation's span (${keyless.map((sp) => sp.name).join(", ")})`);
+
+    exporter.reset();
+    answer = realAnswer;
+    await send(`/v1/thoughts?topic=${PLANTED}`, { authorization: `Bearer read-raw` });
+    await send(`/v1/search?query=${PLANTED}`);
+    const told = JSON.stringify(exporter.getFinishedSpans().map((sp) => ({ name: sp.name, attributes: sp.attributes, events: sp.events, status: sp.status })));
+    assert(told.length > 100 && !told.includes("read-raw") && !told.includes(PLANTED) && !told.includes("topic=") && !told.includes("?"),
+      `no key, query string or planted text in any span (${told.length} chars)`);
+  } finally {
+    answer = realAnswer;
+    await tracing.shutdown();
+  }
+
+  // A real `bun api.ts` with a collector named: it says where its spans go, by
+  // origin alone, and its stop sends what is batched (the batch's own delay is
+  // 5 s), before it exits.
+  const received: string[] = [];
+  const collector = Bun.serve({ port: 0, fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") received.push(await req.text()); return Response.json({}); } });
+  const collectorPort = collector.port;
+  const STUB = { OB1_STOP_GRACE: "3", MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub" };
+  const api = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://otel-user:otel-secret@127.0.0.1:${collectorPort}` }, { waitForSdk: true });
+  let out = "";
+  try {
+    await fetch(`http://127.0.0.1:${api.port}/v1/whoami?note=${PLANTED}`).then((r) => r.text());
+    out = await api.stop();
+  } finally {
+    api.kill();
+    collector.stop(true);
+  }
+  assert(api.up && api.sdk, `bun api.ts came up and loaded its SDK (${out.slice(-400)})`);
+  const sent = received.join("\n");
+  assert(sent.includes("GET /v1/whoami") && sent.includes("open-brain-api") && !sent.includes(PLANTED),
+    `its stop sent the whoami's span to the collector, named for its service, the query left out (${received.length} exports; ${sent.slice(0, 160)})`);
+  assert(out.includes(`telemetry: open-brain-api's spans go to http://127.0.0.1:${collectorPort} over OTLP/HTTP`) && !out.includes("otel-secret"),
+    `it says where its spans go, by origin, the endpoint's credentials left out (${out.split("\n").filter((l) => l.includes("telemetry")).join(" / ")})`);
+
+  // With a collector that fails: the stop says the spans were not sent — not
+  // that the pool did not close — and the failed export says so, by origin and
+  // kind, neither the endpoint's credentials nor its headers in any line (review pass 1).
+  const gone = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 500 }) });
+  const gonePort = gone.port;
+  const lone = await serveChild(import.meta.dir, "api.ts", {
+    ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://otel-user:otel-secret@127.0.0.1:${gonePort}`, OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer s3cr3t-header",
+  }, { waitForSdk: true });
+  let loneOut = "";
+  try {
+    await fetch(`http://127.0.0.1:${lone.port}/v1/whoami`).then((r) => r.text());
+    loneOut = await lone.stop();
+  } finally {
+    lone.kill();
+    gone.stop(true);
+  }
+  const loneUp = lone.up && lone.sdk;
+  const stopLine = loneOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
+  assert(loneUp && /; no database pool was opened; spans not sent; exit 0$/.test(stopLine) && loneOut.includes(`telemetry: 1 span not sent to http://127.0.0.1:${gonePort} (HTTP 500)`)
+    && !loneOut.includes("otel-secret") && !loneOut.includes("s3cr3t-header"),
+    `its collector failing, the stop says the spans were not sent, the pool's clause its own; the failure is said by origin and kind, no credential (${stopLine} / ${loneOut.split("\n").filter((l) => l.includes("not sent to")).join(" / ")})`);
+
+  // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on 15 s (review pass 5).
+  const { tmpdir } = await import("node:os");
+  const suicide = `${tmpdir()}/smd1849-kills-itself-${process.pid}.ts`;
+  await Bun.write(suicide, "process.kill(process.pid, 'SIGKILL');\n");
+  const k0 = performance.now();
+  const killed = await serveChild(tmpdir(), suicide, {});
+  const killedMs = performance.now() - k0;
+  killed.kill();
+  await Bun.file(suicide).delete();
+  assert(!killed.up && killedMs < 3_000, `a child killed by a signal: not up, seen in ${Math.round(killedMs)} ms`);
+
+  // An export already on its way when the stop comes: the flush waits for it,
+  // and a collector slower than the bound is said as such — not read as sent
+  // because nothing was left in the batch (review pass 2).
+  const slowCollector = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(3_000); return Response.json({}); } });
+  const slowPort = slowCollector.port;
+  // The batch's delay at 200 ms (OTEL_BSP_SCHEDULE_DELAY), so its export is on its way well before the stop.
+  const late = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${slowPort}`, OTEL_BSP_SCHEDULE_DELAY: "200" }, { waitForSdk: true });
+  let lateOut = "";
+  try {
+    await fetch(`http://127.0.0.1:${late.port}/v1/whoami`).then((r) => r.text());
+    await Bun.sleep(700); // past the batch's delay: its export is on its way, the batch empty
+    lateOut = await late.stop();
+  } finally {
+    late.kill();
+    slowCollector.stop(true);
+  }
+  const lateStop = lateOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
+  assert(late.up && late.sdk && /; spans not sent within \d+ ms; exit 0$/.test(lateStop), `an export on its way at the stop is waited for, not read as sent (${lateStop})`);
 }
 
 report();

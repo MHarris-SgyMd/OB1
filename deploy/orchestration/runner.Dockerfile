@@ -2,7 +2,7 @@
 # with Bun for the pipeline and python3 for the emitters that are Python.
 # Built from the repo root (compose: orchestration-runner), like the server and
 # the migrator; the root .dockerignore lets in only what is copied here.
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 # su-exec runs each step as its own user. A pipeline's emitter runs as a uid of
 # its own (runner.ts emitterUid, no passwd entry needed), which owns nothing and
 # cannot read the runner's or the ingester's environment (a process's

@@ -2,7 +2,7 @@
 # Cloudflare Workers uses wrangler.toml instead; Deno Deploy needs neither.
 # Built from the REPO ROOT, not server-portable/ — see deploy/compose.yaml. The
 # server needs db/config.mjs, which a narrower context cannot reach.
-FROM oven/bun:1.4.0-alpine AS deps
+FROM oven/bun:1.4.3-alpine AS deps
 WORKDIR /app/server-portable
 COPY server-portable/package.json server-portable/bun.lock ./
 RUN bun install --frozen-lockfile --production
@@ -13,7 +13,7 @@ RUN bun install --frozen-lockfile --production
 # ../../server-portable/plugin-sdk.ts, through which it reaches zod in
 # server-portable's node_modules (SMD-2310; before, the server sat at /app and
 # db/ at /db, which a plugin's import could not mirror).
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 WORKDIR /app/server-portable
 ENV NODE_ENV=production
 COPY --from=deps /app/server-portable/node_modules ./node_modules

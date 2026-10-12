@@ -44,7 +44,7 @@ chat only, beside Ollama:
 | `OB1_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/v1`. Ollama works. Embeddings — and chat, unless the next row says otherwise |
 | `OB1_LLM_API_KEY` | falls back to `OPENROUTER_API_KEY` | Omitted entirely for a loopback endpoint |
 | `OB1_CHAT_BASE_URL` | the embeddings endpoint | Where `/chat/completions` goes when that is a different provider; `OB1_METADATA_MODEL` then names a model this endpoint serves |
-| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY` or `OPENROUTER_API_KEY` (both are the embeddings endpoint's), so a local chat model beside a hosted embedder is not handed the hosted key, and local embeddings with OpenRouter for chat means this knob, not `OPENROUTER_API_KEY`. Preflight fails a hosted chat endpoint with no key of its own and names the fix |
+| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one (a chat base with a user and password of its own is a different endpoint) | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY` or `OPENROUTER_API_KEY` (both are the embeddings endpoint's), so a local chat model beside a hosted embedder is not handed the hosted key, and local embeddings with OpenRouter for chat means this knob, not `OPENROUTER_API_KEY`. A user and password in a base URL are that endpoint's credential too, sent as Basic unless a key is set (SMD-2885). Preflight fails a hosted chat endpoint with neither of its own and names the fix |
 | `OB1_LLM_TIMEOUT` | `120` seconds | Per provider call, both endpoints — embedding, blurb and metadata extraction alike; a call that never returns fails as such instead of hanging |
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
@@ -638,7 +638,14 @@ MCP tools do rather than a copy of it:
   each server's first middleware makes (notFound, for a path that middleware
   never sees): its keys an allow-list, each value held to its rule as the line is written, so no
   URL, key, argument or thought text reaches it (`deploy/README.md`, "What the
-  servers log").
+  servers log"). The same record is the request's OpenTelemetry span, and each
+  tool call a span under it — the request's attributes the line's checked values, a call's its own outcome and code — the
+  API's no-ops until `OTEL_EXPORTER_OTLP_ENDPOINT` (or its traces variable) names a collector
+  (`deploy/README.md`, "Traces").
+- **`otel-setup.ts`** — the OpenTelemetry SDK for traces, loaded only then and
+  only on Bun: an OTLP/HTTP exporter, batched, the AsyncLocalStorage context
+  manager and the W3C propagator. `wrangler.toml` aliases it to
+  `shims/otel-unavailable.ts`, so the Worker carries the API alone.
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
 for what a move would leave behind: an import outside the file's list, a SQL call or
@@ -792,14 +799,14 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 919 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
+bun test-server.ts        # 976 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, and the spans (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 332 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 249 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals
+bun test-rest.ts          # 346 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-plugins.ts       # 251 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, and a plugin operation's span
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 160 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 161 — the REST core beside the MCP server on one database: every operation through both
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

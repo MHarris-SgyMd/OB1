@@ -328,7 +328,7 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
 }
 
 // ── [7]–[8] The client against a stub tier ──────────────────────────────────
-type Stub = { requests: { path: string; body: any; bytes: number }[]; answer: (body: any) => Response | Promise<Response> };
+type Stub = { requests: { path: string; body: any; bytes: number; auth: string | null }[]; answer: (body: any) => Response | Promise<Response> };
 const stub: Stub = { requests: [], answer: () => new Response("unset", { status: 500 }) };
 const tier = Bun.serve({
   port: 0,
@@ -336,7 +336,7 @@ const tier = Bun.serve({
     const path = new URL(req.url).pathname;
     const raw = req.method === "POST" ? await req.text() : "";
     const body = raw ? JSON.parse(raw) : undefined;
-    stub.requests.push({ path, body, bytes: new TextEncoder().encode(raw).length });
+    stub.requests.push({ path, body, bytes: new TextEncoder().encode(raw).length, auth: req.headers.get("authorization") });
     if (path === "/info") return Response.json(INFO);
     return stub.answer(body);
   },
@@ -358,6 +358,14 @@ section("[7] the client's egress gate — refused decisions send nothing");
   stub.requests = [];
   const d = await jevDecide(local, { proposition: "p", context: "c" }, subj);
   assert(stub.requests.length === 1 && d.p !== null && d.p > 0.5 && d.model.name === MODEL_INFO.name, "a declared-local decision is sent and answered with its model");
+  assert(stub.requests[0].auth === null, "…with no Authorization: the tier has no key");
+  // A user and password in the base are the tier's credential, sent as Basic
+  // on any Bun (embed.ts's providerEndpoint, SMD-2885).
+  const withUser = resolveJevConfig({ OB1_JEV_BASE_URL: BASE.replace("://", "://jev:s3cret@"), OB1_JEV_LOCAL: "1" })!;
+  stub.requests = [];
+  await jevDecide(withUser, { proposition: "p", context: "c" }, subj);
+  assert(withUser.endpoint.base === BASE && stub.requests.length === 1 && stub.requests[0].auth === `Basic ${btoa("jev:s3cret")}`,
+         `userinfo in OB1_JEV_BASE_URL leaves the base and is sent as Basic (${stub.requests[0]?.auth})`);
   const remote = resolveJevConfig({ OB1_JEV_BASE_URL: BASE })!;
   assert(!remote.endpoint.local, "a loopback address is not local until declared");
   stub.requests = [];

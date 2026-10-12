@@ -441,13 +441,54 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
   }
 }
 
+/** The keys of a thought's stamp, which the server writes and a caller's metadata cannot (050, 073). */
+export const STAMP_KEYS = ["actor_kind", "actor_name", "trust"] as const;
+/**
+ * A stamp key a patch named and the row kept: the key; the value the row
+ * holds when it is a string; and whether it holds one at all (a JSON null
+ * is none), so a value that is there but not a string (a raw writer's) is
+ * not said to be unset.
+ */
+export type KeptKey = { key: (typeof STAMP_KEYS)[number]; value: string | null; present: boolean };
+
+/**
+ * The stamp keys a metadata patch named whose value the row did not take
+ * (SMD-2744): the patch against the stamp update_thought answers it wrote
+ * (088), read inside the write — no read after it, so no other write, pass
+ * or clock stands between (the read-back this replaced met each of those in
+ * turn). Undefined when the patch named none, or the database answered no
+ * stamp (one before 088), so nothing is claimed; else the list — empty when
+ * every named key matches the row (an echo, or a lower trust a change of
+ * text declared).
+ */
+export function keptStampKeys(stamp: Record<string, unknown> | undefined, patch: Record<string, unknown> | undefined): KeptKey[] | undefined {
+  const named = patch ? STAMP_KEYS.filter((k) => Object.hasOwn(patch, k)) : [];
+  if (!named.length || !patch || !stamp) return undefined;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  return named.filter((k) => !same(stamp[k], patch[k]))
+    .map((k) => ({ key: k, value: typeof stamp[k] === "string" ? (stamp[k] as string) : null, present: stamp[k] !== undefined && stamp[k] !== null }));
+}
+
 /** What an edit did, as its reply states it. */
 export type Updated = {
   id: string;
   updatedAt?: string;
   /** The text: moved and re-embedded, moved without a vector (the gate refused the call), or left alone. */
   contentChange: "reembedded" | "no_vector" | null;
+  /** Whether the patch merged anything (088's answer): a key the server does not set changed, or a change of text took its trust — not a stamp key the row kept, nor one that echoed it. */
   metadataMerged: boolean;
+  /** The stamp keys the patch named whose value the row did not take, with the value it holds (SMD-2744); absent when none. */
+  kept?: KeptKey[];
+  /** The patch merged nothing and kept nothing: it named what the thought already held (SMD-2744). */
+  metadataEcho?: true;
+  /** Whether the text counts as the one the thought held, by 003's fingerprint (088); absent when the database does not say. */
+  sameText?: boolean;
+  /** The row's metadata is SQL NULL (a raw writer's), which merges no patch, and the patch named a key the server does not set (088). */
+  patchDropped?: true;
+  /** The trust the patch sent, when the row did not take it: the word, or null for a null or a non-string. */
+  trustSent?: string | null;
+  /** Why a change of text left no trust, when the stamp says (review pass 7): the key has no kind, or the metadata is not an object (a raw writer's), which takes no stamp. */
+  stampGap?: "no_kind" | "not_object";
   /** The pointer as the caller set it: an id, null for cleared, absent when left alone. */
   supersedes?: string | null;
   contextFailures: number;
@@ -521,6 +562,19 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
 
   if (!result.ok) return refuse(storeRefusal(result, id));
 
+  // SMD-2744 PR 2: the three stamp keys are the server's (050, 073) — the
+  // key's that wrote the current text, and the trust that write declared —
+  // so a patch naming one is merged in name only, and the reply said
+  // "metadata merged" while the row kept its own (SMD-2664's review pass 5).
+  // update_thought answers, from inside the write (088), the stamp it left,
+  // whether the patch merged anything, and whether the text counts as the
+  // same; the reply names each named key the row did not take. A database
+  // before 088 answers none of these, and the reply says what it said; one
+  // that answers a stamp and no boolean verdict is read as not merged — a
+  // null was read as merged (review pass 6).
+  const kept = keptStampKeys(result.stamp, metadata_patch);
+  const merged = metadata_patch !== undefined && (result.metadataMerged ?? result.stamp === undefined);
+
   // Click-through relevance (034): the caller edited this id after a
   // search. Only on a written edit, not a refusal. SMD-1719: an edit that
   // sets `supersedes` also names a returned id as this thought's source —
@@ -537,7 +591,25 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
     id,
     ...(result.updatedAt !== undefined ? { updatedAt: result.updatedAt } : {}),
     contentChange: content === undefined ? null : gate?.embeddings.allowed ? "reembedded" : "no_vector",
-    metadataMerged: metadata_patch !== undefined,
+    metadataMerged: merged,
+    // "It already held what the patch named" only where the text counts as
+    // the same: on a change of text the stamp moved to the editor even when
+    // it matches the patch (review pass 5).
+    ...(metadata_patch !== undefined && !merged && !kept?.length && result.sameText !== false && !result.patchDropped ? { metadataEcho: true } : {}),
+    ...(result.patchDropped ? { patchDropped: true } : {}),
+    // The trust the patch sent, when it named one and the row did not take
+    // it: the hint's reason on a change of text turns on it (review pass 5).
+    ...(kept?.some((k) => k.key === "trust") && metadata_patch ? { trustSent: typeof metadata_patch.trust === "string" ? metadata_patch.trust : null } : {}),
+    // A change of text writes actor_name onto any object metadata, so a
+    // stamp without it is metadata that is not an object, and one without
+    // actor_kind is a key with no kind (review pass 7: "your key has no
+    // kind" was said of an array row's classified key).
+    ...(result.sameText === false && kept?.some((k) => k.key === "trust" && !k.present) && result.stamp
+      ? typeof result.stamp.actor_name !== "string" ? { stampGap: "not_object" as const }
+        : typeof result.stamp.actor_kind !== "string" ? { stampGap: "no_kind" as const } : {}
+      : {}),
+    ...(kept?.length ? { kept } : {}),
+    ...(result.sameText !== undefined ? { sameText: result.sameText } : {}),
     ...(supersedes !== undefined ? { supersedes } : {}),
     contextFailures: embedded?.contextFailures ?? 0,
     ...(result.duplicateOf ? { duplicateOf: result.duplicateOf } : {}),

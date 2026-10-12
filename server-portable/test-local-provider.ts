@@ -256,7 +256,7 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   // three diallers, which take the configuration as an argument. Cases [2]
   // and [3] above are the server-level half: with neither chat knob set both
   // calls went to one endpoint, keyless, exactly as before the split.
-  const { resolveEmbedConfig, providerCall, ProviderError } = await import("./embed.ts");
+  const { resolveEmbedConfig, providerCall, ProviderError, shownBase, shownUrl } = await import("./embed.ts");
   const { judgePair } = await import("./consolidate.ts");
   const { extractEntities } = await import("./entities.ts");
 
@@ -321,6 +321,73 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   const keyed = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_CHAT_API_KEY: "key-c" });
   assert(keyed.chat.base === A && keyed.chat.headers.Authorization === "Bearer key-c" && keyed.embeddings.headers.Authorization === undefined,
          "OB1_CHAT_API_KEY alone gives the same endpoint a chat-only credential, and the embeddings call stays keyless");
+
+  // A user and password in a base are a credential, sent as Basic by the
+  // endpoint's own header — not left in the URL for fetch, which sends them
+  // from Bun 1.4.3 and dropped them before (SMD-2885). Percent-escapes are
+  // decoded and the pair is UTF-8; a key takes the header over them.
+  const U = B.replace("://", "://us%40er:p%C3%A4ss@");
+  const BASIC = `Basic ${Buffer.from("us@er:päss", "utf8").toString("base64")}`;
+  const basic = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U });
+  assert(basic.embeddings.base === B && basic.embeddings.userinfo && basic.chat === basic.embeddings, "userinfo leaves the base, and with no chat knob the chat endpoint is still the embeddings one");
+  await providerCall(basic, "/embeddings", embBody, SUBJ);
+  await providerCall(basic, "/chat/completions", chatBody, SUBJ);
+  assert(seenB.slice(-2).every((s) => s.auth === BASIC), `both calls send the userinfo as Basic, decoded and UTF-8 (${JSON.stringify(seenB.slice(-2).map((s) => s.auth))})`);
+  await providerCall(resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: B.replace("://", "://solo@") }), "/embeddings", embBody, SUBJ);
+  assert(lastB().auth === `Basic ${btoa("solo:")}`, "a user with no password is Basic with an empty password");
+  const rawAt = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: B.replace("://", "://us@er:p@") });
+  assert(rawAt.embeddings.base === B && rawAt.embeddings.headers.Authorization === `Basic ${btoa("us@er:p")}`, "an unescaped @ in the user is the URL parser's reading: the last @ ends the userinfo, all of it out of the base");
+  const twice = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U, OB1_CHAT_BASE_URL: U });
+  assert(twice.chat === twice.embeddings, "the same base with the same userinfo in both knobs is one endpoint");
+  // Second review pass: the same spelling in both knobs is one endpoint with a
+  // key too (the key's Bearer for both calls), and so is the chat base without
+  // the userinfo.
+  const twiceKeyed = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U, OB1_LLM_API_KEY: "key-u", OB1_CHAT_BASE_URL: U });
+  const bareChat = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U, OB1_LLM_API_KEY: "key-u", OB1_CHAT_BASE_URL: B });
+  assert(twiceKeyed.chat === twiceKeyed.embeddings && twiceKeyed.chat.headers.Authorization === "Bearer key-u" && bareChat.chat === bareChat.embeddings,
+         "the same base and userinfo in both knobs share the key; so does the chat base spelled without the userinfo");
+  // A URL the parser reads userinfo from without `//`, or past a backslash
+  // (special schemes read `\` as `/`): rebuilt from the parse, so no userinfo
+  // is left and the host dialled is the one the parser read.
+  const noSlashes = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: B.replace("http://", "http:/solo:pw@") });
+  const backslash = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://u:p@named.invalid\\x@127.0.0.1:1/v1" });
+  assert(noSlashes.embeddings.base === B && noSlashes.embeddings.headers.Authorization === `Basic ${btoa("solo:pw")}`
+         && new URL(backslash.embeddings.base).hostname === "named.invalid" && !backslash.embeddings.base.includes("u:p"),
+         `userinfo the parser reads is taken out whatever the spelling, and the parser's host is dialled (${noSlashes.embeddings.base}; ${backslash.embeddings.base})`);
+  // Kept as written where cutting the userinfo means the same URL, so the two
+  // knobs' spellings of one base still match (third review pass).
+  const spelled = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://u:p@Host.invalid:80/v1", OB1_LLM_API_KEY: "key-s", OB1_CHAT_BASE_URL: "http://Host.invalid:80/v1" });
+  assert(spelled.embeddings.base === "http://Host.invalid:80/v1" && spelled.chat === spelled.embeddings,
+         `a base keeps its spelling when only the userinfo is cut, and the chat knob's same spelling shares it (${spelled.embeddings.base})`);
+  // A base the parser refuses keeps its userinfo (fetch refuses it too); a row
+  // masks it as maskUrl did.
+  const refused = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "https://user:s3cret#PW@provider.invalid/v1" });
+  assert(!refused.embeddings.userinfo && shownBase(refused.embeddings) === "https://***@provider.invalid/v1",
+         `a base the URL parser refuses is shown masked (${shownBase(refused.embeddings)})`);
+  // A URL not yet split (brain-compare's, n8n provisioning's) prints as a split
+  // endpoint would, a spelling with no `//` too, which no mask over the text
+  // reads as userinfo (SMD-2894).
+  assert(shownUrl("http:/op:pw@h.invalid/v1") === "http://***@h.invalid/v1" && shownUrl("http://h.invalid/v1") === "http://h.invalid/v1"
+         && shownUrl("https://user:s3cret#PW@provider.invalid/v1") === "https://***@provider.invalid/v1",
+         `shownUrl masks a URL's userinfo as shownBase masks an endpoint's (${shownUrl("http:/op:pw@h.invalid/v1")})`);
+  await providerCall(resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U, OB1_LLM_API_KEY: "key-u" }), "/embeddings", embBody, SUBJ);
+  assert(lastB().auth === "Bearer key-u", "a key takes the Authorization header: Bearer, and the userinfo is not sent");
+  const ownUser = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: B, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: U });
+  await providerCall(ownUser, "/embeddings", embBody, SUBJ);
+  await providerCall(ownUser, "/chat/completions", chatBody, SUBJ);
+  assert(ownUser.chat !== ownUser.embeddings && seenB.at(-2)?.auth === "Bearer key-a" && lastB().auth === BASIC,
+         "a chat base that is the embeddings base plus userinfo is an endpoint of its own: chat sends the Basic, embeddings keep the key");
+
+  // A failure names the endpoint that was dialled, never its userinfo.
+  failB = true;
+  let userMsg = "";
+  try {
+    await providerCall(basic, "/embeddings", embBody, SUBJ);
+  } catch (e) {
+    userMsg = (e as Error).message;
+  }
+  assert(userMsg.includes(B) && !/us%40er|p%C3%A4ss/.test(userMsg), `a failure names the base without its userinfo (${userMsg.slice(0, 80)})`);
+  failB = false;
 
   // A failure names the endpoint that was dialled.
   failB = true;

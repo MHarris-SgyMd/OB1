@@ -13,7 +13,7 @@
 # CMD here is only what a bare `run` does (tier.ts prints its usage). Not
 # published by release.yml — it is an operator's tool that runs a checkout, not
 # a release artifact.
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 # The client major matches the stack's server, pgvector/pgvector:0.8.6-pg16.
 # refreshToolsReady refuses a pg_dump older than either server (the source for
 # the dump, --to for the probe that reads it before the reset). A newer one

@@ -56,7 +56,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
@@ -87,7 +87,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20 and 23 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, and the workflows' runner and action pins
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, and one Bun pinned everywhere
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -139,7 +139,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: server-portable
@@ -388,6 +388,19 @@ jobs:
           CLOUDFLARE_API_TOKEN: ""
           WRANGLER_SEND_METRICS: "false"
 
+      # The Worker carries OpenTelemetry's API alone, whose spans are no-ops
+      # there: the SDK is loaded only on Bun, and wrangler.toml aliases its
+      # module to a stub, without which the bundler would put the whole SDK
+      # (its exporter, its context manager, async_hooks) in the Worker for
+      # code that never runs there (SMD-1849 PR 2b). The bundle names each
+      # module it holds by its path.
+      - name: The Worker bundles no OpenTelemetry SDK
+        working-directory: server-portable
+        run: |
+          bundled=$(grep -o 'node_modules/@opentelemetry/[a-z-]*' .cf-out/index.js | sort -u | tr '\n' ' ')
+          [ "$bundled" = "node_modules/@opentelemetry/api " ] \
+            || { echo "the Worker bundles more of OpenTelemetry than its API: $bundled" >&2; exit 1; }
+
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
@@ -420,7 +433,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         id: install
@@ -513,7 +526,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: db
@@ -600,7 +613,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: db
@@ -650,7 +663,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: server-portable
@@ -916,7 +929,7 @@ jobs:
       # drives the SvelteKit one against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       # SMD-2251. The three dashboards need nothing from the stack, and built in
       # series after it they added 35 s to this job. So they build here, in the
@@ -1373,6 +1386,21 @@ jobs:
             if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then
               echo "the probe on open-brain_egress did not answer for itself (exit $rc): $out" >&2; exit 1
             fi
+          done
+
+      # SMD-2894: check 33 holds every Bun pin to one version, by its text.
+      # That the forwarder's digest is its tag's image is the registry's fact,
+      # so the running forwarder is asked; and the server, built FROM its tag.
+      - name: The stack runs the pinned Bun
+        working-directory: deploy
+        run: |
+          img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
+          want="${img#*oven/bun:}"; want="${want%%[-@]*}"
+          [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
+          for s in forwarder server; do
+            got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
+            echo "$s: Bun $got"
+            [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
           done
 
       # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
@@ -2286,8 +2314,9 @@ jobs:
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an
-          # earlier call's.
-          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+\}$'
+          # earlier call's. A trace id closes the line where a `traceparent`
+          # came in or a collector is set (PR 2b); neither is, here.
+          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$'
           stats_before=$(docker compose -f compose.yaml logs --no-color --no-log-prefix server | grep -cE "$STATS_LINE" || true)
           # Answered by the server, so Traefik took the absolute form and logged it:
           # a refusal before the log would leave the userinfo half untested.
@@ -2360,7 +2389,7 @@ jobs:
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
-          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
 
       # SMD-2310: a plugin's webhook reaches the REST core only through the
       # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
@@ -2730,7 +2759,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install the evals' pinned packages
         working-directory: evals
@@ -2801,7 +2830,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
 
       - name: Install
         working-directory: compat/supabase-sql
@@ -2861,7 +2890,7 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.3"
       - name: commitlint the pushed range against the house grammar
         env:
           EVENT: ${{ github.event_name }}

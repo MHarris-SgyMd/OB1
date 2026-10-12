@@ -1117,10 +1117,10 @@ services:
   # with the client's address first, and then the bytes both ways, unread:
   # it terminates nothing, and an event stream passes as it is written.
   #
-  # Bun, pinned by digest: the multi-arch index 1.4.0-alpine resolved to,
+  # Bun, pinned by digest: the multi-arch index 1.4.3-alpine resolved to,
   # the image the stack's workers run.
   forwarder:
-    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
+    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373
     # Nothing it needs is root's, as the proxy's: it listens on 8000 and
     # writes only to stderr. Not read_only, for the proxy's reason: compose
     # writes the inline script into the container's own filesystem.
@@ -1196,7 +1196,7 @@ services:
   # it — under the default deny, OB1_EGRESS_ALLOW=type:board-finding
   # (db/board-findings.ts, SMD-2681). It comments only.
   board-sync:
-    image: oven/bun:1.4.0-alpine
+    image: oven/bun:1.4.3-alpine
     profiles: ["board-sync"]
     working_dir: /app
     volumes:
@@ -1270,7 +1270,7 @@ services:
   # would otherwise reach the CLI as a flag (`--status` ran once and exited
   # 0). `exec` hands the process to bun, so the stop signal reaches it.
   extract:
-    image: oven/bun:1.4.0-alpine
+    image: oven/bun:1.4.3-alpine
     profiles: ["workers"]
     working_dir: /app
     volumes: &claim-worker-mounts
@@ -1336,7 +1336,7 @@ services:
   # thoughts already judged, miss their pairs however this runs
   # (deploy/README.md).
   consolidate:
-    image: oven/bun:1.4.0-alpine
+    image: oven/bun:1.4.3-alpine
     profiles: ["workers"]
     working_dir: /app
     volumes: *claim-worker-mounts
@@ -1382,7 +1382,7 @@ services:
   # handlers, which the scheduler does after its start reads — and those wait
   # out a database not answering yet, so a stop then would wait out the grace.
   sleep:
-    image: oven/bun:1.4.0-alpine
+    image: oven/bun:1.4.3-alpine
     profiles: ["sleep"]
     working_dir: /app
     init: true

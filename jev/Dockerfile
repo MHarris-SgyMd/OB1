@@ -9,12 +9,12 @@
 # No weights in the image. The model is referenced, not vendored: serve.ts
 # fetches the pinned files into JEV_MODEL_DIR (a volume) on first start and
 # verifies every file's sha256 on every start (jev/fetch-model.ts).
-FROM oven/bun:1.4.0-slim AS deps
+FROM oven/bun:1.4.3-slim AS deps
 WORKDIR /app/jev
 COPY jev/package.json jev/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-FROM oven/bun:1.4.0-slim
+FROM oven/bun:1.4.3-slim
 WORKDIR /app/jev
 ENV NODE_ENV=production JEV_HOST=0.0.0.0 JEV_PORT=8020 JEV_MODEL_DIR=/models
 COPY --from=deps /app/jev/node_modules ./node_modules

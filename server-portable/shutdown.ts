@@ -123,11 +123,25 @@ export function createCallCount(): CallCount & { track<T>(run: () => T | Promise
   };
 }
 
+/**
+ * How the spans' flush ended (SMD-1849 PR 2b): every span still batched or
+ * already on its way went (`sent`); an export failed (`failed`); there was
+ * none to send (`none`); or it outlasted its time (`timeout`).
+ */
+export type FlushResult = "sent" | "failed" | "none" | "timeout";
+
 export interface DrainOptions {
   /** The running server, once the first request has handed it over; undefined before, when nothing can be in flight. */
   server: () => Stoppable | undefined;
   /** Close the database pool: true once closed, false when none was ever opened. */
   close: () => Promise<boolean>;
+  /**
+   * Send the spans still batched or on their way (SMD-1849 PR 2b); undefined
+   * with no collector set. Run beside the close, under its bound, and said on
+   * its own, so a collector that stalls is never read as a pool that did not
+   * close (review pass 1).
+   */
+  flush?: () => Promise<FlushResult | undefined>;
   /** The tool calls still running, waited on with the requests. */
   calls?: CallCount;
   /** Told just before what is still in flight is closed — at the bound, or on a second signal — so the lines it leaves say the stop cut it. */
@@ -154,7 +168,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
   const on = opts.on ?? ((signal, handler) => { process.on(signal, handler); });
   let settle: (code: number) => void = () => {};
   const stopped = new Promise<number>((resolve) => { settle = resolve; });
-  // What a second signal ends: the drain while it runs, then the pool's close.
+  // What a second signal ends: the drain while it runs, then the pool's close and the spans' flush.
   let cutShort: (() => void) | undefined;
 
   const stop = async (signal: string) => {
@@ -188,16 +202,32 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // A drain that ended late gets what is left of the drain's bound plus the
     // after-cut close, so the exit-0 path cannot outlast the cut path (review pass 3).
     const closeMs = drained ? Math.round(Math.min(closeBoundMs, Math.max(closeAfterCutMs, drainBoundMs + closeAfterCutMs - (performance.now() - t0)))) : closeAfterCutMs;
+    // The spans' flush beside the pool's close, under the same bound, each said on its own.
+    const said: Record<FlushResult, string> = { sent: "; spans sent", failed: "; spans not sent", none: "; no spans left to send", timeout: `; spans not sent within ${closeMs} ms` };
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    let flushCut = () => {};
+    const flushed = opts.flush ? Promise.race([
+      opts.flush().then((result) => (result === undefined ? "" : said[result]), () => said.failed),
+      new Promise<string>((resolve) => {
+        flushTimer = setTimeout(() => resolve(said.timeout), closeMs);
+        flushCut = () => resolve("; spans not sent: a second signal");
+      }),
+    ]) : Promise.resolve("");
     const closed = await Promise.race([
       opts.close().then((had) => (had ? "database pool closed" : "no database pool was opened"), (e: Error) => `database pool not closed: ${e.message}`),
       new Promise<string>((resolve) => {
         timer = setTimeout(() => resolve(`database pool not closed within ${closeMs} ms`), closeMs);
-        cutShort = () => resolve("database pool not closed: a second signal");
+        cutShort = () => {
+          resolve("database pool not closed: a second signal");
+          flushCut();
+        };
       }),
     ]);
     clearTimeout(timer);
+    const spans = await flushed;
+    clearTimeout(flushTimer);
     const code = drained ? 0 : 1;
-    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}; exit ${code}`);
+    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}${spans}; exit ${code}`);
     settle(code);
     exit(code);
   };
