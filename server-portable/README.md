@@ -803,6 +803,8 @@ bun test-server.ts        # 976 — transport, auth, tool surface, OAuth discove
 bun test-auth.ts          # 190 — scoped, hashed, named keys
 bun test-rest.ts          # 346 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 251 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, and a plugin operation's span
+bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
+bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset

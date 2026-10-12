@@ -361,15 +361,25 @@
  *      digest. changes/ and CHANGELOG.md, which record what was, are not
  *      read. That a digest is its tag's image is the registry's fact: CI's
  *      "The stack runs the pinned Bun" asks the running forwarder
+ *  34. every suite is run (SMD-2895): each `test-*` script in a file git
+ *      tracks or would track is one a fork-checks.yml step runs — `bun` or
+ *      `node` naming it from the step's working-directory, the job's or a `cd`
+ *      in the step, where its failure fails the job (no `continue-on-error`,
+ *      `if: false` or `|| true`), a comment line or a quoted string read as
+ *      nothing — or one SUITES_NOT_RUN names with why; an entry there that a
+ *      workflow runs, that names no suite or that gives no reason is reported
+ *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
+ *      passed unrun for weeks; `eval-*` files are measurements, not suites,
+ *      and are not read
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32 and 33 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33 and 34 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
 import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, dirname, relative, sep } from "node:path";
+import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
@@ -7066,6 +7076,139 @@ function checkBunPins() {
   for (const [where, detail] of bunPinProblems(pins, ref, setup)) fail(where, `${detail} — every Bun pin names the version ${BUN_PIN_REF} does (${ref}): bump them in one commit (check 33, SMD-2894)`);
 }
 checkBunPins();
+
+// ── 34. Every suite is run (SMD-2895) ────────────────────────────────────────
+//
+// fork-checks.yml exists because upstream's suites ran in no workflow and one
+// asserted the opposite of production for months. The fork repeated it in
+// small: db/test-weekly-digest.ts (31 assertions, SMD-2239) and
+// server-portable/test-jobs.ts (45, SMD-2273) were listed in no step, so they
+// passed when someone ran them by hand and were checked by nothing else. A
+// suite is a `test-*` script; a step of fork-checks.yml, the workflow every
+// pull request runs, runs it when its `run` calls bun or node on it, read from
+// the step's working-directory, the job's or the workflow's, or a directory a
+// `cd` in the same step names (which of those applies is the shell's to say, so
+// each is taken). release.yml is not read: it runs on a tag, and on a pull
+// request only when its own paths change. A run counts only if the suite's
+// failure fails the job, so nothing counts from a step or job with
+// `continue-on-error` or `if: false`, or from a command followed by `|| true`
+// or `|| :`, a continued line read as one. A comment line runs nothing, and a
+// quoted string is read as nothing either: an echo that names a suite does not
+// run it, and so a suite run only inside `sh -c "…"`, or only through `bun run`
+// and a package script, reads as unrun, which is the loud direction. What
+// no workflow should run is named in SUITES_NOT_RUN with why, and an entry
+// there that a workflow does run is stale.
+const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
+const SUITES_NOT_RUN: Record<string, string> = {
+  "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
+  "server-portable/test-support.ts": "the server suites' shared helpers, imported by them; it runs nothing itself",
+  "db/test-bench-reuse.ts": "nine bench runs at 150,000 rows, about three minutes; run by hand with with-postgres.sh (db/README.md, db/ci-parity.sh)",
+  "recipes/atomizer/test-atomize.mjs": "calls a live model provider with the operator's key; a reachability check, not a suite",
+  "recipes/authorship-edges/test-attribution.mjs": "an upstream recipe's own self-test, run by hand as its README says (the maintainer's call, SMD-2895)",
+};
+/** A tracked `test-*` script: what check 34 calls a suite. */
+const SUITE_FILE = /(?:^|\/)test-[\w.-]*\.(?:ts|mts|mjs|js|cjs)$/;
+/** bun or node, its flags, then the script it runs. */
+const SUITE_RUN = /\b(?:bun|node)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s;&|()<>'"`]+\.(?:ts|mts|mjs|js|cjs))(?![\w.])/g;
+/** A `cd` in a run line, and the directory it names. */
+const SHELL_CD = /\bcd\s+([^\s;&|()<>'"`]+)/g;
+/** A script a step runs, at one path it can resolve to, and the step. */
+type SuiteRun = { path: string; where: string };
+/** A quoted string in a run line, read as nothing. */
+const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
+/** What follows a command that swallows its failure, up to the end of its line or a `;`. */
+const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
+/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
+const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job, each with every path it can resolve to and the step it is in. */
+function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
+  const out: SuiteRun[] = [];
+  const wdOf = (v: unknown): string | undefined => {
+    const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
+    return typeof d === "string" ? d : undefined;
+  };
+  const top = isMapping(doc) ? wdOf(doc.defaults) : undefined;
+  const jobs = isMapping(doc) && isMapping(doc.jobs) ? doc.jobs : {};
+  for (const [job, def] of Object.entries(jobs)) {
+    if (!isMapping(def) || failureIgnored(def)) continue;
+    const jobWd = wdOf(def.defaults) ?? top ?? ".";
+    const steps = Array.isArray(def.steps) ? def.steps : [];
+    steps.forEach((step, i) => {
+      if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+      const wd = typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd;
+      const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
+      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.join(wd, m[1]))];
+      const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
+      for (const m of text.matchAll(SUITE_RUN)) {
+        if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
+        for (const d of dirs) out.push({ path: posix.normalize(posix.join(d, m[1])), where });
+      }
+    });
+  }
+  return out;
+}
+/** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
+function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  for (const s of suites) {
+    const by = run.find((r) => r.path === s);
+    if (s in notRun) {
+      if (by) problems.push([s, `is in SUITES_NOT_RUN ("${notRun[s]}"), but ${by.where} runs it — take it off the list`]);
+    } else if (!by) problems.push([s, `is a suite no ${SUITE_WORKFLOW} step runs where its failure fails the job, so it passes or fails unseen — add a step that runs it, or name it in SUITES_NOT_RUN with why`]);
+  }
+  for (const [p, why] of Object.entries(notRun)) {
+    if (!suites.includes(p)) problems.push([SELF, `SUITES_NOT_RUN names ${p}, which is no test-* script in the tree — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `SUITES_NOT_RUN names ${p} with no reason`]);
+  }
+  return problems;
+}
+/** [what, workflow YAML, the paths it runs, deduplicated and sorted]. */
+const SUITE_RUN_PROBES: [string, string, string[]][] = [
+  ["a step's working-directory", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: bun test-a.ts\n`, ["db/test-a.ts"]],
+  ["a path from the root, and node", `jobs:\n  a:\n    steps:\n      - run: bun recipes/x/test-b.mjs\n      - run: node y/test-c.mjs\n`, ["recipes/x/test-b.mjs", "y/test-c.mjs"]],
+  ["the job's default working-directory, and the workflow's", `defaults:\n  run:\n    working-directory: w\njobs:\n  a:\n    defaults:\n      run:\n        working-directory: server-portable\n    steps:\n      - run: bun test-d.ts\n  b:\n    steps:\n      - run: bun test-e.ts\n`, ["server-portable/test-d.ts", "w/test-e.ts"]],
+  ["a cd in a subshell, behind a timeout", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: |\n          (cd ../server-portable && exec timeout --kill-after=10s "$limit" bun test-f.ts) > "$RUNNER_TEMP/f.log" 2>&1 &\n`, ["db/test-f.ts", "server-portable/test-f.ts"]],
+  ["flags, and two runs in one line", `jobs:\n  a:\n    steps:\n      - run: bun --smol x/test-g.ts && bun x/test-h.ts --self-check\n`, ["x/test-g.ts", "x/test-h.ts"]],
+  ["a comment line and an echo run nothing", `jobs:\n  a:\n    steps:\n      - run: |\n          # bun x/test-i.ts\n          echo "x/test-j.ts failed"\n          echo "::error::bun x/test-k.tsx"\n`, []],
+  ["an echo that names bun on a suite runs nothing (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: |\n          echo "bun x/test-l.ts failed"\n          printf '%s\\n' 'run bun x/test-m.ts by hand'\n`, []],
+  ["a suite only inside sh -c reads as unrun (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: sh -c "bun x/test-n.ts"\n`, []],
+  ["a failure swallowed by || true or || : (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: |\n          bun x/test-o.ts > "$RUNNER_TEMP/o.log" 2>&1 || true\n          bun x/test-p.ts && echo ok || :\n          bun x/test-q.ts || { echo "q failed"; exit 1; }\n          bun x/test-r.ts; false || true\n`, ["x/test-q.ts", "x/test-r.ts"]],
+  ["a swallow on a continued line, and a package script (review pass 2)", `jobs:\n  a:\n    steps:\n      - run: |\n          bun x/test-y.ts \\\n            --flag || true\n          bun x/test-z.ts \\\n            --flag\n      - working-directory: s\n        run: bun run test:sql\n`, ["x/test-z.ts"]],
+  ["continue-on-error or if: false on a step or a job (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: bun x/test-s.ts\n        continue-on-error: true\n      - run: bun x/test-t.ts\n        continue-on-error: \${{ matrix.experimental }}\n      - run: bun x/test-u.ts\n        if: false\n      - run: bun x/test-v.ts\n        if: \${{ !cancelled() }}\n        continue-on-error: false\n  b:\n    continue-on-error: true\n    steps:\n      - run: bun x/test-w.ts\n  c:\n    if: false\n    steps:\n      - run: bun x/test-x.ts\n`, ["x/test-v.ts"]],
+];
+/** [what, suites, runs, not-run list, the wheres reported]. */
+const SUITE_PROBLEM_PROBES: [string, string[], string[], Record<string, string>, string[]][] = [
+  ["every suite run or excused", ["a/test-a.ts", "a/test-b.ts"], ["a/test-a.ts"], { "a/test-b.ts": "why" }, []],
+  ["a suite nothing runs", ["a/test-a.ts", "a/test-b.ts"], ["a/test-a.ts"], {}, ["a/test-b.ts"]],
+  ["an excused suite a workflow runs", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-a.ts": "why" }, ["a/test-a.ts"]],
+  ["an excuse for a file that is gone", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-gone.ts": "why" }, [SELF]],
+  ["an excuse with no reason", ["a/test-a.ts"], [], { "a/test-a.ts": " " }, [SELF]],
+];
+function checkSuitesRun() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 34 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2895)`);
+    return;
+  }
+  for (const [what, yaml, expected] of SUITE_RUN_PROBES) {
+    const got = [...new Set(suitesRunIn("probe.yml", Bun.YAML.parse(yaml)).map((r) => r.path))].sort();
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 34 no longer reads exactly ${JSON.stringify(expected)} as run for its probe "${what}" (read ${JSON.stringify(got)})`);
+  }
+  for (const [what, suites, run, notRun, expected] of SUITE_PROBLEM_PROBES) {
+    const got = suiteProblems(suites, run.map((path) => ({ path, where: "probe.yml" })), notRun).map(([where]) => where);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 34 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  const files = citationFiles();
+  const suites = files.filter((rel) => SUITE_FILE.test(rel));
+  const run: SuiteRun[] = [];
+  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
+  // were either missed, the reading is broken, not the tree clean.
+  for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
+    if (!run.some((r) => r.path === known)) fail(SELF, `check 34 does not read ${known} as run by fork-checks.yml — the reading is broken, not the tree clean`);
+  }
+  for (const [where, detail] of suiteProblems(suites, run, SUITES_NOT_RUN)) fail(where, `${detail} (check 34, SMD-2895)`);
+}
+checkSuitesRun();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
