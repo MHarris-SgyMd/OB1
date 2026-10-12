@@ -167,7 +167,11 @@ cites a returned id logs no cite row there (SMD-1719). `vector index memory` and
 `filter bitmap memory` (SMD-1499): the server sized for the table. The first
 is a warning, since a managed platform may not let the operator change the
 setting: the valid HNSW indexes over `thoughts` and `thought_chunks` against
-`shared_buffers`, with the size to set and the statement that sets it. The OS
+`shared_buffers`, with the size to set and the statement that sets it. A
+staging index built by hand for 039 to adopt is left out while the body still
+orders by the vector column and the vector index (001's, 007's) holds the
+shipped name, since the walk uses that until 039 runs; the row says so, and a
+warning's remedy has 039 applied before sizing (SMD-2871). The OS
 page cache serves a walk too, but measured at ten million rows it gave ten
 connections about a third of the throughput. The second is information only:
 the bitmap a filter on the GIN route needs (64 bytes a heap page; every page
@@ -634,7 +638,14 @@ MCP tools do rather than a copy of it:
   each server's first middleware makes (notFound, for a path that middleware
   never sees): its keys an allow-list, each value held to its rule as the line is written, so no
   URL, key, argument or thought text reaches it (`deploy/README.md`, "What the
-  servers log").
+  servers log"). The same record is the request's OpenTelemetry span, and each
+  tool call a span under it — the request's attributes the line's checked values, a call's its own outcome and code — the
+  API's no-ops until `OTEL_EXPORTER_OTLP_ENDPOINT` (or its traces variable) names a collector
+  (`deploy/README.md`, "Traces").
+- **`otel-setup.ts`** — the OpenTelemetry SDK for traces, loaded only then and
+  only on Bun: an OTLP/HTTP exporter, batched, the AsyncLocalStorage context
+  manager and the W3C propagator. `wrangler.toml` aliases it to
+  `shims/otel-unavailable.ts`, so the Worker carries the API alone.
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
 for what a move would leave behind: an import outside the file's list, a SQL call or
@@ -788,15 +799,15 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 926 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
+bun test-server.ts        # 976 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, and the spans (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 332 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 221 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById and the example's replay refusals
+bun test-rest.ts          # 346 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-plugins.ts       # 251 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, and a plugin operation's span
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 161 — the REST core beside the MCP server on one database: every operation through both
-../db/with-postgres.sh bun test-plugins-sql.ts  # 101 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
+../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

@@ -170,6 +170,10 @@ export interface WorkerHeartbeat {
   ended: boolean;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
   malformed: { answers: number; bad: number; alarm: boolean } | null;
+  /** The sleep scheduler's current or last sleep: its start and, once over, its end, UTC instants (SMD-2678); absent for the other workers, and for a sleep row with none or not of the shape. */
+  slept?: { from: string; to: string | null };
+  /** Whether the sleep scheduler's role reads query_log, as its start found (SMD-2678); absent for the other workers and an older scheduler. */
+  reads?: "yes" | "denied" | "missing";
 }
 
 /** A heartbeat older than this many of its own intervals is stale. */
@@ -230,6 +234,13 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       continue;
     }
     const everyS = v!.every_s as number;
+    // The scheduler's mark of its sleep (SMD-2678): left off when not of the
+    // shape, as a malformed block is — the row still says whether it is alive.
+    const s = worker === "sleep" ? (v!.slept as Record<string, unknown> | undefined) : undefined;
+    const slept = s !== null && typeof s === "object" && typeof s.from === "string" && UTC_INSTANT.test(s.from) && (s.to === null || (typeof s.to === "string" && UTC_INSTANT.test(s.to)))
+      ? { from: s.from, to: s.to as string | null }
+      : undefined;
+    const reads = worker === "sleep" && (v!.reads === "yes" || v!.reads === "denied" || v!.reads === "missing") ? v!.reads : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -242,6 +253,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       outcome: v!.outcome as WorkerHeartbeat["outcome"],
       ended: v!.ended === true || v!.outcome === "stopped",
       malformed,
+      ...(slept ? { slept } : {}),
+      ...(reads ? { reads } : {}),
     });
   }
   return { heartbeats, ignored };

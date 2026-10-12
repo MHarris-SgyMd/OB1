@@ -121,7 +121,7 @@ export type HookRequest = { headers: Readonly<Record<string, string>>; query: Re
 /** A webhook's answer to its sender: a status, and a JSON body if it has one. */
 export type HookAnswer = { status: 200 | 202 | 204 | 400 | 401 | 403 | 404 | 409 | 413 | 422 | 503; body?: Record<string, unknown> };
 
-/** What a webhook's handler runs against: the core as the hook's own capture-only caller, the plugin's tables, its secret, and how long a capture may run. */
+/** What a webhook's handler runs against: the core as the hook's own capture-only caller, the plugin's tables, its secret, how long a capture may run, and a way to answer before work ends. */
 export interface HookContext {
   /**
    * A core operation as `hook:<plugin>`, a caller of capture scope alone: a
@@ -139,6 +139,27 @@ export interface HookContext {
    * plugin cannot read itself. onceById sizes its lease from it.
    */
   readonly captureSeconds: number;
+  /**
+   * Runs `work` once the handler's answer is on its way (SMD-2767), for a
+   * sender that wants one sooner than the work takes (Slack: three seconds):
+   * it starts on the event loop's next turn after the handler returns an
+   * answer the runtime takes, and not at all if the handler throws or answers
+   * what is refused — `discarded` runs then instead, before the 500 is sent
+   * (waited on for 5 s at most),
+   * to undo what the handler did for the work (onceById gives its claim
+   * back). Work runs on any answer taken, a retryable 409 or 503 included, so
+   * work its sender's retry must not repeat goes through onceById. The
+   * runtime owns both:
+   * a failure is caught and written to the REST core's fault log as one line,
+   * never a rejection that would stop the process, and the server's stop
+   * waits for them as for a request, within OB1_STOP_GRACE — counted from
+   * when each is deferred, so one from a timer the handler left is waited for
+   * only if it is deferred before the stop finds nothing running. Its sender has its 2xx by then and resends
+   * nothing: work that fails is told only to the fault log, and work a crash
+   * or the stop's cut ends only to the stop's count of what it cut, if to
+   * anything.
+   */
+  defer(work: () => Promise<unknown>, discarded?: () => Promise<unknown>): void;
 }
 
 export interface PluginHook {
@@ -250,6 +271,12 @@ export type OnceOptions = {
    * or changing one forgets the ids kept without it, and no claim prunes them.
    */
   scope?: string;
+  /**
+   * Claim now and leave the run, its record and its release to `ctx.defer`
+   * (SMD-2767), so the sender is answered within its deadline: onceById's
+   * answer is then `OnceDeferred`.
+   */
+  defer?: boolean;
 };
 
 /** What a run hands back: the value to answer with, and the thought to remember the id by — the core's thought id, a uuid; null gives the claim back, so the sender's retry runs. */
@@ -257,6 +284,9 @@ export type OnceRun<T> = { value: T; thoughtId: string | null };
 
 /** onceById's answer: the run's value; the thought a delivery of the id already captured; or that one is still running. */
 export type Once<T> = { ran: T } | { duplicate: string } | { inFlight: true };
+
+/** onceById's answer with `defer`: the id claimed and its run left to `ctx.defer`, or, as without, a duplicate or one still running. */
+export type OnceDeferred = { deferred: true } | { duplicate: string } | { inFlight: true };
 
 /**
  * Runs `run` once per delivery id (SMD-2768), over the plugin's own table
@@ -279,8 +309,22 @@ export type Once<T> = { ran: T } | { duplicate: string } | { inFlight: true };
  * fails leaves the claim to lapse, and the run's value is answered all the same.
  * A `thoughtId` that is no uuid is the plugin's fault: thrown, the claim kept
  * to lapse, so a resend is told to retry (409) until the lease rather than run.
+ *
+ * With `defer` (SMD-2767), the claim is made and answered now — `deferred`, a
+ * duplicate or one still running — and the run, its record and its release
+ * are left to `ctx.defer`: the sender is answered within its deadline, and a
+ * resend while the run goes on is still told to retry. A deferred run that
+ * throws, hands back no thought (a refusal of the core's, say) or a
+ * `thoughtId` that is no uuid reaches the fault log, its message naming the
+ * delivery and what became of its claim (`delivery <scope> <id> (its id given
+ * back): …`), and not the sender, who has its answer; a run that throws with
+ * the refusal's code says more than one that hands back nothing.
  */
-export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions): Promise<Once<T>> {
+export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer: true }): Promise<OnceDeferred>;
+export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions & { defer?: false }): Promise<Once<T>>;
+export function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds" | "defer">, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions): Promise<Once<T> | OnceDeferred>;
+export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"> & Partial<Pick<HookContext, "defer">>, id: string, run: () => Promise<OnceRun<T>>, options: OnceOptions): Promise<Once<T> | OnceDeferred> {
+  if (options.defer && typeof ctx.defer !== "function") throw new Error("onceById: defer needs the hook's ctx.defer");
   const scope = options.scope;
   if (scope !== undefined && !(typeof scope === "string" && scope.length <= 32 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(scope))) throw new Error(`onceById: scope ${JSON.stringify(scope)} is not lower-case words and hyphens of at most 32 characters`);
   if (!isDeliveryId(id, scope)) throw new Error("onceById: an id is 1 to 200 characters from ! to ~, less its scope and a space (isDeliveryId)");
@@ -309,30 +353,66 @@ export async function onceById<T>(ctx: Pick<HookContext, "db" | "captureSeconds"
   });
   if (!claim.claimed) return claim.thoughtId ? { duplicate: claim.thoughtId } : { inFlight: true };
   const claimedAt = claim.at;
-  // One that cannot be given back lapses with the lease.
-  const release = () =>
-    ctx.db.tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz`).catch(() => undefined);
-  let done: OnceRun<T>;
-  try {
-    done = await run();
-  } catch (err) {
-    await release();
-    throw err;
+  // What became of its own claim: given back; already no longer its own (a
+  // retry took it past the lease, or the prune); or, the DELETE failing, left
+  // to lapse at the lease (review pass 4: a DELETE that matched nothing was told as given back).
+  type Fate = "given back" | "already re-claimed or pruned" | "left to lapse at the lease";
+  const release = (): Promise<Fate> =>
+    ctx.db
+      .tx((sql) => sql`DELETE FROM deliveries WHERE id = ${key} AND thought_id IS NULL AND claimed_at = ${claimedAt}::timestamptz RETURNING id`)
+      .then((rows): Fate => (rows.length ? "given back" : "already re-claimed or pruned"), (): Fate => "left to lapse at the lease");
+  // What became of the claim when no thought was recorded; null, kept to lapse (a thoughtId that is no uuid).
+  let gaveBack: Fate | null = null;
+  // The run's value, and whether it captured a thought.
+  const finish = async (): Promise<{ value: T; captured: boolean }> => {
+    let done: OnceRun<T>;
+    try {
+      done = await run();
+    } catch (err) {
+      gaveBack = await release();
+      throw err;
+    }
+    const thoughtId = done.thoughtId;
+    if (thoughtId === null) {
+      gaveBack = await release();
+      return { value: done.value, captured: false };
+    }
+    // Anything else would fail the record unseen. Not given back: a resend is
+    // 409 until the lease, where a release would run it again on every one.
+    if (!UUID_RE.test(thoughtId)) {
+      throw new Error("onceById: a run's thoughtId is the core's thought id, a uuid, or null");
+    }
+    await ctx.db
+      .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${key}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
+      .catch(() => undefined);
+    return { value: done.value, captured: true };
+  };
+  if (options.defer) {
+    // Its sender has its answer: a run that captured nothing is a fault to
+    // tell, not a claim given back for a retry that will not come. Each
+    // fault names the delivery — short, so a long id leaves the fault line's
+    // 300 characters to the fault (review pass 2) — and what became of its
+    // claim, before the fault's own words (review pass 3).
+    const named = () => `delivery ${key.length > 64 ? `${key.slice(0, 61)}...` : key} (its id ${gaveBack ?? "kept to lapse at the lease"})`;
+    ctx.defer!(
+      () =>
+        finish().then(
+          ({ captured }) => {
+            if (!captured) throw new Error(`${named()}: no thought captured`);
+          },
+          (err: unknown) => {
+            throw new Error(`${named()}: ${err instanceof Error ? err.message : String(err)}`);
+          },
+        ),
+      // The handler failed after the claim: its sender is told 500 and retries, so the id is given back now, not at the lease.
+      async () => {
+        gaveBack = await release();
+        if (gaveBack === "left to lapse at the lease") throw new Error(`${named()}: its handler failed after the claim, and the claim could not be given back`);
+      },
+    );
+    return { deferred: true };
   }
-  const thoughtId = done.thoughtId;
-  if (thoughtId === null) {
-    await release();
-    return { ran: done.value };
-  }
-  // Anything else would fail the record unseen. Not given back: a resend is
-  // 409 until the lease, where a release would run it again on every one.
-  if (!UUID_RE.test(thoughtId)) {
-    throw new Error("onceById: a run's thoughtId is the core's thought id, a uuid, or null");
-  }
-  await ctx.db
-    .tx((sql) => sql`INSERT INTO deliveries (id, thought_id) VALUES (${key}, ${thoughtId}) ON CONFLICT (id) DO UPDATE SET thought_id = excluded.thought_id`)
-    .catch(() => undefined);
-  return { ran: done.value };
+  return { ran: (await finish()).value };
 }
 
 /** A GUI page: its path under the plugin's (lower-case words and hyphens), and its nav label. */

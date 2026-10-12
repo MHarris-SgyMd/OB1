@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2689 assertions: 2689 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
+`bun test-schema.ts` prints `2733 assertions: 2733 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-eight (88) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 088 SMD-2744).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1341,6 +1341,17 @@ again. It refuses to apply without 046 or 085. test-schema [77],
 test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
 test-e2e-sql [13g].
 
+Migration 087 adds `board_findings_posted`, what board-sync's findings step
+posted to the Linear board (SMD-2681): one row per ticket pair and word —
+the pair in order by 079's ticket identity, the word (`outdates`, `related`,
+`evolves`, `duplicate`), the ticket commented on, Linear's comment id, and the
+proposal and relation-facet ids it named. `origin` is `posted`, counted
+against the daily cap, or `found`, a marker already on the board. Rows are
+only inserted — a posted one after Linear answers, in the transaction that
+posted — so a failed post records nothing. It needs nothing before it. See
+[What it tells the board](#the-board-in-the-brain-smd-1954). test-schema [78],
+test-upgrade [20ai], test-live [41].
+
 Migration 088 has `update_thought` say what it did (SMD-2744's second Work
 item). A `metadata_patch` naming `trust`, `actor_kind` or `actor_name` is
 merged in name only — the server sets them (050, 073) — and the server's
@@ -1356,11 +1367,10 @@ merged only when a change of text — which writes the stamp over the NULL —
 took the patch's trust. Each is read inside the write, with the row locked,
 so no other write, backfill pass or clock stands between the answer and the
 row (a read after the write, which the server tried first, met each of those
-in turn). The server's reply names
-each named stamp key the thought did not take, at the value it holds. The
-body is 073's, the signature the same, the grants kept; it carries 073's
-mechanism for an earlier form a re-applied older file left, and refuses to
-apply without 073. test-schema [79], test-upgrade [20aj],
+in turn). The server's reply names each named stamp key the thought did not
+take, at the value it holds. The body is 073's, the signature the same, the
+grants kept; it carries 073's mechanism for an earlier form a re-applied
+older file left, and refuses to apply without 073. test-schema [79], test-upgrade [20aj],
 server-portable/test-update-delete.ts [11], test-server.ts [23].
 
 ## What changed relative to the guide
@@ -1408,14 +1418,19 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once, or with `--groups capture,worker,…` those alone
-(SMD-2289). `--groups` grants less and revokes nothing; `--exact` adds the
+issues every group at once but the opt-in **sleep** group, or with `--groups
+capture,worker,…` those alone (SMD-2289) — the only way to issue **sleep**
+(SMD-2678). `--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
 database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
 holds anything else (named by catalog and database); then the groups are
-granted, so what it holds here is theirs. Every `--grant`, and `login-role.ts`,
+granted, so what it holds here is theirs — so an `--exact` without `--groups`
+also takes away a **sleep** grant made earlier: name it again
+(`--groups <its groups>,sleep --exact`) for a scheduler's role, and restart
+the scheduler after either, since it reads the privilege once at its start.
+Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
 a member of no role, its settings in every database cleared; refused if one
@@ -1462,7 +1477,10 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
+| | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **sleep** — the sleep scheduler (`sleep.ts`, the compose `sleep` profile, SMD-2678): a search logged in the query log wakes the brain. **Opt-in:** a plain `--grant` leaves it out, since the log holds every search's text; only `--groups …,sleep` issues it. A role without it sleeps on writes alone, and the scheduler and preflight's `sleep` row say so | `query_log` (034) | `SELECT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
@@ -1529,7 +1547,8 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above for the tables, views, sequences and
+`--grant` issues exactly the list above, but for the opt-in **sleep** group,
+for the tables, views, sequences and
 functions that exist, in one transaction — and before committing it asks the
 catalog whether the role now holds each privilege, because a grantor that holds
 a privilege without grant option "grants" it with only a warning and no effect;
@@ -1541,8 +1560,9 @@ runs the revokes, the check and the grants in a transaction it rolls back, so it
 needs the privileges a real run does and shows what that run would refuse. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
-entity extraction, **structure** as well for a structured pass, and **pages**
-for a role that writes pages (064). The
+entity extraction, **structure** as well for a structured pass, **pages**
+for a role that writes pages (064), and **sleep**, named in `--groups`, for
+the role the sleep scheduler connects as when a search should wake it. The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -2791,32 +2811,36 @@ bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ev
 bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration, followers running outside sleep, or a pass's refusal (under --follow, all but a start refusal by a pass that got past its start earlier, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
-**Running it.** Until SMD-2678's compose service, on the compose stack (whose
-Postgres publishes no port) run it in a one-off container of the `extract`
-service, which mounts the checkout and carries the server's model settings,
-`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL`, and `OB1_WORKER_KEY` when
-`deploy/.env` sets it — the command replaces the service's, so its refusal
-without the key does not apply, and the passes then say they write with no
-agent id. In the foreground, stopped with Ctrl-C; nothing restarts it:
+**Running it.** On the compose stack, as its own service: `--profile sleep`
+runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
+and `OB1_SLEEP_WORKERS` for its three numbers, digits only (SMD-2678;
+`deploy/README.md`, "The `sleep` profile instead", has the first start and
+the move from the `workers` profile):
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow
+podman compose -f deploy/compose.yaml --profile sleep up -d sleep
 ```
 
-Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
+The service mounts the checkout and carries the server's model settings,
+`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL` and `OB1_WORKER_KEY`, and
+refuses to start without the key (exit 2). Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
 another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
-`capture`, `worker` and `extraction` groups, `server` for the worker key). It
+`capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084) —
+with the opt-in `sleep` group as well for a search to wake it (below). It
 has no `--job`.
 
 **What wakes it.** A write the audit recorded through a key not classified
-`ingested`, and — only for the owner, and only under the server's
-`OB1_QUERY_LOG=on` (off by default) — a read the server logged. Under a
-`--grant` role, or with the log off, only writes wake it; the start says which.
+`ingested`, and — only under the server's `OB1_QUERY_LOG=on` (off by default),
+and only for a role that may read `query_log`: the owner, or one granted the
+opt-in `sleep` group, `migrate.ts --grant <role> --groups <its groups>,sleep`
+("Grants for a capturing role"; the log holds every search's text, so a
+plain `--grant` leaves it out) — a read the server logged. Otherwise only
+writes wake it; the start says which, and preflight's `sleep` row does too.
 board-sync's key is classified `ingested` on the stable brain; an unclassified
 key's writes wake it (reembed, ingest-records, a migration's backfill) until
 `SELECT set_agent_kind('<key name>', 'ingested')` says they are background
@@ -2838,25 +2862,50 @@ refusal at a pass's first start, or mid-pass (the provider refusing the
 request itself), ends the scheduler with 2, as it ends a follower — so the
 same 402 ends it mid-pass and is retried when a sleep's start meets it first.
 
-**Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute:
-preflight's `workers` row reads "running a pass" while asleep, "alive" while
-awake, "its last pass failed" while a pass's last word was a failure (into the
-next sleep, until one of its passes stamps), and stopped once it ends. A pass
-waiting at its start for a provider that does not answer stamps nothing, so the
-row keeps its last word then. Its `consolidate pass` row reads a fresh one as the
-scheduler working the current judge's key, rather than asking for a second
-worker. Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
+**Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
+with `slept`, the current or last sleep's start and, once it is over, its
+end, and `reads`, whether its role read `query_log` at its start — so
+preflight judges what wakes the scheduler by the scheduler's role, not its
+own. Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
+running, for how long; awake, with when the last sleep ended and how long it
+lasted; "its last pass failed" while a pass's last word was a failure (into
+the next sleep, until one of its passes stamps); stopped once it ends, or
+stale, each with the service's restart; and what wakes it — a search or a
+write, or writes alone and why, each lesser case a warning with its fix. The
+`workers` row no longer reads it. A pass waiting at its start for a provider
+that does not answer stamps nothing, so the row keeps its last word then
+(SMD-2752). Its `consolidate pass` row reads a fresh one as the scheduler
+working the current judge's key, rather than asking for a second worker.
+Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
-**From the `workers` profile.** Its followers do not yield. Stop them
-(`podman compose -f deploy/compose.yaml --profile workers stop extract
-consolidate`), stop starting them (take `workers` out of `COMPOSE_PROFILES` in
-`deploy/.env`, and out of any `--profile workers up`), and delete their
-`heartbeat:extract:…` and `heartbeat:consolidate:…` rows, or preflight's
-`workers` row asks for them back. The start and `--dry-run` name any with a
-fresh heartbeat.
+**From the `workers` profile.** Its followers do not yield, so the two are
+alternatives: a run refuses (exit 2) while any of their heartbeats is fresh —
+at its start, and when an awake or asleep poll finds one (a follower brought
+up beside it stamps only after its start probe) — and `--dry-run` names them.
+Stop them (`podman compose -f deploy/compose.yaml --profile workers stop
+extract consolidate`) — a clean stop marks a row ended, which lifts the
+refusal; one killed past its grace stays fresh for up to three intervals —
+stop starting them (take `workers` out of
+`COMPOSE_PROFILES` in `deploy/.env`, and out of any `--profile workers up`),
+and delete their `heartbeat:extract:…` and `heartbeat:consolidate:…` rows,
+or preflight's `workers` row asks for them back. Under `--follow` a refusal
+ends `heartbeat:sleep` on a failure, so preflight's `sleep` row names the
+followers keeping it down and asks for a choice of profile, rather than a
+restart that would refuse again; while the scheduler runs, the `workers` row
+asks for a stopped follower's row to be retired, not started again.
+
+**A database not answering at its start** is waited out, as one mid-sleep
+is (SMD-2599's schedule), so the service started beside a restarting Postgres
+spends none of its three restarts. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the compose service's SIGTERM).
+So does each pass's start at every sleep: a follower waits out every statement
+up to its first claim — the tables check, the worker key's lookup, extraction's
+key, 079's check, the relations grants; not an operator's `--retry-*` — where it
+used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
+the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679), a compose service with preflight's own `sleep` row (SMD-2678).
+(SMD-2679); quieter banners, configuration checks at its start and the
+provider-wait word (SMD-2752).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -3638,7 +3687,9 @@ value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
 extraction, the last judged block's malformed answers and whether they passed
-SMD-2266's alarm. The time is the
+SMD-2266's alarm, and, for the sleep scheduler, `slept`, its current or last
+sleep's start and end, and `reads`, whether its role read `query_log` at its
+start (SMD-2678). The time is the
 row's `updated_at`, the database's `now()`.
 
 - **`ok`:** the pass ran, whatever its rows came to — a document the model
@@ -3671,7 +3722,8 @@ the record; the heartbeat still counts.
 
 **Who reads it.** Keyed `/health`, `brain_info` (a `Workers` row) and
 `GET /v1/brain` carry every heartbeat as `database.workers`. Preflight's
-`workers` row warns, with a remedy for each:
+`workers` row warns, with a remedy for each — for every heartbeat but the
+sleep scheduler's, which has its own `sleep` row ("Sleep", above):
 - when a heartbeat is older than three of its intervals, or its worker ended
   (the remedy names the command that starts it again);
 - when a fresh one's last pass failed;
@@ -3887,20 +3939,131 @@ mirror keeps the hand captures' shape, which had none. A Linear webhook would be
 exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
 which would call this tool's `syncIssue` with the one identifier it was told.
 
+**What it tells the board (SMD-2681).** The board comes in; consolidation's
+findings about it went nowhere until someone read the queue. With
+`LINEAR_COMMENT_API_KEY` set, every pass (not `--audit`, and not `--only`,
+which brings in only the named tickets' links) ends with `board-findings.ts`'s
+step: a pending `outdates` proposal (029) or a standing `related`, `evolves`
+or `duplicate` relation (084) between two tickets the board does not link is
+posted as one comment on the newer ticket — the ticket of the thought the
+judge saw as newer. The same step runs on its own:
+
+```bash
+bun board-findings.ts --url … --dry-run   # what would be posted and what the gate would refuse — the board unread, so a pair already on it is listed too; no Linear request, no row
+bun board-findings.ts --url …             # post, up to the cap
+bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run applies, over OB1_FINDINGS_POST_CAP
+```
+
+- **Which findings.** Two Linear rows (`metadata.source = 'linear'`:
+  board-sync's tickets and their dated sections) filed under two different
+  tickets — 079's identity, `coalesce(metadata->>'ticket', metadata->>'issue')`,
+  which must read as an identifier (`SMD-123`) — that no active Linear link
+  joins: neither 079's `consolidation_tickets_linked` nor a `duplicate_of`
+  either way. That is SMD-2680's board-pair rule, asked when posting (a link
+  made after the verdict never moves the proposal, and the pass has just
+  brought in the links of every ticket Linear says moved — a link added
+  without moving either ticket's `updatedAt` waits for a `--full` pass), narrowed to Linear rows: a fork change record
+  or a capture can carry a `ticket` too, and its text is not the board's, so
+  `brain_info`'s board counts can be higher than what is posted. A session
+  note, or any thought that is not a Linear row, on either side is never
+  posted.
+- **One comment per ticket pair.** Several proposals or relations between rows
+  of the same two tickets are one comment. It names the two tickets, each
+  finding's word and direction and the judge's confidence, a proposal's
+  one-line reason (as code, so a link or a mention in it is shown, not
+  rendered), and how to act: a proposal is decided in the brain
+  (`cd db && bun consolidate.ts --accept <id>`, or `--reject <id>`); a
+  `related` or `evolves` relation by linking the tickets as related on the
+  board, which this tool's next pass brings back, after which 079 leaves the
+  pair out of the candidates; a `duplicate` by marking one a duplicate of the
+  other, after which the pair is not posted again (079 still pairs it for the
+  judge). It proposes only: no link is added, no status moved, no description
+  edited.
+- **Posted once.** Migration 087's `board_findings_posted` holds one row per
+  ticket pair and word (`outdates`, `related`, `evolves`, `duplicate`), so a
+  relation a re-judge replaced at another score is not posted again, and a pair
+  is posted again only for a word not posted for it before (a proposal judged
+  the other way round is not). The comment's last line is a marker,
+  `ob1-finding SMD-A SMD-B words`, in letters, digits, hyphens and spaces:
+  Linear keeps a comment as rich text and returns
+  markdown derived from it, so the marker is read back with identifiers
+  un-autolinked and escapes undone. Before posting, both tickets' comments are
+  read (the first 250 of each); a word a marker already names — another brain
+  posted it, or this one lost its row — is recorded `found` and not posted.
+  So a person who writes the line on either ticket silences that word for the
+  pair. Two brains on one board read each other's markers; two that post the
+  same pair in the same moment can both post.
+  Each post holds one lock for the whole brain, re-reads what is recorded and
+  re-counts the day's posts under it, then posts and writes its rows in that
+  transaction: a post that fails records nothing and the next pass tries
+  again, and two posters at once post neither a pair twice nor past the cap. A
+  run killed after Linear answered and before the commit leaves the comment
+  with no row; the next run finds its marker and records it `found`, which the
+  cap does not count.
+- **Bounded.** At most `OB1_FINDINGS_POST_CAP` comments (default 5, 0 to 100)
+  in any 24 hours, counted from the comments this brain recorded posting — a
+  comment Linear made after the step gave up on it is recorded `found` later,
+  and not counted, and each brain counts its own; best first, by the
+  judge's confidence and then age. The confidence does not yet rank real
+  findings (SMD-2705), so the cap is the guard. A bad value stops the tool with
+  exit 2, as a bad interval does — in board-sync, when the key is set.
+- **A ticket off the board.** A ticket deleted in Linear, or moved out of the
+  initiative, keeps its row (above). Board-sync passes the step this pass's
+  census, and a pair with a ticket off it — or one this pass failed to fetch,
+  whose links it did not bring in — is left alone, no Linear request,
+  while a ticket on it that the comment key cannot find fails the pass: the
+  key does not see the board's teams. The census is as old as its pass: a
+  ticket deleted while a pass runs fails that pass's post once, and the next
+  census drops it. A pair that fails every pass — a team the comment key
+  cannot see — keeps the heartbeat `failed`; give the key the team, or, as
+  the owner, record the pair as told with a `found` row in
+  `board_findings_posted` for each word. Run on its own, `board-findings.ts` has
+  no census: Linear's "Entity not found" is reported as no such ticket and
+  asked again next run; any other error is a failure.
+- **Through the egress gate.** The comment leaves to `api.linear.app`, so it
+  is gated as a subject of its own: type `board-finding`, source
+  `board-findings`, and its text for a `marker:` term — values a capture is
+  unlikely to carry, since `OB1_EGRESS_ALLOW` is the server's too and a term
+  admits any row carrying its value. Under the default deny nothing is posted:
+  board-sync says so once at start and leaves the step off, and
+  `board-findings.ts` prints what it would have posted. Opt in with
+  `OB1_EGRESS_ALLOW=type:board-finding`. That term lets the comments out
+  and nothing else: board-sync's own embeddings still need their endpoint
+  declared local or a term of their own, and board-sync judges its up-front
+  refusal without it. The two thoughts are not gated
+  themselves: both are the board's own rows, and what leaves is a remark about
+  them, to that board.
+- **Its own key.** `LINEAR_COMMENT_API_KEY` is a key that can comment, never
+  `LINEAR_API_KEY`: that one is someone's whole account, which this tool only
+  reads with. Board-sync warns when the two are the same key. The key is read
+  from the environment or a `.env` on `db/env.ts`'s search path and never
+  printed. Unset, the step is off and nothing is said.
+- **Exit and heartbeat.** A post that fails (Linear refused, answered without
+  creating it, or did not answer within 20 s) is reported and fails the pass,
+  so `heartbeat:board-sync` says `failed`; the next pass tries again.
+- **Grants.** The `structure` group holds `SELECT, INSERT` on
+  `board_findings_posted` and `SELECT` on `supersession_proposals`; the step
+  also reads `thoughts` and `thought_facets` (the capture group's) and
+  executes 079's function — `--groups capture,structure`. A role that lacks
+  any of them is said once at start and the step stays off; a dry run needs
+  the reads alone. Compose's `board-sync` connects as the owner and
+  needs nothing.
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2689 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1190 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2733 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1246 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
+bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 
@@ -4046,7 +4209,15 @@ names the errors that mean the database is not answering (a connection
 refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
 `waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
 wakes it; a thought in hand records nothing, and its lease is returned when the
-database is back. It waits a provider outage out the same way.
+database is back. Its start's statements, up to the first claim, go through
+`throughOutage` — the statement itself again on the same schedule, null on a
+stop — and `workerIdentity`'s `outage` option throws a database outage at the
+key's lookup for it to wait, where it warned and went on unattributed
+(SMD-2752). The followers pass `lookupOutage`, which leaves out too many
+connections (53300): the lookup opens a connection beside the pass's pool,
+refused for as long as the brain is at `max_connections`, so that one is still
+warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
+out the same way.
 - **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
 - **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
 - **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
@@ -4694,7 +4865,13 @@ default — are unaffected.
   row with four workers, and the migrator prints the vector count and the
   setting in force just before 039. It adopts staging indexes built beforehand
   with `CREATE INDEX CONCURRENTLY` under the names its header gives, which is
-  the path for a brain past a million rows.
+  the path for a brain past a million rows. The header's statements carry the
+  `{{EMBEDDING_DIM}}` placeholder only the migrator fills in: put the column's
+  width there (`SELECT atttypmod FROM pg_attribute WHERE attrelid =
+  'thoughts'::regclass AND attname = 'embedding'`). Where an index is to
+  be built, dropped or renamed first, the walk index row's remedy — and the
+  vector index memory row's warning while a staging index is left out —
+  prints the statements filled in, with where to run them (SMD-2880).
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.

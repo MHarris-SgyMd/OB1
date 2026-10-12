@@ -112,6 +112,12 @@ export async function workerIdentity(
     noKeyWarning: string;
     write?: (line: string) => void;
     warn?: (line: string) => void;
+    /**
+     * An error of the lookup's that this says is the database not answering
+     * is thrown, for the caller to wait out (a follower's start, SMD-2752),
+     * rather than warned about with the rows going on unattributed.
+     */
+    outage?: (e: unknown) => boolean;
   },
 ): Promise<{ ok: true; identity: WorkerIdentity } | { ok: false; message: string }> {
   const write = opts.write ?? ((l: string) => console.log(l));
@@ -145,6 +151,7 @@ export async function workerIdentity(
   try {
     res = await store.resolveAgent({ keyHash: hash, label: record.name, scope: record.scope });
   } catch (e) {
+    if (opts.outage?.(e)) throw e;
     warn(`  ⚠  could not resolve the worker's identity (${(e as Error).message}); rows will carry no agent id`);
     return { ok: true, identity: none };
   } finally {
@@ -239,6 +246,18 @@ export function databaseUnavailable(e: unknown): boolean {
   if (name !== "PostgresError" && name !== "SQLError") return false;
   if (typeof code === "string" && /^ERR_POSTGRES_(CONNECTION_|IDLE_TIMEOUT|LIFETIME_TIMEOUT)/.test(code)) return true;
   return typeof errno === "string" && (errno.startsWith("08") || ["57P01", "57P02", "57P03", "53300"].includes(errno));
+}
+
+/**
+ * Whether the worker key's lookup should wait on a database error: an outage
+ * of databaseUnavailable's, but not too many connections (53300). The lookup
+ * opens a connection of its own beside the pass's pool, so at
+ * max_connections the pool still answers while the lookup is refused for as
+ * long as the brain is busy — a wait with no end, at every sleep. That one is
+ * warned about and the rows go unattributed, as before (SMD-2752 review pass 2).
+ */
+export function lookupOutage(e: unknown): boolean {
+  return databaseUnavailable(e) && (e as { errno?: unknown }).errno !== "53300";
 }
 
 /**
@@ -537,6 +556,43 @@ export async function waitOut(opts: {
       return true;
     } catch (e) {
       if (!opts.outage(e)) throw e;
+    }
+  }
+}
+
+/**
+ * A statement that outlasts the database going away (SMD-2599's rule): run
+ * again after each of outageWait's waits until it answers, or null when
+ * `wake` ends the wait. The statement is its own check: a `SELECT 1` on
+ * another connection can answer while it cannot — the worker key's lookup
+ * opens one of its own on `url`, refused a slot while the pool holds one
+ * (53300) — and every pass of such a loop would begin the schedule at 5 s
+ * again (SMD-2752 review pass 1). `said` keeps "not answering" to one line an
+ * outage, and "answers again" to after one. Any error not
+ * databaseUnavailable's is thrown. The sleep scheduler's reads (SMD-2678),
+ * and a follower's start before its first claim (SMD-2752): the scheduler
+ * starts a pass at every sleep, and meets a restarting database there where a
+ * follower meets it once.
+ */
+export async function throughOutage<T>(run: () => Promise<T>, opts: {
+  wake: AbortSignal;
+  said: { down: boolean };
+  out: (line: string) => void;
+  err: (line: string) => void;
+  /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
+  sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+}): Promise<T | null> {
+  const sleep = opts.sleep ?? sleepUnless;
+  for (let step = 0; ; step++) {
+    try {
+      const r = await run();
+      if (opts.said.down) { opts.out("  the database answers again"); opts.said.down = false; }
+      return r;
+    } catch (e) {
+      if (!databaseUnavailable(e)) throw e;
+      if (!opts.said.down) { opts.err(`  the database is not answering (${(e as Error).message}) — waiting for it`); opts.said.down = true; }
+      await sleep(outageWait(step), opts.wake);
+      if (opts.wake.aborted) return null;
     }
   }
 }

@@ -177,6 +177,8 @@ const {
   isLocalHostname,
   LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
+  plan039,
+  walkRemedy,
 } = await import("../db/config.mjs");
 
 // The embedding model read as embed.ts's resolveEmbedConfig reads it, trimmed
@@ -293,7 +295,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -3009,6 +3011,45 @@ if (configFailed) {
          * words it.
          */
         type Overload = { cfg: string; settings: Record<string, string>; src: string; rows: number; nargs: number; sig: string };
+        // 039's walk: the statement's ORDER BY, not a word a comment could carry
+        // (the walk index check, and the memory row's pairing, SMD-2871).
+        const WALK_ORDERS_BY_CAST = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/;
+        /**
+         * Each table's two index names, shipped and staging, as 039's DO
+         * block reads them (every index, valid or not), and the column's
+         * width — the configured one where the catalog gives none. The walk
+         * index check reads the shipped half; it and the memory row both hand
+         * the pairs to plan039, so the two remedies name the same steps, a
+         * table that is not there marked so that no statement names it
+         * (SMD-2880).
+         */
+        const readPairs = async () => {
+          const rows = (await sql`
+            SELECT n.tbl, n.tbl || '_embedding_idx' AS name, to_regclass('public.' || n.tbl) IS NOT NULL AS present, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid,
+                   pg_get_indexdef(s.indexrelid) AS sdef, s.indisvalid AS svalid,
+                   (SELECT a.atttypmod FROM pg_attribute a WHERE a.attrelid = to_regclass('public.thoughts') AND a.attname = 'embedding' AND NOT a.attisdropped)::int AS dim
+              FROM (VALUES (1, 'thoughts'), (2, 'thought_chunks')) AS n(ord, tbl)
+              LEFT JOIN pg_index i ON i.indexrelid = to_regclass('public.' || n.tbl || '_embedding_idx')
+              LEFT JOIN pg_index s ON s.indexrelid = to_regclass('public.' || n.tbl || '_embedding_halfvec_idx')
+             ORDER BY n.ord`) as { tbl: string; name: string; present: boolean; def: string | null; valid: boolean | null; sdef: string | null; svalid: boolean | null; dim: number | null }[];
+          const width = Number(rows[0]?.dim);
+          return {
+            rows,
+            pairs: rows.map((r) => ({ table: r.tbl, exists: r.present, shipped: r.def === null ? null : { def: r.def, valid: r.valid === true }, staging: r.sdef === null ? null : { def: r.sdef, valid: r.svalid === true } })),
+            dim: width > 0 ? width : embDim,
+          };
+        };
+        // What the ledger says of 039, in apply039's states: recorded; a later
+        // file recorded without it (a row deleted or misspelt by hand, where a
+        // plain run would apply 039 alone after 074 — review pass 2); read
+        // and pending; no ledger; locked (its read timed out, as a migration
+        // holding it does — review pass 3); or unread, with whyUnread.
+        const ledger039 = (): { state: "recorded" | "hole" | "pending" | "none" | "locked" | "unread"; why?: string } =>
+          ledger.has("039") ? { state: "recorded" }
+          : [...ledger].some((n) => n > "039") ? { state: "hole" }
+          : ledgerRead ? { state: "pending" }
+          : !ledgerPresent ? { state: "none" }
+          : { state: ledgerUnread?.reason === "timeout" ? "locked" : "unread", why: whyUnread };
         let catalog: { mt: Overload[]; hy: { nargs: number; sig: string; src: string }[]; kwRows: number | null; kwSig: string | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
@@ -3450,19 +3491,24 @@ if (configFailed) {
          * setting) when the valid HNSW indexes over thoughts and
          * thought_chunks outgrow shared_buffers — found by access method, so
          * 039's halfvec swap and any later rename read alike; an INVALID
-         * index the planner ignores is not counted, though a valid staging
-         * index built before 039 adopts it is. `filter bitmap memory` is
+         * index the planner ignores is not counted. Nor is a staging index
+         * built by hand that 039 is about to adopt, in the state it adopts
+         * from — db/config.mjs's residentIndexes has the rule — and the row
+         * says what it left out (SMD-2871). `filter bitmap memory` is
          * information only, until SMD-1464 settles the plan mode the
          * expensive bitmap depends on. db/config.mjs's memorySizing holds the
          * arithmetic and memoryRows the wording.
          */
         try {
-          const { memorySizing, memoryRows } = await import("../db/config.mjs");
+          const { memorySizing, memoryRows, residentIndexes } = await import("../db/config.mjs");
+          const indexes = (await sql`
+            SELECT c.relname AS name, t.relname AS "table", pg_relation_size(i.indexrelid)::bigint AS bytes, pg_get_indexdef(i.indexrelid) AS def
+              FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid JOIN pg_am a ON a.oid = c.relam
+             WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks'))`)
+            .map((r: { name: string; table: string; bytes: string | number; def: string }) => ({ name: String(r.name), table: String(r.table), bytes: Number(r.bytes), def: String(r.def) }));
           const [m] = await sql`
             SELECT
-              (SELECT COALESCE(sum(pg_relation_size(i.indexrelid)), 0)
-                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
-                WHERE a.amname = 'hnsw' AND i.indisvalid AND i.indrelid IN (to_regclass('thoughts'), to_regclass('thought_chunks')))::bigint AS hnsw,
+              (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped)::int AS dim,
               COALESCE(pg_relation_size(to_regclass('thoughts'), 'main'), 0)::bigint AS heap,
               current_setting('block_size')::int AS block,
               pg_size_bytes(current_setting('shared_buffers'))::bigint AS shared,
@@ -3474,20 +3520,30 @@ if (configFailed) {
             add("vector index memory", "skip", why);
             add("filter bitmap memory", "skip", why);
           } else {
+            // Whether the body walks the vector column (before 039) or the
+            // cast decides which of a pair is walked; unread, nothing is left out.
+            const bodyCasts = catalog instanceof Error || !catalog.mt.length ? null : WALK_ORDERS_BY_CAST.test(catalog.mt[0].src);
             const s = memorySizing({
-              hnswBytes: Number(m.hnsw),
+              ...residentIndexes({ indexes, dim: Number(m.dim), bodyCasts }),
               sharedBuffersBytes: Number(m.shared),
               heapBytes: Number(m.heap),
               blockSize: Number(m.block),
               workMemBytes: Number(m.work),
             });
-            // The rows' wording is memoryRows', where test-schema holds every branch.
-            for (const row of memoryRows(s)) add(row.name, row.status, row.detail, row.fix);
+            // The rows' wording is memoryRows', where test-schema holds every
+            // branch. The pairs are read only for a staging index left out —
+            // the one state its remedy has steps — and a failed read costs the
+            // steps, never the size (review pass 2).
+            let plan: ReturnType<typeof plan039> | undefined;
+            if (s.resident.stagedCount > 0) {
+              try { plan = plan039(await readPairs()); } catch { /* the steps go; the size stays */ }
+            }
+            for (const row of memoryRows(s, { ledger: ledger039(), plan })) add(row.name, row.status, row.detail, row.fix);
           }
         } catch (e) {
           // Both rows, so each direct check still prints exactly one.
           const why = `could not verify: ${(e as Error).message}`;
-          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class and pg_am, and the shared_buffers and work_mem settings.";
+          const reads = "The reads behind these checks are pg_relation_size on thoughts, thought_chunks and their indexes, pg_index, pg_class, pg_am and pg_attribute, and the shared_buffers and work_mem settings.";
           add("vector index memory", "warn", why, reads);
           add("filter bitmap memory", "warn", why, reads);
         }
@@ -3631,12 +3687,9 @@ if (configFailed) {
           if (!mt.length) {
             add("walk index", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
           } else {
-            const bodyCasts = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/.test(mt[0].src);
+            const bodyCasts = WALK_ORDERS_BY_CAST.test(mt[0].src);
             const HALF = /USING hnsw \(\(\(embedding\)::(\w+\.)?halfvec\(\d+\)\) (\w+\.)?halfvec_cosine_ops\)$/;
-            const idx = (await sql`
-              SELECT n.name, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid
-              FROM (VALUES ('thoughts_embedding_idx'), ('thought_chunks_embedding_idx')) AS n(name)
-              LEFT JOIN pg_index i ON i.indexrelid = to_regclass('public.' || n.name)`) as { name: string; def: string | null; valid: boolean | null }[];
+            const { rows: idx, pairs, dim } = await readPairs();
             const problems: string[] = [];
             for (const r of idx) {
               if (r.def === null) problems.push(`${r.name} does not exist`);
@@ -3651,11 +3704,11 @@ if (configFailed) {
             } else {
               add("walk index", "warn",
                   `match_thoughts orders its walk by ${bodyCasts ? "embedding::halfvec" : "the vector column"} but ${problems.join("; ")}${ledgerHas039 ? " — although migration 039 is recorded as applied: an earlier definer re-applied by hand, or an index rebuilt by hand" : ""} — the planner has no index path for the walk, so every unfiltered and broad-filter search sequentially scans both tables (exact; 019's latency back)`,
-                  `Apply db/migrations/039_match_thoughts_halfvec_index.sql — \`bun db/migrate.ts\` where the ledger does not record it, \`--reapply\` or the file alone against the direct connection where it does — which swaps a vector index under the name for the halfvec one, builds where the name is free, rebuilds an INVALID one and restores the body's cast; then db/migrations/074_min_trust.sql, the last definer of match_thoughts — 039's file alone re-creates the 6-argument form beside 074's, and every 6-argument call is then "function is not unique" (SMD-1724); on a brain past a million rows build the staging indexes CONCURRENTLY first, as 039's header says.`);
+                  walkRemedy({ ledger: ledger039(), plan: plan039({ pairs, dim }), bodyCasts }));
             }
           }
         } catch (e) {
-          add("walk index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_proc, pg_index and pg_class.");
+          add("walk index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_proc, pg_index, pg_class and pg_attribute.");
         }
 
         /**
@@ -4479,8 +4532,9 @@ if (configFailed) {
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
         // board-sync's --loop and the extraction and consolidation followers
-        // stamp one after every pass, and the sleep scheduler at least every
-        // minute, its followers through it (SMD-1794). One older than three
+        // stamp one after every pass. The sleep scheduler's, at least every
+        // minute, its followers through it (SMD-1794), is its own row below
+        // (SMD-2678). One older than three
         // of its own intervals is a stopped worker — board-sync was down four
         // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
         // one whose last pass
@@ -4492,27 +4546,121 @@ if (configFailed) {
           if (w === null) {
             if ("workers" in facts.unread) add("workers", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat: rows.");
             else add("workers", "skip", "no ob1_config — migration 006 is not applied.");
-          } else if (w.heartbeats.length === 0) {
-            add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
+          } else if (w.heartbeats.every((h) => h.worker === "sleep")) {
+            add("workers", "skip", `no long-running worker has stamped a heartbeat on this brain${w.heartbeats.length ? " but the sleep scheduler (its own row, below)" : ""}${w.ignored ? ` (${w.ignored} heartbeat row(s) not of the shape, ignored)` : ""}.`);
           } else {
-            const wrong = w.heartbeats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
-            const detail = w.heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
+            const beats = w.heartbeats.filter((h) => h.worker !== "sleep");
+            const wrong = beats.filter((h) => h.stale || h.ended || h.outcome === "failed" || h.malformed?.alarm);
+            const detail = beats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + (w.ignored ? `; ${w.ignored} heartbeat row(s) not of the shape, ignored` : "");
             if (wrong.length === 0) {
               add("workers", "ok", detail);
             } else {
+              // The sleep scheduler running here refuses beside a claim follower:
+              // one stopped for it is retired, not started again (review pass 3).
+              const sleepRuns = w.heartbeats.some((b) => b.worker === "sleep" && !b.stale && !b.ended);
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
-                  : h.worker === "sleep"
-                    ? `sleep's last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).`
-                    : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
+                  : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
               });
               add("workers", "warn", detail, fixes.join(" "));
+            }
+          }
+        }
+
+        // The sleep scheduler (SMD-1794; the compose `sleep` profile, SMD-2678):
+        // its heartbeat, its current or last sleep (the row's `slept`), and
+        // what wakes it. A search wakes it only when the server logs searches
+        // (OB1_QUERY_LOG=on) and the scheduler's role can read the log — the
+        // owner, or a role granted the opt-in `sleep` group; the scheduler's own
+        // `reads` word says which, this connection's privilege standing in for
+        // a row from before it (review pass 1). Without either
+        // it sleeps on writes alone: through a search it would keep the model
+        // busy, so that warns. A scheduler that never ran says so and passes.
+        {
+          const w = facts.workers;
+          const h = w?.heartbeats.find((b) => b.worker === "sleep");
+          if (w === null) {
+            if ("workers" in facts.unread) add("sleep", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat:sleep row.");
+            else add("sleep", "skip", "no ob1_config — migration 006 is not applied.");
+          } else if (h === undefined) {
+            add("sleep", "skip", "the sleep scheduler has not run on this brain — `--profile sleep` runs it, as an alternative to `--profile workers` (deploy/README.md, SMD-2678).");
+          } else {
+            // CASE, not AND: Postgres does not promise to skip has_table_privilege
+            // when the table is absent, and on a brain before 034 it would throw.
+            let probe: { log: boolean; readable: boolean } | Error;
+            try {
+              [probe] = (await sql`
+                SELECT to_regclass('public.query_log') IS NOT NULL AS log,
+                       CASE WHEN to_regclass('public.query_log') IS NULL THEN false ELSE has_table_privilege('public.query_log', 'SELECT') END AS readable`) as { log: boolean; readable: boolean }[];
+            } catch (e) {
+              probe = e as Error;
+            }
+            if (probe instanceof Error) {
+              add("sleep", "warn", `${heartbeatState(h)}; could not verify what wakes it: ${probe.message}`, "The check reads to_regclass and has_table_privilege on query_log.");
+            } else {
+              // Whether the scheduler's role reads the log is its own word, on its
+              // row (`reads`, as its start found): preflight's role may be another
+              // (an owner's preflight beside a --grant scheduler, or the reverse).
+              // A row from before it falls back to this connection's privilege.
+              const own = h.reads !== undefined;
+              const log = own ? h.reads !== "missing" : probe.log;
+              const readable = own ? h.reads === "yes" : probe.readable;
+              const { queryLogEnabled } = await import("../db/config.mjs");
+              const logged = queryLogEnabled(env as unknown as Record<string, string | undefined>);
+              // Its start found no log, but 034 is applied since: only a restart
+              // lets it read one (review pass 2).
+              const logSince = own && h.reads === "missing" && probe.log;
+              const wakes = logSince
+                ? "writes alone wake it — its start found no query log, which is applied since"
+                : !log
+                ? "writes alone wake it (no query log: migration 034 is not applied)"
+                : !logged
+                  ? "writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search"
+                  : !readable
+                    ? `writes alone wake it — ${own ? "its role cannot read query_log, as it found at its start" : "this role cannot read query_log (the scheduler has not said whether its own can)"}`
+                    : "a search or a write wakes it";
+              const wakeFix = logSince
+                ? `Restart it so its start finds the query log, applied since it began — ${restartCommand("sleep", null)}.`
+                : !log
+                ? null
+                : !logged
+                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment) and recreate it — podman compose -f deploy/compose.yaml up -d server api — so a search wakes the scheduler; until then it can run its passes through a session of searches."
+                  : !readable
+                    ? "Grant the scheduler's role the opt-in sleep group, `bun db/migrate.ts --grant <role> --groups <its groups>,sleep` (db/README.md, \"Grants for a capturing role\"), or run it as the owner, then restart it (its start reads the privilege once) — until then a search does not wake it."
+                    : null;
+              const s = h.slept;
+              const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
+              const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
+              const sleepWords = h.stale || h.ended
+                ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
+                : h.running
+                  ? `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
+                  : s && s.to
+                    ? `awake, its passes waiting for the brain to go quiet — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}`
+                    : "awake, its passes waiting for the brain to go quiet — no sleep yet";
+              const down = h.stale || h.ended;
+              // A scheduler not running wakes for nothing: what would wake it is said as such.
+              const detail = `${heartbeatState(h)}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
+              const fixes: string[] = [];
+              // Followers running here keep a scheduler down: it refuses beside
+              // them, so "start it again" alone would only refuse again (review pass 3).
+              const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
+              if (down && followers.length) {
+                fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (down) {
+                fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (h.outcome === "failed") {
+                fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
+              }
+              if (wakeFix) fixes.push(wakeFix);
+              add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
             }
           }
         }

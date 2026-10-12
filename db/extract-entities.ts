@@ -82,7 +82,11 @@
  * and waited out, checking after 5 s and twice as long each time up to 5 min
  * (worker-bootstrap.ts, waitOut), and polling resumes when it answers. A
  * thought in hand is recorded nothing; its lease is returned when the
- * database is back. A run without --follow still exits 1 on it.
+ * database is back. Its start waits the same way, every statement up to the
+ * first claim but an operator's --retry-* — the worker key's lookup too,
+ * which would otherwise go on unattributed — since the sleep scheduler starts
+ * a follower at every sleep (SMD-2752). A run without --follow still exits 1
+ * on it.
  *
  * It outlasts the provider going away too. Three things are outages:
  *   - a rate limit, a server error or a lost connection still failing after
@@ -153,7 +157,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -423,6 +427,25 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     err(STOPPED_EARLY);
     return true;
   };
+  /**
+   * A statement of the start, before the first claim: a follower's outlasts
+   * the database going away (worker-bootstrap.ts's throughOutage), since the
+   * sleep scheduler starts a pass at every sleep and meets a restarting
+   * database there, where a follower meets it once (SMD-2752). Null when the
+   * caller's signal ends the wait. The CLI has no handlers yet: a signal
+   * ends the process outside a container, and inside one bun as PID 1
+   * ignores it until compose's grace runs out (SMD-2666, the provider's
+   * start wait's too). A run without --follow, and --status or --dry-run
+   * beside it, still rejects on the error (review pass 3).
+   */
+  const startSaid = { down: false };
+  const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
+    FOLLOW && !STATUS_ONLY && !DRY_RUN ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
+  /** An atStart wait the caller's signal ended (its null): a stop before the pass began. */
+  const stoppedWaiting = (): number => {
+    stoppedEarly();
+    return 130;
+  };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   const jevCfg = DECIDE ? resolveJevConfig(env as unknown as JevEnv) : null;
@@ -458,10 +481,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   // ── The database's side ─────────────────────────────────────────────────────
 
-  const [{ tables }] = await sql`
+  const tables = await atStart(async () => Number((await sql`
     SELECT count(*)::int AS tables FROM pg_class
-    WHERE relname IN ('thought_work_claims', 'ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`;
-  if (Number(tables) < 4) {
+    WHERE relname IN ('thought_work_claims', 'ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`)[0].tables));
+  if (tables === null) return stoppedWaiting();
+  if (tables < 4) {
     err("\n  The entity tables or the lease table are missing. Apply migrations 015 and 016 first:\n    cd db && bun migrate.ts --url …");
     return 2;
   }
@@ -567,11 +591,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   if (!STATUS_ONLY && !DRY_RUN) {
     if (stoppedEarly()) return 130;
     // Without a key the URL is not read; with one, run() refused a missing URL.
-    const id = await workerIdentity(opts.url ?? "", env, {
+    // A follower's lookup waits a database outage out, rather than writing its rows unattributed.
+    const id = await atStart(() => workerIdentity(opts.url ?? "", env, {
       noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
       write: out,
       warn: err,
-    });
+      outage: FOLLOW ? lookupOutage : undefined,
+    }));
+    if (id === null) return stoppedWaiting();
     if (!id.ok) {
       err(id.message);
       return 2;
@@ -697,7 +724,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
-  const recordedKey: string | undefined = ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key;
+  const recorded = await atStart(async () => ({ key: ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key }));
+  if (recorded === null) return stoppedWaiting();
+  const recordedKey: string | undefined = recorded.key;
   if (recordedKey && recordedKey !== JOB) {
     out(`  ob1_config.entity_extraction_key is ${recordedKey}; this run uses ${JOB} — a different model or prompt version`);
     if (!SWITCH_KEY && !STATUS_ONLY && !DRY_RUN) {
@@ -760,9 +789,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
   if (stoppedEarly()) return 130;
   if (recordedKey !== JOB) {
-    await sql`
+    const set = await atStart(() => sql`
       INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`);
+    if (set === null) return stoppedWaiting();
     out(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
   }
 
@@ -770,6 +800,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let returned = 0;
   if (stoppedEarly()) return 130;
   if (RETRY_FAILED) {
+    // An operator's flag, never the scheduler's: not under the start's wait,
+    // since a count committed and then lost with its connection would be
+    // retried into a false 0 (review pass 1).
     const [{ n }] = await sql`
       WITH retried AS (
         UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0

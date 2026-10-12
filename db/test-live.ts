@@ -55,6 +55,9 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, 
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
+import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
+import { linearClient } from "./linear-api.ts";
+import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -10312,6 +10315,24 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
     await st.end("stopped");
     const two = await row(st.key);
     assert(two?.outcome === "stopped" && two.ended === true && two.malformed?.bad === 12 && two.job === "extract:test@p2", `a stop is the worker's end, the last block stays, and the job is in the value (${JSON.stringify(two)})`);
+    // Once ended, the row takes no stamp but another end: a pass finishing
+    // after the sleep scheduler's hard stop stamped its word over the end,
+    // inside the scheduler's `during`, and the row read ended and running at
+    // once (SMD-2752 review pass 1).
+    const ending = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:ending@p3", intervalS: 1, minEveryS: 1 });
+    let afterEnd: { running?: boolean; outcome?: string; ended?: boolean } | null = null;
+    await ending.during((async () => {
+      await ending.end("stopped");
+      await ending.alive("ok");
+      await ending.stamp("failed");
+      // Past the 1 s timer's second tick, so a tick that wrote would be read (review pass 2).
+      await Bun.sleep(2300);
+      afterEnd = await row(ending.key);
+    })());
+    await ending.end("failed");
+    const reEnded = await row(ending.key);
+    assert(afterEnd !== null && (afterEnd as { running: boolean }).running === false && (afterEnd as { outcome: string }).outcome === "stopped" && reEnded?.outcome === "failed" && reEnded.ended === true,
+      `once ended, a stamp, an alive and the running timer write nothing, and a second end still does (${JSON.stringify(afterEnd)} → ${JSON.stringify(reEnded)})`);
     // Each stamp writes the whole value: a restarted follower (a new stamper,
     // no block of its own) clears the row's block until it judges one, and an
     // old value of any shape, JSON or not, is replaced.
@@ -10465,6 +10486,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   let unavailable = false;
   /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
   let badRequest = false;
+  /** Probes only: held this long before the answer — a pass waiting at its start (SMD-2752). */
+  let probeHold = 0;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -10472,7 +10495,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       if (missing) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (probeHold) await Bun.sleep(probeHold);
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const judging = /<thought_a>/.test(prompt);
       if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
@@ -10507,11 +10533,37 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
-    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number } : null;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: string } : null;
   };
   const lines: string[] = [];
   const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
     runSleep({ url: URL_!, env, quiet: 1, poll: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
+  /**
+   * A run's exit code, or -1 when it has not returned in 20 s — then stopped
+   * and awaited, so a regression that never returns fails its assertion
+   * rather than hanging the suite (the no-refusal mutant hung it for hours,
+   * SMD-2678 review pass 1).
+   */
+  const bounded = async (run: Promise<number>, ac: AbortController): Promise<number> => {
+    const code = await Promise.race([run, Bun.sleep(20_000).then(() => -1)]);
+    if (code === -1) { ac.abort(); await run; }
+    return code;
+  };
+  /**
+   * The suite's client with each statement handed to `handle` first: its text
+   * (the template's strings joined with `$`; "" for a fragment of another
+   * shape) and `run`, which issues it. What `handle` returns is the
+   * statement's result — throw for a database not answering, delay, or run.
+   */
+  const intercept = (handle: (text: string, run: () => unknown) => unknown): SQL =>
+    new Proxy(sql, {
+      apply(t, self, args) {
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join("$") : "";
+        return handle(text, () => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
+      },
+    }) as unknown as SQL;
+  /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
+  const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
@@ -10534,6 +10586,99 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
     assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
       `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+
+    // A claim follower stamping fresh outside the scheduler does not yield to a
+    // live call: a run refuses (2) rather than sleep beside it, and the dry run
+    // names it and exits 0; an ended follower's row is no follower (SMD-2678).
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const besideDry = await sleepRun({ dryRun: true });
+    const besideDryText = lines.join("\n");
+    lines.length = 0;
+    // A scheduler that slept before: its last sleep is kept by the refusal's
+    // stamp, which writes the whole value (review pass 4).
+    const priorSlept = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", slept: priorSlept })})`;
+    // Bounded: a run that does not refuse sleeps under --follow for ever.
+    const acBeside = new AbortController();
+    const beside = await bounded(sleepRun({ follow: true, signal: acBeside.signal }), acBeside);
+    const besideText = lines.join("\n");
+    // Refused under --follow, the row says so — ended on a failure, with what
+    // it read — so preflight names the followers keeping it down (review pass 3).
+    const refusedBeat = await beat();
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    await sql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "stopped", ended: true })} WHERE key = 'heartbeat:extract:outside@p2'`;
+    lines.length = 0;
+    const endedDry = await sleepRun({ dryRun: true });
+    const endedDryText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    // A row under the prefix whose key is not pass-stamp's alphabet — one any
+    // worker-group role could plant, a quote in it — is no follower, and never
+    // reaches the DELETE the refusal prints for pasting (review pass 1).
+    const planted = "heartbeat:extract:x'); DELETE FROM thoughts; --";
+    await sql`INSERT INTO ob1_config (key, value) VALUES (${planted}, ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const plantedDry = await sleepRun({ dryRun: true });
+    const plantedText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key = ${planted}`;
+    assert(plantedDry === 0 && !/outside sleep/.test(plantedText) && !plantedText.includes("DELETE FROM thoughts"),
+      `a planted key not of the heartbeat alphabet is not named, nor pasted into a DELETE (exit ${plantedDry})`);
+    // Twenty stale rows that sort first by key do not hide a fresh follower
+    // past the read's bound of twenty: newest first (review pass 2).
+    for (let i = 0; i < 20; i++) {
+      await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:extract:aaa${i}@p2`}, ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, now() - interval '1 hour')`;
+    }
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:zzz@p2', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })})`;
+    lines.length = 0;
+    const hiddenDry = await sleepRun({ dryRun: true });
+    const hiddenText = lines.join("\n");
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:aaa%' OR key = 'heartbeat:extract:zzz@p2'`;
+    assert(hiddenDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:zzz@p2 —/.test(hiddenText),
+      `a fresh follower behind twenty stale rows that sort first is still named (exit ${hiddenDry})`);
+    // A signal aborted during a start read that waits on no outage is a stop
+    // before the run began, as one before run() is: 130 and no row (review pass 2).
+    const acEarly = new AbortController();
+    lines.length = 0;
+    const earlyCode = await bounded(sleepRun({ sql: around(() => acEarly.abort()), follow: true, signal: acEarly.signal }), acEarly);
+    assert(earlyCode === 130 && lines.some((l) => /stopped before the pass began/.test(l)) && (await beat()) === null,
+      `a stop during a start read ends it with 130 and stamps no row (exit ${earlyCode})`);
+    // …and wins over a follower those reads found: 130, no row, no refusal (review pass 4).
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    const acEarly2 = new AbortController();
+    lines.length = 0;
+    const early2Code = await bounded(sleepRun({ sql: around(() => acEarly2.abort()), follow: true, signal: acEarly2.signal }), acEarly2);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
+      `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
+    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
+        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
+        && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
+        && endedDry === 0 && !/outside sleep/.test(endedDryText),
+      `a fresh follower outside refuses a run (2, no sleep, its row ended failed, its last sleep kept), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
+
+    // The start's reads wait out a database not answering yet (57P03, the
+    // server starting up), as the sleep's own reads do: the compose service
+    // starts beside a Postgres that may be restarting (SMD-2678). A stop
+    // during that wait ends the run as a stop before it began (130).
+    const startingUp = () => Object.assign(new Error("the database system is starting up"), { name: "PostgresError", errno: "57P03" });
+    /** The suite's client, whose first `n` statements fail as a database starting up. */
+    const failing = (n: number) => {
+      let left = n;
+      return around(() => { if (left-- > 0) throw startingUp(); });
+    };
+    lines.length = 0;
+    const waited = await sleepRun({ sql: failing(1), dryRun: true });
+    const waitedText = lines.join("\n");
+    assert(waited === 0 && /the database is not answering \(the database system is starting up\) — waiting for it/.test(waitedText) && /the database answers again/.test(waitedText) && /a sleep would begin/.test(waitedText),
+      `a database down at the start is waited out, said once, and the run goes on (exit ${waited}: ${lines.filter((l) => /database/.test(l)).join(" | ").trim()})`);
+    lines.length = 0;
+    const acDown = new AbortController();
+    const downRun = sleepRun({ sql: failing(Number.MAX_SAFE_INTEGER), follow: true, signal: acDown.signal });
+    await pollUntil(async () => lines.some((l) => /not answering/.test(l)), 10_000);
+    acDown.abort();
+    const downCode = await Promise.race([downRun, Bun.sleep(15_000).then(() => -1)]);
+    assert(downCode === 130 && lines.some((l) => /not answering/.test(l)) && (await beat()) === null,
+      `a stop while the start waits on the database ends it with 130, no row stamped (exit ${downCode})`);
 
     // One sleep: extraction alone, drained, then consolidation, then done.
     lines.length = 0;
@@ -10623,6 +10768,13 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const ownRows = Number((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key LIKE 'heartbeat:extract%' OR key LIKE 'heartbeat:consolidate%'`)[0].c);
     assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
       `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
+    // The row carries its last sleep (SMD-2678): when it began and when it
+    // ended, the database's instants, the end past the start; and its word on
+    // reading the query log, the owner's here (review pass 1).
+    const mark = endBeat?.slept;
+    const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat?.reads === "yes",
+      `the heartbeat carries the last sleep's start and end, and that it reads the log (${JSON.stringify(mark)}; reads ${endBeat?.reads})`);
 
     // A capture whose transaction began before the sleep and commits after it
     // is dated before the sleep: it still wakes it.
@@ -10739,9 +10891,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
     // A sleep that ran resets the schedule: the next refusal waits 5 s again.
-    missing = true;
+    // The model goes only once the capture has woken the recovered sleep, so
+    // that sleep ends as one that ran: flipped before, consolidation joining
+    // it could meet the 404 at its own start, a refusal retried on the same
+    // schedule — a race this lost under load (SMD-2678's tidy). The flip lands
+    // within the 1 s quiet before the next sleep (pollUntil reads every 250 ms).
     const at2 = lines.length;
     await capture("A note that wakes it before the model goes again.", "op-sleep", 0, 5);
+    await pollUntil(async () => {
+      const woke = lines.slice(at2).some((l) => /awake: a live write/.test(l));
+      if (woke) missing = true;
+      return woke;
+    }, 20_000);
     const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
     const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
     missing = false;
@@ -10802,6 +10963,213 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       slow = 0;
       cli.kill("SIGKILL");
       await cli.exited;
+    }
+
+    // A follower that appears after the start — both profiles started at once,
+    // the follower stamping only past its start probe — ends the run with 2,
+    // as the start's refusal does: found by an awake poll, and by an asleep one
+    // with the passes hard-stopped first, the lease returned (review pass 1).
+    const outsideRow = () => sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
+                                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    try {
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const acAwake = new AbortController();
+      const awakeRun = sleepRun({ follow: true, quiet: 300, minStampEveryS: 1, signal: acAwake.signal });
+      await pollUntil(async () => (await beat()) !== null, 10_000);
+      await outsideRow();
+      const awakeCode = await bounded(awakeRun, acAwake);
+      const awakeBeat = await beat();
+      assert(awakeCode === 2 && lines.some((l) => /refused: followers are running outside sleep.*heartbeat:consolidate:late@p4/.test(l)) && !lines.some((l) => /asleep:/.test(l)) && awakeBeat?.ended === true && awakeBeat.outcome === "failed",
+        `a follower stamping after the start ends an awake --follow with 2, never having slept, its row ended failed (exit ${awakeCode}; ${JSON.stringify(awakeBeat)})`);
+
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      await capture("A note the follower finds the brain asleep over.", "sync-sleep", 0, 8);
+      slowExtract = 3000;
+      lines.length = 0;
+      const acAsleep = new AbortController();
+      const asleepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acAsleep.signal });
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 20_000);
+      await outsideRow();
+      const asleepCode = await bounded(asleepRun, acAsleep);
+      assert(asleepCode === 2 && lines.some((l) => /refused: followers are running outside sleep/.test(l)) && !(await claims(EX)).claimed,
+        `…and one found asleep stops the passes, returns the lease and ends with 2 (exit ${asleepCode}; claimed ${(await claims(EX)).claimed ?? 0})`);
+    } finally {
+      slowExtract = 0;
+      await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
+    }
+
+    // A pass's start outlasts the database going away (SMD-2752): the
+    // scheduler starts its passes at every sleep, so a restart there must not
+    // end it. Each engine under --follow, on a client whose statements of the
+    // start fail once each as a database starting up — extract's tables
+    // check and its extraction key's read and write, consolidate's tables
+    // check, 079's check and the relations grant read — waits each out and
+    // reaches its pass, nothing recorded failed. The worker key's lookup is
+    // test-worker-bootstrap.ts's. Both at once: each wait is 5 s.
+    {
+      /** The suite's client, whose statements matching each pattern fail once, in any order — or every time — as a database starting up. */
+      const downOnceAt = (patterns: RegExp[], always = false): { sql: SQL; hit: string[] } => {
+        const left = [...patterns];
+        const hit: string[] = [];
+        const client = intercept((text, run) => {
+          const i = left.findIndex((p) => p.test(text));
+          if (i < 0) return run();
+          hit.push(left[i].source);
+          if (!always) left.splice(i, 1);
+          throw startingUp();
+        });
+        return { sql: client, hit };
+      };
+      /** A run's code, or what it threw, or "hung" past `ms`. */
+      const settled = (run: Promise<number>, ms: number) => Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(ms).then(() => "hung")]);
+      const exDown = downOnceAt([/relname IN \('thought_work_claims', 'ob1_entities'/, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/]);
+      const coDown = downOnceAt([/relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, /ob1:linked-tickets-not-paired/, /to_regprocedure\('record_thought_relation/]);
+      // The key unset, so the run writes it: the write is a start statement too.
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      const failedBefore = { ex: (await claims(EX)).failed ?? 0, co: (await claims(CO)).failed ?? 0 };
+      const exLines: string[] = [];
+      const coLines: string[] = [];
+      const acEx = new AbortController();
+      const acCo = new AbortController();
+      let exBegan = false;
+      let coBegan = false;
+      // Stopped as its pass begins: the start is what is under test.
+      const exRun = runExtract({ sql: exDown.sql, env, workers: 1, follow: 1, signal: acEx.signal, onPass: () => { exBegan = true; acEx.abort(); }, writer: { out: (l) => exLines.push(l), err: (l) => exLines.push(l) } });
+      const coRun = runConsolidate({ sql: coDown.sql, env, workers: 1, follow: 1, signal: acCo.signal, onPass: () => { coBegan = true; acCo.abort(); }, writer: { out: (l) => coLines.push(l), err: (l) => coLines.push(l) } });
+      const [exCode, coCode] = await Promise.all([settled(exRun, 45_000).finally(() => acEx.abort()), settled(coRun, 45_000).finally(() => acCo.abort())]);
+      const waits = (ls: string[]) => ls.filter((l) => /the database is not answering \(the database system is starting up\) — waiting for it/.test(l)).length;
+      const keyNow = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value;
+      assert(exCode === 0 && exBegan && exDown.hit.length === 3 && waits(exLines) === 3 && keyNow === EX && ((await claims(EX)).failed ?? 0) === failedBefore.ex,
+        `extract's start waits out the database at its tables check and its key's read and write, then reaches its pass, nothing failed (exit ${exCode}; ${exDown.hit.length} of 3 hit, ${waits(exLines)} wait(s); key ${keyNow})`);
+      assert(coCode === 0 && coBegan && coDown.hit.length === 3 && waits(coLines) === 3 && ((await claims(CO)).failed ?? 0) === failedBefore.co,
+        `consolidate's start waits out the database at its tables check, 079's check and the relations grant read, then reaches its pass, nothing failed (exit ${coCode}; ${coDown.hit.length} of 3 hit, ${waits(coLines)} wait(s))`);
+
+      // The worker key's lookup, on a connection of its own to `url`: here a
+      // closed port, the database not answering it. Each follower waits,
+      // rather than warning and writing its rows unattributed; a stop during
+      // the wait ends it before its pass (130).
+      const keyed = { ...env, OB1_WORKER_KEY: "sleep-lookup-raw", MCP_ACCESS_KEYS: `sleep-lookup:capture:${hashKey("sleep-lookup-raw")}` };
+      const lookup = async (engine: typeof runExtract | typeof runConsolidate) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        let began = false;
+        const run = engine({ sql, url: "postgres://unused@127.0.0.1:1/none", env: keyed, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; ac.abort(); }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)) || began, 10_000);
+        ac.abort();
+        const code = await settled(run, 15_000);
+        return { code, began, waited: ls.some((l) => /the database is not answering .* — waiting for it/.test(l)), warned: ls.some((l) => /could not resolve the worker's identity/.test(l)) };
+      };
+      const [exLookup, coLookup] = await Promise.all([lookup(runExtract), lookup(runConsolidate)]);
+      assert([exLookup, coLookup].every((r) => r.code === 130 && r.waited && !r.warned && !r.began),
+        `a follower whose worker key's lookup finds the database not answering waits, unattributed rows never written, and a stop then ends it with 130 (extract ${JSON.stringify(exLookup)}, consolidate ${JSON.stringify(coLookup)})`);
+
+      // A stop during a start's wait is a stop before the pass began (130),
+      // at each statement — not the start's verdict on one that never
+      // answered ("the tables are missing", 2), a TypeError on its null, nor
+      // a pass run on (review passes 1 and 2).
+      const stopInWait = async (engine: typeof runExtract | typeof runConsolidate, at: RegExp) => {
+        const ls: string[] = [];
+        const ac = new AbortController();
+        let began = false;
+        const run = engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, onPass: () => { began = true; }, writer: { out: (l) => ls.push(l), err: (l) => ls.push(l) } });
+        await pollUntil(async () => ls.some((l) => /the database is not answering/.test(l)), 10_000);
+        ac.abort();
+        const code = await settled(run, 15_000);
+        // Nor says it wrote extraction's key when the write never answered.
+        return { at: at.source.slice(0, 24), code, began, early: ls.some((l) => /stopped before the pass began/.test(l)), missing: ls.some((l) => /are missing/.test(l)) || ls.some((l) => /entity_extraction_key = .* now enqueue/.test(l)) };
+      };
+      // The key unset, so extraction's start writes it.
+      await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+      const stoppedIn = await Promise.all([
+        stopInWait(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/),
+        stopInWait(runExtract, /SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'/),
+        stopInWait(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/),
+        stopInWait(runConsolidate, /ob1:linked-tickets-not-paired/),
+        stopInWait(runConsolidate, /to_regprocedure\('record_thought_relation/),
+      ]);
+      // A read beside --follow — --status, --dry-run — is no follower's start:
+      // the outage still rejects it at once rather than waiting (review pass 3).
+      // Stopped once the race settles, so a regression that waits does not go on retrying through the suite (review pass 4).
+      const readBeside = (engine: typeof runExtract | typeof runConsolidate, at: RegExp, o: { status?: boolean; dryRun?: boolean }) => {
+        const ac = new AbortController();
+        return Promise.race([
+          engine({ sql: downOnceAt([at], true).sql, env, workers: 1, follow: 1, signal: ac.signal, ...o, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error) => ((e as { errno?: string }).errno === "57P03" ? "rejected" : `threw: ${e.message}`)),
+          Bun.sleep(4_000).then(() => "waited"),
+        ]).finally(() => ac.abort());
+      };
+      const besides = await Promise.all([
+        readBeside(runExtract, /relname IN \('thought_work_claims', 'ob1_entities'/, { status: true }),
+        readBeside(runConsolidate, /relname IN \('thought_work_claims', 'thought_entities', 'supersession_proposals'\)/, { dryRun: true }),
+      ]);
+      assert(besides.every((b) => b === "rejected"), `--status and --dry-run beside --follow reject on a database down, not wait (${besides.join(", ")})`);
+      const stoppedAtWrite = await stopInWait(runExtract, /INSERT INTO ob1_config \(key, value\) VALUES \('entity_extraction_key'/);
+      stoppedIn.push(stoppedAtWrite);
+      // The key as the suite had it, whichever case runs next (review pass 4).
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${EX}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      assert(stoppedIn.every((r) => r.code === 130 && r.early && !r.began && !r.missing),
+        `a stop while a start statement waits on the database ends the pass with 130, before it began, at each of the six (${JSON.stringify(stoppedIn)})`);
+    }
+
+    // A stop that lands while the scheduler reads, with a pass waiting at its
+    // start (its probe held): the pass settles at once (130) and the read then
+    // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
+    // itself", 130 and the row failed (review pass 1).
+    try {
+      probeHold = 8000;
+      lines.length = 0;
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      const acRace = new AbortController();
+      let landed = false;
+      /** The scheduler's client: its first wake read once asleep aborts the run's signal, then answers 300 ms later. */
+      const stopMidRead = intercept((text, run) => {
+        if (landed || !/FROM thought_audit WHERE created_at > /.test(text) || !lines.some((l) => /asleep:/.test(l))) return run();
+        landed = true;
+        acRace.abort();
+        return Bun.sleep(300).then(run);
+      });
+      const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal }), acRace);
+      const raceBeat = await beat();
+      assert(landed && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
+        `a stop landing mid-read with a pass waiting at its start is a stop: 0, the row ended stopped (exit ${raceCode}; landed ${landed}; ${JSON.stringify(raceBeat)}; ${lines.filter((l) => /ended by itself|stopping/.test(l)).join(" | ").trim()})`);
+    } finally {
+      probeHold = 0;
+    }
+
+    // …and a soft stop that lands in the poll that finds a follower outside
+    // keeps its own: the thought in hand finished, not abandoned, and 0 with
+    // the row ended stopped (review pass 2).
+    try {
+      const inHandNote = await capture("A note the soft stop lets finish.", "sync-sleep", 0, 9);
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      slowExtract = 3000;
+      lines.length = 0;
+      const acSoft = new AbortController();
+      let armed = false;
+      let fired = false;
+      /** The scheduler's client: once armed, its follower read stops the run, then a follower appears, then the read runs. */
+      const stopThenFollower = intercept((text, run) => {
+        if (!armed || fired || !/WHERE key ~ /.test(text)) return run();
+        fired = true;
+        return (async () => {
+          acSoft.abort();
+          await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:consolidate:late@p4', ${JSON.stringify({ v: 1, job: "consolidate:late@p4", every_s: 60, running: false, outcome: "ok" })})
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+          return await run();
+        })();
+      });
+      const softRun = sleepRun({ sql: stopThenFollower, follow: true, minStampEveryS: 1, signal: acSoft.signal });
+      await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
+      const [inHandNow] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+      armed = true;
+      const softCode = await bounded(softRun, acSoft);
+      const [held] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ${inHandNow?.id ?? inHandNote}::uuid`;
+      const softBeat = await beat();
+      assert(fired && softCode === 0 && held?.status === "succeeded" && softBeat?.ended === true && softBeat.outcome === "stopped" && !lines.some((l) => /refused: followers/.test(l)),
+        `a soft stop in the poll that finds a follower outside lets the thought in hand finish: 0, the row ended stopped (exit ${softCode}; fired ${fired}; ${held?.status}; ${JSON.stringify(softBeat)})`);
+    } finally {
+      slowExtract = 0;
+      await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:late@p4'`;
     }
   } finally {
     stub.stop(true);
@@ -10918,6 +11286,367 @@ console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over
       `${pages} heap pages need ${ruleKb.toFixed(0)} kB by the rule: 8 kB under it the bitmap is lossy (${under}), 8 kB over it exact (${over})`);
   } finally {
     await sql.close();
+  }
+}
+
+console.log("\n[41] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
+{
+  const bsql = new SQL({ url: URL_!, max: 2 });
+  // The stub: every operation logged by name; a ticket's comments kept so a
+  // marker posted is read back; failNext answers one comment with an error.
+  type Op = { name: string; vars: Record<string, unknown> };
+  const ops: Op[] = [];
+  const comments = new Map<string, string[]>();
+  let failNext = false, unsuccessfulNext = false, made = 0, delayMs = 0, hangMs = 0;
+  // The next ticket read's answer, when not the ticket: another error, an empty answer, or Linear's no-such-ticket as an HTTP 400.
+  let ticketNext: null | "error" | "empty" | "http400" | "partial" = null;
+  // Linear keeps a comment as rich text and hands back markdown derived from
+  // it: an identifier comes back autolinked, a hyphen may come back escaped.
+  // The stub stores what it is sent that way, so the marker is read as Linear
+  // would return it (review pass 1).
+  const asLinearReturnsIt = (body: string) => body
+    .replace(/\b(ZQ-\d+)\b/g, (_, id: string) => `<issue id="u-${id}" href="https://linear.app/zq/issue/${id}/x">${id}</issue>`)
+    .replace(/ob1-finding/g, "ob1\\-finding");
+  const stub = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const { query, variables } = (await req.json()) as { query: string; variables: Record<string, unknown> };
+      const name = /^\s*(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "anonymous";
+      ops.push({ name, vars: variables });
+      if (name === "BoardFindingTicket") {
+        const id = String(variables.id);
+        const mode = ticketNext; ticketNext = null;
+        if (mode === "error") return Response.json({ data: { issue: null }, errors: [{ message: "Field 'comments' not found on type 'Issue'", path: ["issue", "comments"] }] });
+        if (mode === "empty") return Response.json({});
+        if (mode === "partial") return Response.json({ data: { issue: { id: `uuid-${id}`, identifier: id, comments: { nodes: [] } } }, errors: [{ message: "comments could not be read", path: ["issue", "comments"] }] });
+        if (mode === "http400") return Response.json({ errors: [{ message: "Entity not found: Issue", path: ["issue"], extensions: { code: "INVALID_INPUT", statusCode: 400 } }], data: null }, { status: 400 });
+        if (!/^ZQ-\d+$/.test(id)) return Response.json({ data: { issue: null }, errors: [{ message: "Entity not found" }] });
+        return Response.json({ data: { issue: { id: `uuid-${id}`, identifier: id, comments: { nodes: (comments.get(id) ?? []).map((body) => ({ body })) } } } });
+      }
+      if (name === "BoardFindingComment") {
+        if (hangMs) { const ms = hangMs; hangMs = 0; await Bun.sleep(ms); }
+        if (delayMs) await Bun.sleep(delayMs);
+        if (failNext) { failNext = false; return Response.json({ data: null, errors: [{ message: "rate limited" }] }); }
+        if (unsuccessfulNext) { unsuccessfulNext = false; return Response.json({ data: { commentCreate: { success: false, comment: null } } }); }
+        const on = String(variables.issueId).replace(/^uuid-/, "");
+        comments.set(on, [...(comments.get(on) ?? []), asLinearReturnsIt(String(variables.body))]);
+        return Response.json({ data: { commentCreate: { success: true, comment: { id: `c-${++made}` } } } });
+      }
+      return Response.json({ data: null, errors: [{ message: `the stub has no ${name}` }] });
+    },
+  });
+  const gql = linearClient("lin_api_test", fetch, { url: `http://127.0.0.1:${stub.port}/graphql`, timeoutMs: 5000 });
+  const allow = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "type:board-finding" }));
+  const deny = findingGate(resolveEgressPolicy({}));
+  const lines: string[] = [];
+  // Every run's report, held to one outcome per pair at the end.
+  const reports: FindingsReport[] = [];
+  const run = (o: { cap?: number; dryRun?: boolean; gate?: typeof allow; stopped?: () => boolean; db?: SQL; board?: ReadonlySet<string> } = {}): Promise<FindingsReport> =>
+    postFindings({ board: o.board, sql: o.db ?? bsql, gql: o.dryRun ? null : gql, cap: o.cap ?? 10, dryRun: o.dryRun ?? false, gate: o.gate ?? allow, stopped: o.stopped, showRefused: true, log: (l) => lines.push(l), warn: (l) => lines.push(l) }).then((r) => { reports.push(r); return r; });
+  const opNames = () => [...new Set(ops.map((o) => o.name))].sort().join(",");
+  const posts = () => ops.filter((o) => o.name === "BoardFindingComment");
+  const rowsOf = async (a: string, b: string) => (await bsql`SELECT word, posted_on, origin, comment_id, finding_ids::text[] AS ids FROM board_findings_posted WHERE ticket_a = ${a} AND ticket_b = ${b} ORDER BY word`) as { word: string; posted_on: string; origin: string; comment_id: string | null; ids: string[] }[];
+
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
+  const ticket = (n: number, what: string) => row(`ZQ-${n} — ${what} (board-findings fixture)`, { source: "linear", issue: `ZQ-${n}` });
+  const propose = async (older: { id: string; fp: string }, newer: { id: string; fp: string }, verdict = "newer_supersedes_older", confidence = 0.9, reason = "the newer ticket's plan replaces the older's") =>
+    String(((await bsql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, ${verdict}, ${confidence}::numeric, ${reason}, 0.9::float, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: unknown }).r);
+  const relate = async (newer: { id: string; fp: string }, older: { id: string; fp: string }, relation: string | null, confidence = 0.8) =>
+    ((await bsql`SELECT record_thought_relation(${newer.id}::uuid, ${older.id}::uuid, ${relation}, ${confidence}::numeric, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: { action: string; id: string | null } }).r;
+  const link = (holder: { id: string }, relation: string, target: string) =>
+    bsql`SELECT record_source_links(${holder.id}::uuid, 'linear', ${JSON.stringify([{ relation, target }])}::text::jsonb)`;
+
+  try {
+    // Whatever earlier sections left between two tickets is recorded found,
+    // so this section's runs see its own fixtures alone.
+    for (const f of await selectFindings(bsql)) {
+      await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, finding_ids) VALUES (${f.a}, ${f.b}, ${f.word}, ${f.newer}, 'found', ARRAY[${f.id}::uuid]) ON CONFLICT DO NOTHING`;
+    }
+    const z1 = await ticket(1, "the old plan"), z2 = await ticket(2, "the new plan");
+    const pid = await propose(z1, z2);
+    // A dated section row carries `ticket` alone (079's identity reads it).
+    const z4 = await ticket(4, "a feature");
+    const z3s = await row("ZQ-3 — 2026-10-01: a dated section saying the same (board-findings fixture)", { source: "linear", ticket: "ZQ-3", section: "2026-10-01" });
+    const rel34 = await relate(z3s, z4, "related", 0.7);
+    // Never posted: a session note on one side; two rows of one ticket; settled proposals; linked since; duplicate either way; a closed relation.
+    const note = await row("a session note about ZQ-5 (board-findings fixture)", { source: "claude-code" });
+    const z5 = await ticket(5, "a ticket a note talks about");
+    await propose(z5, note);
+    const z6 = await ticket(6, "one ticket"), z6s = await row("ZQ-6 — 2026-10-02: its own section (board-findings fixture)", { source: "linear", ticket: "ZQ-6", section: "2026-10-02" });
+    await propose(z6, z6s);
+    const z7 = await ticket(7, "settled a"), z8 = await ticket(8, "settled b"), z7b = await ticket(70, "settled c"), z8b = await ticket(80, "settled d"), z7c = await ticket(71, "settled e"), z8c = await ticket(81, "settled f");
+    const acc = await propose(z7, z8), rej = await propose(z7b, z8b), stl = await propose(z7c, z8c);
+    await bsql`UPDATE supersession_proposals SET status = 'accepted', reviewed_at = now(), superseding_id = newer_id WHERE id = ${acc}::uuid`;
+    await bsql`UPDATE supersession_proposals SET status = 'rejected', reviewed_at = now() WHERE id = ${rej}::uuid`;
+    await bsql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${stl}::uuid`;
+    const z9 = await ticket(9, "linked later a"), z10 = await ticket(10, "linked later b");
+    await propose(z9, z10);
+    await link(z10, "relates_to", "ZQ-9");
+    const z11 = await ticket(11, "a duplicate"), z12 = await ticket(12, "its original");
+    await propose(z11, z12);
+    await link(z11, "duplicate_of", "ZQ-12");   // the older side holds it: the reverse direction
+    const z66 = await ticket(66, "an original"), z67 = await ticket(67, "its duplicate, filed later");
+    await propose(z66, z67);
+    await link(z67, "duplicate_of", "ZQ-66");   // …and the newer side holding it
+    // A fork change record carries `ticket` too (ingest-records.ts), and a capture may: its text is not the board's.
+    const z60 = await ticket(60, "a ticket a change record names");
+    const rec = await row("ZQ-61 — the change record's own text (board-findings fixture)", { source: "fork", ticket: "ZQ-61" });
+    await propose(z60, rec);
+    // An identity that is no identifier (lower case here) never reaches a comment.
+    const z62 = await ticket(62, "a ticket"), lower = await row("zq-63 — a row whose identity is lower case (board-findings fixture)", { source: "linear", issue: "zq-63" });
+    await relate(lower, z62, "related");
+    const z13 = await ticket(13, "closed a"), z14 = await ticket(14, "closed b");
+    await relate(z14, z13, "evolves");
+    await relate(z14, z13, null);
+    // Two words on one pair: one comment, two rows.
+    const z15 = await ticket(15, "two words a"), z16 = await ticket(16, "two words b");
+    const p1516 = await propose(z15, z16, "newer_supersedes_older", 0.6, "ZQ-16 restates ZQ-15");
+    const r1516 = await relate(z16, z15, "related", 0.95);
+    // A marker already on the ticket: recorded found, not posted.
+    const z17 = await ticket(17, "told a"), z18 = await ticket(18, "told b");
+    await relate(z18, z17, "evolves");
+    // …on the OTHER ticket of the pair, as Linear hands it back: both tickets are read.
+    comments.set("ZQ-17", [asLinearReturnsIt("Some earlier discussion.\n\nob1-finding ZQ-17 ZQ-18 evolves")]);
+
+    // 1. The first run.
+    const r1 = await run();
+    const posted1 = posts();
+    const on = posted1.map((o) => String(o.vars.issueId)).sort().join(",");
+    assert(r1.posted.length === 3 && r1.found.length === 1 && r1.failed.length === 0 && on === "uuid-ZQ-16,uuid-ZQ-2,uuid-ZQ-3",
+      `the first run posts one comment per unlinked ticket pair, on the newer ticket — ZQ-2 (a proposal), ZQ-3 (a section row's relation), ZQ-16 (two words) — and nothing for the note, a change record, a lower-case identity, one ticket's two rows, the settled, the linked, a duplicate either side holds, the closed (${summaryLine(r1, 10, false).trim()}; on ${on})`);
+    assert(opNames() === "BoardFindingComment,BoardFindingTicket", `the request log holds a ticket read and a comment, nothing else — no link, no status, no edit (${opNames()})`);
+    const body2 = String(posted1.find((o) => o.vars.issueId === "uuid-ZQ-2")!.vars.body);
+    assert(/\*\*ZQ-2 outdates ZQ-1\*\* \(confidence 0\.90\): `the newer ticket's plan replaces the older's`/.test(body2) && body2.includes(`bun consolidate.ts --accept ${pid}`) && body2.includes(`--reject ${pid}`)
+        && /changed nothing on this board/.test(body2) && body2.trimEnd().endsWith("ob1-finding ZQ-1 ZQ-2 outdates"),
+      `the proposal's comment names both tickets, the direction, the confidence, the reason and how to decide it, says it changed nothing, and ends with its marker:\n${body2}`);
+    const body16 = String(posted1.find((o) => o.vars.issueId === "uuid-ZQ-16")!.vars.body);
+    assert(body16.indexOf("is related to") < body16.indexOf("outdates ZQ-15") && body16.trimEnd().endsWith("ob1-finding ZQ-15 ZQ-16 related outdates"),
+      `two words on one pair are one comment, the higher confidence first, both in the marker:\n${body16}`);
+    const rows1516 = await rowsOf("ZQ-15", "ZQ-16");
+    assert(JSON.stringify(rows1516.map((r) => [r.word, r.posted_on, r.origin, r.ids])) === JSON.stringify([["outdates", "ZQ-16", "posted", [p1516]], ["related", "ZQ-16", "posted", [r1516.id]]]) && rows1516[0].comment_id === rows1516[1].comment_id && rows1516[0].comment_id !== null,
+      `…and two rows, one per word, naming the finding ids and the one comment (${JSON.stringify(rows1516)})`);
+    const rows34 = await rowsOf("ZQ-3", "ZQ-4");
+    assert(rows34.length === 1 && rows34[0].word === "related" && rows34[0].posted_on === "ZQ-3" && rows34[0].ids[0] === rel34.id, `a section row counts as its ticket: ZQ-3 ~ ZQ-4 recorded on ZQ-3 (${JSON.stringify(rows34)})`);
+    const found = await rowsOf("ZQ-17", "ZQ-18");
+    assert(found.length === 1 && found[0].origin === "found" && found[0].comment_id === null && !comments.has("ZQ-18"),
+      `a marker already on the other ticket of the pair, as Linear returns it, is recorded found, and nothing is posted (${JSON.stringify(found)})`);
+    // A lost record: the rows gone, the comments as Linear returns them are what stop a second post.
+    await bsql`DELETE FROM board_findings_posted WHERE ticket_a = 'ZQ-1' AND ticket_b = 'ZQ-2'`;
+    const lost = await run();
+    assert(lost.posted.length === 0 && lost.found.length === 1 && posts().length === 3, `a pair whose row was lost is found on the board, autolinked and escaped as Linear returns it, and not posted again (${summaryLine(lost, 10, false).trim()})`);
+
+    // 2. A re-run: nothing to tell, so no request at all.
+    ops.length = 0;
+    const r2 = await run();
+    assert(r2.pairs === 0 && ops.length === 0, `a re-run posts nothing and asks Linear nothing (${r2.pairs} pair(s), ${ops.length} request(s))`);
+    // A re-judge that replaces the relation at another score: a new facet id, the same word — not a new finding.
+    const again = await relate(z3s, z4, "related", 0.75);
+    const r3 = await run();
+    assert(again.action === "replaced" && again.id !== rel34.id && r3.pairs === 0 && ops.length === 0, `a relation replaced at another score is not posted again (${again.action}; ${r3.pairs} pair(s))`);
+
+    // 3. The cap: three new pairs, a cap leaving two of the day's five.
+    const fresh: { id: string; fp: string }[] = [];
+    for (const n of [20, 21, 22, 23, 24, 25]) fresh.push(await ticket(n, "capped"));
+    await relate(fresh[1], fresh[0], "related", 0.9);
+    await relate(fresh[3], fresh[2], "related", 0.8);
+    await relate(fresh[5], fresh[4], "related", 0.7);
+    // Two of the first run's three count: the lost pair's row is `found` now, which never counts.
+    const r4 = await run({ cap: 4 });
+    assert(r4.postedBefore === 2 && r4.posted.length === 2 && r4.waitingOnCap === 1 && r4.posted.map((p) => p.on).join(",") === "ZQ-21,ZQ-23",
+      `with two posted today and a cap of four, two more are posted, best first, and one waits (${summaryLine(r4, 4, false).trim()})`);
+    const asked = ops.length;
+    const r5 = await run({ cap: 4 });
+    assert(r5.posted.length === 0 && r5.waitingOnCap === 1 && posts().length === 2 && ops.length === asked,
+      `…and a run the same day posts nothing more, and a pair waiting on the cap costs no Linear request (${summaryLine(r5, 4, false).trim()}; ${ops.length - asked} request(s))`);
+    await bsql`UPDATE board_findings_posted SET posted_at = posted_at - interval '25 hours' WHERE ticket_a LIKE 'ZQ-%'`;
+    const r6 = await run({ cap: 4 });
+    assert(r6.postedBefore === 0 && r6.posted.length === 1 && r6.posted[0].on === "ZQ-25", `a day later the third is posted (${summaryLine(r6, 5, false).trim()})`);
+    // A marker found on the board costs no place under the cap: the best pair is found, the next still posts.
+    const z40 = await ticket(40, "found first a"), z41 = await ticket(41, "found first b"), z42 = await ticket(42, "after it a"), z43 = await ticket(43, "after it b");
+    await relate(z41, z40, "related", 0.99);
+    await relate(z43, z42, "related", 0.5);
+    comments.set("ZQ-41", ["ob1-finding ZQ-40 ZQ-41 related"]);
+    const r6b = await run({ cap: 2 });
+    assert(r6b.postedBefore === 1 && r6b.found.length === 1 && r6b.posted.length === 1 && r6b.posted[0].on === "ZQ-43" && r6b.waitingOnCap === 0,
+      `a pair found on the board does not use the cap's one place left: the next pair is posted (${summaryLine(r6b, 2, false).trim()})`);
+    // A new word on a pair told before is a new finding: posted, with that word alone.
+    await propose(z4, z3s, "newer_supersedes_older", 0.6, "the section restates the feature");
+    const rw = await run();
+    const bodyNew = String(posts().at(-1)?.vars.body ?? "");
+    assert(rw.posted.length === 1 && rw.posted[0].on === "ZQ-3" && rw.posted[0].words.join() === "outdates" && !/is related to/.test(bodyNew) && (await rowsOf("ZQ-3", "ZQ-4")).length === 2,
+      `a pair posted as related and later judged outdates is posted again, for the new word alone (${summaryLine(rw, 10, false).trim()})`);
+
+    // 4. The egress gate, a dry run, a failed post, then the post.
+    const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");
+    await relate(z31, z30, "duplicate", 0.85);
+    ops.length = 0; lines.length = 0;
+    const r7 = await run({ gate: deny });
+    assert(r7.refused === 1 && r7.posted.length === 0 && ops.length === 0 && lines.some((l) => /not posted on ZQ-31: .*deny \(the default\)/.test(l) && /type:board-finding/.test(l) && /ZQ-31 duplicates ZQ-30/.test(l)),
+      `under the default deny the comment is refused before any request, and printed with the rule and the term that allows it (${ops.length} request(s))`);
+    const r8 = await run({ dryRun: true });
+    assert(r8.pairs === 1 && ops.length === 0 && (await rowsOf("ZQ-30", "ZQ-31")).length === 0 && lines.some((l) => /would post on ZQ-31/.test(l) && /mark one a duplicate of the other/.test(l)),
+      `a dry run prints the comment, asks Linear nothing and records nothing (${ops.length} request(s))`);
+    failNext = true;
+    const r9 = await run();
+    assert(r9.failed.length === 1 && /rate limited/.test(r9.failed[0].error) && (await rowsOf("ZQ-30", "ZQ-31")).length === 0,
+      `a post Linear refuses records nothing (${JSON.stringify(r9.failed)})`);
+    unsuccessfulNext = true;
+    const r9b = await run();
+    assert(r9b.failed.length === 1 && /did not create the comment/.test(r9b.failed[0].error) && (await rowsOf("ZQ-30", "ZQ-31")).length === 0,
+      `a post Linear answers with success false records nothing either (${JSON.stringify(r9b.failed)})`);
+    const stoppedRun = await run({ stopped: () => true });
+    assert(stoppedRun.pairs === 1 && stoppedRun.posted.length === 0 && stoppedRun.failed.length === 0, "a signal before a pair ends the step with nothing posted");
+    const r10 = await run();
+    assert(r10.posted.length === 1 && (await rowsOf("ZQ-30", "ZQ-31"))[0]?.origin === "posted", `…and the next run posts it (${summaryLine(r10, 10, false).trim()})`);
+
+    // 5. A ticket Linear does not have for this key — deleted, or out of its sight — is a fact, not a failure.
+    const gone = await row("GONE-1 — a ticket deleted in Linear, its row kept (board-findings fixture)", { source: "linear", issue: "GONE-1" });
+    const z44 = await ticket(44, "paired with a deleted ticket");
+    await relate(z44, gone, "related");
+    const r11 = await run();
+    assert(r11.unreachable.length === 1 && r11.unreachable[0].ticket === "GONE-1" && r11.failed.length === 0 && r11.posted.length === 0 && (await rowsOf("GONE-1", "ZQ-44")).length === 0,
+      `a pair with a ticket Linear cannot find is reported, not failed, and nothing is recorded (${summaryLine(r11, 10, false).trim()})`);
+    // Only Linear's no-such-ticket answer is that: another error, or an empty answer, is a failure; the answer as an HTTP 400 is still no ticket.
+    ticketNext = "error";
+    const rErr = await run();
+    ticketNext = "empty";
+    const rEmpty = await run();
+    ticketNext = "partial";
+    const rPartial = await run();
+    ticketNext = "http400";
+    const r400 = await run();
+    assert(rErr.failed.length === 1 && rErr.unreachable.length === 0 && rPartial.failed.length === 1 && rEmpty.failed.length === 1 && rEmpty.unreachable.length === 0 && r400.unreachable.length === 1 && r400.unreachable[0].ticket === "ZQ-44" && r400.failed.length === 0,
+      `a read error that is not Linear's no-such-ticket — "not found" about a field, a ticket with its comments unread, or an empty answer — fails the pair; the no-such-ticket answer sent as HTTP 400 is still no ticket (${JSON.stringify([rErr.failed, rEmpty.failed, r400.unreachable])})`);
+    // With the board's census — board-sync's — a ticket off it is not asked of Linear, and one on it the key cannot find is the key's failure.
+    const asked2 = ops.length;
+    const offIt = await run({ board: new Set(["ZQ-44"]) });
+    assert(offIt.offBoard === 1 && offIt.unreachable.length === 0 && ops.length === asked2,
+      `with the census, a pair whose ticket the board no longer lists is left alone, with no Linear request (${summaryLine(offIt, 10, false).trim()})`);
+    const onIt = await run({ board: new Set(["ZQ-44", "GONE-1"]) });
+    assert(onIt.failed.length === 1 && /which the board lists/.test(onIt.failed[0].error) && onIt.unreachable.length === 0,
+      `…and a ticket the board lists that the comment key cannot find fails: the key does not see the board (${JSON.stringify(onIt.failed)})`);
+
+    // 6. The re-gate: a marker found for one word changes the body, and the gate reads the body sent.
+    const z52 = await ticket(52, "regate a"), z53 = await ticket(53, "regate b");
+    await propose(z52, z53, "newer_supersedes_older", 0.9);
+    await relate(z53, z52, "related", 0.8);
+    comments.set("ZQ-52", ["ob1-finding ZQ-52 ZQ-53 outdates"]);
+    const onlyOutdates = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:outdates" }));
+    const r12 = await run({ gate: onlyOutdates });
+    assert(r12.foundWords === 1 && r12.found.length === 0 && r12.posted.length === 0 && !comments.get("ZQ-53") && (await rowsOf("ZQ-52", "ZQ-53")).map((r) => `${r.word}:${r.origin}`).join() === "outdates:found" && lines.some((l) => /^  not posted on ZQ-53: /.test(l)),
+      `a body that lost its found word is gated again: the text without 'outdates' is refused under marker:outdates (${summaryLine(r12, 10, false).trim()})`);
+    await run();
+
+    // 7. Two posters at once: one lock for the brain, the cap and the record re-read under it.
+    const z54 = await ticket(54, "race a"), z55 = await ticket(55, "race b"), z56 = await ticket(56, "race c"), z57 = await ticket(57, "race d");
+    await relate(z55, z54, "related", 0.9);
+    await relate(z57, z56, "related", 0.8);
+    const today = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+    const other = new SQL({ url: URL_!, max: 2 });
+    try {
+      delayMs = 150;
+      const before = posts().length;
+      const [ra, rb] = await Promise.all([run({ cap: today + 1 }), run({ cap: today + 1, db: other })]);
+      assert(posts().length - before === 1 && ra.posted.length + rb.posted.length === 1 && ra.waitingOnCap + rb.waitingOnCap >= 1,
+        `two posters at once with one place left under the cap post one comment between them (${posts().length - before} posted)`);
+      const z58 = await ticket(58, "race e"), z59 = await ticket(59, "race f");
+      await relate(z59, z58, "related", 0.99);
+      const before2 = posts().length;
+      const [rc, rd] = await Promise.all([run({ cap: 100 }), run({ cap: 100, db: other })]);
+      assert(posts().length - before2 === 2 && (comments.get("ZQ-59") ?? []).length === 1 && rc.posted.length + rd.posted.length === 2,
+        `…and two posters on one pair post it once: the second re-reads the record under the lock (${(comments.get("ZQ-59") ?? []).length} comment(s) on ZQ-59)`);
+      // Two posters on two DIFFERENT pairs with one place left: the lock is the brain's, not the pair's.
+      const z90 = await ticket(90, "cross a"), z91 = await ticket(91, "cross b"), z92 = await ticket(92, "cross c"), z93 = await ticket(93, "cross d");
+      await relate(z91, z90, "related", 0.95);
+      await relate(z93, z92, "related", 0.94);
+      const today2 = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+      const onlyZQ93 = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:ZQ-93" }));
+      const before4 = posts().length;
+      await Promise.all([run({ cap: today2 + 1 }), run({ cap: today2 + 1, db: other, gate: onlyZQ93 })]);
+      assert(posts().length - before4 === 1, `two posters starting on two different pairs with one place left post one comment between them (${posts().length - before4} posted)`);
+    } finally {
+      delayMs = 0;
+      await other.close();
+    }
+    assert(opNames() === "BoardFindingComment,BoardFindingTicket", `still nothing but ticket reads and comments in the log (${opNames()})`);
+
+    // A dry run under the cap and the gate, over several pairs: counted, not subtracted.
+    const z94 = await ticket(94, "dry a"), z95 = await ticket(95, "dry b"), z96 = await ticket(96, "dry c"), z97 = await ticket(97, "dry d");
+    await relate(z95, z94, "related", 0.5);
+    await relate(z97, z96, "related", 0.4);
+    const pendingDry = groupFindings(await selectFindings(bsql)).length;
+    const today3 = Number(((await bsql`SELECT count(DISTINCT (ticket_a, ticket_b, posted_at))::int AS n FROM board_findings_posted WHERE origin = 'posted' AND posted_at > now() - interval '24 hours'`)[0] as { n: number }).n);
+    const zq9 = findingGate(resolveEgressPolicy({ OB1_EGRESS_ALLOW: "marker:ZQ-9" }));
+    const dryRun2 = await run({ dryRun: true, cap: today3 + 2, gate: zq9 });
+    // Pending, best first: the cross pair the cap left (0.95 or 0.94, allowed), GONE-1 ~ ZQ-44 (0.8, refused: no "ZQ-9"), ZQ-94 ~ ZQ-95 (allowed), ZQ-96 ~ ZQ-97 (left for the cap).
+    assert(pendingDry === 4 && dryRun2.wouldPost === 2 && dryRun2.refused === 1 && dryRun2.waitingOnCap === 1,
+      `a dry run takes the cap's places for what it would post, not for what the gate would refuse (${summaryLine(dryRun2, today3 + 2, true).trim()})`);
+    await run();
+
+    // 5. The step as board-sync sets it up from the environment.
+    const off = await findingsStep(bsql, {});
+    const bad = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_FINDINGS_POST_CAP: "101" });
+    const denied = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x" });
+    const on2 = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_EGRESS_ALLOW: "type:board-finding", OB1_FINDINGS_POST_CAP: "0" }, { url: `http://127.0.0.1:${stub.port}/graphql` });
+    assert("off" in off && /LINEAR_COMMENT_API_KEY is not set/.test(off.off) && "error" in bad && /OB1_FINDINGS_POST_CAP/.test(bad.error)
+        && "off" in denied && /egress gate refuses every comment/.test(denied.off) && "step" in on2 && on2.cap === 0,
+      `board-sync's step: off without the key, exit-2 configuration for a cap over 100, off under the default deny, on with the term (${JSON.stringify([off, bad, denied, "step" in on2 ? on2.banner : on2])})`);
+    const stubUrl = `http://127.0.0.1:${stub.port}/graphql`;
+    const z64 = await ticket(64, "step a"), z65 = await ticket(65, "step b");
+    await relate(z65, z64, "evolves", 0.9);
+    const before3 = posts().length;
+    const capped = "step" in on2 ? await on2.step.run({ dryRun: false }) : -1;
+    assert(capped === 0 && posts().length === before3, `the step reads the cap it was given: 0 posts nothing, exit 0 (${capped})`);
+    const timed = await findingsStep(bsql, { LINEAR_COMMENT_API_KEY: "lin_api_x", OB1_EGRESS_ALLOW: "type:board-finding", OB1_FINDINGS_POST_CAP: "100" }, { url: stubUrl, timeoutMs: 300 });
+    const before5 = posts().length;
+    const signalled = "step" in timed ? await timed.step.run({ dryRun: false, stopped: () => true }) : -1;
+    assert(signalled === 0 && posts().length === before5 && (await rowsOf("ZQ-64", "ZQ-65")).length === 0, `the step passes board-sync's signal through: stopped, it posts nothing (exit ${signalled})`);
+    hangMs = 3000;
+    const t0 = performance.now();
+    const hung = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
+    const took = performance.now() - t0;
+    assert(hung === 1 && took < 2000 && (await rowsOf("ZQ-64", "ZQ-65")).length === 0,
+      `a Linear that does not answer is given up on at the step's bound, records nothing, and fails the step (exit ${hung}, ${took.toFixed(0)} ms)`);
+    await Bun.sleep(3000);  // the abandoned request lands at the stub: the comment is on the board with no row
+    const fine = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
+    assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
+      `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
+
+    // A role: capture and structure are what the step needs; without INSERT on the record it is off, and a dry run needs the reads alone.
+    const FROLE = "ob1_live_findings";
+    const fUrl = URL_!.replace(/\/\/[^@]*@/, `//${FROLE}:ob1findings@`);
+    const [{ mayCreate: mayCreateF }] = (await bsql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (fUrl === URL_ || !mayCreateF) {
+      skip("the findings step under a granted role", fUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropF = () => bsql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${FROLE}') THEN EXECUTE 'DROP OWNED BY ${FROLE}'; EXECUTE 'DROP ROLE ${FROLE}'; END IF; END $$`);
+      await dropF();
+      const rs = new SQL({ url: fUrl, max: 1 });
+      try {
+        await bsql.unsafe(`CREATE ROLE ${FROLE} LOGIN PASSWORD 'ob1findings'`);
+        const granted = await migrateInProcess({ grant: FROLE, groups: "capture,structure" });
+        const full = await findingsSchemaProblem(rs);
+        await bsql.unsafe(`REVOKE INSERT ON board_findings_posted FROM ${FROLE}`);
+        const noInsert = await findingsSchemaProblem(rs), dryOk = await findingsSchemaProblem(rs, { write: false });
+        await bsql.unsafe(`REVOKE SELECT ON supersession_proposals FROM ${FROLE}`);
+        const noQueue = await findingsSchemaProblem(rs, { write: false });
+        assert(granted.code === 0 && full === null && /lacks SELECT and INSERT on board_findings_posted \(the structure group\)/.test(noInsert ?? "") && dryOk === null
+            && /lacks SELECT on supersession_proposals \(the structure group\).*--groups capture,structure/.test(noQueue ?? ""),
+          `capture and structure are the step's grants; without INSERT on the record it is off, naming it, while a dry run needs the reads alone (${JSON.stringify([full, noInsert, dryOk, noQueue])})`);
+      } finally {
+        await rs.close();
+        await dropF();
+      }
+    }
+
+    assert(reports.length > 20 && reports.every((r) => outcomes(r) === r.pairs),
+      `every run's outcome counts add up to its pairs (${reports.filter((r) => outcomes(r) !== r.pairs).map((r) => `${outcomes(r)} of ${r.pairs}`).join(", ") || `${reports.length} runs`})`);
+  } catch (err) {
+    assert(false, `[41] stopped: ${(err as Error).stack}`);
+  } finally {
+    stub.stop(true);
+    await bsql.close();
   }
 }
 

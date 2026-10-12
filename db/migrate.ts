@@ -70,6 +70,7 @@ import {
   EMBEDDING_MODEL,
   HNSW_SEEDS,
   ROLE_GRANT_GROUPS,
+  DEFAULT_GRANT_GROUPS,
   GRANT_LOCK,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
@@ -345,7 +346,7 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
 /** A --groups or --exact without --grant, worded, or null: each shapes --grant and does nothing alone. */
 export function lonelyGrantFlag(groups: string | undefined | null, exact: boolean | undefined | null): string | null {
   if ((groups == null && !exact)) return null;
-  return `${groups != null ? "--groups narrows" : "--exact makes"} --grant ${groups != null ? "to some of its groups" : "all a role holds"}; it does nothing on its own. Pass it with --grant <role>.`;
+  return `${groups != null ? "--groups names the groups --grant issues" : "--exact makes --grant all a role holds"}; it does nothing on its own. Pass it with --grant <role>.`;
 }
 
 async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"]): Promise<number> {
@@ -381,9 +382,11 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // role now holds each privilege and rolls back if not: a grantor that holds a
   // privilege without grant option "grants" it with a WARNING and no effect,
   // which the driver does not surface (SMD-1796, third review pass).
-  // --groups a,b narrows it to those groups of ROLE_GRANTS (SMD-2289: the
-  // orchestration runner's role gets what its ingester and reembed run, not the
-  // whole list). It grants less; alone it revokes nothing, so a role granted more
+  // A plain --grant issues DEFAULT_GRANT_GROUPS: every group but the opt-in
+  // ones, which only --groups issues (the sleep group's read of the query log,
+  // SMD-2678). --groups a,b grants those groups of ROLE_GRANTS alone (SMD-2289:
+  // the orchestration runner's role gets what its ingester and reembed run, not
+  // the whole list). Alone it revokes nothing, so a role granted more
   // before keeps what it has. --exact makes the grant all the role holds in this
   // database: in the grant's own transaction it refuses a member of another role
   // or an owner of anything (review pass 5), then revokes, object by object,
@@ -414,7 +417,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     }
     const groupsArg = opts.groups ?? undefined;
     const exact = opts.exact === true;
-    const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
+    // A plain --grant issues every group but the opt-in ones (the sleep group's read of the query log, SMD-2678).
+    const grantGroups = groupsArg === undefined ? DEFAULT_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
     const unknown = grantGroups.filter((g) => !(ROLE_GRANT_GROUPS as readonly string[]).includes(g));
     if (groupsArg !== undefined && (unknown.length || !grantGroups.length)) {
       err(`--groups takes a comma-separated list of ${ROLE_GRANT_GROUPS.join(", ")}${unknown.length ? `; not a group: ${unknown.map((g) => JSON.stringify(g)).join(", ")}` : "; none was given"}.`);

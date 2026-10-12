@@ -492,11 +492,12 @@ export function malformedAlarm(answers, malformed) {
  * SMD-2424, do the claim workers (`--profile workers`); a checkout's command
  * follows for a follower run by hand, the one that can carry a custom --job.
  * Consolidation takes no --job: its key follows the judge model, so the job
- * is named beside it. The sleep scheduler (SMD-1794) runs in a one-off container
- * of the extract service until its own service (SMD-2678), or from a checkout.
+ * is named beside it. The sleep scheduler (SMD-1794) runs as its own compose
+ * service, `--profile sleep` (SMD-2678), or from a checkout; preflight's `sleep`
+ * row names it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/sleep.ts --follow, with the -f files and -p the stack was started with (docker compose alike; a one-off container of the extract service, in the foreground); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
+  if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with (docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy/.env); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
@@ -1728,6 +1729,38 @@ export const BITMAP_BYTES_PER_PAGE = 64;
 export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
 
 /**
+ * The valid HNSW indexes over thoughts and thought_chunks a vector search
+ * walks (SMD-2871), from preflight's catalog read: each index's name, table,
+ * bytes and pg_get_indexdef, the embedding column's width, and whether
+ * match_thoughts' body orders its walk by embedding::halfvec (null when it
+ * could not be read). 039's header has an operator on a large brain build
+ * `<table>_embedding_halfvec_idx` by hand, CONCURRENTLY, and then run 039,
+ * which adopts it under the shipped name and drops the vector index there
+ * (001's on thoughts, 007's on thought_chunks). In that window both are
+ * valid and the walk uses one, so the staging index is left out — but only
+ * in the state 039 adopts from and the walk reads: a body ordering by the
+ * vector column, an HNSW vector_cosine_ops index over the column under the
+ * shipped name, and the staging index of 039's own shape at the column's
+ * width. Anywhere else 039 would refuse the staging index (another shape),
+ * skip it (the shipped index already 039's), the body walks the staging
+ * index itself (it casts), or the walk has no vector index to use now (the
+ * shipped name missing, INVALID, partial or another operator class) and the
+ * staging index is what 039 puts under the name; so it is counted like any
+ * other index. What 039 would build, and what to run before it, is
+ * plan039's (SMD-2880).
+ */
+export function residentIndexes({ indexes, dim, bodyCasts }) {
+  const VECTOR = /USING hnsw \(embedding (\w+\.)?vector_cosine_ops\)( WITH \([^)]*\))?$/;
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::(\\w+\\.)?halfvec\\(${dim}\\)\\) (\\w+\\.)?halfvec_cosine_ops\\)$`);
+  const staged = bodyCasts === false
+    ? indexes.filter((s) => s.name === `${s.table}_embedding_halfvec_idx` && HALF.test(s.def)
+        && indexes.some((x) => x.table === s.table && x.name === `${s.table}_embedding_idx` && VECTOR.test(x.def)))
+    : [];
+  const sum = (xs) => xs.reduce((t, x) => t + x.bytes, 0);
+  return { hnswBytes: sum(indexes) - sum(staged), stagedBytes: sum(staged), stagedCount: staged.length, stagedTables: staged.map((s) => s.table) };
+}
+
+/**
  * Sizing the server for the table (SMD-1499).
  *
  * - Resident, the warning: the HNSW indexes over thoughts and thought_chunks
@@ -1737,6 +1770,10 @@ export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
  *   cache before every run, ten connections got about a third of the
  *   throughput they got with the indexes in shared_buffers (SMD-1499's
  *   record). The recommendation is the indexes' size rounded up to 64 MB.
+ *   A staging index 039 is about to adopt (residentIndexes says which) is
+ *   not in hnswBytes but in stagedBytes and stagedTables: the walk uses the
+ *   vector index under the shipped name until 039 swaps the staging one in
+ *   (SMD-2871).
  * - Bitmap, information only: a filter's matches are collected one entry per
  *   heap page (BITMAP_BYTES_PER_PAGE). On the custom plans match_thoughts
  *   runs, the bitmap a GIN-routed filter builds is the routing count's, under
@@ -1750,7 +1787,7 @@ export const BITMAP_PAGE_SHARE_GATED = 1 - Math.exp(-1);
  * Pure: preflight reads the numbers and prints what this returns, and the
  * schema suite holds the arithmetic. Sizes in bytes.
  */
-export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
+export function memorySizing({ hnswBytes, stagedBytes = 0, stagedTables = [], sharedBuffersBytes, heapBytes, blockSize, workMemBytes }) {
   const MB = 1048576;
   const upTo = (bytes, step) => Math.max(step, Math.ceil(bytes / (step * MB)) * step);
   const heapPages = Math.ceil(heapBytes / blockSize);
@@ -1758,7 +1795,7 @@ export function memorySizing({ hnswBytes, sharedBuffersBytes, heapBytes, blockSi
   const bitmapPages = gated ? Math.ceil(heapPages * BITMAP_PAGE_SHARE_GATED) : heapPages;
   const bitmapBytes = bitmapPages * BITMAP_BYTES_PER_PAGE;
   return {
-    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
+    resident: { fits: hnswBytes <= sharedBuffersBytes, needBytes: hnswBytes, stagedBytes, stagedCount: stagedTables.length, stagedTables, haveBytes: sharedBuffersBytes, recommend: `${upTo(hnswBytes, 64)}MB` },
     bitmap: { fits: bitmapBytes <= workMemBytes, heapPages, gated, bitmapPages, needBytes: bitmapBytes, wholeHeapBytes: heapPages * BITMAP_BYTES_PER_PAGE, haveBytes: workMemBytes },
   };
 }
@@ -1771,6 +1808,133 @@ export function bytesText(bytes) {
 }
 
 /**
+ * How a remedy has migration 039 applied, by what the ledger says of it
+ * (SMD-2871, SMD-2880), `ledger.state` one of:
+ * - "pending": the ledger is read and records neither 039 nor a later file
+ *   — a plain migrator run applies the pending files, 039 among them;
+ * - "none": no ledger — a plain run runs every file and records them, where
+ *   --baseline (the migration ledger row's adoption) would record 039 unrun;
+ * - "recorded": it records 039 — the re-apply, since a plain run skips it;
+ * - "hole": it records a later file without 039 (a row removed or misspelt
+ *   by hand) — the re-apply, since a plain run would apply 039 alone after
+ *   074 and leave two match_thoughts forms, every shorter call then "not
+ *   unique";
+ * - "unread": it could not be read (`ledger.why` says why, in preflight's
+ *   words for ledgerRemedy) — the re-apply, which applies 039 either way;
+ * - "locked": its read timed out — a migration or a long transaction holds
+ *   it, perhaps 039 itself, so nothing is run: preflight again once released.
+ * Never the file by hand: 039 and 074 after it are templates only the
+ * migrator fills in. The commands are spelt as REAPPLY_COMMAND spells the
+ * re-apply.
+ */
+export function apply039(ledger = { state: "pending" }) {
+  const reapply = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
+  switch (ledger.state) {
+    case "recorded": return `Re-apply the recorded migrations: ${reapply}.`;
+    case "hole": return `The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${reapply}.`;
+    case "unread": return `Whether 039 is recorded is unknown (${ledger.why ?? "this role cannot read schema_migrations"}), so re-apply the recorded migrations, which applies 039 either way: ${reapply}.`;
+    case "locked": return `The ledger is locked (${ledger.why ?? "its read timed out"}): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.`;
+    case "none": return "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).";
+    default: return "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
+  }
+}
+
+/**
+ * What migration 039's index swap will do on each table, decided as its DO
+ * block decides (SMD-2880), and what an operator runs before it, as
+ * statements to paste — 039's header spells them with `{{EMBEDDING_DIM}}`,
+ * which only the migrator fills in. `pairs` is one entry a table: the
+ * index under the shipped name and the one under the staging name, each
+ * `{ def, valid }` (pg_get_indexdef, indisvalid) or null, and `exists:
+ * false` for a table that is not there (no statement names it). Per table:
+ * - the shipped name holding 039's shape at `dim`: 039 skips the table;
+ * - a valid halfvec index of another shape there: 039 stops on it, so it is
+ *   replaced first — the staging index built (or one of 039's shape kept),
+ *   and once that build has finished, the shipped one dropped and the
+ *   staging one renamed onto the name;
+ * - a valid staging index of another shape: 039 stops on it, so it is
+ *   dropped first;
+ * - a free shipped name: filled first, by renaming a staging index of 039's
+ *   shape onto it or building one under it CONCURRENTLY (an INVALID staging
+ *   index dropped before) — a re-apply, or a plain run with no ledger,
+ *   re-runs 001's and 007's CREATE INDEX ahead of 039 and would build a
+ *   vector index there inside its transaction, then 039 its own;
+ * - beside anything else under the name, 039 swaps the staging index in:
+ *   adopting one of its shape, or building one inside its transaction,
+ *   holding writers — on a table past a million vectors built first,
+ *   CONCURRENTLY, after an INVALID staging index is dropped.
+ * The first steps are needed on any brain, the builds only on a large
+ * table. `steps` is the text, grouped by table, each with its reason and the
+ * statements numbered ("" when nothing is to run first); `first` and `large`
+ * the statements; `swaps` the tables where 039 swaps a staging index in.
+ */
+export function plan039({ pairs, dim }) {
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::(\\w+\\.)?halfvec\\(${dim}\\)\\) (\\w+\\.)?halfvec_cosine_ops\\)$`);
+  const exact = (x) => x?.valid === true && HALF.test(x.def);
+  const groups = [];
+  let swaps = 0;
+  for (const { table: t, shipped, staging, exists } of pairs) {
+    const ship = `${t}_embedding_idx`;
+    const stage = `${t}_embedding_halfvec_idx`;
+    const create = (name) => `CREATE INDEX CONCURRENTLY ${name} ON ${t} USING hnsw ((embedding::halfvec(${dim})) halfvec_cosine_ops);`;
+    if (exists === false || exact(shipped)) continue;
+    const g = { table: t, first: [], large: [], why: [], whyLarge: "" };
+    groups.push(g);
+    if (shipped?.valid === true && shipped.def.includes("halfvec")) {
+      g.why.push(`${ship} is a halfvec index of another shape, which 039 stops on: replacing it drops its own settings`);
+      if (!exact(staging)) g.first.push(...(staging ? [`DROP INDEX CONCURRENTLY ${stage};`] : []), create(stage), { built: true });
+      g.first.push(`DROP INDEX CONCURRENTLY ${ship};`, `ALTER INDEX ${stage} RENAME TO ${ship};`);
+      continue;
+    }
+    if (staging?.valid === true && !exact(staging)) { g.why.push(`${stage} is of another shape, which 039 stops on`); g.first.push(`DROP INDEX CONCURRENTLY ${stage};`); }
+    if (!shipped) {
+      if (exact(staging)) { g.why.push(`${ship} is missing and ${stage}, of 039's shape, is built`); g.first.push(`ALTER INDEX ${stage} RENAME TO ${ship};`); }
+      else {
+        g.why.push(`${ship} is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`);
+        g.first.push(...(staging?.valid === false ? [`DROP INDEX CONCURRENTLY ${stage};`] : []), create(ship));
+      }
+      continue;
+    }
+    swaps++;
+    if (exact(staging)) continue;
+    g.whyLarge = staging?.valid === false ? `${stage} is INVALID (an interrupted build), and 039 would build it again inside its transaction` : `039 would build ${stage} inside its transaction`;
+    if (staging?.valid === false) g.large.push(`DROP INDEX CONCURRENTLY ${stage};`);
+    g.large.push(create(stage));
+  }
+  // Numbered across the remedy; a { built } marker is a wait before the next statement.
+  let n = 0;
+  const render = (xs) => xs.map((x, i) => (typeof x !== "string" ? "" : `${i === 0 ? "" : " "}${++n}) ${typeof xs[i - 1] === "object" ? "once that build has finished without error (an interrupted one leaves the index INVALID), " : ""}\`${x}\``)).join("");
+  const strings = (xs) => xs.filter((x) => typeof x === "string");
+  const first = groups.flatMap((g) => strings(g.first));
+  const large = groups.flatMap((g) => g.large);
+  const creates = [...first, ...large].filter((x) => x.startsWith("CREATE")).length;
+  const builds = large.filter((x) => x.startsWith("CREATE")).length;
+  if (!first.length && !large.length) return { steps: "", swaps, first, large };
+  const intro = "Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). "
+    + (creates ? "Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (`SELECT count(embedding) FROM <table>`), as `SET maintenance_work_mem = '<size>';`. " : "");
+  const anyBrain = groups.filter((g) => g.first.length).map((g) => `on ${g.table} (${g.why.join(", and ")}): ${render(g.first)}`);
+  const largeTables = groups.filter((g) => g.large.length).map((g) => `on ${g.table} (${g.whyLarge}): ${render(g.large)}`);
+  const steps = intro
+    + (anyBrain.length ? `On any brain, first — ${anyBrain.join("; ")}. ` : "")
+    + (largeTables.length ? `${anyBrain.length ? "Then, where" : "Where"} the table holds more than a million vectors — ${largeTables.join("; ")}; on a smaller table the migrator builds ${builds > 1 ? "them" : "it"} inside its transaction, holding writers, in the migrating role's maintenance_work_mem (\`ALTER ROLE <role> SET maintenance_work_mem = '<size>'\`, RESET after). ` : "");
+  return { steps, swaps, first, large };
+}
+
+/**
+ * The walk index row's remedy (SMD-2880): plan039's steps, then 039 applied
+ * the way the ledger calls for. A locked ledger is waited out, steps and
+ * all: 039 may be what holds it. Where the body already casts and the steps
+ * leave 039's shape under every name, 039 has nothing left to do, so no
+ * stop of the server is asked for. Pure text, so the schema suite holds
+ * every branch's wording.
+ */
+export function walkRemedy({ ledger, plan, bodyCasts = false }) {
+  if (ledger?.state === "locked") return apply039(ledger);
+  if (bodyCasts && plan.swaps === 0 && plan.large.length === 0 && plan.first.length > 0) return `${plan.steps}Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.`;
+  return `${plan.steps}${apply039(ledger)}`;
+}
+
+/**
  * Preflight's two SMD-1499 rows from memorySizing's result: their status,
  * detail and remedy, as text, so test-schema holds every branch's wording —
  * the resident warning's included, which no live test can reach (a pool
@@ -1778,20 +1942,32 @@ export function bytesText(bytes) {
  * (a managed platform may not let the operator change the setting), with the
  * size to set and the way back if postgres then will not start; `filter
  * bitmap memory` is information only, always ok, and recommends nothing.
+ * `ledger` picks how a remedy has 039 applied (SMD-2871, SMD-2880:
+ * apply039's states), and `plan`, plan039's result, the steps before it and
+ * how many staging indexes it swaps in — the walk index row's own.
  */
-export function memoryRows(s) {
+export function memoryRows(s, { ledger = { state: "pending" }, plan = { steps: "", swaps: 0 } } = {}) {
   const r = s.resident;
   const b = s.bitmap;
   const n = (x) => x.toLocaleString("en-US");
+  // SMD-2871: said whenever one was left out, by name, so the size is never read as every index there is.
+  const names = (tables, suffix) => tables.map((t) => `${t}${suffix}`).join(" and ");
+  const many = r.stagedCount > 1;
+  const staged = r.stagedCount === 0 ? "" : `. Not counted: ${names(r.stagedTables, "_embedding_halfvec_idx")} (${bytesText(r.stagedBytes)}), ${many ? "staging indexes" : "a staging index"} 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use ${names(r.stagedTables, "_embedding_idx")} until 039 swaps ${many ? "the staging indexes" : "the staging index"} in. Run preflight again after 039`;
+  // The warning's remedy has 039 applied before sizing, the way the walk
+  // index row does: plan039's steps first, then the migrator, as the ledger
+  // calls for.
+  const swapped = Math.max(plan.swaps, r.stagedCount) === 1 ? "the staging index" : "the staging indexes";
+  const lead = r.stagedCount > 0 ? `039 is about to swap ${swapped} in, which changes the size, so apply it before sizing. ${ledger.state === "locked" ? "" : plan.steps}${apply039(ledger)} Size only if a fresh run after 039 still warns (the size below is for the indexes as they stand). ` : "";
   const resident = r.needBytes === 0
     ? { name: "vector index memory", status: "ok", detail: "no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold (the walk index check says whether one is missing)" }
     : r.fits
-    ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})` }
+    ? { name: "vector index memory", status: "ok", detail: `the HNSW indexes (${bytesText(r.needBytes)}) fit shared_buffers (${bytesText(r.haveBytes)})${staged}` }
     : {
         name: "vector index memory",
         status: "warn",
-        detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)`,
-        fix: `Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
+        detail: `the HNSW indexes over thoughts and thought_chunks are ${bytesText(r.needBytes)} and shared_buffers is ${bytesText(r.haveBytes)}: a vector search walks an index the buffer pool cannot hold. The OS page cache serves the walk, but not as well — at ten million rows, with the indexes read into the page cache, ten concurrent searches got about a third of the throughput they got with the indexes in shared_buffers (SMD-1499)${staged}`,
+        fix: `${lead}Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '${r.recommend}'; then restart postgres (on the compose stack \`compose restart postgres\`; on compose.tiers.yaml each tier's \`<tier>-postgres\` is set and restarted on its own; the setting is kept in the data directory), or set it in the platform's parameter group; more for the hot heap if there is room. If postgres then will not start (the host could not give it the memory), take the line back out of the data directory and start it again: \`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\` (the tier's service on compose.tiers.yaml).`,
       };
   let detail;
   if (b.heapPages === 0) {
@@ -2113,7 +2289,7 @@ export async function alignVectorSearchPath(sql) {
  * One list, grouped by the role that needs each group, each row naming the
  * migration that introduced the requirement. This is the single spelling:
  * preflight's `write privileges` check reads CAPTURE_WRITES, `migrate.ts
- * --grant` issues every group through grantStatements(), and db/README.md's
+ * --grant` issues every group but the opt-in ones through grantStatements(), and db/README.md's
  * "Grants for a capturing role" is rendered from the same groups — a
  * check-fork-consistency check asserts the README names each table.
  *
@@ -2159,7 +2335,7 @@ export const ROLE_GRANTS = Object.freeze({
     // edit that moves no vector touches the table only under the extractor's
     // recipe (run-it, third review pass; fourth) — so all four are hard here
     // (SMD-1731). The workers' passes write through the same table, and
-    // --grant issues every group.
+    // --grant issues every group but the opt-in ones.
     Object.freeze({ table: "derivations",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "061" }),
     // 068's triggers run as the caller on every write of a row carrying an
     // issue key or a supersedes pointer, and reconcile the node_state
@@ -2271,6 +2447,13 @@ export const ROLE_GRANTS = Object.freeze({
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
+    // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
+    // it posted: read for the cap and "not posted again", inserted after Linear
+    // answers. Never updated or deleted — a failed post rolls the claim back.
+    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT", "INSERT"]),             since: "087" }),
+    // …and reads the proposal queue it posts from (review pass 2: through the
+    // server group it also took UPDATE on ob1_agent_keys, for one SELECT).
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),                     since: "029" }),
   ]),
   // The opt-in query log (034, SMD-1295): the server writes one row per search
   // and one per follow-up touch, but ONLY when OB1_QUERY_LOG=on. INSERT is all
@@ -2281,6 +2464,15 @@ export const ROLE_GRANTS = Object.freeze({
   // check as "log off; grant needed if you enable it".
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
+  ]),
+  // The sleep scheduler's read of the query log (db/sleep.ts, SMD-2678): a
+  // search logged there wakes the brain, as a live write in thought_audit
+  // does. Opt-in (OPT_IN_GRANT_GROUPS): the log holds every search's text, so
+  // a plain --grant leaves it out and only `--groups …,sleep` issues it. A
+  // role without it sleeps on writes alone, and the scheduler and preflight's
+  // `sleep` row say so.
+  sleep: Object.freeze([
+    Object.freeze({ table: "query_log", privileges: Object.freeze(["SELECT"]), since: "034" }),
   ]),
   // The durable async job registry (069, SMD-2318): the server writes a row per
   // long-running job as the in-memory registry moves it along (INSERT on start,
@@ -2485,7 +2677,11 @@ export const ROLE_GRANTS = Object.freeze({
 /** The advisory lock (`pg_advisory_xact_lock(hashtext(GRANT_LOCK))`) every `migrate.ts --grant` and `db/login-role.ts` take, so two at once in one database queue rather than deadlock or collide on "tuple concurrently updated" over the same catalog rows (SMD-2289). */
 export const GRANT_LOCK = "ob1:grants";
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "sleep", "jobs", "pages", "community", "extensions", "recipes"]);
+/** The groups a plain `migrate.ts --grant` leaves out: issued only when `--groups` names them (SMD-2678). */
+export const OPT_IN_GRANT_GROUPS = Object.freeze(["sleep"]);
+/** What a plain `migrate.ts --grant <role>` issues: every group but the opt-in ones. */
+export const DEFAULT_GRANT_GROUPS = Object.freeze(ROLE_GRANT_GROUPS.filter((g) => !OPT_IN_GRANT_GROUPS.includes(g)));
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -2619,14 +2815,15 @@ export function grantPresenceSql(objects) {
 }
 /**
  * GRANT statements giving `role` exactly the privileges the given groups need
- * (default: all — the do-everything role the guide sets up). Pass `present` (a
+ * (default: DEFAULT_GRANT_GROUPS, what a plain `migrate.ts --grant` issues —
+ * every group but the opt-in ones, SMD-2678). Pass `present` (a
  * Set of object names that exist — tables, views, sequences and functions alike, the
  * names as the rows spell them) to skip what a partially-migrated database or an
  * unapplied community schema lacks; omit it to emit everything. The role is
  * quoted; the schema USAGE grant is the caller's to add (a schema, not a
  * table). One GRANT per object, its privileges combined, in group/list order.
  */
-export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
+export function grantStatements(role, { groups = DEFAULT_GRANT_GROUPS, present = null } = {}) {
   const ident = quoteIdent(role);
   const out = [];
   for (const { kind, name, privileges } of mergedGrants(groups, present)) {
@@ -2648,7 +2845,7 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
  * grantStatements and grantVerifySql so what is granted and what is checked
  * are one list (SMD-1796, third review pass).
  */
-export function mergedGrants(groups = ROLE_GRANT_GROUPS, present = null) {
+export function mergedGrants(groups = DEFAULT_GRANT_GROUPS, present = null) {
   const ORDER = ["USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE"];
   const byName = new Map();
   for (const g of groups) {

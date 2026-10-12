@@ -2851,6 +2851,7 @@ const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
@@ -5301,7 +5302,7 @@ const INDEX_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./render.ts", "*"],
     // The public origin's answers (SMD-2382): HTTP at the edge, no store, no provider.
     ["./oauth-edge.ts", "*"],
-    // The request's JSON line (SMD-1849): an allow-list and a sink, no store, no provider.
+    // The request's JSON line and its spans (SMD-1849): an allow-list, a sink and the OpenTelemetry API; the SDK only through startTelemetry; no store, no provider.
     ["./telemetry.ts", "*"],
     // The core's deadlines and filter parser — its operations are reached through createCore.
     ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
@@ -5334,8 +5335,8 @@ const API_ROLE: TransportRole = {
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
-    // The stop's lines for what it cuts (SMD-1849): request records, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849): request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "flushTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -6182,7 +6183,7 @@ const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": nul
 const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
+  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES, sleep: CHECKOUT_MODULES,
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],
@@ -6213,6 +6214,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
+    sleep: ["data", "egress"],
     ollama: ["egress"],
     "ollama-pull": ["egress"],
     jev: ["egress"],
@@ -6890,7 +6892,7 @@ await checkPlugins();
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
-  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3",
+  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
 };

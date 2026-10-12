@@ -75,6 +75,11 @@ import {
   bytesText,
   memoryRows,
   memorySizing,
+  residentIndexes,
+  REAPPLY_COMMAND,
+  apply039,
+  plan039,
+  walkRemedy,
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
@@ -12926,7 +12931,7 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against shared_buffers (a warning), and the filter bitmaps against work_mem (information only) (SMD-1499, db/config.mjs)");
+console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against shared_buffers (a warning), and the filter bitmaps against work_mem (information only) (SMD-1499, db/config.mjs); the walk index remedy (SMD-2880)");
 {
   // Pure arithmetic: preflight reads the numbers and prints what this returns.
   const MB = 1048576;
@@ -12967,6 +12972,174 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
          && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
          && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
     "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+  // SMD-2871: a staging index 039 is about to adopt is passed apart, sized
+  // nothing, and said in either branch, one or two of them; the warning's
+  // remedy then has 039 applied first, the way the ledger calls for, with
+  // plan039's steps (the walk index row's, SMD-2880) before that.
+  const stagedOne = memorySizing({ ...base, stagedBytes: 34 * MB, stagedTables: ["thoughts"] });
+  assert(stagedOne.resident.needBytes === 100 * MB && stagedOne.resident.recommend === memorySizing(base).resident.recommend && stagedOne.resident.fits
+         && stagedOne.resident.stagedBytes === 34 * MB && stagedOne.resident.stagedCount === 1 && stagedOne.resident.stagedTables.join() === "thoughts"
+         && memorySizing(base).resident.stagedBytes === 0 && memorySizing(base).resident.stagedCount === 0,
+    "a staging index's bytes are carried apart, and neither the fit nor the recommendation counts them; none by default");
+  const [okStaged] = memoryRows(stagedOne);
+  const over = { ...base, hnswBytes: 128 * MB + 1 };
+  const [warnStaged] = memoryRows(memorySizing({ ...over, stagedBytes: 43 * MB, stagedTables: ["thoughts", "thought_chunks"] }));
+  assert(okStaged.detail === "the HNSW indexes (100 MB) fit shared_buffers (128 MB). Not counted: thoughts_embedding_halfvec_idx (34 MB), a staging index 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx until 039 swaps the staging index in. Run preflight again after 039"
+         && warnStaged.status === "warn" && warnStaged.detail.endsWith("(SMD-1499). Not counted: thoughts_embedding_halfvec_idx and thought_chunks_embedding_halfvec_idx (43 MB), staging indexes 039 will adopt; match_thoughts still orders its walk by the vector column, so searches use thoughts_embedding_idx and thought_chunks_embedding_idx until 039 swaps the staging indexes in. Run preflight again after 039"),
+    `a staging index left out is said in the ok row and the warning, one or two of them (${okStaged.detail.slice(okStaged.detail.indexOf("Not counted"), okStaged.detail.indexOf(";"))})`);
+  const SIZING = "Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB';";
+  const leadOne = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }))[0].fix ?? "";
+  // One table's two indexes as preflight reads them for plan039: the shipped name's, then the staging name's.
+  const VECDEF = (t: string, tail = "") => `CREATE INDEX ${t}_embedding_idx ON public.${t} USING hnsw (embedding vector_cosine_ops)${tail}`;
+  const HALFDEF = (t: string, name: string, dim = EMBEDDING_DIM) => `CREATE INDEX ${name} ON public.${t} USING hnsw (((embedding)::halfvec(${dim})) halfvec_cosine_ops)`;
+  type Ix = { def: string; valid: boolean } | null;
+  const pairOf = (table: string, shipped: Ix, staging: Ix = null, exists = true) => ({ table, shipped, staging, exists });
+  const vecIx = (t: string): Ix => ({ def: VECDEF(t), valid: true });
+  const stageIx = (t: string, valid = true, def = HALFDEF(t, `${t}_embedding_halfvec_idx`)): Ix => ({ def, valid });
+  const recordedPlan = plan039({ pairs: [pairOf("thoughts", vecIx("thoughts"), stageIx("thoughts")), pairOf("thought_chunks", vecIx("thought_chunks"))], dim: EMBEDDING_DIM });
+  const leadRecorded = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }), { ledger: { state: "recorded" }, plan: recordedPlan })[0].fix ?? "";
+  const leadUnread = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }), { ledger: { state: "unread" } })[0].fix ?? "";
+  const leadLocked = memoryRows(memorySizing({ ...over, stagedBytes: 34 * MB, stagedTables: ["thoughts"] }), { ledger: { state: "locked", why: "schema_migrations could not be read: canceling statement due to lock timeout" }, plan: recordedPlan })[0].fix ?? "";
+  const REAPPLY_STEPS = `stop the server and every worker, run \`${REAPPLY_COMMAND}\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again`;
+  // SMD-2880's wording, shared with the walk index block below: where to run
+  // the statements, the memory before a CREATE, a build left to a small
+  // table's migrator, the free name's reason, the wait, and the ledger's
+  // sentences.
+  const RUN = "Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). ";
+  const SIZE = "Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (`SELECT count(embedding) FROM <table>`), as `SET maintenance_work_mem = '<size>';`. ";
+  const SMALLER = (it: string) => `; on a smaller table the migrator builds ${it} inside its transaction, holding writers, in the migrating role's maintenance_work_mem (\`ALTER ROLE <role> SET maintenance_work_mem = '<size>'\`, RESET after). `;
+  const FREE = (t: string) => `${t}_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`;
+  const WAIT = "once that build has finished without error (an interrupted one leaves the index INVALID), ";
+  const PENDING = "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
+  const LOCKED = "The ledger is locked (schema_migrations could not be read: canceling statement due to lock timeout): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.";
+  const SWAP = (which: string) => `039 is about to swap ${which} in, which changes the size, so apply it before sizing. `;
+  const SIZE_AFTER = "Size only if a fresh run after 039 still warns (the size below is for the indexes as they stand). ";
+  const CREATE = (name: string, t: string) => `CREATE INDEX CONCURRENTLY ${name} ON ${t} USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);`;
+  assert((warnStaged.fix ?? "").startsWith(`${SWAP("the staging indexes")}${PENDING} ${SIZE_AFTER}${SIZING}`)
+         && leadOne.startsWith(`${SWAP("the staging index")}${PENDING} ${SIZE_AFTER}${SIZING}`)
+         && leadUnread.startsWith(`${SWAP("the staging index")}Whether 039 is recorded is unknown (this role cannot read schema_migrations), so re-apply the recorded migrations, which applies 039 either way: ${REAPPLY_STEPS}. ${SIZE_AFTER}${SIZING}`)
+         && leadRecorded.startsWith(`${SWAP("the staging indexes")}${RUN}${SIZE}Where the table holds more than a million vectors — on thought_chunks (039 would build thought_chunks_embedding_halfvec_idx inside its transaction): 1) \`${CREATE("thought_chunks_embedding_halfvec_idx", "thought_chunks")}\`${SMALLER("it")}Re-apply the recorded migrations: ${REAPPLY_STEPS}. ${SIZE_AFTER}${SIZING}`)
+         && leadLocked.startsWith(`${SWAP("the staging indexes")}${LOCKED} ${SIZE_AFTER}${SIZING}`),
+    "the warning's remedy leads with why — 039 changes the size — and has it applied before sizing: the pending run, the re-apply where the ledger records 039 or could not be read, a locked ledger waited out with no steps; plan039's steps first, where to run them and the memory for each build said (SMD-2880: 039's header spells the statement with the placeholder); the size below said to be the indexes' as they stand");
+  // Before 039 with nothing staged — the common case, where plan039 has
+  // both tables to build — the row and its remedy read as before SMD-2871.
+  const buildBoth = plan039({ pairs: [pairOf("thoughts", vecIx("thoughts")), pairOf("thought_chunks", vecIx("thought_chunks"))], dim: EMBEDDING_DIM });
+  const unstagedRows = memoryRows(memorySizing(over), { ledger: { state: "unread" }, plan: buildBoth });
+  const unstagedOk = memoryRows(memorySizing(base), { plan: buildBoth });
+  assert(buildBoth.steps !== "" && (unstagedRows[0].fix ?? "").startsWith(SIZING) && unstagedRows[0].detail.endsWith("(SMD-1499)") && unstagedOk[0].detail === okRes.detail,
+    "nothing staged: no clause and no 039-first remedy, whatever plan039 and the ledger say");
+  // residentIndexes: which index of a pair is walked. Left out only in the
+  // state 039 adopts from and the body walks around: anywhere else counted.
+  const W = EMBEDDING_DIM;
+  const VEC = VECDEF;
+  const ix = (name: string, table: string, def: string, bytes: number) => ({ name, table, def, bytes });
+  const shippedVec = [ix("thoughts_embedding_idx", "thoughts", VEC("thoughts"), 30 * MB), ix("thought_chunks_embedding_idx", "thought_chunks", VEC("thought_chunks"), 60 * MB)];
+  const stage = (t: string, def = HALFDEF(t, `${t}_embedding_halfvec_idx`), bytes = t === "thoughts" ? 10 * MB : 20 * MB) => ix(`${t}_embedding_halfvec_idx`, t, def, bytes);
+  const resident = (indexes: { name: string; table: string; def: string; bytes: number }[], bodyCasts: boolean | null = false) => residentIndexes({ indexes, dim: W, bodyCasts });
+  const pair = resident([...shippedVec, stage("thoughts"), stage("thought_chunks")]);
+  const one = resident([...shippedVec, stage("thoughts")]);
+  const withM = resident([ix("thoughts_embedding_idx", "thoughts", VEC("thoughts", " WITH (m='16', ef_construction='64')"), 30 * MB), stage("thoughts")]);
+  // pgvector in a schema off the search path: pg_get_indexdef qualifies the type and both operator classes.
+  const qualified = resident([
+    ix("thoughts_embedding_idx", "thoughts", `CREATE INDEX thoughts_embedding_idx ON public.thoughts USING hnsw (embedding extensions.vector_cosine_ops)`, 30 * MB),
+    ix("thoughts_embedding_halfvec_idx", "thoughts", `CREATE INDEX thoughts_embedding_halfvec_idx ON public.thoughts USING hnsw (((embedding)::extensions.halfvec(${W})) extensions.halfvec_cosine_ops)`, 10 * MB),
+  ]);
+  assert(pair.hnswBytes === 90 * MB && pair.stagedBytes === 30 * MB && pair.stagedCount === 2
+         && one.hnswBytes === 90 * MB && one.stagedBytes === 10 * MB && one.stagedCount === 1
+         && withM.stagedCount === 1 && withM.hnswBytes === 30 * MB && qualified.stagedCount === 1 && qualified.hnswBytes === 30 * MB
+         && resident(shippedVec).stagedCount === 0 && resident(shippedVec).hnswBytes === 90 * MB,
+    "039's window — a body on the vector column, the vector index under the shipped name (its own build parameters or not, pgvector's schema named or not), a staging index of 039's shape — leaves the staging index out on each table it is built on");
+  const halfShipped = (t: string) => ix(`${t}_embedding_idx`, t, HALFDEF(t, `${t}_embedding_idx`), 10 * MB);
+  const counted = (label: string, r: { hnswBytes: number; stagedBytes: number; stagedCount: number }, total: number) =>
+    r.stagedCount === 0 && r.stagedBytes === 0 && r.hnswBytes === total ? "" : label;
+  const missed = [
+    counted("body casts (the walk index remedy's rebuild: the staging index is the one walked)", resident([...shippedVec, stage("thoughts")], true), 100 * MB),
+    counted("body unread", resident([...shippedVec, stage("thoughts")], null), 100 * MB),
+    counted("shipped index already 039's (039 skips the table)", resident([halfShipped("thoughts"), stage("thoughts")]), 20 * MB),
+    counted("no index under the shipped name", resident([stage("thoughts")]), 10 * MB),
+    counted("shipped index under another name", resident([ix("pf_aside", "thoughts", VEC("thoughts"), 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("shipped index of another operator class (no index for the walk now)", resident([ix("thoughts_embedding_idx", "thoughts", VEC("thoughts").replace("vector_cosine_ops", "vector_l2_ops"), 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("shipped index partial", resident([ix("thoughts_embedding_idx", "thoughts", `${VEC("thoughts")} WHERE (embedding IS NOT NULL)`, 30 * MB), stage("thoughts")]), 40 * MB),
+    counted("staging index over the vector column (039 refuses it)", resident([...shippedVec.slice(0, 1), stage("thoughts", `CREATE INDEX thoughts_embedding_halfvec_idx ON public.thoughts USING hnsw (embedding vector_cosine_ops)`, 30 * MB)]), 60 * MB),
+    counted("staging index at another width", resident([...shippedVec.slice(0, 1), stage("thoughts", HALFDEF("thoughts", "thoughts_embedding_halfvec_idx", W + 1))]), 40 * MB),
+    counted("staging index with its own m (039 refuses it)", resident([...shippedVec.slice(0, 1), stage("thoughts", `${HALFDEF("thoughts", "thoughts_embedding_halfvec_idx")} WITH (m='32')`)]), 40 * MB),
+    counted("staging index on the other table's name", resident([...shippedVec.slice(0, 1), ix("thought_chunks_embedding_halfvec_idx", "thoughts", HALFDEF("thoughts", "thought_chunks_embedding_halfvec_idx"), 10 * MB)]), 40 * MB),
+  ].filter(Boolean);
+  assert(missed.length === 0,
+    `anywhere else the staging index is counted like any other: a casting or unread body, a shipped index already 039's, not there or of no use to the walk, a staging index 039 would refuse (${missed.join("; ") || "none missed"})`);
+  // SMD-2880: plan039, 039's DO block read table by table, and the walk
+  // index row's remedy. Each cell's statements, in order, and which list
+  // holds them — first (any brain) or large (a brain past a million rows):
+  // nothing where 039 skips or adopts; a CONCURRENTLY build of the staging
+  // index on a large brain where 039 would build it (an INVALID one dropped
+  // first); a free name filled first on any brain, renamed onto or built
+  // under; and, first, what 039 would refuse replaced or dropped.
+  const planOf = (pair: ReturnType<typeof pairOf>) => { const p = plan039({ pairs: [pair], dim: W }); return { first: p.first, large: p.large }; };
+  const halfIx = (t: string, name = `${t}_embedding_idx`, tail = ""): Ix => ({ def: `${HALFDEF(t, name)}${tail}`, valid: true });
+  const T = "thoughts";
+  const S = "thoughts_embedding_halfvec_idx";
+  const N = "thoughts_embedding_idx";
+  const DROP_S = `DROP INDEX CONCURRENTLY ${S};`;
+  const REPLACE = [`DROP INDEX CONCURRENTLY ${N};`, `ALTER INDEX ${S} RENAME TO ${N};`];
+  const OTHER_STAGE = stageIx(T, true, HALFDEF(T, S, W + 1));
+  const TUNED = halfIx(T, N, " WITH (m='32')");
+  const cells: [string, ReturnType<typeof pairOf>, string[], string[]][] = [
+    ["shipped 039's (039 skips)", pairOf(T, halfIx(T), stageIx(T)), [], []],
+    ["a table that is not there (no statement names it)", pairOf(T, null, null, false), [], []],
+    ["shipped 039's, pgvector's schema named (039 skips)", pairOf(T, { def: `CREATE INDEX ${N} ON public.${T} USING hnsw (((embedding)::extensions.halfvec(${W})) extensions.halfvec_cosine_ops)`, valid: true }), [], []],
+    ["vector shipped, staging of 039's shape (039 adopts)", pairOf(T, vecIx(T), stageIx(T)), [], []],
+    ["INVALID shipped, staging of 039's shape (039 adopts)", pairOf(T, { def: VECDEF(T), valid: false }, stageIx(T)), [], []],
+    ["vector shipped, nothing staged", pairOf(T, vecIx(T)), [], [CREATE(S, T)]],
+    ["INVALID shipped, nothing staged", pairOf(T, { def: VECDEF(T), valid: false }), [], [CREATE(S, T)]],
+    ["INVALID shipped of 039's own shape, nothing staged (039 skips only a valid one)", pairOf(T, { def: HALFDEF(T, N), valid: false }), [], [CREATE(S, T)]],
+    ["another expression shipped (IVFFlat over the vector column), nothing staged", pairOf(T, { def: `CREATE INDEX ${N} ON public.${T} USING ivfflat (embedding vector_cosine_ops)`, valid: true }), [], [CREATE(S, T)]],
+    ["vector shipped, staging INVALID", pairOf(T, vecIx(T), stageIx(T, false)), [], [DROP_S, CREATE(S, T)]],
+    ["vector shipped, staging of another shape (039 refuses it)", pairOf(T, vecIx(T), OTHER_STAGE), [DROP_S], [CREATE(S, T)]],
+    ["free name, nothing staged", pairOf(T, null), [CREATE(N, T)], []],
+    ["free name, staging INVALID", pairOf(T, null, stageIx(T, false)), [DROP_S, CREATE(N, T)], []],
+    ["free name, staging of another shape (039 refuses it)", pairOf(T, null, OTHER_STAGE), [DROP_S, CREATE(N, T)], []],
+    ["free name, staging of 039's shape", pairOf(T, null, stageIx(T)), [`ALTER INDEX ${S} RENAME TO ${N};`], []],
+    ["halfvec shipped of another shape (039 refuses it), nothing staged", pairOf(T, TUNED), [CREATE(S, T), ...REPLACE], []],
+    ["IVFFlat over halfvec shipped (039's LIKE '%halfvec%' refuses it), nothing staged", pairOf(T, { def: `CREATE INDEX ${N} ON public.${T} USING ivfflat (((embedding)::halfvec(${W})) halfvec_cosine_ops)`, valid: true }), [CREATE(S, T), ...REPLACE], []],
+    ["halfvec shipped of another shape, staging of 039's shape", pairOf(T, TUNED, stageIx(T)), REPLACE, []],
+    ["halfvec shipped of another shape, staging INVALID", pairOf(T, TUNED, stageIx(T, false)), [DROP_S, CREATE(S, T), ...REPLACE], []],
+    ["halfvec shipped of another shape, staging of another shape", pairOf(T, TUNED, OTHER_STAGE), [DROP_S, CREATE(S, T), ...REPLACE], []],
+  ];
+  const wrongCells = cells.filter(([, pair, first, large]) => JSON.stringify(planOf(pair)) !== JSON.stringify({ first, large })).map(([label, pair]) => `${label}: ${JSON.stringify(planOf(pair))}`);
+  assert(wrongCells.length === 0, `plan039 decides each table as 039's DO block does, and names the statements to run first, in order, on any brain or on a large one (${wrongCells.join("; ") || `${cells.length} cells`})`);
+  const swapsOf = (pairs: ReturnType<typeof pairOf>[]) => plan039({ pairs, dim: W }).swaps;
+  assert(swapsOf([pairOf(T, vecIx(T), stageIx(T)), pairOf("thought_chunks", vecIx("thought_chunks"))]) === 2 && swapsOf([pairOf(T, null), pairOf("thought_chunks", null, stageIx("thought_chunks"))]) === 0
+         && swapsOf([pairOf(T, halfIx(T)), pairOf("thought_chunks", TUNED)]) === 0 && plan039({ pairs: [pairOf(T, halfIx(T))], dim: W }).steps === "",
+    "swaps counts the tables where 039 swaps a staging index in beside an index under the name — not a free name filled first, a table it skips or one replaced first; nothing to run is nothing said");
+  // The text, word for word: where to run, the memory, the any-brain steps
+  // by table with their reasons and the wait, the large-table steps, and the
+  // walk remedy's ledger branches; a locked ledger waited out; no re-apply
+  // where the steps leave 039 nothing under a casting body.
+  const walkPlain = walkRemedy({ ledger: { state: "pending" }, plan: plan039({ pairs: [pairOf(T, halfIx(T)), pairOf("thought_chunks", halfIx("thought_chunks"))], dim: W }) });
+  const recordedPairs = [pairOf(T, vecIx(T)), pairOf("thought_chunks", null)];
+  const walkRecorded = walkRemedy({ ledger: { state: "recorded" }, plan: plan039({ pairs: recordedPairs, dim: W }) });
+  const walkUnread = walkRemedy({ ledger: { state: "unread", why: "schema_migrations does not resolve for this role" }, plan: plan039({ pairs: [pairOf(T, vecIx(T), stageIx(T, false)), pairOf("thought_chunks", null, stageIx("thought_chunks"))], dim: W }) });
+  const walkHole = walkRemedy({ ledger: { state: "hole" }, plan: plan039({ pairs: [pairOf(T, TUNED), pairOf("thought_chunks", vecIx("thought_chunks"), stageIx("thought_chunks", true, HALFDEF("thought_chunks", "thought_chunks_embedding_halfvec_idx", W + 1)))], dim: W }) });
+  const walkLocked = walkRemedy({ ledger: { state: "locked", why: "schema_migrations could not be read: canceling statement due to lock timeout" }, plan: plan039({ pairs: recordedPairs, dim: W }) });
+  const walkDone = walkRemedy({ ledger: { state: "recorded" }, plan: plan039({ pairs: [pairOf(T, TUNED), pairOf("thought_chunks", null)], dim: W }), bodyCasts: true });
+  const walkCastSwap = walkRemedy({ ledger: { state: "recorded" }, plan: plan039({ pairs: recordedPairs, dim: W }), bodyCasts: true });
+  assert(walkPlain === PENDING
+         && walkRecorded === `${RUN}${SIZE}On any brain, first — on thought_chunks (${FREE("thought_chunks")}): 1) \`${CREATE("thought_chunks_embedding_idx", "thought_chunks")}\`. Then, where the table holds more than a million vectors — on thoughts (039 would build ${S} inside its transaction): 2) \`${CREATE(S, T)}\`${SMALLER("it")}Re-apply the recorded migrations: ${REAPPLY_STEPS}.`
+         && walkUnread === `${RUN}${SIZE}On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing and thought_chunks_embedding_halfvec_idx, of 039's shape, is built): 1) \`ALTER INDEX thought_chunks_embedding_halfvec_idx RENAME TO thought_chunks_embedding_idx;\`. Then, where the table holds more than a million vectors — on thoughts (${S} is INVALID (an interrupted build), and 039 would build it again inside its transaction): 2) \`${DROP_S}\` 3) \`${CREATE(S, T)}\`${SMALLER("it")}Whether 039 is recorded is unknown (schema_migrations does not resolve for this role), so re-apply the recorded migrations, which applies 039 either way: ${REAPPLY_STEPS}.`
+         && walkHole === `${RUN}${SIZE}On any brain, first — on thoughts (${N} is a halfvec index of another shape, which 039 stops on: replacing it drops its own settings): 1) \`${CREATE(S, T)}\` 2) ${WAIT}\`DROP INDEX CONCURRENTLY ${N};\` 3) \`ALTER INDEX ${S} RENAME TO ${N};\`; on thought_chunks (thought_chunks_embedding_halfvec_idx is of another shape, which 039 stops on): 4) \`DROP INDEX CONCURRENTLY thought_chunks_embedding_halfvec_idx;\`. Then, where the table holds more than a million vectors — on thought_chunks (039 would build thought_chunks_embedding_halfvec_idx inside its transaction): 5) \`${CREATE("thought_chunks_embedding_halfvec_idx", "thought_chunks")}\`${SMALLER("it")}The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${REAPPLY_STEPS}.`
+         && walkLocked === LOCKED
+         && walkDone.endsWith("`. Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.") && !walkDone.includes("stop the server")
+         && walkCastSwap.endsWith(`Re-apply the recorded migrations: ${REAPPLY_STEPS}.`)
+         && walkRemedy({ ledger: { state: "recorded" }, plan: plan039({ pairs: [pairOf(T, TUNED)], dim: W }) }).endsWith(`Re-apply the recorded migrations: ${REAPPLY_STEPS}.`),
+    `the walk index remedy word for word: the pending run alone with nothing first; a free name filled on any brain and a large-table build, then a re-apply; a rename, then an INVALID staging index dropped and built again, with an unread ledger's reason; two stops on two tables, the replacement waiting for its build, with a ledger hole's reason; a locked ledger waited out, steps and all; and no re-apply where the steps leave 039 nothing under a casting body, but one where it still swaps (${walkHole.slice(0, 60)}…)`);
+  const freeOnly = plan039({ pairs: [pairOf(T, null)], dim: W }).steps;
+  const renameOnly = plan039({ pairs: [pairOf(T, null, stageIx(T))], dim: W }).steps;
+  assert(freeOnly === `${RUN}${SIZE}On any brain, first — on thoughts (${FREE(T)}): 1) \`${CREATE(N, T)}\`. ` && renameOnly === `${RUN}On any brain, first — on thoughts (${N} is missing and ${S}, of 039's shape, is built): 1) \`ALTER INDEX ${S} RENAME TO ${N};\`. `
+         && apply039({ state: "none" }) === "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
+    "the memory goes ahead of any CREATE INDEX, an any-brain one alone included, and not ahead of a rename alone; with no ledger, the plain run that records every file, not the --baseline the ledger row offers");
+  assert([walkPlain, walkRecorded, walkUnread, walkHole, walkLocked, leadRecorded].every((t) => !/file alone|direct connection|074_min_trust|\{\{/.test(t))
+         && leadRecorded.includes(apply039({ state: "recorded" })) && walkRecorded.includes(apply039({ state: "recorded" })) && apply039({ state: "unread" }).includes("(this role cannot read schema_migrations)") && apply039() === PENDING,
+    "no branch has a file applied by hand, 074 after it or a placeholder left in; both rows say 039's apply in apply039's words, an unread reason defaulting to the refusal's and no ledger state to the pending run");
   const [noIndex] = memoryRows(memorySizing({ ...base, hnswBytes: 0 }));
   assert(noIndex.status === "ok" && noIndex.detail.startsWith("no valid HNSW index on thoughts or thought_chunks, so nothing for shared_buffers to hold"),
     `no valid HNSW index: said as none, not as an index of 0 kB (${noIndex.detail.slice(0, 60)}…)`);
@@ -13365,6 +13538,40 @@ console.log("\n[77] Migration 086: the operator resets a capture-only key's sett
     "086 re-applied: one function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[78] Migration 087: board_findings_posted — one row per ticket pair and word, the pair in order, the ticket commented on one of the two, a word and an origin from their lists, at least one finding named; the cap's index; a re-apply a no-op (SMD-2681)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'board_findings_posted' ORDER BY ordinal_position`))
+    .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
+  assert(cols === "ticket_a:text ticket_b:text word:text posted_on:text origin:text comment_id:text? finding_ids:ARRAY posted_at:timestamp with time zone",
+    `the table's columns, only comment_id nullable (${cols})`);
+  const pk = (await one<{ k: string }>(`SELECT string_agg(a.attname, ',' ORDER BY k.i) AS k FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(n, i) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n WHERE c.conrelid = 'board_findings_posted'::regclass AND c.contype = 'p'`)).k;
+  assert(pk === "ticket_a,ticket_b,word", `the key is the pair and the word, not a finding's id (${pk})`);
+  const idx = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'board_findings_posted_at_idx'`))?.d ?? "";
+  assert(/\(posted_at\) WHERE \(origin = 'posted'::text\)/.test(idx), `the cap's index: posted_at over the rows this brain posted (${idx})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["board_findings_posted"])).c ?? "";
+  assert(/Migration 087 \/ SMD-2681/.test(tc) && /never updated or deleted/.test(tc), "the table's comment names 087, the ticket, and that a row is only inserted");
+
+  const ins = (a: string, b: string, word: string, on: string, origin: string, ids = "{00000000-0000-0000-0000-000000000001}") =>
+    db.query(`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, finding_ids) VALUES ($1, $2, $3, $4, $5, $6::uuid[])`, [a, b, word, on, origin, ids])
+      .then(() => "ok", (e: Error) => e.message);
+  assert((await ins("SMD-1", "SMD-2", "related", "SMD-2", "posted")) === "ok", "a row: two tickets in order, a word, the newer ticket, posted");
+  assert((await ins("SMD-1", "SMD-2", "outdates", "SMD-1", "found")) === "ok", "…another word for the same pair is another row; found is an origin");
+  assert(/duplicate key/.test(await ins("SMD-1", "SMD-2", "related", "SMD-1", "posted")), "the same pair and word twice is refused: posted once");
+  assert(/board_findings_posted_pair_ordered/.test(await ins("SMD-2", "SMD-1", "evolves", "SMD-2", "posted")), "a pair out of order is refused, so one pair has one spelling");
+  assert(/board_findings_posted_pair_ordered/.test(await ins("SMD-3", "SMD-3", "evolves", "SMD-3", "posted")), "…and two rows of one ticket are no pair");
+  assert(/board_findings_posted_word/.test(await ins("SMD-1", "SMD-3", "supersedes", "SMD-3", "posted")), "a word outside the four is refused");
+  assert(/board_findings_posted_on_the_pair/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-9", "posted")), "a comment on a ticket outside the pair is refused");
+  assert(/board_findings_posted_origin/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-3", "sent")), "an origin outside posted and found is refused");
+  assert(/board_findings_posted_names_a_finding/.test(await ins("SMD-1", "SMD-3", "evolves", "SMD-3", "posted", "{}")), "a row naming no finding is refused");
+
+  const before = JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`));
+  await reapply("087");
+  assert(JSON.stringify(await q(`SELECT * FROM board_findings_posted ORDER BY word`)) === before, "087 re-applied: the rows stand");
+  await db.exec(`DELETE FROM board_findings_posted WHERE true`);
 }
 
 console.log("\n[79] Migration 088: update_thought answers what it did — the row's stamp after the write, whether the text counts as the same, and whether the patch merged anything the server does not set; nothing else moves (SMD-2744)");

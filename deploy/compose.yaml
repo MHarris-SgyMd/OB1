@@ -1188,6 +1188,13 @@ services:
   # fetches issues) and OB1_LINEAR_INITIATIVE. The egress gate applies to its
   # embed and tag calls as to a capture's: with the provider on the host,
   # deploy/.env carries OB1_LLM_LOCAL=1 or every ticket lands without a vector.
+  #
+  # With LINEAR_COMMENT_API_KEY set — a key of its own that can comment, never
+  # LINEAR_API_KEY — each pass ends by posting a consolidation finding between
+  # two tickets the board does not link as one comment on the newer ticket, at
+  # most OB1_FINDINGS_POST_CAP (5) a day and only where the egress gate allows
+  # it — under the default deny, OB1_EGRESS_ALLOW=type:board-finding
+  # (db/board-findings.ts, SMD-2681). It comments only.
   board-sync:
     image: oven/bun:1.4.0-alpine
     profiles: ["board-sync"]
@@ -1209,6 +1216,8 @@ services:
       LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
+      LINEAR_COMMENT_API_KEY: ${LINEAR_COMMENT_API_KEY:-}
+      OB1_FINDINGS_POST_CAP: ${OB1_FINDINGS_POST_CAP:-}
     command: ["bun", "db/sync-linear.ts", "--loop"]
     # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
@@ -1350,6 +1359,61 @@ services:
     # the most on the stable brain (1,447 claims, 2026-10-05).
     stop_grace_period: 60s
     depends_on: *claim-worker-depends
+    restart: on-failure:3
+    logging: *logging
+
+  # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
+  # — `--profile sleep` — and an alternative to `--profile workers`, not a
+  # companion: `bun db/sleep.ts --follow` runs extraction, then consolidation
+  # beside it, only while the brain is quiet — OB1_SLEEP_QUIET seconds (unset,
+  # 300) with no live write in thought_audit and, when the server logs
+  # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
+  # the opt-in `sleep` grant group), no search — and hard-stops both within
+  # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
+  # returned. Followers outside it do not yield, so it will not run (exit 2)
+  # while the workers profile's heartbeats are fresh: at its start, before
+  # each sleep, and within a poll while asleep — so both profiles brought up
+  # at once end it too.
+  #
+  # The workers' shape: the same image, mounts, environment, key guard and
+  # digits-only knobs, so it runs this checkout's code too (SMD-2601). One
+  # worker per pass unless OB1_SLEEP_WORKERS says more. `init: true` from the
+  # start (SMD-2666): bun as PID 1 ignores SIGTERM until it installs its
+  # handlers, which the scheduler does after its start reads — and those wait
+  # out a database not answering yet, so a stop then would wait out the grace.
+  sleep:
+    image: oven/bun:1.4.0-alpine
+    profiles: ["sleep"]
+    working_dir: /app
+    init: true
+    volumes: *claim-worker-mounts
+    environment:
+      <<: *server-env
+      PORT: ""
+      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
+      OB1_SLEEP_QUIET: ${OB1_SLEEP_QUIET:-}
+      OB1_SLEEP_POLL: ${OB1_SLEEP_POLL:-}
+      OB1_SLEEP_WORKERS: ${OB1_SLEEP_WORKERS:-}
+    command:
+      - sh
+      - -c
+      - |
+        [ -n "$$OB1_WORKER_KEY" ] || { echo "sleep: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
+        case "$$OB1_SLEEP_QUIET$$OB1_SLEEP_POLL$$OB1_SLEEP_WORKERS" in *[!0-9]*) echo "sleep: OB1_SLEEP_QUIET ('$$OB1_SLEEP_QUIET'), OB1_SLEEP_POLL ('$$OB1_SLEEP_POLL') and OB1_SLEEP_WORKERS ('$$OB1_SLEEP_WORKERS') take digits only" >&2; exit 2;; esac
+        exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}"
+    extra_hosts: *host-alias
+    # The workers': Postgres on `data`, the model provider on `egress`
+    # (SMD-2583). On compose's default network it would wait for a database it
+    # cannot reach, for ever (its start's outage wait), never exiting to restart.
+    networks: [data, egress]
+    # The first SIGTERM stops its passes after the thought in hand, as the
+    # extract service's does — extraction's p90 is 121 s on the stable brain —
+    # and a wait for the quiet at once.
+    stop_grace_period: 120s
+    depends_on: *claim-worker-depends
+    # The workers' rule: a refusal exits 2 (no key, a bad knob, a pass refusing
+    # at its first start, followers running outside it) and three restarts end
+    # it; an outage, at its start or in a sleep, is waited out, not exited.
     restart: on-failure:3
     logging: *logging
 
@@ -1842,10 +1906,10 @@ networks:
   #          (auth.ob1.internal), each called by that name; a tier of another
   #          project joins it under its own (compose.canary.yaml).
   #   data   internal: Postgres, and only what connects to it — the migrator,
-  #          the two servers, board-sync, the workers, the import runner and
+  #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
   #   egress outward: whatever calls a model provider or a vendor (the two
-  #          servers, board-sync, the workers, the import runner, n8n), and
+  #          servers, board-sync, the workers, the sleep scheduler, the import runner, n8n), and
   #          the stack's own Ollama and Jev, which fetch their weights there
   #          and are called there by name.
   #   auth-egress  outward, the authorization server's alone.
