@@ -135,7 +135,9 @@
  * ── Not here ────────────────────────────────────────────────────────────────
  * A budget per pass
  * (statement_timeout, work_mem) and per sleep (a wall clock), and the
- * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). The frozen-belief
+ * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). A pass waiting
+ * mid-pass for the provider, after its workers' pauses, reads "running a
+ * pass" on the row — the `waiting` word is its start's alone (SMD-2905). The frozen-belief
  * scan, decay relabelling and an HNSW heal are their own tickets' passes
  * (SMD-1722, SMD-1736, SMD-1632), as is the awake latency under a sleep at 1M
  * and 10M rows (SMD-1500's harness).

@@ -2896,8 +2896,9 @@ words, and the `sleep` row says each:
   (key)", with that kind's remedy before the restart, where "start it again"
   alone would only refuse again.
 
-Its `consolidate pass` row reads a fresh one as the scheduler
-working the current judge's key, rather than asking for a second worker.
+Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
+scheduler working the current judge's key, its pass's start wait said there
+too, rather than asking for a second worker.
 Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
 **From the `workers` profile.** Its followers do not yield, so the two are
@@ -2926,7 +2927,8 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679).
+(SMD-2679); a `waiting` word for a pass waiting mid-pass for the provider,
+which reads "running a pass" — `waiting` is its start's alone (SMD-2905).
 test-live [38] drives it against a stub model.
 
 ## Extensions
