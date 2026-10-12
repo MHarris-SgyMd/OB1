@@ -333,7 +333,7 @@ export const SPECS = {
       content: z.string().min(1).optional()
         .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
       metadata_patch: z.record(z.string(), z.unknown()).optional()
-        .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone"),
+        .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone. actor_kind, actor_name and trust are the server's: the kind and name of the key that wrote the current text, and the trust a change of text declares (none above the key's kind). A patch naming them sets none of them — save a trust no higher than your key's kind (ingested for a key with no kind) sent with a change of text — while its other keys still merge, and the reply names each one the thought kept"),
       if_unchanged_since: z.string().optional()
         .describe("The updated_at from your last read. The update is refused as STALE_READ if the thought changed since"),
       // Migration 032 (SMD-1323): the visible half of the provenance

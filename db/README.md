@@ -259,7 +259,7 @@ guards against the accident (`plugins/README.md`).
 ## Expected outcome
 
 `bun test-schema.ts` prints `2689 assertions: 2689 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-six (86) migrations applied, and
+Against a real database, `bun migrate.ts` reports eighty-seven (87) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 088 SMD-2744).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1340,6 +1340,28 @@ a restamp with a reset after it is no writer, and the capture is the writer
 again. It refuses to apply without 046 or 085. test-schema [77],
 test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
 test-e2e-sql [13g].
+
+Migration 088 has `update_thought` say what it did (SMD-2744's second Work
+item). A `metadata_patch` naming `trust`, `actor_kind` or `actor_name` is
+merged in name only — the server sets them (050, 073) — and the server's
+reply said "metadata merged". Its success answer now carries `stamp`, the
+row's `actor_kind`, `actor_name` and `trust` after the call; `same_text`,
+whether the text counts as the one it held by 003's fingerprint; and, when a
+patch was given, `metadata_merged`, whether the patch moved a key the server
+does not set or had its trust — a word — taken by a change of text; the stamp
+moving on its own to a new text's writer is not the patch's. It is never null.
+A row whose metadata is SQL NULL (a raw writer's) merges no patch: it answers
+`patch_dropped` when the patch named a key the server does not set, and
+merged only when a change of text — which writes the stamp over the NULL —
+took the patch's trust. Each is read inside the write, with the row locked,
+so no other write, backfill pass or clock stands between the answer and the
+row (a read after the write, which the server tried first, met each of those
+in turn). The server's reply names
+each named stamp key the thought did not take, at the value it holds. The
+body is 073's, the signature the same, the grants kept; it carries 073's
+mechanism for an earlier form a re-applied older file left, and refuses to
+apply without 073. test-schema [79], test-upgrade [20aj],
+server-portable/test-update-delete.ts [11], test-server.ts [23].
 
 ## What changed relative to the guide
 
