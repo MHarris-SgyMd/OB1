@@ -73,6 +73,8 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
 const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
 /** The → fix line under the row named `name`, or "" when the row has none. */
 const fix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : ""; };
+/** The → fix line, trimmed, under the FAILING row named `name` — for a name with an ok row first (the metadata model's, then its --deep probe's). */
+const failFix = (out: string, name: string) => { const ls = out.split("\n"); const i = ls.findIndex((l) => new RegExp(`^\\s*✗\\s+${name}\\s`).test(l)); return i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1].trim() : ""; };
 
 // db/migrate.ts, for the --grant step: the one executable spelling of the
 // capturing-role privileges. Spawned like preflight so its exit code and output
@@ -4210,15 +4212,85 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(httpsProxyOnly.out), "…and HTTPS_PROXY alone does not touch an http base");
   proxied.stop(true);
 
-  // Userinfo in the base: fetch never sends it, and the rows must not print
-  // it on every start (fifth review pass).
-  const seenAuth: (string | null)[] = [];
-  const plain = Bun.serve({ port: 0, fetch: (req) => { seenAuth.push(req.headers.get("authorization")); return Response.json({ object: "list", data: [] }); } });
+  // Userinfo in the base: a credential, sent as Basic by every call the server
+  // makes (embed.ts, SMD-2885) — but not by this probe, which sends none, on
+  // any Bun: 1.4.3's fetch sends a URL's userinfo itself, so it is out of the
+  // URL before fetch sees it. The rows never print it (fifth review pass).
+  const seenAuth: { method: string; auth: string | null }[] = [];
+  const plain = Bun.serve({ port: 0, fetch: (req) => {
+    seenAuth.push({ method: req.method, auth: req.headers.get("authorization") });
+    return req.method === "GET" ? Response.json({ object: "list", data: [] }) : Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
+  } });
   const withUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://user:s3cret-in-url@127.0.0.1:${plain.port}/v1` });
-  plain.stop(true);
   assert(!/s3cret-in-url/.test(withUser.out) && /✓\s+provider endpoint\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 answers/.test(withUser.out) && /✓\s+model provider\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 — embeddings/.test(withUser.out),
          "userinfo in the base URL is masked on the endpoint and provider rows and appears nowhere in the report");
-  assert(seenAuth.length === 1 && seenAuth[0] === null, `…and fetch sent no Authorization for it (${JSON.stringify(seenAuth)})`);
+  assert(seenAuth.length === 1 && seenAuth[0].auth === null, `…the probe sent no Authorization for it, on this Bun (${Bun.version}) too (${JSON.stringify(seenAuth)})`);
+  assert(/✓\s+provider credential\s+the user and password in OB1_LLM_BASE_URL, sent as Basic$/.test(row(withUser.out, "provider credential")),
+         `…and the credential row names it as the credential, sent as Basic (${row(withUser.out, "provider credential").trim()})`);
+  seenAuth.length = 0;
+  const deepUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://user:s3cret-in-url@127.0.0.1:${plain.port}/v1` }, "--deep");
+  const posted = seenAuth.filter((s) => s.method === "POST");
+  assert(posted.length > 0 && posted.every((s) => s.auth === `Basic ${btoa("user:s3cret-in-url")}`) && !/s3cret-in-url/.test(deepUser.out),
+         `--deep sends exactly what the server sends: the userinfo as Basic on every probe, and prints it nowhere (${JSON.stringify(posted)})`);
+  plain.stop(true);
+  // A hosted base with userinfo and no key has a credential: not the missing
+  // key's failure, and --deep tests it rather than skipping (provider.invalid
+  // resolves nowhere, so the probe fails — what is asserted is that it ran).
+  const hostedUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://user:s3cret-in-url@provider.invalid/v1" }, "--deep");
+  assert(/✓\s+provider credential\s+the user and password in OB1_LLM_BASE_URL, sent as Basic$/.test(row(hostedUser.out, "provider credential")) && !/s3cret-in-url/.test(hostedUser.out),
+         `a hosted base's userinfo is its credential — no "no OB1_LLM_API_KEY" failure (${row(hostedUser.out, "provider credential").trim()})`);
+  assert(!/no credential to test/.test(hostedUser.out) && /✗\s+embedding provider\s/.test(hostedUser.out),
+         `…and --deep dials it instead of skipping for want of a credential (${row(hostedUser.out, "embedding provider").trim().slice(0, 120)})`);
+  // A 401 to a --deep probe names the credential that was sent, by its knob:
+  // the base's user and password, the key, or none — and a chat endpoint that
+  // is the embeddings one names the embeddings knobs (fourth review pass).
+  const deny = Bun.serve({ port: 0, fetch: (req) => req.method === "GET" ? Response.json({ object: "list", data: [] }) : new Response("no", { status: 401 }) });
+  const DENY = `http://127.0.0.1:${deny.port}/v1`;
+  const denyUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: DENY.replace("://", "://u:wrong@") }, "--deep");
+  const denySharedKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: DENY, OB1_LLM_API_KEY: "sk-wrong", OB1_CHAT_BASE_URL: DENY }, "--deep");
+  const denyChatUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: DENY.replace("://", "://c:wrong@") }, "--deep");
+  const denyNone = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: DENY }, "--deep");
+  deny.stop(true);
+  assert(failFix(denyUser.out, "embedding provider") === "→ The user and password in OB1_LLM_BASE_URL are rejected. Check them."
+         && failFix(denyUser.out, "metadata model").startsWith("→ The user and password in OB1_LLM_BASE_URL are rejected. Check them. "),
+         `a 401 to userinfo names the base's user and password, not a key that is not set (${failFix(denyUser.out, "embedding provider")} / ${failFix(denyUser.out, "metadata model").slice(0, 70)})`);
+  assert(failFix(denySharedKey.out, "metadata model").startsWith("→ The key is rejected. Check OB1_LLM_API_KEY (or OPENROUTER_API_KEY). "),
+         `…a chat base that is the embeddings endpoint names the embeddings key, not OB1_CHAT_API_KEY (${failFix(denySharedKey.out, "metadata model").slice(0, 90)})`);
+  assert(failFix(denyChatUser.out, "metadata model").startsWith("→ The user and password in OB1_CHAT_BASE_URL are rejected. Check them. "),
+         `…a chat base's own userinfo is named by its knob (${failFix(denyChatUser.out, "metadata model").slice(0, 90)})`);
+  assert(failFix(denyNone.out, "embedding provider") === "→ It wants a credential and none was sent: set OB1_LLM_API_KEY (or OPENROUTER_API_KEY), or a user and password in OB1_LLM_BASE_URL.",
+         `…and a 401 with nothing sent says so (${failFix(denyNone.out, "embedding provider")})`);
+  // A base the URL parser refuses (a `#` in the password) keeps its userinfo,
+  // and rows quote the base and remedies built from it: every row prints a
+  // base through shownBase and every host through egress's hostOf, which mask
+  // it, so none prints it — a `#` in the password, or a space in it and a bad
+  // port (third and fourth review passes).
+  const refusedUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://user:s3cret#in-url@provider.invalid/v1", OB1_LLM_API_KEY: "sk-refused" }, "--deep");
+  assert(!/s3cret#in-url/.test(refusedUser.out) && /https:\/\/\*\*\*@provider\.invalid\/v1/.test(row(refusedUser.out, "embeddings egress") + row(refusedUser.out, "metadata model")),
+         `a base the URL parser refuses is printed masked on every row and remedy (${refusedUser.out.split("\n").filter((l) => /provider\.invalid/.test(l)).length} line(s) name it)`);
+  const refusedSpace = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://user:s3cret in-url@provider.invalid:bad/v1" });
+  assert(!/s3cret in-url/.test(refusedSpace.out) && /https:\/\/\*\*\*@provider\.invalid:bad\/v1 is not local/.test(row(refusedSpace.out, "provider credential")),
+         `…and the credential failure and egress rows mask a password with a space in it (${row(refusedSpace.out, "provider credential").trim().slice(0, 120)})`);
+  // Both: the key takes the one Authorization header, and the row says the
+  // userinfo is not sent.
+  const both = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "https://user:s3cret-in-url@provider.invalid/v1", OB1_LLM_API_KEY: "sk-both" });
+  assert(/!\s+provider credential\s+OB1_LLM_API_KEY and a user and password in OB1_LLM_BASE_URL are both set — the key is sent as Bearer and the user and password are not sent$/.test(row(both.out, "provider credential"))
+         && /^→ Remove the user and password from OB1_LLM_BASE_URL, or unset OB1_LLM_API_KEY to send them as Basic\.$/.test(fix(both.out, "provider credential").trim())
+         && /✓\s+provider credential\s+set \(7 chars\)/.test(both.out),
+         `a key beside userinfo warns that the userinfo is not sent, then reports the key (${row(both.out, "provider credential").trim()})`);
+  // The embeddings base again, with a user and password, as the chat base: an
+  // endpoint of its own (its credential is its own), so the embeddings key is
+  // named as not sent there though the two bases are one.
+  const chatUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_LLM_API_KEY: "sk-emb", OB1_CHAT_BASE_URL: LOCAL_STUB.replace("://", "://chat:s3cret-in-url@") });
+  assert(/✓\s+chat credential\s+the user and password in OB1_CHAT_BASE_URL, sent as Basic — OB1_LLM_API_KEY belongs to the other endpoint and is not sent here$/.test(row(chatUser.out, "chat credential")) && !/s3cret-in-url/.test(chatUser.out),
+         `a chat base that is the embeddings base plus userinfo has its own credential, and the embeddings key is named as not sent (${row(chatUser.out, "chat credential").trim()})`);
+  // The chat base the embeddings base without its userinfo: the same endpoint,
+  // so the chat row points at the provider row instead of naming OB1_CHAT_*
+  // knobs that are not set (second review pass).
+  const chatShared = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB.replace("://", "://emb:s3cret-in-url@"), OB1_LLM_API_KEY: "sk-emb", OB1_CHAT_BASE_URL: LOCAL_STUB });
+  assert(/✓\s+chat credential\s+the embeddings endpoint's — OB1_CHAT_BASE_URL names the same base, so the provider credential row is this one's too$/.test(row(chatShared.out, "chat credential"))
+         && !/chat credential\s+.*OB1_CHAT_API_KEY/.test(chatShared.out),
+         `a chat base that is the embeddings endpoint says so, naming no chat knob that is unset (${row(chatShared.out, "chat credential").trim()})`);
 
   // A listener that accepts and closes with no HTTP — an https port dialled
   // as http is the common shape — is its own wording, without Bun's advice
@@ -4327,6 +4399,16 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
          "a redirect is an answer that is not the tier: named, its Location shown, userinfo masked, the base's path the remedy");
   const halfway = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${halfTier.port}`, OB1_JEV_LOCAL: "1" }, "--deep");
   assert(!/jevsecret/.test(halfway.out) && /✗\s+jev decision\s+Decision request to http:\/\/\*\*\*@127\.0\.0\.1:\d+\/decide failed: 500/.test(halfway.out), "a /decide that fails is the decision row's, userinfo masked");
+  // A 401 is the credential's, not the path's: the base's user and password
+  // are the tier's one credential, sent as Basic (SMD-2885, fourth review pass).
+  const guarded = Bun.serve({ port: 0, fetch: () => new Response("unauthorized", { status: 401 }) });
+  const jevDenied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${guarded.port}`, OB1_JEV_LOCAL: "1" });
+  const jevBare = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${guarded.port}`, OB1_JEV_LOCAL: "1" });
+  guarded.stop(true);
+  assert(!/jevsecret/.test(jevDenied.out) && /✗\s+jev tier\s+http:\/\/\*\*\*@127\.0\.0\.1:\d+ answers, but refuses the request: .*401/.test(jevDenied.out)
+         && fix(jevDenied.out, "jev tier").trim() === "→ The user and password in OB1_JEV_BASE_URL are rejected. Check them."
+         && fix(jevBare.out, "jev tier").trim() === "→ It wants a credential and none was sent: put a user and password in OB1_JEV_BASE_URL.",
+         `a 401 from the tier names its credential, sent or missing, not its path (${fix(jevDenied.out, "jev tier").trim()} / ${fix(jevBare.out, "jev tier").trim()})`);
   const pathed = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `${TIER}/v1`, OB1_JEV_LOCAL: "1" });
   assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers, but not as the tier/.test(pathed.out), "a base with Ollama's /v1 on it answers, but not as the tier");
   const proxied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });

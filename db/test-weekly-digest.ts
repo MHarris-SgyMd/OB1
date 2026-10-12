@@ -131,6 +131,10 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const proxied = telegramEndpoint({ OB1_TELEGRAM_API_BASE: "https://tg.internal/", OB1_TELEGRAM_LOCAL: "1" });
   ok(proxied.base === "https://tg.internal" && proxied.local,
     "OB1_TELEGRAM_API_BASE overrides the host (trailing slash off) and OB1_TELEGRAM_LOCAL declares it local");
+  ok(def.headers.Authorization === undefined, "the default endpoint sends no Authorization: the bot token is in the path");
+  const fronted = telegramEndpoint({ OB1_TELEGRAM_API_BASE: "https://bot:s3cret@tg.internal/" });
+  ok(fronted.base === "https://tg.internal" && fronted.headers.Authorization === `Basic ${btoa("bot:s3cret")}`,
+    "a user and password in OB1_TELEGRAM_API_BASE leave the base and are sent as Basic, as for every endpoint (SMD-2885)");
 }
 
 console.log(`\ntest-weekly-digest: ${pass} passed, ${fail} failed`);

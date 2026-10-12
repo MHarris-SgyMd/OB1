@@ -220,12 +220,14 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
 
 const showTerm = (t: EgressTerm): string => `${t.unit}:${t.value}`;
 
-/** The host a base URL names, for a reason; the URL itself when it does not parse. */
+/** The host a base URL names, for a reason; the URL itself, its userinfo masked, when it does not parse. */
 export function hostOf(base: string): string {
   try {
     return new URL(base).host;
   } catch {
-    return base;
+    // A base the URL parser refuses keeps its userinfo (embed.ts): masked, as
+    // store.ts's maskUrl masks it, before a row or a record carries it (SMD-2885).
+    return base.replace(/:\/\/[^/]*@/, "://***@");
   }
 }
 

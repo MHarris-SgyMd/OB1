@@ -257,14 +257,24 @@ export function refusesLength(status: number | undefined, body: string): boolean
  * rather than a base URL and a header set that silently meant "both".
  */
 export type ProviderEndpoint = {
-  /** Base URL, trailing slashes stripped. */
+  /**
+   * Base URL, trailing slashes and userinfo stripped: what every call dials. A
+   * base the URL parser refuses is kept as written, userinfo and all — fetch
+   * refuses it too — so a row prints `shownBase`, not this (SMD-2885).
+   */
   base: string;
   /**
-   * The credential, when there is one. Preflight reports that it is set and how
-   * long it is, never the value; everything else reads `headers`.
+   * The key, when there is one. Preflight reports that it is set and how long
+   * it is, never the value; everything else reads `headers`.
    */
   key: string | undefined;
-  /** Request headers; carries Authorization only when there is a key. */
+  /**
+   * The base URL carried userinfo the parser reads (`http://user:pass@host/v1`,
+   * or a user alone). It is sent as Basic when there is no key, and not at all
+   * when there is: the key's Bearer takes the one Authorization header (SMD-2885).
+   */
+  userinfo: boolean;
+  /** Request headers; carries Authorization only when there is a key or userinfo. */
   headers: Record<string, string>;
   /**
    * Declared on this machine or its private network — OB1_LLM_LOCAL /
@@ -280,18 +290,70 @@ export type ProviderEndpoint = {
 /** The knobs that declare an endpoint local. */
 export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL";
 
+/**
+ * A base URL's user and password, out of it: the base without them, and the
+ * Basic credential they make (RFC 7617, UTF-8), or none. Bun's fetch sends
+ * userinfo as Basic from 1.4.3 and dropped it before, so it is never left in a
+ * URL for fetch to decide — nor for a message to print (SMD-2885).
+ */
+function splitUserinfo(base: string): { base: string; basic?: string } {
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    return { base };
+  }
+  if (!url.username && !url.password) return { base };
+  const decoded = (part: string) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  };
+  const basic = Buffer.from(`${decoded(url.username)}:${decoded(url.password)}`, "utf8").toString("base64");
+  url.username = "";
+  url.password = "";
+  // The base as written, the userinfo cut out — where the parser reads that as
+  // the same URL. Else the parse rebuilt: `http:/u:p@h` and `http://u:p@h\x@other`
+  // are userinfo too, and the host the parser read is the one dialled (second
+  // review pass). As written, so the knobs' two spellings of one base still
+  // compare equal (resolveProviderEndpoints; third review pass).
+  const cut = base.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, "$1");
+  let same = false;
+  try {
+    same = new URL(cut).href === url.href;
+  } catch {
+    // the cut does not parse: the rebuild it is
+  }
+  return { base: same ? cut : url.href.replace(/\/+$/, ""), basic };
+}
+
+/**
+ * A base as a row prints it: userinfo, which `base` no longer carries, as
+ * `***@`. A base the URL parser refuses kept its userinfo (fetch refuses it
+ * too), and is masked as store.ts's maskUrl masks it (second review pass).
+ */
+export function shownBase(at: ProviderEndpoint): string {
+  return at.userinfo ? at.base.replace("://", "://***@") : at.base.replace(/:\/\/[^/]*@/, "://***@");
+}
+
 /** An endpoint from its parts, with the one header rule every call shares. */
 export function providerEndpoint(base: string, key: string | undefined, local = false, declaredBy?: LocalKnob): ProviderEndpoint {
+  const split = splitUserinfo(base.replace(/\/+$/, ""));
+  // A local endpoint needs no credential, so the key is optional there.
+  // Sending `Authorization: Bearer undefined` to Ollama is harmless but
+  // confusing in logs, so the header is omitted entirely when there is no
+  // credential. A key wins over userinfo, as fetch's own header rule has it.
+  const authorization = key ? `Bearer ${key}` : split.basic ? `Basic ${split.basic}` : undefined;
   return {
-    base: base.replace(/\/+$/, ""),
+    base: split.base,
     key,
+    userinfo: split.basic !== undefined,
     local,
     ...(local && declaredBy ? { declaredBy } : {}),
-    // A local endpoint needs no credential, so the key is optional there.
-    // Sending `Authorization: Bearer undefined` to Ollama is harmless but
-    // confusing in logs, so the header is omitted entirely when there is no key.
-    headers: key
-      ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
+    headers: authorization
+      ? { Authorization: authorization, "Content-Type": "application/json" }
       : { "Content-Type": "application/json" },
   };
 }
@@ -304,13 +366,15 @@ export function providerEndpoint(base: string, key: string | undefined, local = 
  * sent before this split.
  *
  * A credential belongs to an endpoint, not to the environment. A chat base
- * that is a different endpoint gets `OB1_CHAT_API_KEY` and nothing else: a
- * local chat model beside a hosted embedder (the Edge0 shape, SMD-1880) must
- * not be handed the hosted provider's key, and there is no other way to say
- * "no key here" while `OB1_LLM_API_KEY` is set (empty means unset throughout).
- * Two spellings of the same base are the same endpoint and share the key. A
- * hosted chat base with no key of its own is a configuration preflight fails
- * by name, not one this function papers over.
+ * that is a different endpoint gets `OB1_CHAT_API_KEY`, or its own userinfo
+ * (SMD-2885), and nothing else: a local chat model beside a hosted embedder
+ * (the Edge0 shape, SMD-1880) must not be handed the hosted provider's key,
+ * and there is no other way to say "no key here" while `OB1_LLM_API_KEY` is
+ * set (empty means unset throughout). Two spellings of the same base are the
+ * same endpoint and share the key; userinfo in a base is a credential like a
+ * key (providerEndpoint), so a chat base with userinfo of its own stands
+ * alone. A hosted chat base with neither a key nor userinfo of its own is a
+ * configuration preflight fails by name, not one this function papers over.
  *
  * Whether an endpoint is LOCAL is declared the same way (SMD-1903):
  * `OB1_LLM_LOCAL` for the embeddings endpoint, `OB1_CHAT_LOCAL` for a chat
@@ -321,14 +385,20 @@ export function providerEndpoint(base: string, key: string | undefined, local = 
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
   // baseUrlOr: trimmed, trailing slashes off, and slashes alone are unset (SMD-1843).
-  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY, flagOn(env.OB1_LLM_LOCAL), "OB1_LLM_LOCAL");
+  const llmBase = baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL);
+  const embeddings = providerEndpoint(llmBase, env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY, flagOn(env.OB1_LLM_LOCAL), "OB1_LLM_LOCAL");
   const chatBase = baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base);
   const chatFlag = flagOn(env.OB1_CHAT_LOCAL);
-  const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, chatFlag || (chatBase === embeddings.base && embeddings.local), chatFlag ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL");
-  // No key of its own and the same base: it IS the embeddings endpoint, key
-  // and all — declared local by either knob, and the knob that did travels
-  // with it. Anything else — its own key, or a different base — stands alone.
-  if (!chat.key && chat.base === embeddings.base) {
+  const chatSplit = splitUserinfo(chatBase);
+  const sameBase = chatSplit.base === embeddings.base;
+  const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, chatFlag || (sameBase && embeddings.local), chatFlag ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL");
+  // No credential of its own and the same base: it IS the embeddings endpoint,
+  // key and all — declared local by either knob, and the knob that did travels
+  // with it. Userinfo is part of the spelling: none in the chat base, or the
+  // same as the embeddings base's, is still the same endpoint, key included
+  // (second review pass). Anything else — its own key, its own userinfo
+  // (SMD-2885), or a different base — stands alone.
+  if (!chat.key && sameBase && (chatSplit.basic === undefined || chatSplit.basic === splitUserinfo(llmBase).basic)) {
     const shared: ProviderEndpoint = chat.local && !embeddings.local ? { ...embeddings, local: true, declaredBy: "OB1_CHAT_LOCAL" } : embeddings;
     return { embeddings: shared, chat: shared };
   }
