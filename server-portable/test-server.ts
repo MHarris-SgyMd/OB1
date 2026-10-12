@@ -1506,8 +1506,10 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const cutter = start();
   // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
   const graced = start({ OB1_STOP_GRACE: "3" });
+  // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
+  const leftBehind = start({ OB1_STOP_GRACE: "10" });
   try {
-    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port), "five child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port), "six child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -1601,8 +1603,26 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
     assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
       `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
+    // A keyed mirror whose client left while it waits on the registry. Bun 1.4.3 counts it done at once, so the stop
+    // drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c review pass 3); Bun 1.4.0,
+    // CI's and the image's, still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
+    // (review pass 4). Either way one line, and the branch is read from the child's own count.
+    const leaving = new AbortController();
+    const left = fetch(`http://127.0.0.1:${leftBehind.port}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY }, signal: leaving.signal }).then(() => "answered", () => "left");
+    await Bun.sleep(200);
+    leaving.abort();
+    await left;
+    await Bun.sleep(50);
+    leftBehind.proc.kill("SIGTERM");
+    const leftCode = await exited(leftBehind.proc, 6_000);
+    const leftLog = await leftBehind.out;
+    const leftLines = leftLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.route === "/jobs/:id");
+    const leftCounted = /1 request in flight/.test(leftLog);
+    assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
+      && leftLines[0].agent === "MCP_ACCESS_KEY" && leftLines[0].status === (leftCounted ? 200 : 0),
+      `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
   } finally {
-    for (const { proc } of [busy, idle, ctrlC, cutter, graced]) proc.kill("SIGKILL");
+    for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind]) proc.kill("SIGKILL");
     silent.stop(true);
   }
 
@@ -1674,8 +1694,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   h.handlers.get("SIGTERM")!();
   assert(await settled(h.stopped) === 0 && /; no database pool was opened; exit 0$/.test(h.lines.at(-1) ?? ""), "no pool opened is said as such, not as a pool closed");
 
-  // The spans' flush is said on its own (SMD-1849 PR 2b review passes 1–2): a
-  // collector that stalls is the spans', never the pool's; none set, nothing said.
+  // The telemetry's flush is said on its own (SMD-1849 PR 2b review passes 1–2): a
+  // collector that stalls is the telemetry's, never the pool's; none set, nothing said.
   type Flush = () => Promise<import("./shutdown.ts").FlushResult | undefined>;
   const flushLine = async (flush: Flush, close: () => Promise<boolean> = async () => false) => {
     const fh = harness({ server: () => undefined, close, flush });
@@ -1688,9 +1708,22 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const failed = await flushLine(async () => "failed");
   const none = await flushLine(async () => "none");
   const timedOut = await flushLine(async () => "timeout");
-  assert(stalled.code === 0 && /; no database pool was opened; spans not sent within 100 ms; exit 0$/.test(stalled.line) && /; database pool closed; spans sent; exit 0$/.test(went.line)
-    && /; database pool closed; exit 0$/.test(unset.line) && /; spans not sent; exit 0$/.test(failed.line) && /; no spans left to send; exit 0$/.test(none.line) && /; spans not sent within 100 ms; exit 0$/.test(timedOut.line),
-    `the spans' flush is its own clause, under the pool's bound: sent, not sent, none left, not within it — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
+  assert(stalled.code === 0 && /; no database pool was opened; telemetry not all sent within 100 ms; exit 0$/.test(stalled.line) && /; database pool closed; telemetry sent; exit 0$/.test(went.line)
+    && /; database pool closed; exit 0$/.test(unset.line) && /; telemetry not all sent; exit 0$/.test(failed.line) && /; no telemetry left to send; exit 0$/.test(none.line) && /; telemetry not all sent within 100 ms; exit 0$/.test(timedOut.line),
+    `the telemetry's flush is its own clause, under the pool's bound: sent, not sent, none left, not within it — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
+  // What the runtime no longer counts but a record holds open ends before the flush, on a drained stop and a cut
+  // alike; and a cut that throws (a sink that fell over) leaves the flush and the exit to run (PR 2c review pass 3).
+  const drainedOrder: string[] = [];
+  const drainedStop = harness({ server: () => ({ pendingRequests: 0, stop: async () => {} }), endOpen: () => drainedOrder.push("endOpen"), flush: async () => { drainedOrder.push("flush"); return "sent" as const; } });
+  drainedStop.handlers.get("SIGTERM")!();
+  const drainedCode = await settled(drainedStop.stopped);
+  const cutStuck = stuck();
+  const cutOrder: string[] = [];
+  const throwingCut = harness({ server: () => cutStuck.server, onCut: () => { cutOrder.push("onCut"); throw new Error("the sink fell over"); }, endOpen: () => cutOrder.push("endOpen"), flush: async () => { cutOrder.push("flush"); return "sent" as const; } });
+  throwingCut.handlers.get("SIGTERM")!();
+  const throwingCode = await settled(throwingCut.stopped);
+  assert(drainedCode === 0 && drainedOrder.join() === "endOpen,flush" && throwingCode === 1 && cutOrder.join() === "onCut,endOpen,flush" && /; telemetry sent; exit 1$/.test(throwingCut.lines.at(-1) ?? ""),
+    `open records ended before the flush on either path; a cut that throws still flushes and exits (${drainedOrder.join()} / ${cutOrder.join()}; ${throwingCut.lines.at(-1)})`);
   // Beside the pool's close, not after it: both stalled take one bound, not two;
   // and a second signal ends the flush's wait as it ends the pool's (review pass 2).
   const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flush: () => new Promise(() => {}) });
@@ -1704,7 +1737,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   await Bun.sleep(20);
   twice.handlers.get("SIGTERM")!();
   await settled(twice.stopped);
-  assert(bothMs < 550 && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; spans not sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
+  assert(bothMs < 550 && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
     `a stalled pool and a stalled collector take one bound (${Math.round(bothMs)} ms of 300), and a second signal ends both waits (${twice.lines.at(-1)})`);
 
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
@@ -3015,7 +3048,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const { useRequestLog } = await import("./telemetry.ts");
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
-  const { setUpTracing } = await import("./otel-setup.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
   const TID = "4bf92f3577b34da6a3ce929d0e0e4736";
   const PARENT = "00f067aa0ba902b7";
   const PLANTED = "planted-span-text-7f3a";
@@ -3064,43 +3097,55 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   assert(JSON.stringify(spelledIds) === JSON.stringify([undefined, undefined, undefined, TID]), `a line's trace is 32 lower-case hex digits, not all zero, or absent (${JSON.stringify(spelledIds)})`);
   const methods = ["TRACE", "CONNECT", "PROPFIND"].map((m) => (JSON.parse(requestLine({ door: "mcp", method: m, status: 405, ms: 1 })) as Record<string, unknown>).method);
   assert(JSON.stringify(methods) === JSON.stringify(["TRACE", "CONNECT", "?"]), `TRACE and CONNECT are known methods, as the HTTP conventions list them (${JSON.stringify(methods)})`);
-  // startTelemetry sets up nothing for an endpoint that is no http(s) URL, or under the SDK's off-switches, and says why.
-  const { startTelemetry } = await import("./telemetry.ts");
+  // Where each signal goes (PR 2c): its own endpoint as given, else the shared one with its path; nowhere under the
+  // off-switches or for an endpoint that is no http(s) URL, each said by the variable's name, and an origin never
+  // with its credentials.
+  const { planTelemetry, startTelemetry } = await import("./telemetry.ts");
+  const GENERIC = "OTEL_EXPORTER_OTLP_ENDPOINT";
+  const plans = [
+    {},
+    { [GENERIC]: "http://collector:4318" },
+    { [GENERIC]: "http://collector:4318/otlp/", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo:4318/v1/traces", OTEL_LOGS_EXPORTER: " NONE " },
+    { OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" },
+    { [GENERIC]: "collector:4318" },
+    { [GENERIC]: "not a url", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://loki:3100/otlp/v1/logs" },
+    { [GENERIC]: "http://collector:4318", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://tempo:4318/v1/traces", OTEL_SDK_DISABLED: " True" },
+  ].map((env) => planTelemetry(env));
+  const nowhere = (why: string, words: string) => `telemetry: ${why}: no ${words} are sent (SMD-1849)`;
+  assert(JSON.stringify(plans) === JSON.stringify([
+    { urls: {}, lines: [], goes: [] },
+    { urls: { traces: "http://collector:4318/v1/traces", metrics: "http://collector:4318/v1/metrics", logs: "http://collector:4318/v1/logs" }, lines: [], goes: [{ variable: GENERIC, origin: "http://collector:4318", words: ["spans", "metrics", "log records"] }] },
+    { urls: { traces: "https://tempo:4318/v1/traces", metrics: "http://collector:4318/otlp/v1/metrics" }, lines: [nowhere(`${GENERIC} is set, but OTEL_LOGS_EXPORTER=none`, "log records")],
+      goes: [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "https://tempo:4318", words: ["spans"] }, { variable: GENERIC, origin: "http://collector:4318", words: ["metrics"] }] },
+    { urls: { metrics: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" }, lines: [], goes: [{ variable: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", origin: "http://prom:9090", words: ["metrics"] }] },
+    { urls: {}, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records")], goes: [] },
+    { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }] },
+    { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [] },
+  ]), `each signal's URL, what goes nowhere said by the variable's name, and where the rest go by origin alone (${JSON.stringify(plans)})`);
+  // startTelemetry sets up nothing where every signal goes nowhere, and says why.
   const said: string[] = [];
-  const env = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, disabled: process.env.OTEL_SDK_DISABLED, exporter: process.env.OTEL_TRACES_EXPORTER };
-  const refusals: boolean[] = [];
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  let refused: boolean | undefined;
   try {
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "collector:4318";
-    refusals.push(await startTelemetry("probe", (l) => said.push(l)));
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "not a url";
-    refusals.push(await startTelemetry("probe", (l) => said.push(l)));
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
-    process.env.OTEL_SDK_DISABLED = "true";
-    refusals.push(await startTelemetry("probe", (l) => said.push(l)));
-    delete process.env.OTEL_SDK_DISABLED;
-    process.env.OTEL_TRACES_EXPORTER = "none";
-    refusals.push(await startTelemetry("probe", (l) => said.push(l)));
+    refused = await startTelemetry("probe", (l) => said.push(l));
   } finally {
-    for (const [k, v] of [["OTEL_EXPORTER_OTLP_ENDPOINT", env.endpoint], ["OTEL_SDK_DISABLED", env.disabled], ["OTEL_TRACES_EXPORTER", env.exporter]] as const) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
-  assert(refusals.every((r) => r === false) && said.length === 4 && said.filter((l) => /OTEL_EXPORTER_OTLP_ENDPOINT is not an http\(s\) URL: no spans are sent/.test(l)).length === 2
-    && said.some((l) => /OTEL_SDK_DISABLED=true: no spans are sent/.test(l)) && said.some((l) => /OTEL_TRACES_EXPORTER=none: no spans are sent/.test(l)),
-    `no SDK for an endpoint that is no http(s) URL, or under OTEL_SDK_DISABLED or OTEL_TRACES_EXPORTER=none, each said (${said.join(" / ")})`);
+  assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records"), `no SDK where every signal goes nowhere, said (${said.join(" / ")})`);
   // A setup that throws leaves the server serving, said by the error's name alone — an SDK's message can carry the URL (review pass 4).
   const thrown: string[] = [];
   const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   let started: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
-    started = await startTelemetry("probe", (l) => thrown.push(l), async () => ({ setUpTracing: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
+    started = await startTelemetry("probe", (l) => thrown.push(l), async () => ({ setUpTelemetry: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
   }
-  assert(started === false && thrown.length === 1 && thrown[0] === "telemetry: not started (TypeError): no spans are sent (SMD-1849)" && !thrown.join().includes("s3cret") && !thrown.join().includes(PLANTED),
+  assert(started === false && thrown.length === 1 && thrown[0] === "telemetry: not started (TypeError): no spans, metrics or log records are sent (SMD-1849)" && !thrown.join().includes("s3cret") && !thrown.join().includes(PLANTED),
     `a setup that throws: not started, said by the error's name, nothing of its message (${thrown.join(" / ")})`);
   // A start line whose sink throws: the SDK is up all the same, and not said to have failed (review pass 5).
   const { stopTelemetry } = await import("./telemetry.ts");
@@ -3109,14 +3154,14 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   let startedAnyway: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
-    startedAnyway = await startTelemetry("probe", (l) => { startSaid.push(l); if (l.includes("spans go to")) throw new Error("the sink fell over"); },
-      async () => ({ setUpTracing: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, shutdown: async () => {} }) }));
+    startedAnyway = await startTelemetry("probe", (l) => { startSaid.push(l); if (l.includes(" go to ")) throw new Error("the sink fell over"); },
+      async () => ({ setUpTelemetry: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
     await stopTelemetry();
   }
-  assert(startedAnyway === true && startSaid.length === 1 && startSaid[0].startsWith("telemetry: probe-svc?forged's spans go to"), `a start line whose sink throws: started, and not said to have failed; the service's name held to printable ASCII (${startSaid.join(" / ")})`);
+  assert(startedAnyway === true && startSaid.length === 1 && startSaid[0].startsWith("telemetry: probe-svc?forged's spans, metrics and log records go to"), `a start line whose sink throws: started, and not said to have failed; the service's name held to printable ASCII (${startSaid.join(" / ")})`);
   // A stop while a start still loads: the start's own SDK goes, and none is left (review pass 6).
   let shut = 0;
   let raceStarted: boolean | undefined;
@@ -3124,7 +3169,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const loading = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTracing: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, shutdown: async () => { shut += 1; } }) };
+      return { setUpTelemetry: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, shutdown: async () => { shut += 1; }, emit: () => {} }) };
     });
     await stopTelemetry();
     raceStarted = await loading;
@@ -3143,10 +3188,10 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const stale = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTracing: () => ({ serviceName: "stale", flush: async () => "failed" as const, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); } }) };
+      return { setUpTelemetry: () => ({ serviceName: "stale", flush: async () => "failed" as const, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); }, emit: () => {} }) };
     });
     const stopped = stopTelemetry().then(() => { order.push("stop returned"); });
-    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTracing: () => ({ serviceName: "fresh", flush: async () => "sent" as const, shutdown: async () => { fastShut += 1; } }) }));
+    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => ({ serviceName: "fresh", flush: async () => "sent" as const, shutdown: async () => { fastShut += 1; }, emit: () => {} }) }));
     await Promise.all([stale, stopped]);
     restarted = await fresh;
   } finally {
@@ -3170,7 +3215,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
     await stopTelemetry();
   }
-  assert(syncStarted === false && syncSaid[0] === "telemetry: not started (RangeError): no spans are sent (SMD-1849)", `a loader that throws at once: not started, said, no throw out (${syncStarted}; ${syncSaid.join(" / ")})`);
+  assert(syncStarted === false && syncSaid[0] === "telemetry: not started (RangeError): no spans, metrics or log records are sent (SMD-1849)", `a loader that throws at once: not started, said, no throw out (${syncStarted}; ${syncSaid.join(" / ")})`);
 
   // A failed export is said at most once a window: the spans' count, the
   // origin, the kind — from the shapes the real exporter fails with (review
@@ -3366,7 +3411,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const drops: string[] = [];
   const queueAsked = process.env.OTEL_BSP_MAX_QUEUE_SIZE;
   process.env.OTEL_BSP_MAX_QUEUE_SIZE = "1000000";
-  const real = setUpTracing("open-brain-test", { report: { origin: "http://collector:4318", warn: (l: string) => drops.push(l) } });
+  const real = setUpTelemetry("open-brain-test", { report: { warn: (l: string) => drops.push(l) }, urls: { traces: "http://collector:4318/v1/traces" } });
   if (queueAsked === undefined) delete process.env.OTEL_BSP_MAX_QUEUE_SIZE;
   else process.env.OTEL_BSP_MAX_QUEUE_SIZE = queueAsked;
   const clamped = drops.shift();
@@ -3391,31 +3436,31 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   // failure is said at once though the batch's failed flush never reaches the exporter's shutdown (review pass 7).
   const refusing = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 400 }) });
   const zeroSaid: string[] = [];
-  const zeroEnv = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, batch: process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE };
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = `http://127.0.0.1:${refusing.port}`;
+  const zeroBatch = process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
+  const refusingAt = `http://127.0.0.1:${refusing.port}`;
   process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE = "0";
   let zeroStopped: string;
   try {
-    const zero = setUpTracing("open-brain-test", { report: { origin: "http://collector:4318", warn: (l: string) => zeroSaid.push(l) } });
+    const zero = setUpTelemetry("open-brain-test", { report: { warn: (l: string) => zeroSaid.push(l) }, urls: { traces: `${refusingAt}/v1/traces` } });
     diag.warn("Dropped 1 spans because maxQueueSize reached");
     const { trace: api } = await import("@opentelemetry/api");
     api.getTracer("probe").startSpan("probe").end();
     zeroStopped = await Promise.race([zero.shutdown().then(() => "stopped"), Bun.sleep(5000).then(() => "hung")]);
   } finally {
-    for (const [name, value] of [["OTEL_EXPORTER_OTLP_ENDPOINT", zeroEnv.endpoint], ["OTEL_BSP_MAX_EXPORT_BATCH_SIZE", zeroEnv.batch]] as const) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
+    if (zeroBatch === undefined) delete process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
+    else process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE = zeroBatch;
     refusing.stop(true);
   }
   assert(zeroStopped === "stopped" && zeroSaid.join(" / ") === [
     `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`,
-    "telemetry: 1 span not sent to http://collector:4318 (queue full) (SMD-1849)",
-    "telemetry: 1 span not sent to http://collector:4318 (HTTP 400) (SMD-1849)",
+    `telemetry: 1 span not sent to ${refusingAt} (queue full) (SMD-1849)`,
+    `telemetry: 1 span not sent to ${refusingAt} (HTTP 400) (SMD-1849)`,
   ].join(" / "), `an export size of 0: the stop returns, and the shutdown's failed export is said inside the window (${zeroStopped}; ${zeroSaid.join(" / ")})`);
 
   const exporter = new InMemorySpanExporter();
-  const tracing = setUpTracing("open-brain-test", { exporter });
+  const { AggregationTemporality: Temporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const metricsOut = new InMemoryMetricExporter(Temporality.CUMULATIVE);
+  const tracing = setUpTelemetry("open-brain-test", { exporter, metrics: metricsOut });
   const { beginRequest, cutOpenRequests, withToolSpan } = await import("./telemetry.ts");
   const beginRequestFor = () => beginRequest("mcp", new Request("http://mcp/x"), () => { throw new Error("the sink fell over"); });
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
@@ -3440,12 +3485,60 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       && !("gen_ai.operation.name" in attrs(tool)) && attrs(tool)["ob1.outcome"] === "error" && attrs(tool)["error.type"] === "FAILED" && tool.status.code === SpanStatusCode.ERROR,
       `the call's span is the request's child: execute_tool, the tool's name, \`error\` FAILED, ERROR (${tool?.name} ${parentOf(tool)} ${JSON.stringify(attrs(tool))})`);
     assert(searched[0]?.trace === server?.spanContext().traceId, `the line names the span's own trace (${searched[0]?.trace})`);
+    // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
+    const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
+    assert(thrown.length === 1 && thrown[0][0] === "exception" && /^exception\.type(,ob1\.fault\.code)?$/.test(String(thrown[0][1])) && /^[A-Z][A-Za-z0-9]*$/.test(String(tool?.events[0]?.attributes?.["exception.type"])),
+      `the search's throw on its call's span: an exception event, its kind and at most a code (${JSON.stringify(tool?.events)})`);
     // Trusted, the caller's trace is continued: the request's span its span's child, the line its trace.
     exporter.reset();
     const trustedLine = await trusting(() => linesOf(() => post(callOf("brain_info", {}), { traceparent })));
     const continued = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
     assert(continued?.spanContext().traceId === TID && parentOf(continued) === PARENT && continued.links.length === 0 && trustedLine[0]?.trace === TID,
       `with OB1_OTEL_TRUST_TRACEPARENT=1 the caller's trace is continued, and the line names it (${continued?.spanContext().traceId} ${parentOf(continued)})`);
+    // A throw in the MCP route (the registry's) has its kind on the request's span, as the REST core's onError's does (review pass 3).
+    exporter.reset();
+    const { agents: registryOf } = await import("./root.ts");
+    const registry = registryOf();
+    const resolveReal = registry.resolve.bind(registry);
+    const errorReal = console.error;
+    try {
+      console.error = () => {};
+      registry.resolve = async () => { throw new RangeError(`the registry threw ${PLANTED}`); };
+      await post(callOf("brain_info", {}, 91));
+    } finally {
+      registry.resolve = resolveReal;
+      console.error = errorReal;
+    }
+    const routeThrew = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    assert(JSON.stringify(routeThrew?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]),
+      `a throw in the MCP route: its kind on the request's span, no message (${JSON.stringify(routeThrew?.events)})`);
+    // A keyless caller at a mirror is refused at its key: its point labels no tool (PR 2c review pass 3).
+    await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
+    await tracing.flush();
+    const mirrorPoints = ((metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
+      .filter((pt) => pt.attributes["http.route"] === "/worker-status" && pt.attributes["ob1.outcome"] === "refused");
+    assert(mirrorPoints.length === 1 && !("ob1.tool" in mirrorPoints[0].attributes), `a keyless mirror's refusal: its point labels no tool (${JSON.stringify(mirrorPoints.map((pt) => pt.attributes))})`);
+    // …and a key the registry did not clear (revoked) is refused at its key too (review pass 4).
+    const { agents: mirrorRegistryOf } = await import("./root.ts");
+    const mirrorRegistry = mirrorRegistryOf();
+    const mirrorResolve = mirrorRegistry.resolve.bind(mirrorRegistry);
+    try {
+      mirrorRegistry.resolve = async () => ({ status: "revoked", agentId: "agent-r", revokedAt: "2026-10-08T00:00:00.000Z", reason: null });
+      await fetch(`${BASE}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    } finally {
+      mirrorRegistry.resolve = mirrorResolve;
+    }
+    await tracing.flush();
+    const revokedPoints = ((metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
+      .filter((pt) => pt.attributes["http.route"] === "/jobs/:id" && pt.attributes["ob1.outcome"] === "refused");
+    assert(revokedPoints.length === 1 && !("ob1.tool" in revokedPoints[0].attributes), `a revoked key at a mirror: its point labels no tool (${JSON.stringify(revokedPoints.map((pt) => pt.attributes))})`);
+    // A worker mirror's store fault has no tool span: its kind is on the request's (PR 2c review pass 1).
+    exporter.reset();
+    await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
+    await fetch(`${BASE}/mcp/worker-retry-failed`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
+    const mirrorFaults = exporter.getFinishedSpans().filter((sp) => sp.kind === SpanKind.SERVER).map((sp) => [sp.name, sp.events.map((e) => e.name)]);
+    assert(JSON.stringify(mirrorFaults) === JSON.stringify([["GET /worker-status", ["exception"]], ["POST /worker-retry-failed", ["exception"]]]),
+      `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
     await post(callOf("brain_info", {}), {}, "/mcp");
@@ -3535,11 +3628,12 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const after = await linesOf(() => post(callOf("brain_info", {})));
   assert(after[0] !== undefined && !("trace" in after[0]), `once the SDK is gone, a request's span is a no-op again (${JSON.stringify(after[0])})`);
 
-  // A real `bun index.ts` with a collector named: it says where its spans go,
-  // and its stop sends what is batched (the batch's own delay is 5 s) before
-  // it exits. A keyless tools/list, refused at the key, reads no store.
-  const received: string[] = [];
-  const collector = Bun.serve({ port: 0, fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") received.push(await req.text()); return Response.json({}); } });
+  // A real `bun index.ts` with a collector named: it says where its spans,
+  // metrics and log records go, and its stop sends what is batched (the span
+  // batch's own delay is 5 s) and the metrics' last reading before it exits. A
+  // keyless tools/list, refused at the key, reads no store.
+  const received: Record<string, string[]> = {};
+  const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   const mcp = await serveChild(import.meta.dir, "index.ts", {
@@ -3556,15 +3650,34 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     silent.stop(true);
   }
   const up = mcp.up && mcp.sdk;
-  const sent = received.join("\n");
-  assert(up && sent.includes('"tools/list"') && sent.includes('"ob1-mcp-probe"') && sent.includes(TID) && !sent.includes(PLANTED) && out.includes(`telemetry: ob1-mcp-probe's spans go to http://127.0.0.1:${collectorPort} over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT`) && /; spans sent; exit 0/.test(out),
-    `bun index.ts with a collector: it says where its spans go, and its stop sends the request's span, the query left out (${received.length} exports; ${out.split("\n").filter((l) => l.includes("telemetry")).join(" / ")})`);
+  const sent = (received["/v1/traces"] ?? []).join("\n");
+  assert(up && sent.includes('"tools/list"') && sent.includes('"ob1-mcp-probe"') && sent.includes(TID) && !sent.includes(PLANTED)
+    && out.includes(`telemetry: ob1-mcp-probe's spans, metrics and log records go to http://127.0.0.1:${collectorPort} over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT`) && /; telemetry sent; exit 0/.test(out),
+    `bun index.ts with a collector: it says where its signals go, and its stop sends the request's span, the query left out (${Object.keys(received).join(", ")}; ${out.split("\n").filter((l) => l.includes("telemetry")).join(" / ")})`);
+  // The same request as a point on the request-duration histogram and as a log record (PR 2c): the record's trace
+  // the span's own, its body the line's fields; neither holds the key, the query string or the planted text.
+  type OtlpSpan = { traceId: string; kind: number };
+  type OtlpLog = { traceId?: string; eventName?: string; severityText?: string; body?: { kvlistValue?: { values: { key: string; value: Record<string, unknown> }[] } } };
+  const spanTrace = (received["/v1/traces"] ?? []).flatMap((t) => (JSON.parse(t) as { resourceSpans: { scopeSpans: { spans: OtlpSpan[] }[] }[] }).resourceSpans)
+    .flatMap((r) => r.scopeSpans).flatMap((s) => s.spans).find((sp) => sp.kind === 2)?.traceId;
+  const records = (received["/v1/logs"] ?? []).flatMap((t) => (JSON.parse(t) as { resourceLogs: { scopeLogs: { logRecords: OtlpLog[] }[] }[] }).resourceLogs)
+    .flatMap((r) => r.scopeLogs).flatMap((s) => s.logRecords);
+  const fieldsOf = (r: OtlpLog | undefined) => Object.fromEntries((r?.body?.kvlistValue?.values ?? []).map(({ key, value }) => [key, Object.values(value)[0]]));
+  const record = fieldsOf(records[0]);
+  const measured = (received["/v1/metrics"] ?? []).join("\n");
+  const everything = JSON.stringify(received);
+  assert(records.length === 1 && records[0].eventName === "ob1.request" && records[0].severityText === "WARN" && spanTrace !== undefined && records[0].traceId === spanTrace
+    && record.rpc === "tools/list" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
+    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields (${JSON.stringify(records)})`);
+  assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
+    `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
+  assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
 }
 
 server.stop();
 provider.stop(true);
 
-console.log("\n[22] reset_capture_stamp's reply says the ways on by the trust the row is left at, the notice line only where fetch shows one, and a refusal by what the key is (SMD-2744)");
+console.log("\n[23] reset_capture_stamp's reply says the ways on by the trust the row is left at, the notice line only where fetch shows one, and a refusal by what the key is (SMD-2744)");
 {
   const { renderResetCaptureStamp } = await import("./render.ts");
   const ID = "00000000-0000-4000-8000-000000002744";
@@ -3603,6 +3716,373 @@ console.log("\n[22] reset_capture_stamp's reply says the ways on by the trust th
     `the refusal by what the key is: an unclassified one given its line (its name quoted), a classified one told to use the operator's own, a capture-only one told so (${unclassified.slice(-90)})`);
   assert(JSON.stringify(refused("agent").structuredContent) === JSON.stringify({ code: "REFUSED_NOT_OPERATOR", retryable: false, text: agentKey }),
     "…and neither the key's name nor its kind is in the refusal's structured content");
+}
+
+console.log("\n[24] Each request a point on the request-duration histogram and a log record (SMD-1849 PR 2c), a fault's kind and code on its span and never its message, and each signal said by itself when it is not sent");
+{
+  const { beginRequest, cutOpenRequests, faultOf, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { batchOptions, batchSizes, flushesResult, flushSignal, logDrops, metricTimes, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
+  const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const { InMemoryLogRecordExporter } = await import("@opentelemetry/sdk-logs");
+  const PLANTED = "planted-2c-text-91d4";
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // The suite's SDK, started as a server's is, so each request's log record goes through it.
+  const startWith = async (setUp: () => import("./otel-setup.ts").Telemetry) => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+    try {
+      return await startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: setUp }));
+    } finally {
+      if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
+    }
+  };
+  const spans = new InMemorySpanExporter();
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const logged = new InMemoryLogRecordExporter();
+  const started = await startWith(() => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }));
+  const lines: string[] = [];
+  const write = (r: Parameters<typeof requestLine>[0]) => lines.push(requestLine(r));
+  try {
+    // A tool call that ran, a REST fault, and a REST client gone before its answer.
+    const ok = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+    Object.assign(ok, { rpc: "tools/call", tool: "search_thoughts", agent: "MCP_ACCESS_KEY" });
+    ok.end({ status: 200, outcome: "ok" }, ok.started + 40);
+    const failed = beginRequest("api", new Request("http://api/v1/stats", { method: "GET" }), write);
+    Object.assign(failed, { route: "/v1/stats", tool: "thought_stats", agent: "w" });
+    failed.end({ status: 500, outcome: "error", code: "FAILED" }, failed.started + 1_200);
+    const leaving = new AbortController();
+    const left = beginRequest("api", new Request(`http://api/v1/search?query=${PLANTED}`, { signal: leaving.signal }), write);
+    left.route = "/v1/search";
+    leaving.abort();
+    left.end({ status: 408, outcome: "abandoned" });
+    const flushed = await flushTelemetry();
+    const histograms = measured.getMetrics().flatMap((r) => r.scopeMetrics).flatMap((s) => s.metrics).filter((m) => m.descriptor.name === "http.server.request.duration");
+    const points = histograms.flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } }[];
+    const pointOf = (outcome: string) => points.find((p) => p.attributes["ob1.outcome"] === outcome);
+    assert(started && flushed === "sent" && histograms.length === 1 && histograms[0].descriptor.unit === "s" && points.length === 3
+      && JSON.stringify(pointOf("ok")?.attributes) === JSON.stringify({ "http.request.method": "POST", "http.response.status_code": 200, "mcp.method.name": "tools/call", "ob1.door": "mcp", "ob1.tool": "search_thoughts", "ob1.outcome": "ok" })
+      && JSON.stringify(pointOf("error")?.attributes) === JSON.stringify({ "http.request.method": "GET", "http.route": "/v1/stats", "http.response.status_code": 500, "error.type": "FAILED", "ob1.door": "api", "ob1.tool": "thought_stats", "ob1.outcome": "error" })
+      && JSON.stringify(pointOf("abandoned")?.attributes) === JSON.stringify({ "http.request.method": "GET", "http.route": "/v1/search", "ob1.door": "api", "ob1.outcome": "abandoned" }),
+      `each request one point, labelled with its method, route, answered status, MCP method, tool and outcome — no key's name, no status none received (${JSON.stringify(points.map((p) => p.attributes))})`);
+    assert(Math.abs((pointOf("ok")?.value.sum ?? 0) - 0.04) < 1e-9 && Math.abs((pointOf("error")?.value.sum ?? 0) - 1.2) < 1e-9 && pointOf("ok")?.value.buckets.boundaries.join() === "0.005,0.01,0.025,0.05,0.075,0.1,0.25,0.5,0.75,1,2.5,5,7.5,10,30,60,300,600",
+      `its value the request's seconds, on bounds past ten seconds to the keepalive's ceiling (${JSON.stringify(points.map((p) => [p.value.sum, p.value.buckets.boundaries.length]))})`);
+    const records = logged.getFinishedLogRecords();
+    const serverSpans = spans.getFinishedSpans();
+    const bodies = records.map((r) => JSON.stringify(r.body));
+    const linesWithoutTs = lines.map((l) => { const { ts: _ts, ...rest } = JSON.parse(l) as Record<string, unknown>; return JSON.stringify(rest); });
+    assert(records.length === 3 && records.every((r) => r.eventName === "ob1.request") && records.map((r) => r.severityText).join() === "INFO,ERROR,WARN"
+      && JSON.stringify(bodies) === JSON.stringify(linesWithoutTs) && records.every((r, i) => r.spanContext?.traceId === serverSpans[i]?.spanContext().traceId && r.spanContext?.spanId === serverSpans[i]?.spanContext().spanId),
+      `each request one log record: its body the line's fields, INFO, ERROR or WARN by how it ended, under its own span (${JSON.stringify(records.map((r) => [r.severityText, r.body]))})`);
+    assert(!JSON.stringify([bodies, points.map((p) => p.attributes)]).includes(PLANTED) && !JSON.stringify(points.map((p) => p.attributes)).includes("MCP_ACCESS_KEY"),
+      "no query string in a log record or a point, and no key's name on a point");
+    // The severity as a backend reads it, a number, and the record's time its request's end, not its start (review pass 1).
+    logged.reset();
+    spans.reset();
+    const slow = beginRequest("api", new Request("http://api/v1/whoami"), write);
+    await Bun.sleep(100);
+    slow.end({ status: 200, outcome: "ok" });
+    const msOf = (t: readonly [number, number] | undefined) => (t ? t[0] * 1e3 + t[1] / 1e6 : NaN);
+    const slowRecord = logged.getFinishedLogRecords()[0];
+    const slowSpan = spans.getFinishedSpans()[0];
+    // A request refused at its key labels no tool, and a refusal's code is no label: a keyless caller, or a plugin's
+    // webhook that takes its code from its sender, mints no series and raises no tool's refusal rate (review pass 3).
+    const keyless = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+    Object.assign(keyless, { rpc: "tools/call", tool: "job_status", refusedAtKey: true });
+    keyless.end({ status: 200, outcome: "refused", code: "UNAUTHORIZED" });
+    const hookRefused = beginRequest("api", new Request("http://api/hooks/example/capture", { method: "POST" }), write);
+    hookRefused.route = "/hooks/example/capture";
+    hookRefused.end({ status: 503, outcome: "refused", code: "SENDER_CHOSE_THIS" });
+    await flushTelemetry();
+    const lastPoints = (measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[];
+    const keylessPoint = lastPoints.find((pt) => pt.attributes["ob1.door"] === "mcp" && pt.attributes["ob1.outcome"] === "refused");
+    const hookPoint = lastPoints.find((pt) => pt.attributes["http.route"] === "/hooks/example/capture");
+    const ownRefusal = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+    Object.assign(ownRefusal, { rpc: "tools/call", tool: "thought_stats" });
+    ownRefusal.end({ status: 200, outcome: "refused", code: "NOT_FOUND" });
+    await flushTelemetry();
+    const ownPoint = ((measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
+      .find((pt) => pt.attributes["ob1.tool"] === "thought_stats" && pt.attributes["ob1.outcome"] === "refused");
+    assert(ownPoint !== undefined, `a tool's own refusal keeps its tool on its point (review pass 4)`);
+    assert(keylessPoint !== undefined && !("ob1.tool" in keylessPoint.attributes) && !("error.type" in keylessPoint.attributes) && hookPoint?.attributes["error.type"] === "refused" && !JSON.stringify(lastPoints).includes("SENDER_CHOSE_THIS"),
+      `a key's refusal labels no tool; a refusal's 503 is labelled by its outcome, not its code (${JSON.stringify([keylessPoint?.attributes, hookPoint?.attributes])})`);
+    assert(records.map((r) => r.severityNumber).join() === "9,17,13" && Math.abs(msOf(slowRecord?.hrTime) - msOf(slowSpan?.endTime)) < 30 && msOf(slowRecord?.hrTime) - msOf(slowSpan?.startTime) > 80,
+      `each record's severity number (INFO 9, ERROR 17, WARN 13), its time its request's end (${records.map((r) => r.severityNumber).join()}; ${Math.round(msOf(slowRecord?.hrTime) - msOf(slowSpan?.endTime))} ms from the span's end)`);
+
+    // A fault on its span: the throw's kind and code, never its message (the webhook's, review on SMD-2310).
+    spans.reset();
+    const thrown = Object.assign(new Error(`connect to http://u:pw@db ${PLANTED}`), { code: "ECONNREFUSED" });
+    await withToolSpan("search_thoughts", async () => { throw thrown; }).catch(() => {});
+    const hooked = beginRequest("api", new Request("http://api/hooks/example/capture", { method: "POST" }), () => {});
+    hooked.fault(new TypeError(PLANTED));
+    hooked.end({ status: 500, outcome: "error", code: "FAILED" });
+    hooked.fault(new RangeError("after its end"));
+    const faulted = spans.getFinishedSpans();
+    const eventsOf = (name: string) => faulted.find((sp) => sp.name === name)?.events.map((e) => [e.name, e.attributes]) ?? [];
+    assert(JSON.stringify(eventsOf("execute_tool search_thoughts")) === JSON.stringify([["exception", { "exception.type": "Error", "ob1.fault.code": "ECONNREFUSED" }]])
+      && JSON.stringify(eventsOf("POST")) === JSON.stringify([["exception", { "exception.type": "TypeError" }]]) && !JSON.stringify(faulted.map((sp) => sp.events)).includes(PLANTED),
+      `a tool call's throw and a request's own fault: an exception event with the kind and code, none after the request's end, no message (${JSON.stringify(faulted.map((sp) => [sp.name, sp.events]))})`);
+    const kinds = [
+      new TypeError(PLANTED), Object.assign(new Error("x"), { name: "has space" }), PLANTED, null, undefined, Object.assign(new Error("x"), { code: "23505" }),
+      Object.assign(new Error("x"), { code: "econnrefused" }), Object.assign(new Error("x"), { code: 503 }), Object.assign(new Error("x"), { code: -1 }), { code: "ENOENT" }, Object.assign(new Error("x"), { code: PLANTED }),
+      Object.assign(new Error("x"), { code: "A".repeat(60) }),
+      // What throws as it is read (review pass 1): a Proxy, a getter, a name that is no string.
+      new Proxy({}, { getPrototypeOf() { throw new Error("trap"); } }), Object.defineProperty(new Error("x"), "code", { get() { throw new Error("getter"); } }),
+      Object.assign(new Error("x"), { name: Symbol("s") }), Object.defineProperty(new Error("x"), "name", { get() { throw new Error("n"); } }),
+      // Bun SQL's server error: the SQLSTATE in `errno`, the driver's own code in `code` (review pass 2); a system error's numeric errno.
+      Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno: "23505" }),
+      Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" }), Object.assign(new Error("x"), { code: "ECONNREFUSED", errno: -61 }),
+    ].map(faultOf);
+    assert(JSON.stringify(kinds) === JSON.stringify([
+      { kind: "TypeError" }, { kind: "?" }, { kind: "string" }, { kind: "null" }, { kind: "undefined" }, { kind: "Error", code: "23505" },
+      { kind: "Error" }, { kind: "Error", code: "503" }, { kind: "Error" }, { kind: "object", code: "ENOENT" }, { kind: "Error" },
+      { kind: "Error" }, { kind: "?" }, { kind: "Error" }, { kind: "?" }, { kind: "?" },
+      { kind: "PostgresError", code: "23505" }, { kind: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" }, { kind: "Error", code: "ECONNREFUSED" },
+    ]), `a fault's kind is its name or what was thrown, its code a SQLSTATE or one spelled as a code, and what throws as it is read \`?\` alone (${JSON.stringify(kinds)})`);
+    // A throw that throws as it is read still ends its call: an error, its span ended (review pass 1: the call stayed open, the line \`unrun\`).
+    spans.reset();
+    const proxy = new Proxy({}, { getPrototypeOf() { throw new Error("trap"); } });
+    const hostile = await withToolSpan("search_thoughts", async () => { throw proxy; }).then(() => "returned", (e) => (e === proxy ? "the proxy" : "another throw"));
+    const hostileSpan = spans.getFinishedSpans().find((sp) => sp.name === "execute_tool search_thoughts");
+    assert(hostile === "the proxy" && hostileSpan?.attributes["ob1.outcome"] === "error", `a hostile throw: rethrown as it was, its call ended \`error\` (${hostile}, ${JSON.stringify(hostileSpan?.attributes)})`);
+  } finally {
+    await stopTelemetry();
+  }
+
+  // An SDK whose log record throws: the request still ends, its line written (a record lost, never the request).
+  const ended: string[] = [];
+  await startWith(() => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => { throw new Error("the logger fell over"); } }));
+  let threw = false;
+  try {
+    beginRequest("api", new Request("http://api/v1/whoami"), (r) => ended.push(requestLine(r))).end({ status: 200 });
+  } catch {
+    threw = true;
+  } finally {
+    await stopTelemetry();
+  }
+  assert(!threw && ended.length === 1, `a log record that throws loses the record, not the request (${threw}, ${ended.length})`);
+  // The stop's cut ends each open record alone: a sink that throws on one leaves the others to end (review pass 3).
+  for (const path of ["/a", "/b"]) beginRequest("api", new Request(`http://api${path}`), () => { throw new Error("the sink fell over"); });
+  let cutThrew = false;
+  try {
+    cutOpenRequests();
+  } catch {
+    cutThrew = true;
+  }
+  assert(!cutThrew && openRequestCount() === 0, `a cut whose sink throws ends every record and throws nothing (${cutThrew}, ${openRequestCount()} open)`);
+
+  // Each signal's losses said by itself (PR 2c): a collector that takes spans and refuses metrics and log records,
+  // and a log batch whose queue holds one record — its drops counted as the batch drops them. The first record goes
+  // as it comes (a batch of one), the second waits in the queue, the third finds it full.
+  // The metric exporter asked for delta temporality (OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE): the reader asks
+  // the watched exporter, which must answer as the OTLP exporter does (review pass 1).
+  const metricBodies: string[] = [];
+  const refusing = Bun.serve({ port: 0, fetch: async (req) => {
+    const path = new URL(req.url).pathname;
+    if (path === "/v1/metrics") metricBodies.push(await req.text());
+    return path === "/v1/traces" ? Response.json({}) : new Response("no", { status: 400 });
+  } });
+  const at = `http://127.0.0.1:${refusing.port}`;
+  const blrp = { queue: process.env.OTEL_BLRP_MAX_QUEUE_SIZE, delay: process.env.OTEL_BLRP_SCHEDULE_DELAY, temporality: process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE };
+  process.env.OTEL_BLRP_MAX_QUEUE_SIZE = "1";
+  process.env.OTEL_BLRP_SCHEDULE_DELAY = "60000";
+  process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE = "delta";
+  const said: string[] = [];
+  let result: string | undefined;
+  let atFlush: string[] = [];
+  let metricExportsAtFlush = 0;
+  try {
+    const real = setUpTelemetry("open-brain-test", { report: { warn: (l) => said.push(l) }, urls: { traces: `${at}/v1/traces`, metrics: `${at}/v1/metrics`, logs: `${at}/v1/logs` } });
+    try {
+      for (let i = 0; i < 3; i++) real.emit({ body: { door: "api", status: 200 }, severity: "INFO", context: ROOT_CONTEXT, at: performance.now() });
+      metricsApi.getMeter("probe").createCounter("probe.count").add(1, { "ob1.door": "api" });
+      result = await real.flush();
+      atFlush = [...said];
+      metricExportsAtFlush = metricBodies.length;
+      // A point after the flush: under delta, only the provider's shutdown sends it.
+      metricsApi.getMeter("probe").createCounter("probe.count").add(1, { "ob1.door": "api" });
+    } finally {
+      await real.shutdown();
+    }
+  } finally {
+    for (const [name, value] of [["OTEL_BLRP_MAX_QUEUE_SIZE", blrp.queue], ["OTEL_BLRP_SCHEDULE_DELAY", blrp.delay], ["OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE", blrp.temporality]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    refusing.stop(true);
+  }
+  const lostOf = (noun: RegExp, kind: string) => atFlush.map((l) => new RegExp(`^telemetry: (\\d+) ${noun.source} not sent to ${at.replace(/[.]/g, "\\.")} \\(${kind}\\) \\(SMD-1849\\)$`).exec(l)).reduce((n, m) => n + (m ? Number(m[1]) : 0), 0);
+  assert(result === "failed" && lostOf(/log records?/, "queue full") === 1 && lostOf(/log records?/, "HTTP 400") === 2 && lostOf(/metric exports?/, "HTTP 400") === 1 && atFlush.length === 3 && !said.some((l) => /spans? not sent/.test(l)),
+    `by the flush, the log batch's drop and its two refused records, the refused metric export, each said by its own noun; the spans' collector took them; the flush failed (${result}; ${said.join(" / ")})`);
+  assert(metricExportsAtFlush === 1 && metricBodies.length === 2 && metricBodies.every((b) => b.includes('"aggregationTemporality":1') && !b.includes('"aggregationTemporality":2')),
+    `the metrics as delta, as asked; and the provider's shutdown sends a point recorded after the flush (${metricExportsAtFlush} at the flush, ${metricBodies.length} after; ${metricBodies[0]?.slice(0, 120)})`);
+
+  // The log batch takes its delay from OTEL_BLRP_SCHEDULE_DELAY: at 0, a record goes as it comes, before any flush (review pass 1).
+  const prompt: string[] = [];
+  const logCollector = Bun.serve({ port: 0, fetch: async (req) => { if (new URL(req.url).pathname === "/v1/logs") prompt.push(await req.text()); return Response.json({}); } });
+  const delayAsked = process.env.OTEL_BLRP_SCHEDULE_DELAY;
+  process.env.OTEL_BLRP_SCHEDULE_DELAY = "0";
+  let promptBeforeFlush = -1;
+  try {
+    const quick = setUpTelemetry("open-brain-test", { report: { warn: () => {} }, urls: { logs: `http://127.0.0.1:${logCollector.port}/v1/logs` } });
+    try {
+      quick.emit({ body: { door: "api", status: 200 }, severity: "INFO", context: ROOT_CONTEXT, at: performance.now() });
+      const until = performance.now() + 5_000;
+      while (prompt.length === 0 && performance.now() < until) await Bun.sleep(10);
+      promptBeforeFlush = prompt.length;
+    } finally {
+      await quick.shutdown();
+    }
+  } finally {
+    if (delayAsked === undefined) delete process.env.OTEL_BLRP_SCHEDULE_DELAY;
+    else process.env.OTEL_BLRP_SCHEDULE_DELAY = delayAsked;
+    logCollector.stop(true);
+  }
+  assert(promptBeforeFlush === 1, `a log batch with no delay sends its record before any flush (${promptBeforeFlush})`);
+
+  // A setup that fails partway registers nothing: no span records after it, no meter provider is left (review pass 1).
+  let partial = "set up";
+  try {
+    setUpTelemetry("open-brain-test", { report: { warn: () => {} }, urls: { traces: "http://127.0.0.1:9/v1/traces", metrics: "http://127.0.0.1:9 /v1/metrics" } });
+  } catch (err) {
+    partial = err instanceof Error ? err.name : "thrown";
+  }
+  const stray = traceApi.getTracer("probe").startSpan("after a failed setup");
+  const strayRecording = stray.isRecording();
+  stray.end();
+  assert(partial !== "set up" && !strayRecording && metricsApi.getMeterProvider().constructor.name === "NoopMeterProvider",
+    `a setup that throws partway: no tracer or meter provider registered (${partial}, recording ${strayRecording}, ${metricsApi.getMeterProvider().constructor.name})`);
+  // …and one that throws at its last step, the log records', with the tracer and meter providers built (review pass 2).
+  let late = "set up";
+  try {
+    setUpTelemetry("open-brain-test", { report: { warn: () => {} }, urls: { traces: "http://127.0.0.1:9/v1/traces", metrics: "http://127.0.0.1:9/v1/metrics", logs: "not a url" } });
+  } catch (err) {
+    late = err instanceof Error ? err.name : "thrown";
+  }
+  const lateSpan = traceApi.getTracer("probe").startSpan("after a late failure");
+  const lateRecording = lateSpan.isRecording();
+  lateSpan.end();
+  assert(late !== "set up" && !lateRecording && metricsApi.getMeterProvider().constructor.name === "NoopMeterProvider",
+    `a setup that throws at its last step: neither the tracer nor the meter provider it built is registered (${late}, recording ${lateRecording}, ${metricsApi.getMeterProvider().constructor.name})`);
+  // The span batch's delay is read here and held, not left to the SDK, which reads it unbounded (review pass 2):
+  // asked for more than a timer's longest, a span waits rather than going at once.
+  const heldSpans: string[] = [];
+  const spanCollector = Bun.serve({ port: 0, fetch: async (req) => { heldSpans.push(new URL(req.url).pathname); return Response.json({}); } });
+  const spanDelay = process.env.OTEL_BSP_SCHEDULE_DELAY;
+  process.env.OTEL_BSP_SCHEDULE_DELAY = "3000000000";
+  const heldSaid: string[] = [];
+  let sentBeforeFlush = -1;
+  try {
+    const held = setUpTelemetry("open-brain-test", { report: { warn: (l) => heldSaid.push(l) }, urls: { traces: `http://127.0.0.1:${spanCollector.port}/v1/traces` } });
+    try {
+      traceApi.getTracer("probe").startSpan("held").end();
+      await Bun.sleep(300);
+      sentBeforeFlush = heldSpans.length;
+    } finally {
+      await held.shutdown();
+    }
+  } finally {
+    if (spanDelay === undefined) delete process.env.OTEL_BSP_SCHEDULE_DELAY;
+    else process.env.OTEL_BSP_SCHEDULE_DELAY = spanDelay;
+    spanCollector.stop(true);
+  }
+  assert(sentBeforeFlush === 0 && heldSaid.includes("telemetry: OTEL_BSP_SCHEDULE_DELAY 3000000000 is held to 2147483647 (SMD-1849)"),
+    `a span batch delay past a timer's longest is held and said, and the span waits (${sentBeforeFlush} sent before the flush; ${heldSaid.join(" / ")})`);
+
+  // planTelemetry's other cases (review passes 1–2): a trailing space, read trimmed; a query string on the shared
+  // endpoint; two variables at one origin; exporters and protocols it does not read.
+  const more = [
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:9 ", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://127.0.0.1:9/v1/traces" },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://h/otlp?tenant=x" },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://c:4318/v1/traces" },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_METRICS_EXPORTER: "prometheus", OTEL_TRACES_EXPORTER: "OTLP", OTEL_EXPORTER_OTLP_PROTOCOL: "grpc", OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json" },
+    // Review pass 2: whitespace after a path; a value read trimmed; a blank one unset; an own endpoint's query kept;
+    // an exporter list naming none; a protocol spelled with capitals and spaces.
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318/otlp " },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: " http://c:4318/ ", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "   ", OTEL_EXPORTER_OTLP_PROTOCOL: " HTTP/JSON ", OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: "  " },
+    { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://c:4318/v1/traces?tenant=x", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://c:4318/v1/logs", OTEL_LOGS_EXPORTER: "none,otlp" },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318/ot lp" },
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_EXPORTER_OTLP_PROTOCOL: "Authorization=Bearer sk-live-abc" },
+    // A token-shaped value is no setting the SDKs know: not shown, however it is spelled (review pass 4).
+    { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_TRACES_EXPORTER: "AKIAIOSFODNN7EXAMPLE", OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf" },
+  ].map((env) => planTelemetry(env));
+  const said1849 = (text: string) => `telemetry: ${text} (SMD-1849)`;
+  assert(JSON.stringify(more.map((p) => [Object.keys(p.urls), p.lines, p.goes])) === JSON.stringify([
+    [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://127.0.0.1:9", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://127.0.0.1:9", words: ["metrics", "log records"] }]],
+    [[], [said1849("OTEL_EXPORTER_OTLP_ENDPOINT has a query string or a fragment, which the signal's path would follow: no spans, metrics or log records are sent")], []],
+    [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://c:4318", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["metrics", "log records"] }]],
+    [["traces", "metrics", "logs"], [said1849(`OTEL_EXPORTER_OTLP_PROTOCOL "grpc" is not read: spans and metrics go as OTLP/HTTP JSON`), said1849(`OTEL_METRICS_EXPORTER "prometheus" is not read (only otlp or none): metrics go as OTLP/HTTP JSON`)],
+      [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
+    [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
+    [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
+    [["traces"], [said1849("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is set, but OTEL_LOGS_EXPORTER=none: no log records are sent")], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://c:4318", words: ["spans"] }]],
+    [[], [said1849("OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL: no spans, metrics or log records are sent")], []],
+    [["traces", "metrics", "logs"], [said1849("OTEL_EXPORTER_OTLP_PROTOCOL (a value not shown) is not read: spans, metrics and log records go as OTLP/HTTP JSON")], [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
+    [["traces", "metrics", "logs"], [said1849(`OTEL_TRACES_EXPORTER (a value not shown) is not read (only otlp or none): spans go as OTLP/HTTP JSON`), said1849(`OTEL_EXPORTER_OTLP_PROTOCOL "http/protobuf" is not read: spans, metrics and log records go as OTLP/HTTP JSON`)],
+      [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
+  ]) && more[0].urls.metrics === "http://127.0.0.1:9/v1/metrics" && more[4].urls.traces === "http://c:4318/otlp/v1/traces" && more[5].urls.traces === "http://c:4318/v1/traces"
+    && more[6].urls.traces === "http://c:4318/v1/traces?tenant=x",
+    `a signal's own URL checked, a query string on the shared endpoint refused and on an own one kept, values trimmed, a list naming none off, one line per variable and origin, what is not read said (${JSON.stringify(more.map((p) => [p.urls, p.lines, p.goes]))})`);
+  // Each place the signals go is said, in a line of its own.
+  const startLines: string[] = [];
+  const startEnv = { traces: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, generic: process.env.OTEL_EXPORTER_OTLP_ENDPOINT };
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://tempo:4318/v1/traces";
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector:4318";
+  try {
+    await startTelemetry("probe", (l) => startLines.push(l), async () => ({ setUpTelemetry: () => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
+  } finally {
+    for (const [name, value] of [["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", startEnv.traces], ["OTEL_EXPORTER_OTLP_ENDPOINT", startEnv.generic]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await stopTelemetry();
+  }
+  assert(startLines.join(" / ") === [
+    "telemetry: probe's spans go to http://tempo:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, SMD-1849)",
+    "telemetry: probe's metrics and log records go to http://collector:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849)",
+  ].join(" / "), `a start line for each place the signals go (${startLines.join(" / ")})`);
+
+  // A metric reader's or a log batch's flush says what it holds before the wait, so a stop whose bound cuts a flush
+  // that never ends still says it (review pass 1).
+  const early: string[] = [];
+  const stalled = watchExporter({ export: () => {}, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => early.push(l), noun: ["log record", "log records"] });
+  stalled.dropped(1); // the window's first line
+  stalled.dropped(2); // held inside the window
+  void flushSignal({ forceFlush: () => new Promise<void>(() => {}) }, stalled);
+  await Bun.sleep(20);
+  assert(early.length === 2 && early[1] === "telemetry: 2 log records not sent to http://collector:4318 (queue full) (SMD-1849)", `a flush that never ends has said what it held, before the wait (${early.join(" / ")})`);
+
+  // The sizes and times read here, as the SDK reads none of them for log records and metrics.
+  const times = [metricTimes(undefined, undefined), metricTimes("5000", undefined), metricTimes("500", "100"), metricTimes("10000", "20000"), metricTimes("3000000000", undefined)];
+  assert(JSON.stringify(times.map(({ interval, timeout }) => [interval, timeout])) === JSON.stringify([[60_000, 30_000], [5_000, 5_000], [60_000, 100], [10_000, 10_000], [2_147_483_647, 30_000]])
+    && times[2].notes[0] === `telemetry: OTEL_METRIC_EXPORT_INTERVAL "500" is not a whole number of at least 1000: 60000 is used (SMD-1849)`
+    && times[3].notes[0] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT 20000 is held to 10000 (SMD-1849)" && times[0].notes.length + times[1].notes.length === 0
+    && times[4].notes[0] === "telemetry: OTEL_METRIC_EXPORT_INTERVAL 3000000000 is held to 2147483647 (SMD-1849)",
+    `the metric reader's interval at least a second and at most a timer's longest, its timeout held to it, each said (${JSON.stringify(times)})`);
+  const batches = [
+    batchOptions({}, "OTEL_BLRP"),
+    batchOptions({ OTEL_BLRP_SCHEDULE_DELAY: "0", OTEL_BLRP_EXPORT_TIMEOUT: "5000", OTEL_BLRP_MAX_QUEUE_SIZE: "10", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "20" }, "OTEL_BLRP"),
+    batchOptions({ OTEL_BLRP_SCHEDULE_DELAY: "3000000000", OTEL_BLRP_EXPORT_TIMEOUT: "-1" }, "OTEL_BLRP"),
+    batchOptions({}, "OTEL_BSP"),
+    batchOptions({ OTEL_BSP_EXPORT_TIMEOUT: "3000000000", OTEL_BLRP_EXPORT_TIMEOUT: "5" }, "OTEL_BSP"),
+  ];
+  assert(JSON.stringify(batches.map(({ queue, batch, delay, timeout }) => [queue, batch, delay, timeout])) === JSON.stringify([[2048, 512, 1000, 30_000], [10, 10, 0, 5000], [2048, 512, 2_147_483_647, 30_000], [2048, 512, 5000, 30_000], [2048, 512, 5000, 2_147_483_647]])
+    && batches[0].notes.length === 0 && batches[1].notes.join() === "telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE 20 is held to 10 (SMD-1849)"
+    && batches[2].notes.join(" / ") === `telemetry: OTEL_BLRP_SCHEDULE_DELAY 3000000000 is held to 2147483647 (SMD-1849) / telemetry: OTEL_BLRP_EXPORT_TIMEOUT "-1" is not a whole number of at least 1: 30000 is used (SMD-1849)`
+    && batches[3].notes.length === 0 && batches[4].notes.join() === "telemetry: OTEL_BSP_EXPORT_TIMEOUT 3000000000 is held to 2147483647 (SMD-1849)",
+    `each batch's options under its own names: its sizes, a delay of 0 kept, each timer at most a timer's longest, each held value said (${JSON.stringify(batches)})`);
+  assert(batchSizes(undefined, "0", "OTEL_BLRP").notes[0] === `telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`
+    && batchSizes("100000", undefined, "OTEL_BLRP").queue === 65_536, "the log batch's sizes held as the span batch's, under their own names");
+  const results = [[], ["none", "sent"], ["sent", "failed", "none"], ["none", "none"]].map((r) => flushesResult(r as never));
+  assert(results.join() === "none,sent,failed,none", `several flushes as one: failed if any failed, else sent if any sent (${results.join()})`);
+  const counted: number[] = [];
+  const dropMeter = logDrops((n) => counted.push(n)).getMeter("x");
+  dropMeter.createCounter("otel.sdk.processor.log.processed").add(2, { "error.type": "queue_full" });
+  dropMeter.createCounter("otel.sdk.processor.log.processed").add(3, { "error.type": "OTLPExporterError" });
+  dropMeter.createCounter("otel.sdk.processor.log.processed").add(1);
+  dropMeter.createHistogram("h").record(1);
+  assert(counted.join() === "2", `the log batch's meter counts its queue's drops alone (${counted.join()})`);
 }
 
 report();

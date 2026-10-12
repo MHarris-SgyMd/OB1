@@ -20,7 +20,7 @@ import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOpti
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
-import { beginRequest, endsWithStream, errorCode, knowTools, logRequest, outcomeOf, requestLine, traceOf, withToolSpan, type RequestRecord } from "../telemetry.ts";
+import { beginRequest, endsWithStream, knowTools, logRequest, outcomeOf, requestLine, traceOf, withToolSpan, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -77,7 +77,8 @@ async function boundedBody(req: Request, limit: number): Promise<Uint8Array | nu
 /**
  * An operation's call under its tool's span (telemetry.ts, PR 2b), ended with
  * how the operation ended: `ok`, a refusal with its code, or — thrown — an
- * error with the code its answer will carry.
+ * error with the code its answer will carry, and the throw's kind and code
+ * (PR 2c).
  */
 function traced<O extends { ok: boolean }>(tool: string, faultCode: string, call: () => Promise<O>): Promise<O> {
   return withToolSpan(tool, async (span) => {
@@ -86,11 +87,15 @@ function traced<O extends { ok: boolean }>(tool: string, faultCode: string, call
       span.end(outcome.ok ? "ok" : "refused", (outcome as { refusal?: { code?: string } }).refusal?.code);
       return outcome;
     } catch (err) {
+      span.fault(err);
       span.end("error", faultCode);
       throw err;
     }
   });
 }
+
+/** The transport's refusals of a caller's key: none or a wrong one, a revoked one, the registry busy, a scope that lacks the route. */
+const KEY_REFUSALS: ReadonlySet<string> = new Set(["UNAUTHORIZED", "REVOKED", "BUSY", "FORBIDDEN"]);
 
 /** How long a caller told to retry is told to wait: the busy registry (agents.ts), and every refusal or fault answered 503. */
 const RETRY_AFTER_SECONDS = 2;
@@ -228,7 +233,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // Under the request's span, so the operation's span is its child (PR 2b).
       await trace.run(next);
     } catch (err) {
-      // An Error goes on to onError, whose 500 says FAILED; a non-Error escapes, with no body.
+      // An Error goes on to onError, whose 500 says FAILED; a non-Error escapes, with no body. Either's kind is on the span.
+      trace.fault(err);
       trace.end({ status: 500, outcome: "error", code: err instanceof Error ? "FAILED" : undefined });
       throw err;
     }
@@ -236,10 +242,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the wildcard's.
     const template = c.get("template");
     trace.route ??= template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
-    // The time first, so `ms` is the request's, not the read of its answer's code.
+    // An error answer's code is the one set as it was answered (answerError, or the hook route from its handler's checked JSON), never read back from the answer (PR 2c).
     const at = performance.now();
     const gone = trace.clientGone;
-    const code = gone ? undefined : trace.code ?? await errorCode(c.res);
+    const code = gone ? undefined : trace.code;
     const outcome = gone ? "abandoned" : trace.outcome ?? outcomeOf(c.res.status, code);
     trace.end({ status: c.res.status, outcome, code }, at);
   });
@@ -253,8 +259,27 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // MCP server's (review pass 1).
   app.get("/openapi.json", (c) => c.json({ ...(doc ??= openApiDocument(pluginRoutes().map((r) => r.op))), servers: [{ url: linkBase(c) || "/" }] }));
 
-  const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) =>
-    c.json(body, status, headers);
+  /**
+   * An error answer: its JSON, and its code on the request's record for the
+   * line — set here, as it is answered, so the middleware never clones and
+   * reads an answer back (PR 2c). A refused HEAD's line has its GET's code.
+   */
+  const answerError = (c: Context, body: object, status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 422 | 500 | 501 | 503, headers: Record<string, string> = {}) => {
+    const trace = traceOf(c.req.raw);
+    const code = (body as { code?: unknown }).code;
+    if (trace && typeof code === "string") trace.code = code;
+    return c.json(body, status, headers);
+  };
+  const refuse = (c: Context, status: 400 | 401 | 403 | 404 | 405 | 503, body: { code: TransportCode } & Record<string, unknown>, headers: Record<string, string> = {}) => {
+    // The route's own refusal of the caller's key — none, a wrong one, revoked, busy, or one whose scope lacks the
+    // route — is the key's, not the tool's: its point labels no tool (telemetry.ts labelsOf; PR 2c review pass 4).
+    // Only the transport refuses here; an operation's or a plugin's refusal answers through answerError.
+    if (KEY_REFUSALS.has(body.code)) {
+      const trace = traceOf(c.req.raw);
+      if (trace) trace.refusedAtKey = true;
+    }
+    return answerError(c, body, status, headers);
+  };
   /**
    * A HEAD answers what the GET would say before it looks anything up — the
    * caller's standing and, on an operation, its input as the schema holds it
@@ -357,7 +382,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (head) return head;
     const id = c.req.param("job_id");
     const stream = await subscribeJob(p, id);
-    if (!stream) return c.json(refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
+    if (!stream) return answerError(c, refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
     const response = new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Its line is written where the stream ends — the job's end, the client
     // gone, the keepalive's ceiling — not as it opens (telemetry.ts
@@ -431,8 +456,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
         // to the same key; no `retryable` until SMD-2461 classifies faults —
         // but capture's, the transient the session hook retries, as the tool
         // gives it (SMD-1978).
-        if (route.fault) return c.json({ code: route.fault, retryable: true, message: failure(err).message }, 503, RETRY_AFTER);
-        return c.json(failure(err), 500);
+        if (route.fault) return answerError(c, { code: route.fault, retryable: true, message: failure(err).message }, 503, RETRY_AFTER);
+        return answerError(c, failure(err), 500);
       }
       if (outcome.ok) return answered(c, name, route.ok, outcome.value, p);
       const r = outcome.refusal as Refusal;
@@ -441,7 +466,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // refusal as "not written" would capture again.
       if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
-      return c.json(refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
+      return answerError(c, refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
     });
   }
 
@@ -488,11 +513,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     try {
       outcome = await traced(op.tool, "FAILED", () => runOperation(op, { core: deps.core, principal: p, track: deps.track }, read.input));
     } catch (err) {
-      return c.json(failure(err), 500);
+      return answerError(c, failure(err), 500);
     }
     if (outcome.ok) return c.json(outcome.value, 200);
     const { status, ...facts } = outcome.refusal;
-    return c.json(facts, status);
+    return answerError(c, facts, status);
   });
 
   // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
@@ -521,8 +546,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (c.req.method !== "POST") return refuse(c, 405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
     // No secret, nothing to verify a delivery against: refused here, whatever the handler would do (PR 4 review pass 1).
     const secret = served.secrets.get(hook.plugin);
-    if (!secret) return c.json({ code: "HOOK_NOT_CONFIGURED", retryable: false }, 503);
-    const tooLarge = () => c.json({ code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
+    if (!secret) return answerError(c, { code: "HOOK_NOT_CONFIGURED", retryable: false }, 503);
+    const tooLarge = () => answerError(c, { code: "TOO_LARGE", retryable: false, limit: HOOK_BODY_LIMIT }, 413);
     if (Number(c.req.header("content-length") ?? "0") > HOOK_BODY_LIMIT) return tooLarge();
     // Read with a running count and cut at the limit: a chunked body declares
     // no length, and reading it whole first let an anonymous sender fill the
@@ -533,7 +558,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       body = await boundedBody(c.req.raw, HOOK_BODY_LIMIT);
     } catch {
       // The sender went away mid-body: nothing to answer it with, and nothing of why.
-      return c.json({ code: "REFUSED_INPUT", retryable: false }, 400);
+      return answerError(c, { code: "REFUSED_INPUT", retryable: false }, 400);
     }
     if (body === null) return tooLarge();
     const headers: Record<string, string> = {};
@@ -551,12 +576,23 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       }, { headers, query, body, text: new TextDecoder().decode(body) });
     } catch (err) {
       // The sender is anonymous: it is told FAILED and nothing of why; the
-      // operator's stderr has the message, one line, bounded.
-      faultLog(`api hook ${hook.path} fault: ${failure(err).message.replace(/\s+/g, " ").slice(0, 300)}`);
-      return c.json({ code: "FAILED", retryable: false }, 500);
+      // operator's stderr has the message, one line, bounded, and the
+      // request's span the throw's kind and code alone (PR 2c).
+      faultLog(`api hook ${hook.path} fault: ${String(failure(err).message).replace(/\s+/g, " ").slice(0, 300)}`);
+      traceOf(c.req.raw)?.fault(err);
+      return answerError(c, { code: "FAILED", retryable: false }, 500);
     }
     const { status, text } = answer;
     if (status === 204 || text === null) return c.body(null, 204);
+    // A handler's own refusal: its code for the line, from the JSON text runHook checked.
+    if (status >= 400) {
+      let said: unknown;
+      try {
+        said = (JSON.parse(text) as { code?: unknown } | null)?.code;
+      } catch {}
+      const named = traceOf(c.req.raw);
+      if (named && typeof said === "string") named.code = said;
+    }
     // The JSON text runHook checked before the work started, not the body read again (review pass 3).
     return c.body(text, status, { "content-type": "application/json" });
   });
@@ -576,7 +612,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   });
   // What escapes a route — a throw outside an operation's own catch — is a
   // JSON fault like any other, not a text 500 and a stack on stderr.
-  app.onError((err, c) => c.json(failure(err), 500));
+  app.onError((err, c) => {
+    traceOf(c.req.raw)?.fault(err);
+    return answerError(c, failure(err), 500);
+  });
   return app;
 }
 

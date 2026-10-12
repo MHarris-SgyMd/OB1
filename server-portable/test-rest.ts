@@ -449,6 +449,22 @@ console.log("\n[8] One JSON line per request (telemetry.ts, SMD-1849): method, r
   answer = realAnswer;
   const faulted = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
   assert(faulted.status === 500 && faulted.outcome === "error" && faulted.code === "FAILED", `a fault: 500 \`error\` FAILED (${lines[0]})`);
+  // Each error answer's code is on its line, set where it is answered (SMD-1849 PR 2c review pass 1: errorCode read
+  // every one back from the answer before, and nothing held the sites that now set it): a capture's fault, a job
+  // stream's refusal as a value, and onError's.
+  lines.length = 0;
+  answer = async () => { throw new Error("connection refused"); };
+  await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
+  answer = realAnswer;
+  await hit(`/v1/jobs/${crypto.randomUUID()}/stream`, { key: "read-raw" });
+  const onErrorLines: string[] = [];
+  const keysUnread = createRestApp({ core, init: () => {}, keys: () => { throw new Error("the keys are unreadable"); }, resolve: async () => identity, track: (run) => run(), log: (l) => onErrorLines.push(l) });
+  const onErrorAnswer = await keysUnread.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" } }));
+  const [storeDown, noJob] = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const onErrorLine = JSON.parse(onErrorLines[0] ?? "{}") as Record<string, unknown>;
+  assert(storeDown?.status === 503 && storeDown.code === "STORE_UNAVAILABLE" && noJob?.status === 404 && noJob.code === "NOT_FOUND"
+    && onErrorAnswer.status === 500 && onErrorLine.status === 500 && onErrorLine.code === "FAILED" && onErrorLine.outcome === "error",
+    `each answer's code on its line: a capture's fault STORE_UNAVAILABLE, no such job NOT_FOUND, onError's FAILED (${[...lines, ...onErrorLines].join(" / ")})`);
   lines.length = 0;
   const hangUp = new AbortController();
   const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("{\"query\":\"cut")); setTimeout(() => { hangUp.abort(); c.error(new Error("the client hung up")); }, 20); } });
@@ -784,12 +800,14 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
 {
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
-  const { setUpTracing } = await import("./otel-setup.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
   const TID = "0af7651916cd43dd8448eb211c80319c";
   const PARENT = "b7ad6b7169203331";
   const PLANTED = "planted-rest-span-91c2";
   const exporter = new InMemorySpanExporter();
-  const tracing = setUpTracing("open-brain-api-test", { exporter });
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const tracing = setUpTelemetry("open-brain-api-test", { exporter, metrics: measured });
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (sp: Span | undefined) => (sp?.attributes ?? {}) as Record<string, unknown>;
   const send = (path: string, headers: Record<string, string> = {}) =>
@@ -818,6 +836,23 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     const faultOp = spans.find((sp) => sp.name === "execute_tool list_thoughts");
     assert(fault?.status.code === SpanStatusCode.ERROR && attrs(fault)["error.type"] === "FAILED" && attrs(fault)["http.response.status_code"] === 500 && faultOp?.status.code === SpanStatusCode.ERROR && attrs(faultOp)["error.type"] === "FAILED",
       `a fault: the request's span and the operation's are ERROR, FAILED, with no message of its own (${JSON.stringify([attrs(fault), attrs(faultOp)])})`);
+    // The operation's span has the throw's kind (PR 2c); the request's, whose call has a span of its own, none.
+    assert(JSON.stringify(faultOp?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "Error" }]]) && fault?.events.length === 0,
+      `the throw's kind on the operation's span alone (${JSON.stringify([faultOp?.events, fault?.events])})`);
+    // An environment that will not seed throws in the middleware itself: its kind on the request's span too (review pass 3).
+    exporter.reset();
+    const unseeded = createRestApp({ core, init: () => { throw new SyntaxError(`OB1_TIER is not a tier near ${PLANTED}`); }, keys: () => ({}), resolve: async () => identity, track: (run) => run(), log: () => {} });
+    await (await unseeded.fetch(new Request("http://api/openapi.json"))).text();
+    const unseededSpan = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    assert(unseededSpan?.events.some((e) => e.name === "exception" && e.attributes?.["exception.type"] === "SyntaxError") === true && !JSON.stringify(unseededSpan?.events).includes(PLANTED),
+      `an init that throws: its kind on the request's span, no message (${JSON.stringify(unseededSpan?.events)})`);
+    // A throw that escapes to onError has no operation span: its kind goes on the request's (review pass 1).
+    exporter.reset();
+    const unread = createRestApp({ core, init: () => {}, keys: () => { throw new TypeError(`the keys are unreadable near ${PLANTED}`); }, resolve: async () => identity, track: (run) => run(), log: () => {} });
+    await (await unread.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" } }))).text();
+    const escaped = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    assert(JSON.stringify(escaped?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "TypeError" }]]) && attrs(escaped)["error.type"] === "FAILED",
+      `onError's throw: its kind on the request's span, FAILED, no message (${JSON.stringify(escaped?.events)})`);
     // Nothing of the fault's message, which carries planted text, in any of its spans (review pass 5: the scan ran only after a reset).
     const faultTold = JSON.stringify(spans.map((sp) => ({ name: sp.name, attributes: sp.attributes, events: sp.events, status: sp.status, links: sp.links })));
     assert(spans.length === 2 && !faultTold.includes(PLANTED) && !faultTold.includes("fell over"), `a fault's message reaches none of its spans: name, attributes, events, status (${faultTold.length} chars)`);
@@ -836,6 +871,15 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     assert(missing?.status.code === SpanStatusCode.UNSET && attrs(missing)["ob1.code"] === "NOT_FOUND" && attrs(missing)["ob1.outcome"] === "refused" && attrs(missing)["http.response.status_code"] === 404
       && attrs(missingOp)["ob1.outcome"] === "refused" && attrs(missingOp)["ob1.code"] === "NOT_FOUND" && missingOp?.status.code === SpanStatusCode.UNSET,
       `a refusal: its code on both spans, not an ERROR (${JSON.stringify([attrs(missing), attrs(missingOp)])})`);
+    // On the histogram: the operation's own refusal is the tool's, and keeps it; a refusal of the key is the key's, and
+    // labels no tool, so a keyless caller raises no tool's refusal rate (PR 2c review pass 4).
+    await send("/v1/stats", { "x-brain-key": "not-a-key" });
+    await tracing.flush();
+    const restPoints = ((measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[]);
+    const missingPoint = restPoints.find((pt) => pt.attributes["http.response.status_code"] === 404 && pt.attributes["http.route"] === "/v1/thoughts/:id");
+    const keyPoint = restPoints.find((pt) => pt.attributes["http.response.status_code"] === 401 && pt.attributes["http.route"] === "/v1/stats");
+    assert(missingPoint?.attributes["ob1.tool"] === "fetch" && keyPoint !== undefined && !("ob1.tool" in keyPoint.attributes),
+      `the operation's refusal keeps its tool on its point; a key's refusal labels none (${JSON.stringify([missingPoint?.attributes, keyPoint?.attributes])})`);
 
     exporter.reset();
     await Promise.resolve(app.fetch(new Request("http://api/v1/thoughts")));
@@ -854,7 +898,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     await tracing.shutdown();
   }
 
-  // A real `bun api.ts` with a collector named: it says where its spans go, by
+  // A real `bun api.ts` with a collector named: it says where its signals go, by
   // origin alone, and its stop sends what is batched (the batch's own delay is
   // 5 s), before it exits.
   const received: string[] = [];
@@ -874,10 +918,10 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   const sent = received.join("\n");
   assert(sent.includes("GET /v1/whoami") && sent.includes("open-brain-api") && !sent.includes(PLANTED),
     `its stop sent the whoami's span to the collector, named for its service, the query left out (${received.length} exports; ${sent.slice(0, 160)})`);
-  assert(out.includes(`telemetry: open-brain-api's spans go to http://127.0.0.1:${collectorPort} over OTLP/HTTP`) && !out.includes("otel-secret"),
-    `it says where its spans go, by origin, the endpoint's credentials left out (${out.split("\n").filter((l) => l.includes("telemetry")).join(" / ")})`);
+  assert(out.includes(`telemetry: open-brain-api's spans, metrics and log records go to http://127.0.0.1:${collectorPort} over OTLP/HTTP`) && !out.includes("otel-secret"),
+    `it says where its signals go, by origin, the endpoint's credentials left out (${out.split("\n").filter((l) => l.includes("telemetry")).join(" / ")})`);
 
-  // With a collector that fails: the stop says the spans were not sent — not
+  // With a collector that fails: the stop says the telemetry was not all sent — not
   // that the pool did not close — and the failed export says so, by origin and
   // kind, neither the endpoint's credentials nor its headers in any line (review pass 1).
   const gone = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 500 }) });
@@ -895,9 +939,9 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   }
   const loneUp = lone.up && lone.sdk;
   const stopLine = loneOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
-  assert(loneUp && /; no database pool was opened; spans not sent; exit 0$/.test(stopLine) && loneOut.includes(`telemetry: 1 span not sent to http://127.0.0.1:${gonePort} (HTTP 500)`)
+  assert(loneUp && /; no database pool was opened; telemetry not all sent; exit 0$/.test(stopLine) && loneOut.includes(`telemetry: 1 span not sent to http://127.0.0.1:${gonePort} (HTTP 500)`)
     && !loneOut.includes("otel-secret") && !loneOut.includes("s3cr3t-header"),
-    `its collector failing, the stop says the spans were not sent, the pool's clause its own; the failure is said by origin and kind, no credential (${stopLine} / ${loneOut.split("\n").filter((l) => l.includes("not sent to")).join(" / ")})`);
+    `its collector failing, the stop says the telemetry was not all sent, the pool's clause its own; the failure is said by origin and kind, no credential (${stopLine} / ${loneOut.split("\n").filter((l) => l.includes("not sent to")).join(" / ")})`);
 
   // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on 15 s (review pass 5).
   const { tmpdir } = await import("node:os");
@@ -927,7 +971,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     slowCollector.stop(true);
   }
   const lateStop = lateOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
-  assert(late.up && late.sdk && /; spans not sent within \d+ ms; exit 0$/.test(lateStop), `an export on its way at the stop is waited for, not read as sent (${lateStop})`);
+  assert(late.up && late.sdk && /; telemetry not all sent within \d+ ms; exit 0$/.test(lateStop), `an export on its way at the stop is waited for, not read as sent (${lateStop})`);
 }
 
 report();

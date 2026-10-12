@@ -256,9 +256,13 @@ console.log("\n[4] The operation over REST: the gate, the input held to its sche
   answer = async () => coreRefuse({ code: "REFUSED_SINCE", retryable: false, since: "x" } as never);
   r = await json(await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" }));
   assert(r.status === 422 && r.body.code === "CORE_REFUSED" && r.body.retryable === false && /list_thoughts refused: REFUSED_SINCE/.test(String(r.body.message)), `the plugin's refusal → its status and code (${JSON.stringify(r.body)})`);
+  const refusedLine = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
   answer = async () => { throw new Error("the store is down"); };
   r = await json(await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" }));
   assert(r.status === 500 && r.body.code === "FAILED" && r.body.message === "the store is down", `a fault → 500 FAILED with its message (${JSON.stringify(r.body)})`);
+  const faultedLine = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+  assert(refusedLine.status === 422 && refusedLine.code === "CORE_REFUSED" && faultedLine.status === 500 && faultedLine.code === "FAILED",
+    `the plugin's refusal and its fault: each code on its line, set where it is answered (SMD-1849 PR 2c review pass 1) (${JSON.stringify([refusedLine, faultedLine])})`);
   answer = async () => coreOk({ thoughts: [] });
   r = await json(await hit(enabled, "/v1/plugins/example/nothing", { key: "read-raw" }));
   assert(r.status === 404 && r.body.code === "NO_ROUTE", "an operation the plugin does not have → 404 NO_ROUTE");
@@ -410,6 +414,22 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   // tool's error — the operation ran, through the server's registration.
   const ran = (await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 2 } })).result as { isError?: boolean; content?: { text: string }[] } | undefined;
   assert(ran?.isError === true && /^Error: .*DATABASE_URL/.test(ran.content?.[0]?.text ?? ""), `a read key's call runs the operation through to the core, whose fault is the tool's error (${ran?.content?.[0]?.text?.slice(0, 120)})`);
+  // What the operation threw is on its call's span by its kind alone (SMD-1849 PR 2c review pass 1).
+  {
+    const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+    const { setUpTelemetry } = await import("./otel-setup.ts");
+    const exporter = new InMemorySpanExporter();
+    const tracing = setUpTelemetry("open-brain-test", { exporter });
+    let events: unknown;
+    try {
+      await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 2 } });
+      events = exporter.getFinishedSpans().find((sp) => sp.name === "execute_tool example_recent")?.events.map((e) => [e.name, Object.keys(e.attributes ?? {})]);
+    } finally {
+      await tracing.shutdown();
+    }
+    assert(JSON.stringify(events) === JSON.stringify([["exception", ["exception.type"]]]) || JSON.stringify(events) === JSON.stringify([["exception", ["exception.type", "ob1.fault.code"]]]),
+      `a plugin tool's fault on its call's span: an exception event, its kind and at most a code (${JSON.stringify(events)})`);
+  }
   // Its line says how the call ended, as a core tool's does (SMD-1849 PR 2b: a plugin call told its request nothing, so the line read `unrun`).
   const { useRequestLog } = await import("./telemetry.ts");
   const said: string[] = [];
@@ -567,6 +587,8 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   calls.length = 0;
   r = await deliver(hookApp("example", undefined), body, signed);
   assert(r.status === 503 && ((await r.json()) as { code?: string }).code === "HOOK_NOT_CONFIGURED" && calls.length === 0, "no secret for the plugin: the REST core refuses, 503, and the handler never runs");
+  const unconfiguredLine = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+  assert(unconfiguredLine.status === 503 && unconfiguredLine.code === "HOOK_NOT_CONFIGURED", `…its code on its line (SMD-1849 PR 2c review pass 1) (${lines.at(-1)})`);
   r = await deliver(hookApp(undefined, `example=${SECRET}`), body, signed);
   assert(r.status === 404 && calls.length === 0, "OB1_HOOKS unset: the webhook is no route, whatever is sent");
   r = await deliver(on, body, signed, "/hooks/example/nothing");
@@ -576,9 +598,18 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   const big = JSON.stringify({ text: "x".repeat(1024 * 1024) });
   r = await deliver(on, big, sign(big));
   assert(r.status === 413 && calls.length === 0, "a body over 1 MiB: 413, before the handler reads it");
+  const tooLargeLine = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+  // A body whose sender is gone mid-read: 400, its code on the line too.
+  const broken = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode("{\"text\":")); controller.error(new Error("the sender went away")); } });
+  const brokenAnswer = await on.fetch(new Request("http://api/hooks/example/capture", { method: "POST", body: broken, headers: { "x-example-signature": "x" }, duplex: "half" } as RequestInit));
+  const brokenLine = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+  assert(tooLargeLine.status === 413 && tooLargeLine.code === "TOO_LARGE" && brokenAnswer.status === 400 && brokenLine.status === 400 && brokenLine.code === "REFUSED_INPUT",
+    `a body over the limit and one cut off mid-read: TOO_LARGE and REFUSED_INPUT on their lines (SMD-1849 PR 2c review pass 1) (${JSON.stringify([tooLargeLine, brokenLine])})`);
   answer = async () => coreRefuse({ code: "REFUSED", retryable: false, reason: "x" } as never);
   r = await deliver(on, body, signed);
   assert(r.status === 422 && ((await r.json()) as { refused?: string }).refused === "REFUSED", "the core refusing the capture: the plugin's 422, naming the core's code");
+  const handlerLine = JSON.parse(lines.at(-1) ?? "{}");
+  assert(handlerLine.status === 422 && handlerLine.code === "CORE_REFUSED" && handlerLine.outcome === "refused", `a handler's own refusal: its code on the line, read from the JSON it answered (SMD-1849 PR 2c) (${lines.at(-1)})`);
   answer = async () => { throw new Error("store down at secret-host:5432"); };
   lines.length = 0;
   r = await deliver(on, body, signed);
@@ -587,6 +618,33 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(faults.length === 1 && faults[0] === "api hook /hooks/example/capture fault: store down at secret-host:5432", `the message goes to the fault log, one line (${JSON.stringify(faults)})`);
   const faultLine = JSON.parse(lines.at(-1) ?? "{}");
   assert(faultLine.status === 500 && faultLine.code === "FAILED" && !lines.some((l) => l.includes("secret-host")), `the request line says the 500 and FAILED, never the message (${lines.at(-1)})`);
+  // A throw whose message is no string still has its fault line, and the sender is told FAILED alone (SMD-1849 PR 2c review pass 3).
+  answer = async () => { throw { message: 42 }; };
+  r = await deliver(on, body, signed);
+  const oddFault = (await r.json()) as Record<string, unknown>;
+  assert(r.status === 500 && JSON.stringify(oddFault) === JSON.stringify({ code: "FAILED", retryable: false }) && faults.at(-1) === "api hook /hooks/example/capture fault: 42",
+    `a throw whose message is a number: FAILED alone to the sender, its fault line all the same (${JSON.stringify(oddFault)}; ${faults.at(-1)})`);
+  // Its request's span has the throw's kind and code, never its message (SMD-1849 PR 2c): a webhook has no tool span of its own.
+  {
+    const { SpanKind } = await import("@opentelemetry/api");
+    const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+    const { setUpTelemetry } = await import("./otel-setup.ts");
+    const exporter = new InMemorySpanExporter();
+    const tracing = setUpTelemetry("open-brain-api-test", { exporter });
+    let spans: ReturnType<typeof exporter.getFinishedSpans> = [];
+    try {
+      answer = async () => { throw Object.assign(new TypeError("store down at secret-host:5432"), { code: "ECONNRESET" }); };
+      await (await deliver(on, body, signed)).text();
+      spans = exporter.getFinishedSpans();
+    } finally {
+      await tracing.shutdown();
+    }
+    const hookSpan = spans.find((sp) => sp.kind === SpanKind.SERVER);
+    const events = hookSpan?.events ?? [];
+    assert(hookSpan?.name === "POST /hooks/example/capture" && hookSpan.attributes["error.type"] === "FAILED" && events.length === 1 && events[0].name === "exception"
+      && JSON.stringify(events[0].attributes) === JSON.stringify({ "exception.type": "TypeError", "ob1.fault.code": "ECONNRESET" }) && !JSON.stringify(spans.map((sp) => [sp.attributes, sp.events])).includes("secret-host"),
+      `a webhook's fault on its request's span: the throw's kind and code, FAILED, nothing of the message (${JSON.stringify(spans.map((sp) => [sp.name, sp.events]))})`);
+  }
   // A chunked body with no length, past the limit: cut as it arrives, never read whole.
   let pulled = 0;
   const chunk = new Uint8Array(64 * 1024).fill(32);
@@ -1002,9 +1060,9 @@ console.log("\n[15] A plugin operation over REST has its span under its request'
 {
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
-  const { setUpTracing } = await import("./otel-setup.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
   const exporter = new InMemorySpanExporter();
-  const tracing = setUpTracing("open-brain-api-test", { exporter });
+  const tracing = setUpTelemetry("open-brain-api-test", { exporter });
   try {
     answer = async () => coreOk({ thoughts: [] });
     await (await hit(enabled, "/v1/plugins/example/recent", { key: "read-raw" })).text();

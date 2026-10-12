@@ -124,9 +124,13 @@ export function createCallCount(): CallCount & { track<T>(run: () => T | Promise
 }
 
 /**
- * How the spans' flush ended (SMD-1849 PR 2b): every span still batched or
- * already on its way went (`sent`); an export failed (`failed`); there was
- * none to send (`none`); or it outlasted its time (`timeout`).
+ * How the telemetry's flush ended (SMD-1849 PR 2b; PR 2c's metrics and log
+ * records with the spans): everything still batched or already on its way went
+ * (`sent`); an export of some signal failed (`failed`); there was none to send
+ * (`none`); or it outlasted its time (`timeout`). Under cumulative
+ * temporality, the default, metrics are a reading sent whole at every flush, so
+ * once a request has been recorded a stop with a metrics endpoint is never
+ * `none` (review passes 1–2); under delta it can be.
  */
 export type FlushResult = "sent" | "failed" | "none" | "timeout";
 
@@ -136,7 +140,7 @@ export interface DrainOptions {
   /** Close the database pool: true once closed, false when none was ever opened. */
   close: () => Promise<boolean>;
   /**
-   * Send the spans still batched or on their way (SMD-1849 PR 2b); undefined
+   * Send the telemetry still batched or on its way (SMD-1849 PR 2b–2c); undefined
    * with no collector set. Run beside the close, under its bound, and said on
    * its own, so a collector that stalls is never read as a pool that did not
    * close (review pass 1).
@@ -146,6 +150,14 @@ export interface DrainOptions {
   calls?: CallCount;
   /** Told just before what is still in flight is closed — at the bound, or on a second signal — so the lines it leaves say the stop cut it. */
   onCut?: () => void;
+  /**
+   * Told just before the flush, on every path: ends what the server no longer
+   * counts in flight but whose record is still open — a mirror whose client
+   * left while its handler waits on the registry, which the runtime counts
+   * done — so its line and its telemetry are written before the flush, not
+   * never (SMD-1849 PR 2c review pass 3).
+   */
+  endOpen?: () => void;
   drainBoundMs?: number;
   closeBoundMs?: number;
   closeAfterCutMs?: number;
@@ -168,7 +180,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
   const on = opts.on ?? ((signal, handler) => { process.on(signal, handler); });
   let settle: (code: number) => void = () => {};
   const stopped = new Promise<number>((resolve) => { settle = resolve; });
-  // What a second signal ends: the drain while it runs, then the pool's close and the spans' flush.
+  // What a second signal ends: the drain while it runs, then the pool's close and the telemetry's flush.
   let cutShort: (() => void) | undefined;
 
   const stop = async (signal: string) => {
@@ -192,7 +204,10 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     if (!drained && (server?.pendingRequests ?? 0) === 0 && (calls?.running ?? 0) === 0) drained = true;
     if (!drained && server) {
       log(`${signal}: ${requests(server.pendingRequests)} still in flight${running()} after ${((performance.now() - t0) / 1000).toFixed(1)} s, closed unfinished`);
-      opts.onCut?.();
+      // Guarded: a sink that throws must not take the flush and the exit with it (review pass 3).
+      try {
+        opts.onCut?.();
+      } catch {}
       // Not awaited: Bun closes the sockets at once, but the promise waits
       // for every handler to settle, and one stalled before it returned a
       // response (a lookup on a database that never answers) would hold it
@@ -202,15 +217,18 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // A drain that ended late gets what is left of the drain's bound plus the
     // after-cut close, so the exit-0 path cannot outlast the cut path (review pass 3).
     const closeMs = drained ? Math.round(Math.min(closeBoundMs, Math.max(closeAfterCutMs, drainBoundMs + closeAfterCutMs - (performance.now() - t0)))) : closeAfterCutMs;
-    // The spans' flush beside the pool's close, under the same bound, each said on its own.
-    const said: Record<FlushResult, string> = { sent: "; spans sent", failed: "; spans not sent", none: "; no spans left to send", timeout: `; spans not sent within ${closeMs} ms` };
+    try {
+      opts.endOpen?.();
+    } catch {}
+    // The telemetry's flush beside the pool's close, under the same bound, each said on its own.
+    const said: Record<FlushResult, string> = { sent: "; telemetry sent", failed: "; telemetry not all sent", none: "; no telemetry left to send", timeout: `; telemetry not all sent within ${closeMs} ms` };
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
     let flushCut = () => {};
     const flushed = opts.flush ? Promise.race([
       opts.flush().then((result) => (result === undefined ? "" : said[result]), () => said.failed),
       new Promise<string>((resolve) => {
         flushTimer = setTimeout(() => resolve(said.timeout), closeMs);
-        flushCut = () => resolve("; spans not sent: a second signal");
+        flushCut = () => resolve("; telemetry not all sent: a second signal");
       }),
     ]) : Promise.resolve("");
     const closed = await Promise.race([
@@ -224,10 +242,10 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       }),
     ]);
     clearTimeout(timer);
-    const spans = await flushed;
+    const sent = await flushed;
     clearTimeout(flushTimer);
     const code = drained ? 0 : 1;
-    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}${spans}; exit ${code}`);
+    log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}${sent}; exit ${code}`);
     settle(code);
     exit(code);
   };
