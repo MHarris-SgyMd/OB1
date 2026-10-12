@@ -528,8 +528,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-2638), 084 (the judge's relations stored, SMD-1873), 085 (a
   // capture-only key's stamp yields to the first classified key that can read
   // at a higher trust, SMD-2664), 086 (the operator resets such a label,
-  // SMD-2744) and 087 (what the findings step posted to the board,
-  // SMD-2681) stay recorded and
+  // SMD-2744), 087 (what the findings step posted to the board,
+  // SMD-2681) and 088 (update_thought answers what it did, SMD-2744)
+  // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -639,13 +640,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without 055, 060, 073 or 074 ([20ag]); 086 adds the reset and
   // redefines 085's restamp and backfill on their own bodies, refusing by
   // name without 046 or 085 ([20ah]); 087 adds a table and
-  // needs nothing ([20ai]) — all
+  // needs nothing ([20ai]); 088 redefines 073's update_thought on
+  // its own body, refusing by name without 073 ([20aj]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 58, `030 is among the last fifty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 59, `030 is among the last fifty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3901,6 +3903,41 @@ console.log("\n[20ai] Migration 087: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the087 });
   const [n] = await sql`SELECT count(*)::int AS n FROM board_findings_posted`;
   assert(n.n === 1 && (await rows()) === before, "a re-apply of 087 is a no-op: the posted row kept, no thought moved");
+  await sql.close();
+}
+
+console.log("\n[20aj] Migration 088: refused by name without 073; onto a populated brain at the file before it — update_thought's new answer, no row and no audit row moved; after it, an edit answers its stamp, whether the text counts as the same and whether the patch merged; a re-apply a no-op (SMD-2744)");
+{
+  const the088 = MIGRATIONS.find((f) => f.endsWith("_update_thought_says_what_it_did.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "073" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the088 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 088 needs 073 (ob1_declared_trust, ob1_actor_stamp); this schema lacks it",
+    `088 on a schema stopped before 073 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the088 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('lap-key', 'agent')`;
+  const LAP = { name: "lap-key", via: "open-brain" };
+  const made = ((await sql`SELECT upsert_thought(${"upgrade 088: the laptop's note"}::text, ${{ metadata: { source: "mcp" }, actor: LAP }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string }).id;
+  const before088 = (await sql`SELECT update_thought(p_id := ${made}::uuid, p_metadata_patch := ${{ topic: "before" }}::jsonb, p_actor := ${LAP}::jsonb) AS r`)[0].r as Record<string, unknown>;
+  assert(before088.ok === true && !("stamp" in before088) && !("metadata_merged" in before088), "[20aj] setup: before 088 the answer carries no stamp and no verdict");
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the088 });
+  const [made88] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'update_thought'`;
+  assert(made88?.fns === 1 && /ob1:patch-merged-beside-the-stamp/.test(String(made88.body)), `one update_thought, with 088's answer (${made88?.fns})`);
+  assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
+  const after = (await sql`SELECT update_thought(p_id := ${made}::uuid, p_metadata_patch := ${{ trust: "ingested", topic: "after" }}::jsonb, p_actor := ${LAP}::jsonb) AS r`)[0].r as { ok: boolean; stamp?: Record<string, unknown>; same_text?: boolean; metadata_merged?: boolean };
+  assert(after.ok && after.stamp?.trust === "agent" && after.stamp?.actor_name === "lap-key" && after.same_text === true && after.metadata_merged === true,
+    `after it, an edit answers the stamp the row keeps, the same text, and the patch merged by its other key (${JSON.stringify(after)})`);
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the088 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 088 is a no-op: no row or audit row moved");
   await sql.close();
 }
 

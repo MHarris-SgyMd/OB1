@@ -8,7 +8,7 @@ description: |
   creating a new thought (that is capture) or removing one (see
   deleting-thoughts).
 author: Ezana Azene
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Updating Thoughts
@@ -68,13 +68,24 @@ overwrites only `status` and leaves everything else in the metadata intact.
 ## Output
 
 A confirmation naming the thought id, what changed (content replaced and
-re-embedded, and/or metadata merged), and the new `updated_at`.
+re-embedded, and/or metadata merged — or "metadata unchanged" when the thought
+already held what the patch named), and the new `updated_at`. A patch naming
+`trust`, `actor_kind` or `actor_name` is answered with the keys the thought
+kept ("trust not taken", and a note with the values it holds); the patch's
+other keys still merge.
 
 ## Common Mistakes
 
 - Using `content` just to add a tag — wastes an embedding call; use
   `metadata_patch`.
 - Expecting `metadata_patch` to replace the whole metadata object — it merges.
+- Patching `trust`, `actor_kind` or `actor_name` to relabel a thought — the
+  server sets them: the kind and name of the key that wrote the current text,
+  and the trust that write declared (at most the key's kind). An edit that
+  leaves the text, letter case and runs of whitespace aside, keeps all three. To lower the
+  trust, send it with a change of the text — your key then becomes the
+  thought's writer; a capture-only key's label another key's re-capture settled
+  or moved is an operator key's to reset (`reset_capture_stamp`).
 - Skipping the search step and passing a half-remembered UUID.
 
 ## Notes

@@ -3605,4 +3605,77 @@ console.log("\n[22] reset_capture_stamp's reply says the ways on by the trust th
     "…and neither the key's name nor its kind is in the refusal's structured content");
 }
 
+console.log("\n[23] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
+{
+  const { keptStampKeys } = await import("./core/writes.ts");
+  const { renderUpdate } = await import("./render.ts");
+  const { createCore } = await import("./core/index.ts");
+  const ID = "00000000-0000-4000-8000-000000002745";
+  const AT = "2026-10-10T12:00:00.123Z";
+  const stamp = { actor_kind: "agent", actor_name: "laptop", trust: "agent" };
+  const none = keptStampKeys(stamp, { topic: "u" });
+  const kept = keptStampKeys(stamp, { trust: "ingested", actor_name: "laptop", topic: "u" });
+  const pre088 = keptStampKeys(undefined, { trust: "ingested" });
+  const planted = keptStampKeys({ actor_name: 5, trust: null }, { actor_name: "x", trust: "operator" });
+  assert(none === undefined && JSON.stringify(kept) === '[{"key":"trust","value":"agent","present":true}]' && pre088 === undefined
+      && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
+    `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
+  // Through the operation, on a store answering as 088 does — and as a database before it does.
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), logActions: async () => {} } as never), door: "test" });
+  const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
+  const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
+  const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);
+  const mixed = await op({ stamp, sameText: true, metadataMerged: true }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested", topic: "t" } } as never);
+  const old = await op({}).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
+  assert(lowered.ok && lowered.value.metadataMerged === false && JSON.stringify(lowered.value.kept?.map((k) => k.key)) === '["trust"]' && !lowered.value.metadataEcho
+      && echoed.ok && echoed.value.metadataMerged === false && echoed.value.metadataEcho === true && echoed.value.kept === undefined
+      && mixed.ok && mixed.value.metadataMerged === true && JSON.stringify(mixed.value.kept?.map((k) => k.key)) === '["trust"]'
+      && old.ok && old.value.metadataMerged === true && old.value.kept === undefined,
+    `the operation reads the write's answer: kept and unmerged, an echo with content (review pass 4: it read "merged"), merged beside a kept key, and a database before 088 replying as before (${JSON.stringify([lowered, echoed, mixed, old].map((o) => o.ok ? { m: o.value.metadataMerged, k: o.value.kept?.map((k) => k.key), e: o.value.metadataEcho } : o))})`);
+  const base = { id: ID, updatedAt: AT, contextFailures: 0, headWindow: null, metadataMerged: false, kept: [{ key: "trust", value: "agent", present: true }] };
+  const noText = renderUpdate({ ok: true, value: { ...base, contentChange: null } } as never).content[0].text;
+  const sameText = renderUpdate({ ok: true, value: { ...base, contentChange: "reembedded", sameText: true } } as never).content[0].text;
+  const newText = renderUpdate({ ok: true, value: { ...base, contentChange: "reembedded", sameText: false, trustSent: "operator" } } as never).content[0].text;
+  const blank = renderUpdate({ ok: true, value: { ...base, contentChange: null, kept: [{ key: "actor_name", value: "\u0007", present: true }] } } as never).content[0].text;
+  assert(/To set the trust — no higher than your key's kind — send it with a change of the text/.test(noText)
+      && /The text you sent counts as the same — letter case and runs of whitespace aside — so the thought keeps its trust/.test(sameText) && !/To set the trust/.test(sameText)
+      && /A trust above your key's kind is held to it\./.test(newText) && !/counts as the same/.test(newText)
+      && /Pass that value as if_unchanged_since on your next edit\./.test(noText),
+    "how a trust is set, by what the caller sent: no text, the same text (the write's verdict), a new one (review passes 2-4)");
+  assert(/actor_name is not a recognised value\./.test(blank) && !/To set the trust/.test(blank), "a planted name that cleans to nothing is no name, and no trust hint without a kept trust");
+  const reason = (trustSent: unknown) => renderUpdate({ ok: true, value: { ...base, contentChange: "reembedded", sameText: false, trustSent } } as never).content[0].text;
+  assert(/A trust above your key's kind is held to it\./.test(reason("operator")) && /"Agent" is not a trust \(ingested, agent or operator\), so the change of text took your key's own\./.test(reason("Agent"))
+      && /A null or a non-string trust declares nothing, so the change of text took your key's own\./.test(reason(null)),
+    "on a change of text, the reason a trust was not taken by what was sent: a word above the key's kind, a word that is no trust, a null (review pass 5)");
+  const newTextEcho = await op({ stamp: { ...stamp, actor_name: "desk" }, sameText: false, metadataMerged: false }).updateThought(principal, { id: ID, content: "y", metadata_patch: { actor_kind: "agent" } } as never);
+  const nullRow = await op({ stamp: {}, sameText: true, metadataMerged: false, patchDropped: true }).updateThought(principal, { id: ID, metadata_patch: { topic: "t" } } as never);
+  const nullText = nullRow.ok ? renderUpdate(nullRow as never).content[0].text : "";
+  assert(newTextEcho.ok && newTextEcho.value.metadataEcho === undefined && newTextEcho.value.metadataMerged === false
+      && /\(the patch not merged: the thought's metadata was SQL NULL, a raw writer's — a change of the text gives it metadata, after which the patch merges\)\./.test(nullText) && !/already held|other keys/.test(nullText),
+    `no "already held" on a change of text, which moved the stamp; a NULL metadata's dropped patch said (review pass 5) (${nullText.split("\n")[0]})`);
+  const nullTrust = await op({ stamp: { actor_kind: "agent", actor_name: "laptop", trust: "ingested" }, sameText: false, metadataMerged: true, patchDropped: true }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "ingested", topic: "t" } } as never);
+  const nullTrustText = nullTrust.ok ? renderUpdate(nullTrust as never).content[0].text : "";
+  const taken = await op({ stamp: { ...stamp, trust: "ingested" }, sameText: false, metadataMerged: true }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "ingested" } } as never);
+  const kindless = await op({ stamp: { actor_name: "laptop" }, sameText: false, metadataMerged: false }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "agent" } } as never);
+  const kindlessText = kindless.ok ? renderUpdate(kindless as never).content[0].text : "";
+  // An array or a scalar takes no stamp: the key's kind is not why (review pass 7).
+  const arrayRow = await op({ stamp: {}, sameText: false, metadataMerged: true }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "agent" } } as never);
+  const arrayText = arrayRow.ok ? renderUpdate(arrayRow as never).content[0].text : "";
+  const classified = await op({ stamp: { ...stamp, trust: "agent" }, sameText: false, metadataMerged: false }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "operator" } } as never);
+  // A kind with no trust beside it is not "no kind"; the same text is no gap at all (pass 7's mutants).
+  const kindNoTrust = await op({ stamp: { actor_kind: "agent", actor_name: "laptop" }, sameText: false, metadataMerged: false }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "agent" } } as never);
+  const kindlessSame = await op({ stamp: { actor_name: "laptop" }, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "y", metadata_patch: { trust: "agent" } } as never);
+  const dirtyText = renderUpdate({ ok: true, value: { ...base, contentChange: "reembedded", sameText: false, trustSent: "a\u001b[2Jb\nc" } } as never).content[0].text;
+  const nullVerdict = await op({ stamp, sameText: false, metadataMerged: undefined }).updateThought(principal, { id: ID, content: "y", metadata_patch: { topic: "t" } } as never);
+  assert(/^Updated [0-9a-f-]{36} \(content [^)]*trust taken; the patch's other keys not merged: the thought's metadata was SQL NULL, a raw writer's — the change of text gave it metadata, so send those keys again\)\./.test(nullTrustText)
+      && taken.ok && taken.value.trustSent === undefined && taken.value.kept === undefined
+      && kindless.ok && kindless.value.stampGap === "no_kind" && /Your key has no kind: it supports only a declared ingested, so the thought keeps no trust/.test(kindlessText) && !/held to it/.test(kindlessText)
+      && arrayRow.ok && arrayRow.value.stampGap === "not_object" && /The thought's metadata is not an object \(a raw writer's\), so the change of text wrote no stamp\./.test(arrayText) && !/Your key has no kind|held to it/.test(arrayText)
+      && classified.ok && classified.value.stampGap === undefined && kindNoTrust.ok && kindNoTrust.value.stampGap === undefined && kindlessSame.ok && kindlessSame.value.stampGap === undefined
+      && !/reset_capture_stamp/.test(kindlessText) && !/reset_capture_stamp/.test(arrayText)
+      && !/[\u0000-\u001f\u007f]/.test(dirtyText.split("\n").find((l) => l.startsWith("Note:")) ?? "x\u0007")
+      && nullVerdict.ok && nullVerdict.value.metadataMerged === false,
+    `a NULL row's text change: the trust taken, the rest said dropped; no trustSent when the trust was taken; a key with no kind told so, an array row not (review pass 7); no reset hint after a change of text; a sent word cleaned; a stamp with no verdict read as not merged (review pass 6) (${nullTrustText.split("\n")[0]})`);
+}
+
 report();

@@ -26,7 +26,7 @@ import { SAID_BY, TRUST } from "./core/filter.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
-import type { Captured, Deleted, HeadWindow, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, HeadWindow, KeptKey, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -1088,24 +1088,74 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
 /** update_thought's value: what moved, and the pointers and pair it reports — ids, flags and counts. */
 const safeUpdate: Safe<Updated> = (v) => ({
   id: v.id, updatedAt: v.updatedAt ?? null, contentChange: v.contentChange, metadataMerged: v.metadataMerged,
+  // The keys alone: the values are the row's, a name not a token.
+  ...(v.kept?.length ? { kept: v.kept.map((k) => k.key) } : {}),
   ...(v.supersedes !== undefined ? { supersedes: v.supersedes } : {}),
   contextFailures: v.contextFailures,
   ...(v.duplicateOf ? { duplicateOf: v.duplicateOf } : {}),
   ...(v.fingerprintHeldBy ? { fingerprintHeldBy: v.fingerprintHeldBy } : {}),
 });
 
+/**
+ * The stamp keys a patch named and the row kept (SMD-2744): which, at what,
+ * and why — so a `trust` patch on an unchanged text no longer reads as merged
+ * — and the ways the label does move. The values are the row's, which a raw
+ * writer may plant: the kind and the trust held to their word lists, the
+ * name through snipText.
+ */
+function explainKept(v: Updated): string {
+  if (!v.kept?.length) return "";
+  const shown = (k: KeptKey): string => {
+    if (!k.present) return `${k.key} is unset`;
+    const val = k.key === "actor_kind" ? oneOf(SAID_BY, k.value) : k.key === "trust" ? oneOf(TRUST, k.value) : k.value === null ? null : snipText(k.value, 80);
+    return `${k.key} is ${val || "not a recognised value"}`;
+  };
+  const trustKept = v.kept.some((k) => k.key === "trust");
+  return `\n\nNote: not taken from the patch — ${v.kept.map(shown).join("; ")}. A thought's actor_kind and actor_name are those of the key that wrote its current text (or re-captured it over a capture-only key's), set by the server, and its trust the one that write declared, else the key's kind: at most the key's kind (a key with no kind supports only ingested; the operator classifies keys with set_agent_kind). An edit that leaves the text — letter case and runs of whitespace aside — keeps all three.`
+    // How a trust is set, to the caller as it stands (review passes 2-7):
+    // one who sent no text is told the way; one whose text counts as the
+    // same (088's verdict) that it does; one whose text changed why the word
+    // it sent was not taken — no stamp, no kind, above the kind, no word.
+    + (!trustKept ? ""
+      : v.contentChange === null ? " To set the trust — no higher than your key's kind — send it with a change of the text; your key then becomes the thought's writer, its actor_kind and actor_name."
+      : v.sameText !== false ? " The text you sent counts as the same — letter case and runs of whitespace aside — so the thought keeps its trust: change the text to set one, no higher than your key's kind."
+      : v.stampGap === "not_object" ? " The thought's metadata is not an object (a raw writer's), so the change of text wrote no stamp."
+      : v.stampGap === "no_kind" ? " Your key has no kind: it supports only a declared ingested, so the thought keeps no trust (the operator classifies keys with set_agent_kind)."
+      : oneOf(TRUST, v.trustSent) !== null ? " A trust above your key's kind is held to it."
+      : typeof v.trustSent === "string" ? ` "${snipText(v.trustSent, 40)}" is not a trust (ingested, agent or operator), so the change of text took your key's own.`
+      : " A null or a non-string trust declares nothing, so the change of text took your key's own.")
+    // A change of text makes the caller the writer: no capture's label left
+    // to reset (review pass 7).
+    + (v.sameText === false ? "" : " If a capture-only key captured this text and another key's re-capture settled or moved its label, an operator key's reset_capture_stamp puts it back.");
+}
+
+/** The keys a patch named that a NULL metadata dropped, and how they merge. */
+function droppedText(v: Updated): string {
+  const others = Boolean(v.kept?.length || v.metadataMerged);
+  return `${v.metadataMerged ? "trust taken; " : ""}${others ? "the patch's other keys" : "the patch"} not merged: the thought's metadata was SQL NULL, a raw writer's — ${
+    v.sameText === false ? `the change of text gave it metadata, so send ${others ? "those keys" : "the patch"} again` : "a change of the text gives it metadata, after which the patch merges"}`;
+}
+
 export function renderUpdate(o: Outcome<Updated>): Reply {
   return render(o, (v) => {
     const what = [
       v.contentChange === "reembedded" ? "content re-embedded" : v.contentChange === "no_vector" ? "content saved without a vector" : null,
-      v.metadataMerged ? "metadata merged" : null,
+      // Of the patch, not the row: a change of text restamps the row even
+      // when the patch's stamp keys were not taken (review pass 1 of PR 2).
+      v.patchDropped ? null : v.metadataMerged ? "metadata merged" : v.metadataEcho ? "metadata unchanged: it already held what the patch named" : null,
+      v.kept?.length ? `${v.kept.map((k) => k.key).join(", ")} not taken` : null,
+      // A row whose metadata was SQL NULL (a raw writer's) merges no patch; a
+      // change of text writes the stamp over it, a trust the patch declared
+      // taken (review pass 6), after which the same keys merge — said last,
+      // its clause its own (review pass 7: "cannot merge into" read as never).
+      v.patchDropped ? droppedText(v) : null,
       v.supersedes === null ? "supersedes cleared" : v.supersedes !== undefined ? `now supersedes ${v.supersedes}` : null,
       // An edit replaces every chunk, so a failure here leaves the SAME
       // half-contextualized state a capture can, and is worth the same
       // sentence rather than a silent partial rewrite.
       v.contextFailures ? `${v.contextFailures} chunks without context` : null,
     ].filter(Boolean).join(", ");
-    return `Updated ${v.id} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${
+    return `Updated ${v.id} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${explainKept(v)}${
       v.noVectorReason !== undefined
         ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
         : ""}`;
