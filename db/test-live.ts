@@ -10213,16 +10213,18 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   }
 
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
-  // /bot<token>/sendMessage counts the Telegram sends (tgReqs).
+  // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
+  // last one's Authorization (tgAuth).
   let tgReqs = 0;
   let chatReqs = 0;
+  let tgAuth: string | null = null;
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch(req) {
       const p = new URL(req.url).pathname;
       if (p.endsWith("/chat/completions")) { chatReqs++; return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] }); }
-      if (p.includes("/sendMessage")) { tgReqs++; return Response.json({ ok: true, result: { message_id: tgReqs } }); }
+      if (p.includes("/sendMessage")) { tgReqs++; tgAuth = req.headers.get("authorization"); return Response.json({ ok: true, result: { message_id: tgReqs } }); }
       return new Response("not found", { status: 404 });
     },
   });
@@ -10263,6 +10265,14 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
     assert(allowed.code === 0 && tgReqs >= 1 && /posted to Telegram/.test(allowed.out),
       `OB1_EGRESS_ALLOW=type:digest lets it post — the stub is called, so the deny zero is a gate holding, not a dead sender (exit ${allowed.code}; ${tgReqs} send(s))`);
+    assert(tgAuth === null, `…with no Authorization: the bot token is in the path (${tgAuth})`);
+
+    // A user and password in the Telegram base (a Basic-auth front before a
+    // self-hosted Bot API) are sent as Basic, on any Bun, and printed nowhere (SMD-2885).
+    tgReqs = 0; chatReqs = 0;
+    const fronted = await weeklyCli(tgArgs, { ...base, OB1_TELEGRAM_API_BASE: tgBase.replace("://", "://bot:s3cret-tg@"), OB1_EGRESS_ALLOW: "type:digest" });
+    assert(fronted.code === 0 && tgReqs >= 1 && tgAuth === `Basic ${btoa("bot:s3cret-tg")}` && !/s3cret-tg/.test(fronted.out + fronted.err),
+      `userinfo in OB1_TELEGRAM_API_BASE is sent as Basic and printed nowhere (exit ${fronted.code}; ${tgReqs} send(s); ${tgAuth})`);
 
     // The send allowed but no credentials: it fails fast, before the LLM spend.
     tgReqs = 0; chatReqs = 0;

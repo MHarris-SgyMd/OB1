@@ -26,7 +26,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ago, deniedObject, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
@@ -406,12 +406,12 @@ if (store !== "postgrest" && store !== "sql") {
 // ── Model provider ──────────────────────────────────────────────────────────
 
 add("model provider", "ok",
-    `${maskUrl(embEndpoint.base)} — embeddings${chatIsOwn ? "" : " and chat"}${localEmbeddings ? " (local — no credential needed)" : ""}`);
+    `${shownBase(embEndpoint)} — embeddings${chatIsOwn ? "" : " and chat"}${localEmbeddings ? " (local — no credential needed)" : ""}`);
 if (chatIsOwn) {
   // A second endpoint is a second row, so an operator reading the report sees
   // where each of the two calls goes; unsplit, the one row says "and chat".
   add("chat provider", "ok",
-      `${maskUrl(chatEndpoint.base)} — chat${env.OB1_CHAT_BASE_URL ? " (OB1_CHAT_BASE_URL)" : ", the embeddings endpoint with its own credential (OB1_CHAT_API_KEY)"}${localChat ? " (local — no credential needed)" : ""}`);
+      `${shownBase(chatEndpoint)} — chat${env.OB1_CHAT_BASE_URL ? " (OB1_CHAT_BASE_URL)" : ", the embeddings endpoint with its own credential (OB1_CHAT_API_KEY)"}${localChat ? " (local — no credential needed)" : ""}`);
 }
 {
   const { resolveEmbeddingDimensions } = await import("../db/config.mjs");
@@ -516,20 +516,34 @@ add("judge model", "ok", env.OB1_JUDGE_MODEL
     : `${judgeModel} — the metadata model; OB1_JUDGE_MODEL gives the judge its own`);
 
 /**
- * One credential row per endpoint. A hosted endpoint with no key is a hard
- * failure naming the knob that sets one; a local endpoint needs none, and a
- * key sent to one is worth a warning. `unshared` names a key that IS set for
- * the other endpoint and is not sent to this one — embed.ts's rule that a
- * different endpoint gets only its own credential, said where an operator
- * expecting the inherited key would look for it (SMD-1902).
+ * One credential row per endpoint. A hosted endpoint with no key and no
+ * userinfo in its base is a hard failure naming the knob that sets one; a
+ * local endpoint needs none, and a key sent to one is worth a warning, which
+ * userinfo is not: it was put in that URL for that endpoint (SMD-2885). A key
+ * beside userinfo is warned of too, since only the key is sent. `unshared`
+ * names a key that IS set for the other endpoint and is not sent to this one
+ * — embed.ts's rule that a different endpoint gets only its own credential,
+ * said where an operator expecting the inherited key would look for it
+ * (SMD-1902).
  */
 function credentialRow(row: string, at: ProviderEndpoint, local: boolean, keyKnob: string, baseKnob: string, unshared?: string): void {
   const aside = unshared ? ` — ${unshared} belongs to the other endpoint and is not sent here` : "";
+  // Userinfo in the base is a credential too, sent as Basic — unless a key
+  // takes the one Authorization header (embed.ts, SMD-2885).
+  if (at.userinfo && !at.key) {
+    add(row, "ok", `the user and password in ${baseKnob}, sent as Basic${aside}`);
+    return;
+  }
+  if (at.userinfo) {
+    const setKnob = keyKnob.split(" or ").find((k) => env[k]) ?? keyKnob;
+    add(row, "warn", `${setKnob} and a user and password in ${baseKnob} are both set — the key is sent as Bearer and the user and password are not sent`,
+        `Remove the user and password from ${baseKnob}, or unset ${setKnob} to send them as Basic.`);
+  }
   if (!at.key) {
     if (local) {
       add(row, "ok", `not required for a local endpoint${aside}`);
     } else {
-      add(row, "fail", `no ${keyKnob}, and ${at.base} is not local${aside}`,
+      add(row, "fail", `no ${keyKnob}, and ${shownBase(at)} is not local${aside}`,
           `Set ${keyKnob}, or point ${baseKnob} at a local provider.`);
     }
     return;
@@ -543,11 +557,19 @@ function credentialRow(row: string, at: ProviderEndpoint, local: boolean, keyKno
 credentialRow("provider credential", embEndpoint, localEmbeddings, "OB1_LLM_API_KEY or OPENROUTER_API_KEY", "OB1_LLM_BASE_URL");
 if (chatIsOwn) {
   // The same base spelled twice shares the embeddings key (embed.ts); only a
-  // different base leaves OB1_LLM_API_KEY behind, and only then is it named.
-  const unshared = embEndpoint.key && !chatEndpoint.key && chatEndpoint.base !== embEndpoint.base
+  // chat endpoint that stands alone — a different base, or its own userinfo
+  // (SMD-2885) — leaves OB1_LLM_API_KEY behind, and only then is it named.
+  const unshared = embEndpoint.key && !chatEndpoint.key && chatEndpoint !== embEndpoint
     ? (env.OB1_LLM_API_KEY ? "OB1_LLM_API_KEY" : "OPENROUTER_API_KEY")
     : undefined;
-  credentialRow("chat credential", chatEndpoint, localChat, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL", unshared);
+  if (chatEndpoint === embEndpoint) {
+    // The same base in both knobs and no credential of its own: the embeddings
+    // endpoint, whose row above is its credential — not OB1_CHAT_* knobs that
+    // are not set (second review pass).
+    add("chat credential", "ok", "the embeddings endpoint's — OB1_CHAT_BASE_URL names the same base, so the provider credential row is this one's too");
+  } else {
+    credentialRow("chat credential", chatEndpoint, localChat, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL", unshared);
+  }
 }
 
 // ── Is the local endpoint there at all? (SMD-1875) ──────────────────────────
@@ -679,10 +701,11 @@ async function resolveFirst(host: string): Promise<{ why: string; then: string }
 }
 async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
   const started = performance.now();
-  // Userinfo in the URL is never sent by fetch and would otherwise land in the
-  // log on every start (fifth review pass); maskUrl is store.ts's, the one the
-  // DATABASE_URL row uses.
-  const shown = maskUrl(at.base);
+  // Userinfo is not in the base (embed.ts takes it out, for the endpoint's
+  // Basic header when there is no key) and this probe sends no credential, so
+  // neither the request nor the log carries it; shownBase marks it `***@`,
+  // maskUrl's shape for the DATABASE_URL row (fifth review pass; SMD-2885).
+  const shown = shownBase(at);
   const unresolved = await resolveFirst(hostnameOf(at.base));
   if (unresolved) {
     add(row, "fail", `nothing answers at ${shown} — ${unresolved.why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${unresolved.then}`, probeRemedy(at.base, knob));
@@ -769,7 +792,7 @@ const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity
 function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: string, refusedMeans: string): void {
   const host = hostOf(at.base);
   if (at.local) {
-    add(row, "ok", `${maskUrl(at.base)} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
+    add(row, "ok", `${shownBase(at)} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
     return;
   }
   if (isLocalEndpoint(at.base)) {
@@ -785,7 +808,7 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
         : egress.mode === "allow"
           ? `, and under allow any ${calls} call an OB1_EGRESS_DENY term matches is refused`
           : "; the gate is off, so nothing is refused today — a later deny would refuse every call";
-    add(row, "warn", `${maskUrl(at.base)} looks local but is not declared so — the gate treats it as remote${consequence}`,
+    add(row, "warn", `${shownBase(at)} looks local but is not declared so — the gate treats it as remote${consequence}`,
         `Set ${knob}=1 if this endpoint is on this machine or its private network (declared, not guessed — SMD-1903).`);
     return;
   }
@@ -4688,9 +4711,19 @@ if (configFailed) {
 // the endpoint's own headers, and for embeddings the `dimensions` parameter
 // when the server would — so a pass here is a pass for the first capture.
 
+/**
+ * What a 401 to a --deep probe asks the operator to check: the credential that
+ * was sent, by the knob that holds it — the key, the base's user and password
+ * (SMD-2885), or nothing at all (fourth review pass).
+ */
+function rejectedRemedy(at: ProviderEndpoint, keyKnob: string, baseKnob: string): string {
+  if (at.key) return `The key is rejected. Check ${keyKnob}.`;
+  if (at.userinfo) return `The user and password in ${baseKnob} are rejected. Check them.`;
+  return `It wants a credential and none was sent: set ${keyKnob}, or a user and password in ${baseKnob}.`;
+}
 if (!deep) {
   add("embedding provider", "skip", "not checked — pass --deep to call the provider");
-} else if (!embEndpoint.key && !localEmbeddings) {
+} else if (!embEndpoint.key && !embEndpoint.userinfo && !localEmbeddings) {
   add("embedding provider", "skip", "no credential to test with");
 } else {
   try {
@@ -4709,8 +4742,8 @@ if (!deep) {
       }),
     });
     if (!r.ok) {
-      add("embedding provider", "fail", `${embEndpoint.base} returned ${r.status}`,
-          r.status === 401 ? "The key is rejected. Check OB1_LLM_API_KEY (or OPENROUTER_API_KEY)." : "Check the provider's status and credit balance.");
+      add("embedding provider", "fail", `${shownBase(embEndpoint)} returned ${r.status}`,
+          r.status === 401 ? rejectedRemedy(embEndpoint, "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)", "OB1_LLM_BASE_URL") : "Check the provider's status and credit balance.");
     } else {
       const d = (await r.json()) as { data?: [{ embedding?: number[] }] };
       const dim = d.data?.[0]?.embedding?.length;
@@ -4754,8 +4787,8 @@ if (deep) {
       : []),
   ];
   for (const [row, model, consequence] of probes) {
-    if (!chatEndpoint.key && !localChat) {
-      add(row, "skip", `no credential to test ${chatEndpoint.base} with`);
+    if (!chatEndpoint.key && !chatEndpoint.userinfo && !localChat) {
+      add(row, "skip", `no credential to test ${shownBase(chatEndpoint)} with`);
       continue;
     }
     try {
@@ -4773,8 +4806,12 @@ if (deep) {
         }),
       });
       if (!m.ok) {
-        add(row, "fail", `${model} returned ${m.status} from ${chatEndpoint.base}`,
-            (m.status === 401 ? `The key is rejected. Check ${chatIsOwn ? "OB1_CHAT_API_KEY" : "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)"}. ` : "") + consequence);
+        add(row, "fail", `${model} returned ${m.status} from ${shownBase(chatEndpoint)}`,
+            (m.status === 401
+              ? `${chatEndpoint === embEndpoint
+                ? rejectedRemedy(chatEndpoint, "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)", "OB1_LLM_BASE_URL")
+                : rejectedRemedy(chatEndpoint, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL")} `
+              : "") + consequence);
       } else {
         const md = (await m.json()) as { choices?: [{ message?: { content?: string } }] };
         const content = md.choices?.[0]?.message?.content ?? "";
@@ -4782,14 +4819,14 @@ if (deep) {
           const parsed = JSON.parse(content);
           add(row, typeof parsed === "object" && parsed !== null ? "ok" : "warn",
               typeof parsed === "object" && parsed !== null
-                ? `${model} honours JSON mode at ${chatEndpoint.base}`
+                ? `${model} honours JSON mode at ${shownBase(chatEndpoint)}`
                 : `${model} returned JSON that is not an object`);
         } catch {
           add(row, "warn", `${model} did not return parseable JSON in JSON mode`, consequence);
         }
       }
     } catch (e) {
-      add(row, "fail", `${model} at ${chatEndpoint.base}: ${(e as Error).message}`,
+      add(row, "fail", `${model} at ${shownBase(chatEndpoint)}: ${(e as Error).message}`,
           `Network reachability to ${hostOf(chatEndpoint.base)}. ${consequence}`);
     }
   }
@@ -4810,7 +4847,7 @@ if (!jevCfg) {
   // the base shown masked, since this row runs on every start; the name
   // resolved before it is dialled; the failure in probeFailure's words.
   const base = jevCfg.endpoint.base;
-  const at = maskUrl(base);
+  const at = shownBase(jevCfg.endpoint);
   const masked = (message: string) => message.split(base).join(at);
   const START = "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
   const host = hostnameOf(base);
@@ -4849,7 +4886,12 @@ if (!jevCfg) {
     const proxy = proxyKnobFor(base);
     const route = proxy ? `; ${proxy} is set, so this call goes through that proxy unless NO_PROXY names ${host}` : "";
     const viaProxy = proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "";
-    if (err.kind === "http" || err.kind === "body") {
+    if (err.kind === "http" && (err as { status?: number }).status === 401) {
+      // A 401 is about the credential, not the path: the base's user and
+      // password are the tier's only one (SMD-2885, fourth review pass).
+      add("jev tier", "fail", `${at} answers, but refuses the request: ${masked(err.message)}${route}`,
+          `${viaProxy}${jevCfg.endpoint.userinfo ? "The user and password in OB1_JEV_BASE_URL are rejected. Check them." : "It wants a credential and none was sent: put a user and password in OB1_JEV_BASE_URL."}`);
+    } else if (err.kind === "http" || err.kind === "body") {
       add("jev tier", "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
           `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
     } else if (failure?.kind === "tls") {

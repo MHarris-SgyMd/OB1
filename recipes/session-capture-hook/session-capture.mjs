@@ -344,6 +344,29 @@ export function shownUrl(url, base) {
 }
 
 /**
+ * A url's user and password, out of it: the url without them, and the Basic
+ * credential they make (UTF-8), or none — server-portable/embed.ts's split,
+ * copied since this file runs alone, always rebuilt from the parse (the hook
+ * compares no two urls, so the written spelling need not be kept): Bun's
+ * fetch sends userinfo as Basic from 1.4.3 and dropped it before, so it is
+ * never left in a url for fetch to decide, nor for a status line to print
+ * (SMD-2885). Which key goes with the url is the hook's own pairing in
+ * loadConfig, not the server's, and a key wins over the userinfo here too.
+ */
+export function splitUserinfo(raw) {
+  let u;
+  try { u = new URL(raw); } catch { return { url: raw }; }
+  if (!u.username && !u.password) return { url: raw };
+  const dec = (p) => { try { return decodeURIComponent(p); } catch { return p; } };
+  const basic = Buffer.from(`${dec(u.username)}:${dec(u.password)}`, "utf8").toString("base64");
+  // Rebuilt from the parse, not cut from the string: `http:/u:p@h` is userinfo
+  // too, and the host the parser read is the one dialled (second review pass).
+  u.username = "";
+  u.password = "";
+  return { url: u.href, basic };
+}
+
+/**
  * The endpoint and the key. From the config file (the shipped shape), or from
  * OB1_BRAIN_URL / OB1_CAPTURE_KEY in the environment (a test, a container). The
  * key never appears in a hook's command line, where it would sit in a settings
@@ -389,7 +412,9 @@ export function loadConfig() {
   // hook-specific endpoint the server key was not minted for.
   const hookModelUrl = env.OB1_SESSION_CAPTURE_MODEL_URL || cfg.model_url;
   const hookModelKey = env.OB1_SESSION_CAPTURE_MODEL_KEY || cfg.model_key;
-  const modelUrlRaw = hookModelUrl || env.OB1_CHAT_BASE_URL || env.OB1_LLM_BASE_URL;
+  // A user and password in the model url are that endpoint's credential: sent
+  // as Basic unless a key is set, whose Bearer takes their place (SMD-2885).
+  const modelSplit = splitUserinfo(String(hookModelUrl || env.OB1_CHAT_BASE_URL || env.OB1_LLM_BASE_URL || ""));
   const modelRaw = env.OB1_SESSION_CAPTURE_MODEL || cfg.model || env.OB1_METADATA_MODEL;
   const modelKey = hookModelKey || (hookModelUrl ? undefined : env.OB1_CHAT_API_KEY || env.OB1_LLM_API_KEY);
   const modelLocal = cfg.model_local ?? (env.OB1_CHAT_LOCAL === "1" || env.OB1_LLM_LOCAL === "1");
@@ -416,9 +441,10 @@ export function loadConfig() {
     // trailing `/chat/completions` a user pasted from a full endpoint removed,
     // so modelSummary's own `/chat/completions` is not doubled into a 404 that
     // would silently fall back (review pass 2).
-    modelUrl: modelUrlRaw ? String(modelUrlRaw).replace(/\/*$/, "").replace(/\/chat\/completions$/, "") : undefined,
+    modelUrl: modelSplit.url ? modelSplit.url.replace(/\/*$/, "").replace(/\/chat\/completions$/, "") : undefined,
     model: modelRaw ? String(modelRaw) : undefined,
     modelKey: modelKey ? String(modelKey) : undefined,
+    modelBasic: modelSplit.basic,
     modelLocal: !!modelLocal,
     egress,
     modelTimeout,
@@ -1929,7 +1955,7 @@ export async function modelSummary(cfg, payload, fetchImpl = fetch) {
   try {
     const r = await fetchImpl(`${cfg.modelUrl}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(cfg.modelKey ? { Authorization: `Bearer ${cfg.modelKey}` } : {}) },
+      headers: { "Content-Type": "application/json", ...(cfg.modelKey ? { Authorization: `Bearer ${cfg.modelKey}` } : cfg.modelBasic ? { Authorization: `Basic ${cfg.modelBasic}` } : {}) },
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0,

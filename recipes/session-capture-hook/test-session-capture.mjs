@@ -2345,6 +2345,15 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(pc.modelUrl === "http://remote/v1" && pc.modelKey === undefined, `a hook-specific model_url does not borrow the server's LLM key (${pc.modelUrl}, key ${pc.modelKey})`);
   const sc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://server/v1", OB1_LLM_API_KEY: "server-llm-key" }, loadConfig);
   assert(sc.modelUrl === "http://server/v1" && sc.modelKey === "server-llm-key", "…while the server's own URL and key pair together");
+  // A user and password in the model url are its credential (SMD-2885): out of
+  // the url (so neither fetch nor the status line sees them), and Basic,
+  // decoded and UTF-8, as embed.ts splits the server's own base urls.
+  const uc = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_LLM_BASE_URL: "http://u:p%C3%A4ss@server/v1", OB1_SESSION_CAPTURE_MODEL: "m" }, loadConfig);
+  assert(uc.modelUrl === "http://server/v1" && uc.modelBasic === Buffer.from("u:päss", "utf8").toString("base64") && !/p%C3%A4ss|päss/.test(modelStatusLine(uc)),
+         `userinfo in the model url leaves it as a Basic credential, and the status line carries none (${uc.modelUrl}; ${modelStatusLine(uc)})`);
+  const slashless = withEnv({ OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http:/u:p@server/v1", OB1_SESSION_CAPTURE_MODEL: "m" }, loadConfig);
+  assert(slashless.modelUrl === "http://server/v1" && slashless.modelBasic === btoa("u:p"),
+         `…whatever the spelling the URL parser reads userinfo from — rebuilt from the parse (second review pass; ${slashless.modelUrl})`);
 
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
   // not the head; and the per-episode window keeps the most recent messages,
@@ -2357,9 +2366,9 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
 
   // A fake OpenAI /chat/completions endpoint the child and modelSummary call.
   let modelReply = "DECIDED: ship it. OPEN: nothing. CHANGED: one file.";
-  let modelSeen = null, modelCalls = 0;
+  let modelSeen = null, modelCalls = 0, modelAuth = null;
   const modelSrv = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
-    modelCalls++; modelSeen = await req.json();
+    modelCalls++; modelAuth = req.headers.get("authorization"); modelSeen = await req.json();
     if (typeof modelReply === "number") return new Response("upstream", { status: modelReply });
     if (modelReply && typeof modelReply === "object") return Response.json(modelReply.json, { status: modelReply.status ?? 200 }); // an error STATUS with a valid-looking body
     return Response.json({ choices: [{ message: { content: modelReply } }] });
@@ -2382,6 +2391,15 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(await modelSummary({ ...modelCfg(), summary: "derived" }, { ...basePayload }) === null, "with the option off, modelSummary keeps the derived text");
   assert(await modelSummary(modelCfg(), { chain_id: "x", text: "t" }) === null, "…as for a payload prepared before the option was on (no assistant excerpt)");
   assert(await modelSummary(modelCfg({ modelUrl: undefined }), { ...basePayload }) === null, "…and when no model_url is configured");
+  // The model call's Authorization (SMD-2885): none by default, the url's
+  // userinfo as Basic, and a key as Bearer in its place.
+  await modelSummary(modelCfg(), { ...basePayload });
+  const noAuth = modelAuth;
+  await modelSummary(modelCfg({ modelBasic: btoa("u:p") }), { ...basePayload });
+  const basicAuth = modelAuth;
+  await modelSummary(modelCfg({ modelBasic: btoa("u:p"), modelKey: "mk" }), { ...basePayload });
+  assert(noAuth === null && basicAuth === `Basic ${btoa("u:p")}` && modelAuth === "Bearer mk",
+         `the model call sends no Authorization by default, the url's userinfo as Basic, and a key as Bearer over it (${noAuth}, ${basicAuth}, ${modelAuth})`);
 
   // Egress refuses a non-local endpoint under deny — before the model is called.
   const beforeEgress = modelCalls;
