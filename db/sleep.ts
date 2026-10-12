@@ -302,15 +302,19 @@ function outsideLine(outside: string[], dryRun: boolean): string {
 const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.round((now.getTime() - t.getTime()) / 1000))} s ago` : "none");
 
 /**
- * What to do about a start refusal, beyond the pass's own words: those name
- * the cause, but the key's names a --switch-key this script does not take,
- * and a revoked key's names no way back (review pass 6, an operator's walk
- * through each refusal).
+ * The scheduler's line for a pass's start refusal that ends it — at the
+ * check, or a permanent one at a later sleep — with what to do beyond the
+ * pass's own words: those name the cause, but the key's name a --switch-key
+ * this script does not take, and a revoked key's no way back (review pass 6,
+ * an operator's walk through each refusal).
  */
-function refusalRemedy(kind: StartRefusal | undefined): string {
-  if (kind === "key") return "; the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or set OB1_METADATA_MODEL back to the recorded key's model";
-  if (kind === "identity") return "; a revoked or unlisted worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service";
-  return "";
+function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: string): string {
+  const remedy = kind === "key"
+    ? "; the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or set OB1_METADATA_MODEL back to the recorded key's model"
+    : kind === "identity"
+      ? "; a revoked or unlisted worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service"
+      : "";
+  return `  ${pass}'s start is refused${kind ? ` (${kind})` : ""} — ${ends}: fix what it names, then start the service again${remedy}`;
 }
 
 /** The scheduler's numbers from its options, or the refusal of the first that breaks its flag's rule. */
@@ -494,7 +498,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // The engine said its own "stopped before the pass began".
     if (code === 130) return 130;
     if (code !== 0) {
-      err(`  ${pass}'s start is refused${result && !result.ok ? ` (${result.refused})` : ""} — the scheduler does not start: fix what it names, then start the service again${refusalRemedy(result && !result.ok ? result.refused : undefined)}`);
+      err(refusedLine(pass, result && !result.ok ? result.refused : undefined, "the scheduler does not start"));
       await endAtStart();
       return code;
     }
@@ -829,7 +833,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // the environment is read once, and the registry does not unrevoke
         // (SMD-2752).
         const permanent = r.refused !== undefined && PERMANENT_REFUSALS.has(r.refused);
-        if (FOLLOW && r.code === 2 && !r.started && permanent) err(`  ${r.pass}'s start is refused (${r.refused}) — no retry mends that, so the scheduler ends: fix what it names, then start the service again${refusalRemedy(r.refused)}`);
+        if (FOLLOW && r.code === 2 && !r.started && permanent) err(refusedLine(r.pass, r.refused, "no retry mends that, so the scheduler ends"));
         if (!FOLLOW || r.code !== 2 || r.started || permanent || !begun.has(r.pass)) {
           await stamper.end("failed", malformed ?? undefined);
           return r.code;
