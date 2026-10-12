@@ -747,7 +747,7 @@ export function requestHead(method: string, target: string, host: string | null)
  * pass 4) — with `until`, which
  * waits for a pattern (or `ms`, or the stream's end) and says whether it came,
  * and `rest`, all of it once the stream ends (SMD-1849 PR 2b: a child's suite
- * waits for its "spans go to" line, not a fixed sleep).
+ * waits for its start line, "… go to <origin> over OTLP/HTTP", not a fixed sleep).
  */
 export function watchStream(stream: ReadableStream<Uint8Array>): { until: (pattern: RegExp, ms: number) => Promise<boolean>; rest: () => Promise<string> } {
   const reader = stream.getReader();
@@ -801,7 +801,7 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
   let up = false;
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
-  const sdk = waitForSdk ? await err.until(/spans go to/, 10_000) : false;
+  const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 10_000) : false;
   let stopped: Promise<string> | undefined;
   return {
     port,

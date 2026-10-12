@@ -55,8 +55,10 @@ if (SERVES_ON_BUN) {
     server: () => bunServer,
     calls,
     close: closeStore,
-    // The spans still batched go beside the pool's close, under its bound, said on their own.
+    // The telemetry still batched goes beside the pool's close, under its bound, said on its own.
     flush: flushTelemetry,
+    // A record the runtime no longer counts but that is still open ends before that flush, on every path (PR 2c review pass 3).
+    endOpen: cutOpenRequests,
     onCut: () => {
       // Every request still in flight gets its line — `cut`, or `abandoned`
       // for a client already gone — before the process exits — the middleware would write it after the handler, and
