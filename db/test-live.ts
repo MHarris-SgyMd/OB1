@@ -11244,7 +11244,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const acKey = new AbortController();
       const keyCode = await bounded(sleepRun({ follow: true, quiet: 300, minStampEveryS: 1, signal: acKey.signal }), acKey);
       await setKey(EX);
-      assert(keyCode === 2 && count(/extract's start is refused \(key\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0,
+      assert(keyCode === 2 && count(/extract's start is refused \(key\) — the scheduler does not start.*bun db\/extract-entities\.ts --switch-key/) === 1 && count(/asleep:/) === 0,
         `an extraction key recorded under another model ends the service with 2 at its start (exit ${keyCode})`);
 
       // Another process's --switch-key between sleeps: the next start refuses
@@ -11278,7 +11278,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the revoked key')`;
       const revokeCode = await bounded(revokeRun, acRevoke);
       slowExtract = 0;
-      assert(revokeCode === 2 && count(/start is refused \(identity\) — no retry mends that, so the scheduler ends/) === 1 && count(/The worker's key was revoked at .+ \(SMD-2752 live\)/) >= 1 && count(/tries it again/) === 0 && count(/\[extract\]\s+agent:  sleep-revoked/) === 1,
+      assert(revokeCode === 2 && count(/start is refused \(identity\) — no retry mends that, so the scheduler ends.*bun keygen\.ts --name/) === 1 && count(/The worker's key was revoked at .+ \(SMD-2752 live\)/) >= 1 && count(/tries it again/) === 0 && count(/\[extract\]\s+agent:  sleep-revoked/) === 1,
         `a worker key revoked between sleeps ends the service with 2 at the next start, not a retry until a restart, its agent line said once (exit ${revokeCode}; ${count(/\[extract\]\s+agent:/)} agent line(s))`);
 
       // A model the check saw served, gone at the first sleep's start (Ollama
