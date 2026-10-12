@@ -3043,6 +3043,11 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   assert(timed[0]?.ms === 7, `end(fields, at): ms is at - started, not the time the line is written (${JSON.stringify(timed)})`);
 }
 
+/** The request-duration histogram's points in an in-memory exporter's last export ([22], [24]). */
+type DurationPoint = { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } };
+const durationPoints = (exporter: { getMetrics(): { scopeMetrics: { metrics: { descriptor: { name: string }; dataPoints: unknown[] }[] }[] }[] }): DurationPoint[] =>
+  (exporter.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as DurationPoint[]);
+
 console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent linked (continued where trusted), its trace id on the line — and no key, URL or text in any span");
 {
   const { useRequestLog } = await import("./telemetry.ts");
@@ -3411,9 +3416,13 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const drops: string[] = [];
   const queueAsked = process.env.OTEL_BSP_MAX_QUEUE_SIZE;
   process.env.OTEL_BSP_MAX_QUEUE_SIZE = "1000000";
-  const real = setUpTelemetry("open-brain-test", { report: { warn: (l: string) => drops.push(l) }, urls: { traces: "http://collector:4318/v1/traces" } });
-  if (queueAsked === undefined) delete process.env.OTEL_BSP_MAX_QUEUE_SIZE;
-  else process.env.OTEL_BSP_MAX_QUEUE_SIZE = queueAsked;
+  let real: ReturnType<typeof setUpTelemetry>;
+  try {
+    real = setUpTelemetry("open-brain-test", { report: { warn: (l: string) => drops.push(l) }, urls: { traces: "http://collector:4318/v1/traces" } });
+  } finally {
+    if (queueAsked === undefined) delete process.env.OTEL_BSP_MAX_QUEUE_SIZE;
+    else process.env.OTEL_BSP_MAX_QUEUE_SIZE = queueAsked;
+  }
   const clamped = drops.shift();
   try {
     diag.warn("Dropped 7 spans because maxQueueSize reached");
@@ -3515,8 +3524,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     // A keyless caller at a mirror is refused at its key: its point labels no tool (PR 2c review pass 3).
     await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
     await tracing.flush();
-    const mirrorPoints = ((metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
-      .filter((pt) => pt.attributes["http.route"] === "/worker-status" && pt.attributes["ob1.outcome"] === "refused");
+    const mirrorPoints = durationPoints(metricsOut).filter((pt) => pt.attributes["http.route"] === "/worker-status" && pt.attributes["ob1.outcome"] === "refused");
     assert(mirrorPoints.length === 1 && !("ob1.tool" in mirrorPoints[0].attributes), `a keyless mirror's refusal: its point labels no tool (${JSON.stringify(mirrorPoints.map((pt) => pt.attributes))})`);
     // …and a key the registry did not clear (revoked) is refused at its key too (review pass 4).
     const { agents: mirrorRegistryOf } = await import("./root.ts");
@@ -3529,8 +3537,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       mirrorRegistry.resolve = mirrorResolve;
     }
     await tracing.flush();
-    const revokedPoints = ((metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
-      .filter((pt) => pt.attributes["http.route"] === "/jobs/:id" && pt.attributes["ob1.outcome"] === "refused");
+    const revokedPoints = durationPoints(metricsOut).filter((pt) => pt.attributes["http.route"] === "/jobs/:id" && pt.attributes["ob1.outcome"] === "refused");
     assert(revokedPoints.length === 1 && !("ob1.tool" in revokedPoints[0].attributes), `a revoked key at a mirror: its point labels no tool (${JSON.stringify(revokedPoints.map((pt) => pt.attributes))})`);
     // A worker mirror's store fault has no tool span: its kind is on the request's (PR 2c review pass 1).
     exporter.reset();
@@ -3795,15 +3802,14 @@ console.log("\n[24] Each request a point on the request-duration histogram and a
     hookRefused.route = "/hooks/example/capture";
     hookRefused.end({ status: 503, outcome: "refused", code: "SENDER_CHOSE_THIS" });
     await flushTelemetry();
-    const lastPoints = (measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[];
+    const lastPoints = durationPoints(measured);
     const keylessPoint = lastPoints.find((pt) => pt.attributes["ob1.door"] === "mcp" && pt.attributes["ob1.outcome"] === "refused");
     const hookPoint = lastPoints.find((pt) => pt.attributes["http.route"] === "/hooks/example/capture");
     const ownRefusal = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
     Object.assign(ownRefusal, { rpc: "tools/call", tool: "thought_stats" });
     ownRefusal.end({ status: 200, outcome: "refused", code: "NOT_FOUND" });
     await flushTelemetry();
-    const ownPoint = ((measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown> }[])
-      .find((pt) => pt.attributes["ob1.tool"] === "thought_stats" && pt.attributes["ob1.outcome"] === "refused");
+    const ownPoint = durationPoints(measured).find((pt) => pt.attributes["ob1.tool"] === "thought_stats" && pt.attributes["ob1.outcome"] === "refused");
     assert(ownPoint !== undefined, `a tool's own refusal keeps its tool on its point (review pass 4)`);
     assert(keylessPoint !== undefined && !("ob1.tool" in keylessPoint.attributes) && !("error.type" in keylessPoint.attributes) && hookPoint?.attributes["error.type"] === "refused" && !JSON.stringify(lastPoints).includes("SENDER_CHOSE_THIS"),
       `a key's refusal labels no tool; a refusal's 503 is labelled by its outcome, not its code (${JSON.stringify([keylessPoint?.attributes, hookPoint?.attributes])})`);

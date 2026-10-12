@@ -407,6 +407,7 @@ export function batchOptions(env: Record<string, string | undefined>, prefix: "O
 /** The span batch's one word on dropped spans, which a diag logger at WARN is handed. */
 const DROPPED = /^Dropped (\d+) spans because maxQueueSize reached$/;
 
+/** A request log record's severity names as the OTel log data model numbers them. */
 const SEVERITY = { INFO: 9, WARN: 13, ERROR: 17 } as const;
 
 /** A suite's: each signal into an exporter of its own, each span and log record handed over as it ends, the metrics at a flush. */

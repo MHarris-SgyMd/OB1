@@ -604,8 +604,9 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
     const why = exporters.includes("none") ? `${variable} is set, but OTEL_${part}_EXPORTER=none`
       : url === undefined || (url.protocol !== "http:" && url.protocol !== "https:") || /\s/.test(endpoint) ? `${variable} is not an http(s) URL`
       : shared && /[?#]/.test(endpoint) ? `${variable} has a query string or a fragment, which the signal's path would follow` : undefined;
+    // No URL is always a why (no http(s) URL), so past this a URL is there.
     if (why !== undefined || url === undefined) {
-      add(nowhere, why ?? "", word);
+      add(nowhere, why!, word);
       continue;
     }
     if (exporters.some((e) => e !== "otlp")) add(unread, `OTEL_${part}_EXPORTER ${quoted(exporterValue!)} is not read (only otlp or none)`, word);
