@@ -4693,7 +4693,7 @@ if (configFailed) {
               } else if (down) {
                 fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
               } else if (waitingFor) {
-                fixes.push(`${waitWords.charAt(0).toUpperCase()}${waitWords.slice(1)}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin" : "the pass begins"} on its own once it answers.`);
+                fixes.push(`${waitWords.charAt(0).toUpperCase()}${waitWords.slice(1)}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
               } else if (h.outcome === "failed") {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }
