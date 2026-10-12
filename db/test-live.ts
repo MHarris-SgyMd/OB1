@@ -37,7 +37,8 @@ import { tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
-import { PROBE_PROMPT, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
@@ -10933,7 +10934,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     missing = false;
     const at3 = lines.length;
     const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
-    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain})`);
+    // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
+    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
 
     // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
     // row reads failed while it does and ok once a pass runs again — the
@@ -11232,8 +11234,10 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const judgeCode = await followRun({ env: { ...env, OB1_JUDGE_MODEL: "judge-unserved" }, quiet: 300 }).settle();
       missingModel = null;
       const judgeBeat = await beat();
-      assert(judgeCode === 2 && count(/consolidate's start is refused \(model\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0 && judgeBeat?.ended === true && judgeBeat.outcome === "failed",
-        `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
+      assert(judgeCode === 2 && count(/consolidate's start is refused \(model\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0 && judgeBeat?.ended === true && judgeBeat.outcome === "failed" && (judgeBeat as { refused?: string }).refused === "model",
+        `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed and naming the refusal, model (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
+      // brain-info's copy of the refusal kinds is the engines' list (SMD-2752 PR 3).
+      assert(JSON.stringify([...SLEEP_REFUSALS]) === JSON.stringify([...START_REFUSALS]), `brain-info's SLEEP_REFUSALS is worker-bootstrap's START_REFUSALS (${SLEEP_REFUSALS.join(",")} | ${START_REFUSALS.join(",")})`);
 
       // `check` beside --status or --dry-run skips the probe and the key, so
       // either engine refuses it as usage rather than report a start through
@@ -11254,8 +11258,9 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       await setKey("extract:another-model@p2");
       const keyCode = await followRun({ quiet: 300 }).settle();
       await setKey(EX);
-      assert(keyCode === 2 && count(/extract's start is refused \(key\) — the scheduler does not start.*bun db\/extract-entities\.ts --switch-key/) === 1 && count(/asleep:/) === 0,
-        `an extraction key recorded under another model ends the service with 2 at its start (exit ${keyCode})`);
+      const keyBeat = (await beat()) as { refused?: string } | null;
+      assert(keyCode === 2 && count(/extract's start is refused \(key\) — the scheduler does not start.*bun db\/extract-entities\.ts --switch-key/) === 1 && count(/asleep:/) === 0 && keyBeat?.refused === "key",
+        `an extraction key recorded under another model ends the service with 2 at its start, the row naming key (exit ${keyCode}; ${JSON.stringify(keyBeat)})`);
 
       // Another process's --switch-key between sleeps: the next start refuses
       // the key, which no retry mends — the service ends (2) where it was
@@ -11284,6 +11289,9 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the revoked key')`;
       const revokeCode = await revokeRun.settle();
       slowExtract = 0;
+      // A permanent refusal at a later sleep's start names its kind on the row too (SMD-2752 PR 3).
+      const revokedBeat = (await beat()) as { refused?: string; ended?: boolean } | null;
+      assert(revokedBeat?.ended === true && revokedBeat.refused === "identity", `a key revoked between sleeps ends the row naming identity (${JSON.stringify(revokedBeat)})`);
       assert(revokeCode === 2 && count(/start is refused \(identity\) — no retry mends that, so the scheduler ends.*bun keygen\.ts --name/) === 1 && count(/The worker's key was revoked at .+ \(SMD-2752 live\)/) >= 1 && count(/tries it again/) === 0 && count(/\[extract\]\s+agent:  sleep-revoked/) === 1,
         `a worker key revoked between sleeps ends the service with 2 at the next start, not a retry until a restart, its agent line said once (exit ${revokeCode}; ${count(/\[extract\]\s+agent:/)} agent line(s))`);
 
@@ -11303,6 +11311,50 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const checkedCode = await checkedRun.stop();
       assert(checkedCode === 0 && count(/extract refused at its start, which it passed earlier in this process, so the next sleep tries it again/) >= 1,
         `a model the start's check saw served, missing at the first sleep's start, is retried rather than ending the service (exit ${checkedCode})`);
+
+      // A pass waiting at its start for a provider that does not answer says
+      // so on heartbeat:sleep (`waiting`), and the word goes once it answers
+      // (SMD-2752 PR 3): the provider answers the check, then is unavailable
+      // as the first sleep starts its passes.
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      await capture("A note for the waiting pass.", "sync-sleep", 0, 13);
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check, again')`;
+      const waitingRun = followRun({ quiet: 4 });
+      try {
+        await pollUntil(async () => (await beat()) !== null, 10_000);
+        unavailable = true;
+        let waitingBeat = null as { waiting?: string[]; running?: boolean } | null;
+        await pollUntil(async () => ((waitingBeat = (await beat()) as typeof waitingBeat)?.waiting?.length ?? 0) > 0, 20_000);
+        unavailable = false;
+        let answeredBeat = null as { waiting?: string[] } | null;
+        await pollUntil(async () => (answeredBeat = (await beat()) as typeof answeredBeat) !== null && answeredBeat.waiting === undefined, 20_000);
+        const waitingCode = await waitingRun.stop();
+        assert(JSON.stringify(waitingBeat?.waiting) === JSON.stringify(["extract"]) && waitingBeat?.running === true && answeredBeat !== null && (answeredBeat as { waiting?: string[] }).waiting === undefined && waitingCode === 0,
+          `a pass waiting at its start for the provider is on the row, and gone once it answers (${JSON.stringify(waitingBeat)} → ${JSON.stringify(answeredBeat)}; exit ${waitingCode})`);
+      } finally {
+        unavailable = false;
+      }
+
+      // Each engine says it through a caller's stamper, consolidation's as
+      // extraction's: waiting as its start wait begins, and no longer once a
+      // stop ends it (SMD-2752 PR 3).
+      const saysWait = async (engine: typeof runExtract | typeof runConsolidate): Promise<string> => {
+        const said: boolean[] = [];
+        const ac = new AbortController();
+        const stamper = { key: "heartbeat:sleep", stamp: async () => {}, end: async () => {}, during: <T,>(p: Promise<T>) => p, alive: async () => {}, startWait: async (on: boolean) => { said.push(on); } };
+        const run = engine({ url: URL_!, env, workers: 1, follow: 1, signal: ac.signal, stamper, writer: { out: () => {}, err: () => {} } });
+        await pollUntil(async () => said.length > 0, 10_000);
+        ac.abort();
+        const code = await Promise.race([run.catch((e: Error) => `threw: ${e.message}`), Bun.sleep(15_000).then(() => "hung")]);
+        return `${code} ${said.join(",")}`;
+      };
+      unavailable = true;
+      try {
+        const both = [await saysWait(runExtract), await saysWait(runConsolidate)];
+        assert(both.every((b) => b === "130 true,false"), `each engine says it waits at its start for the provider, and no longer once stopped (${both.join(" | ")})`);
+      } finally {
+        unavailable = false;
+      }
     } finally {
       missingModel = null;
       missing = false;

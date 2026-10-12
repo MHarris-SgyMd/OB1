@@ -815,7 +815,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const wake = opts.signal ?? new AbortController().signal;
     const down = Date.now();
     err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out");
+    // Said through a caller's stamper while it lasts — the sleep scheduler's,
+    // so heartbeat:sleep and preflight's row say a pass waits at its start for
+    // the provider, not that its passes run (SMD-2752).
+    await opts.stamper?.startWait?.(true);
+    const answered = await probeUntil(() => probe(undefined, wake), wake, (p) => p.state !== "out").finally(() => opts.stamper?.startWait?.(false));
     if (answered) {
       const own = startRefusal(answered, cfg.metadataModel, "OB1_METADATA_MODEL");
       if (own) return refused(probeRefusal(answered), own);

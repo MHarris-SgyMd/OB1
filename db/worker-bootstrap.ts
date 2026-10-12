@@ -261,7 +261,8 @@ export function databaseUnavailable(e: unknown): boolean {
  * retries `model`, `provider` and `lookup`, which a re-pull, a top-up or a
  * quieter database can (review pass 1).
  */
-export type StartRefusal = "usage" | "egress" | "tables" | "model" | "provider" | "identity" | "key" | "lookup";
+export const START_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
+export type StartRefusal = (typeof START_REFUSALS)[number];
 
 /** A pass's start, as its run reports it to `onStart`: through, with the provider answering at its probe or not yet; or refused, and why. */
 export type StartResult = { ok: true; provider: "up" | "out" } | { ok: false; refused: StartRefusal };

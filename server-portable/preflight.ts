@@ -39,7 +39,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
-import { restartCommand, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
+import { restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -4661,24 +4661,37 @@ if (configFailed) {
               const s = h.slept;
               const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
               const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
+              // Its passes waiting at their start for a provider that does not
+              // answer, by its own word (SMD-2752): asleep, but nothing runs.
+              const waitingFor = !(h.stale || h.ended) && h.running && h.waiting?.length ? h.waiting : null;
+              const waitWords = waitingFor ? `${waitingFor.join(" and ")} waiting for the provider at ${waitingFor.length > 1 ? "their" : "its"} start` : "";
               const sleepWords = h.stale || h.ended
                 ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
                 : h.running
-                  ? `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
+                  ? waitingFor
+                    ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
+                    : `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
                   : s && s.to
                     ? `awake, its passes waiting for the brain to go quiet — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}`
                     : "awake, its passes waiting for the brain to go quiet — no sleep yet";
               const down = h.stale || h.ended;
+              // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
+              const refusedBy = h.ended && h.outcome === "failed" && h.refused ? h.refused : null;
               // A scheduler not running wakes for nothing: what would wake it is said as such.
-              const detail = `${heartbeatState(h)}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
+              const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
               const fixes: string[] = [];
               // Followers running here keep a scheduler down: it refuses beside
               // them, so "start it again" alone would only refuse again (review pass 3).
               const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
               if (down && followers.length) {
                 fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (refusedBy) {
+                // "Start it again" would only refuse again: the cause comes first (SMD-2752).
+                fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}; started before that, it refuses again. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
               } else if (down) {
                 fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (waitingFor) {
+                fixes.push(`${waitWords.charAt(0).toUpperCase()}${waitWords.slice(1)}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); the pass begins on its own once it answers.`);
               } else if (h.outcome === "failed") {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }

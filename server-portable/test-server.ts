@@ -1206,6 +1206,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(readsOf("heartbeat:sleep", "yes") === "yes" && readsOf("heartbeat:sleep", "denied") === "denied" && readsOf("heartbeat:sleep", "missing") === "missing"
       && readsOf("heartbeat:sleep", "maybe") === undefined && readsOf("heartbeat:sleep", true) === undefined && readsOf("heartbeat:board-sync", "yes") === undefined,
     "the scheduler's reads word is carried when one of three, and never off another worker's row");
+  // Its waiting passes and its refusal (SMD-2752): carried when of the shape, else left off; never another worker's.
+  const markOf = (key: string, extra: Record<string, unknown>) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, ...extra }), at, age_s: 1 }]).heartbeats[0];
+  const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
+  assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
+    `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
+  const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
+  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
+    `the scheduler's refusal is carried when one of the list, and its row counts either way (${JSON.stringify(refusals)})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
