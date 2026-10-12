@@ -57,7 +57,7 @@
 
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
-import { providerCall, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { providerCall, providerEndpoint, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
 import fs from "node:fs";
@@ -89,15 +89,11 @@ const DEFAULT_TELEGRAM_BASE = "https://api.telegram.org";
 export const OB1_TELEGRAM_LOCAL = "OB1_TELEGRAM_LOCAL";
 
 export function telegramEndpoint(env: Record<string, string | undefined>): ProviderEndpoint {
-  return {
-    base: baseUrlOr(env.OB1_TELEGRAM_API_BASE, DEFAULT_TELEGRAM_BASE),
-    key: undefined,
-    headers: {},
-    local: flagOn(env.OB1_TELEGRAM_LOCAL),
-    // declaredBy is resolveProviderEndpoints' bookkeeping (a closed LocalKnob set
-    // this synthetic endpoint is not part of); the banner names the knob itself.
-    declaredBy: undefined,
-  };
+  // No key — the bot token is in the path — and providerEndpoint's header rule,
+  // so a user and password in the base go as Basic, as for every endpoint
+  // (SMD-2885). No declaredBy: that is resolveProviderEndpoints' bookkeeping (a
+  // closed LocalKnob set this endpoint is not part of); the banner names the knob.
+  return providerEndpoint(baseUrlOr(env.OB1_TELEGRAM_API_BASE, DEFAULT_TELEGRAM_BASE), undefined, flagOn(env.OB1_TELEGRAM_LOCAL));
 }
 
 const SYSTEM_PROMPT =
@@ -307,14 +303,14 @@ async function synthesize(cfg: EmbedConfig, model: string, userPrompt: string, k
   return text;
 }
 
-async function deliverTelegram(base: string, token: string, chatId: string, text: string): Promise<number[]> {
-  const url = `${base}/bot${token}/sendMessage`;
+async function deliverTelegram(at: ProviderEndpoint, token: string, chatId: string, text: string): Promise<number[]> {
+  const url = `${at.base}/bot${token}/sendMessage`;
   const ids: number[] = [];
   for (const chunk of chunkForTelegram(text)) {
     const res = await withProviderRetry("telegram", async () => {
       const r = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: at.headers,
         body: JSON.stringify({ chat_id: chatId, text: chunk, disable_web_page_preview: true }),
       });
       if (!r.ok) {
@@ -472,7 +468,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   const token = process.env.TELEGRAM_BOT_TOKEN!;
   const chatId = process.env.TELEGRAM_CHAT_ID!;
   try {
-    const ids = await deliverTelegram(telegram.base, token, chatId, digest);
+    const ids = await deliverTelegram(telegram, token, chatId, digest);
     console.log(`  posted to Telegram (${ids.length} message${ids.length === 1 ? "" : "s"})`);
   } catch (e) {
     console.error(`  Telegram delivery failed: ${(e as Error).message}`);
