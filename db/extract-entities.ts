@@ -251,19 +251,23 @@ export interface ExtractOptions {
   /**
    * A follower's start alone (SMD-2752): the banner, the egress gate, the
    * tables, the provider's probe and the escalation model's listing, the
-   * worker key and the recorded extraction key — then 0, before the first
-   * write (the key's, a --retry-*, the pool), without waiting for a provider
-   * that does not answer; or the start's refusal (2). Needs `follow`. The
+   * worker key and the recorded extraction key — then 0, before the pass's
+   * first write (the key's, a --retry-*, the pool), without waiting for a
+   * provider that does not answer; or the start's refusal (2). The worker
+   * key's lookup writes, as at every start (resolve_agent registers the agent
+   * and stamps its last use): it is how a revoked key is found. Needs
+   * `follow`, and no `status` or `dryRun`. The
    * sleep scheduler's check at its own start, so a misconfiguration is
    * refused there rather than at the first quiet.
    */
   check?: boolean;
   /**
    * False leaves out the start's banner — the job, model, window and egress
-   * lines, the worker key's agent line or its no-key warning, the key's note
-   * and the workers line — for a pass the sleep scheduler drives at every
-   * sleep, whose check printed it once (SMD-2752). A refusal still says what
-   * it refuses.
+   * lines, the worker key's agent line or its no-key warning and the key's
+   * note, which the sleep scheduler's check says once, and the workers line,
+   * which the check returns before and a driven pass leaves out — for a pass
+   * the scheduler drives at every sleep (SMD-2752). A refusal still says
+   * what it refuses.
    */
   banner?: boolean;
   /**
@@ -377,7 +381,9 @@ export async function run(opts: ExtractOptions): Promise<number> {
   const settled = numbers(opts);
   if (typeof settled === "string") return usage(settled);
   // The check is a follower's start, its probe included (SMD-2752).
-  if (opts.check && !settled.follow) return usage("extract-entities.ts: check is a follower's start — pass follow beside it.");
+  // Beside --status or --dry-run the probe and the key are skipped, and a
+  // start reported through would be none (review pass 1).
+  if (opts.check && (!settled.follow || opts.status === true || opts.dryRun === true)) return usage("extract-entities.ts: check is a follower's start — pass follow beside it, and no --status or --dry-run.");
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -631,9 +637,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     actorName = id.identity.keyName;
     // A key that was set but did not resolve to a name is no actor: the blanket
     // check above credited one, so it is asked again without (third review pass).
+    // A lookup that did not name the key may name it next time (a database
+    // refusing connections), so the refusal is `lookup`, not `egress` (SMD-2752).
     if (env.OB1_WORKER_KEY && id.identity.keyName === undefined) {
       const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
-      if (again) return refused("egress", `\n  ${regateMessage("extracted", again)}`);
+      if (again) return refused("lookup", `\n  ${regateMessage("extracted", again)}`);
     }
   }
 
@@ -767,9 +775,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     say(`  ob1_config.entity_extraction_key is not set: the trigger has enqueued nothing yet; ${CHECK ? "the first pass sets it" : "this run sets it"}`);
   }
 
-  // The check ends here, before the first write — the key's, a --retry-*'s,
-  // the pool's — and without waiting for a provider that does not answer:
-  // each pass waits for it at its own start (SMD-2752).
+  // The check ends here, before the pass's first write — the key's, a
+  // --retry-*'s, the pool's; the worker key's lookup wrote, as at every start —
+  // and without waiting for a provider that does not answer: each pass waits
+  // for it at its own start (SMD-2752).
   if (CHECK) {
     if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
     opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });

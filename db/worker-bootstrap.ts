@@ -253,11 +253,15 @@ export function databaseUnavailable(e: unknown): boolean {
  * (`usage`), the egress gate (`egress`), the lease and entity tables
  * (`tables`), a model the provider does not serve (`model`), the provider
  * refusing the call itself — a key, a base URL, a 402 (`provider`), the
- * worker key (`identity`), or the extraction key another run recorded
- * (`key`). The sleep scheduler ends on the ones no retry mends, and retries
- * `model` and `provider`, which a re-pull or a top-up can.
+ * worker key (`identity`), the extraction key another run recorded
+ * (`key`), or the egress gate asked again without the worker key as its
+ * actor because the key's lookup did not name it — too many connections, an
+ * answer of another shape — under a policy that admits that actor alone
+ * (`lookup`). The sleep scheduler ends on the ones no retry mends, and
+ * retries `model`, `provider` and `lookup`, which a re-pull, a top-up or a
+ * quieter database can (review pass 1).
  */
-export type StartRefusal = "usage" | "egress" | "tables" | "model" | "provider" | "identity" | "key";
+export type StartRefusal = "usage" | "egress" | "tables" | "model" | "provider" | "identity" | "key" | "lookup";
 
 /** A pass's start, as its run reports it to `onStart`: through, with the provider answering at its probe or not yet; or refused, and why. */
 export type StartResult = { ok: true; provider: "up" | "out" } | { ok: false; refused: StartRefusal };

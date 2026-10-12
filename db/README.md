@@ -2840,13 +2840,14 @@ ends it with 2 at once: a bad `OB1_WORKER_KEY`, an extraction or judge model
 not served (the judge's met there, not once extraction's backlog drains), or an
 `entity_extraction_key` recorded under another model. A provider that does not
 answer is no refusal; each pass waits for it at its own start. The passes each
-sleep starts then print no banner and run no end-of-run summary (its counts
+sleep starts then print no banner and run no end-of-run summary queries (its counts
 and graph, scans a wake would wait for). Every sleep's passes meet their start's
 refusals again, and each names which it is:
 - the worker key revoked, the extraction key moved by another process's
   `--switch-key`, the tables, the egress policy — no retry mends these, and
   the scheduler ends with 2 (until SMD-2752 they were retried until a restart);
-- the model not served or the provider refusing the call, at the start of a
+- the model not served, the provider refusing the call, or the key's lookup
+  not naming it under an actor-only egress policy, at the start of a
   pass that got through its start before (the check, or an earlier sleep), is
   retried on SMD-2599's schedule (5 s, doubling, at most 5 min) — a model
   re-pulled, a 402 cleared by topping up credit, a gateway's passing
@@ -4048,7 +4049,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2716 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1252 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1253 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

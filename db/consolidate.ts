@@ -269,12 +269,13 @@ export interface ConsolidateOptions {
   /**
    * A follower's start alone (SMD-2752), as extract-entities.ts's: the
    * banner, the egress gate, the tables, the judge model's probe, the worker
-   * key — then 0, before the first write, without waiting for a provider
-   * that does not answer; or the start's refusal (2). Needs `follow`, and is
-   * a run's, not a review's.
+   * key — then 0, before the pass's first write, without waiting for a
+   * provider that does not answer; or the start's refusal (2). The worker
+   * key's lookup writes, as at every start (resolve_agent): it is how a
+   * revoked key is found. Needs `follow`, and is a run's, not a review's.
    */
   check?: boolean;
-  /** False leaves out the start's banner — the job, model and egress lines, the agent line or the no-key warning, the workers line — for a pass the sleep scheduler drives (SMD-2752). */
+  /** False leaves out the start's banner — the job, model and egress lines and the agent line or the no-key warning, which the sleep scheduler's check says once, and the workers line, which the check returns before — for a pass the scheduler drives (SMD-2752). */
   banner?: boolean;
   /** False leaves out the end-of-run summary — the counts and the queue — and a stopping pass's last count of the pool, which the scheduler waits for at a wake (SMD-2752). */
   summary?: boolean;
@@ -623,9 +624,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (keyName) actorName = keyName;
     // A key that was set but did not resolve to a name is no actor: the blanket
     // check above credited one, so it is asked again without (third review pass).
+    // A lookup that did not name the key may name it next time (a database
+    // refusing connections), so the refusal is `lookup`, not `egress` (SMD-2752).
     if (env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
       const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
-      if (again) return refused("egress", `\n  ${regateMessage("judged", again)}`);
+      if (again) return refused("lookup", `\n  ${regateMessage("judged", again)}`);
     }
   }
 
@@ -1075,11 +1078,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (079)`);
   }
 
-  // The check ends here, before the first write — --retry-failed's, the
-  // pool's — and without waiting for a provider that does not answer: each
+  // The check ends here, before the pass's first write — --retry-failed's,
+  // the pool's; the key's lookup wrote, as at every start — and without waiting for a provider that does not answer: each
   // pass waits for it at its own start (SMD-2752).
   if (CHECK) {
-    // The run's relations note, said once here for the passes that leave their banner out.
+    // The relations note at the start too; each pass says it again whatever its banner, since grants or 084 may change between sleeps (review pass 1).
     if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged then gets no relation until its claim is cleared`);
     if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
     opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
@@ -1904,7 +1907,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
-  if (RELATIONS_OFF) say(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
+  if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
   let after = await followedPass();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);

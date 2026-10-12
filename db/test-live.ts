@@ -10694,7 +10694,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const acOnce = new AbortController();
     const onceRun = sleepRun({ signal: acOnce.signal });
     const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
-    if (onceRace === "hung") { acOnce.abort(); await onceRun; }
+    // Seen hung once in a full run (SMD-2752 PR 2), one thought of three
+    // extracted in 90 s, and not since in 28: read before the stop what the
+    // database's sessions wait on and when the model was last called, which
+    // tell a statement stuck from a call stuck — the scheduler's poll prints
+    // nothing while it waits (review pass 1).
+    let hungAt = "";
+    if (onceRace === "hung") {
+      const activity = (await sql`SELECT state, wait_event_type, wait_event, left(query, 90) AS q FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()`) as { state: string; wait_event_type: string | null; wait_event: string | null; q: string }[];
+      hungAt = `; sessions: ${activity.map((a) => `${a.state}/${a.wait_event_type ?? "-"}:${a.wait_event ?? "-"} ${a.q}`).join(" || ")}; model calls ${modelCalls.slice(-4).map((c) => `${c.kind} ${Math.round((Date.now() - c.at) / 1000)} s ago`).join(", ")}`;
+      acOnce.abort();
+      await onceRun;
+    }
     const once = onceRace === "hung" ? -1 : onceRace;
     slowExtract = 0;
     await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
@@ -10704,7 +10715,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const firstJudge = Math.min(...modelCalls.filter((c) => c.kind === "judge").map((c) => c.at));
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
-      `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}`})`);
+      `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
     assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /both pools drained — the sleep ends/.test(onceText),
       `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
@@ -11211,6 +11222,15 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const judgeBeat = await beat();
       assert(judgeCode === 2 && count(/consolidate's start is refused \(model\) — the scheduler does not start/) === 1 && count(/asleep:/) === 0 && judgeBeat?.ended === true && judgeBeat.outcome === "failed",
         `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
+
+      // `check` beside --status or --dry-run skips the probe and the key, so
+      // either engine refuses it as usage rather than report a start through
+      // (review pass 1).
+      const usageBeside = await Promise.all([
+        new Promise<string>((done) => { let r = "none"; runExtract({ url: URL_!, env, workers: 1, follow: 1, check: true, status: true, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`)); }),
+        new Promise<string>((done) => { let r = "none"; runConsolidate({ url: URL_!, env, workers: 1, follow: 1, check: true, dryRun: true, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`)); }),
+      ]);
+      assert(usageBeside.every((u) => u === "2 usage"), `check beside --status or --dry-run is refused as usage, never reported through (${usageBeside.join(", ")})`);
 
       // Extraction's key recorded under another model: refused at the start (item 3).
       await setKey("extract:another-model@p2");

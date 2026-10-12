@@ -90,7 +90,8 @@
  *    once, and the registry does not unrevoke), the extraction key another
  *    process's --switch-key moved, the tables, the egress policy — ends the
  *    scheduler with 2;
- *  - the model not served or the provider refusing the call, at the start of
+ *  - the model not served, the provider refusing the call, or the key's lookup
+ *    not naming it under an actor-only egress policy, at the start of
  *    a pass that got through its start earlier, is retried under --follow on
  *    SMD-2599's outage schedule, heartbeat:sleep failed and re-stamped
  *    through the wait, until a pass of a later sleep stamps: a model
@@ -449,7 +450,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // start rather than at the first quiet, or after extraction's backlog for
   // consolidation's judge. The passes each sleep starts leave their banner to
   // this. A provider that does not answer is no refusal: each pass waits for
-  // it at its own start, as before.
+  // it at its own start, as before. The check runs before this process's
+  // heartbeat exists — its probes up to a minute each, a database outage as
+  // long as it lasts — so preflight reads the last process's row meanwhile,
+  // as during the start's reads above; a refusal ends the row failed, and an
+  // error the check throws ends the run as any start's does (review pass 1).
   /**
    * The passes whose start got through in this process — the provider
    * answered their probe, the keys resolved — at this check or at a sleep's
