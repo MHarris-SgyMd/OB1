@@ -1376,8 +1376,18 @@ itself, in the foreground and beside any live traffic, as it does under
 `workers`; only consolidation's new pool — the thoughts re-pooled under the
 new key — waits for the brain to go quiet.
 
-It has no budget yet (SMD-2679). Quieter banners and configuration checks at
-its start are SMD-2752.
+It has no budget yet (SMD-2679). Since SMD-2752 it checks each pass's start
+once, before its first quiet: a bad `OB1_WORKER_KEY`, a model not served (the
+judge's too) or an extraction key recorded under another model ends each
+start at once (exit 2, `heartbeat:sleep` ended failed); `on-failure:3`
+restarts it three times, each refused the same way, and then `ps` shows it
+exited, so `podman logs` on `sleep` names the cause within seconds of the
+first start, not at the first quiet. As with the `workers` profile, a model
+`ollama-pull` is still pulling at a first boot is refused the same way: start
+`sleep` once the pull is done. A worker key revoked later, or the key moved by
+a `--switch-key` run elsewhere, ends it at the next sleep rather than retrying
+until a restart. Each pass's banner is said once there, not at every sleep;
+progress lines (`pool:`, `before:`) still come with each sleep's work.
 
 ## Refreshing a tier
 
