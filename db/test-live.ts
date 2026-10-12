@@ -11230,7 +11230,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const checkBeside = (engine: typeof runExtract | typeof runConsolidate, o: { status?: boolean; dryRun?: boolean }) =>
         new Promise<string>((done) => {
           let r = "none";
-          engine({ url: URL_!, env, workers: 1, follow: 1, check: true, ...o, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`));
+          engine({ url: URL_!, env, workers: 1, follow: 1, check: true, ...o, onStart: (s) => { r = s.ok ? "through" : s.refused; }, writer: { out: () => {}, err: () => {} } }).then((c) => done(`${c} ${r}`), (e: Error) => done(`threw: ${e.message}`));
         });
       const usageBeside = await Promise.all([
         checkBeside(runExtract, { status: true }), checkBeside(runExtract, { dryRun: true }),
@@ -11302,6 +11302,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         `a model the start's check saw served, missing at the first sleep's start, is retried rather than ending the service (exit ${checkedCode})`);
     } finally {
       missingModel = null;
+      missing = false;
       slowExtract = 0;
       await setKey(EX);
     }
