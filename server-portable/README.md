@@ -638,7 +638,14 @@ MCP tools do rather than a copy of it:
   each server's first middleware makes (notFound, for a path that middleware
   never sees): its keys an allow-list, each value held to its rule as the line is written, so no
   URL, key, argument or thought text reaches it (`deploy/README.md`, "What the
-  servers log").
+  servers log"). The same record is the request's OpenTelemetry span, and each
+  tool call a span under it — the request's attributes the line's checked values, a call's its own outcome and code — the
+  API's no-ops until `OTEL_EXPORTER_OTLP_ENDPOINT` (or its traces variable) names a collector
+  (`deploy/README.md`, "Traces").
+- **`otel-setup.ts`** — the OpenTelemetry SDK for traces, loaded only then and
+  only on Bun: an OTLP/HTTP exporter, batched, the AsyncLocalStorage context
+  manager and the W3C propagator. `wrangler.toml` aliases it to
+  `shims/otel-unavailable.ts`, so the Worker carries the API alone.
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
 for what a move would leave behind: an import outside the file's list, a SQL call or
@@ -792,10 +799,10 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 919 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, and the request line's allow-list and its one line per request (SMD-1849)
+bun test-server.ts        # 969 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, and the spans (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 332 — the REST core's routes, OpenAPI, authorization ladder and its JSON request line, over a stub core
-bun test-plugins.ts       # 249 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals
+bun test-rest.ts          # 346 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-plugins.ts       # 251 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, and a plugin operation's span
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
