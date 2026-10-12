@@ -86,8 +86,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
-      # 29, 32, 33 and 34 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, and every suite run by a workflow
+      # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, and db/ci-parity.sh running what CI runs
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
