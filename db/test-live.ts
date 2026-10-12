@@ -11360,6 +11360,24 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
         unavailable = false;
       }
 
+      // A sleep whose pass only waited at its start, then a wake: no pass
+      // stamped, so the awake row keeps its last word — none yet here — rather
+      // than read ok (review pass 3 of PR 3).
+      await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+      unavailable = true;
+      const wokenRun = followRun({ quiet: 2, minStampEveryS: 60 });
+      try {
+        await pollUntil(async () => ((await beat()) as { waiting?: string[] } | null)?.waiting?.length === 1, 15_000);
+        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake while the pass waits')`;
+        let wokenBeat = null as { running?: boolean; outcome?: string | null; waiting?: string[] } | null;
+        await pollUntil(async () => (wokenBeat = (await beat()) as typeof wokenBeat) !== null && wokenBeat.running === false, 15_000);
+        const wokenCode = await wokenRun.stop();
+        assert(wokenBeat?.outcome === null && wokenBeat.waiting === undefined && wokenCode === 0,
+          `a sleep woken while its pass waited at its start leaves the row's outcome unset, not ok (${JSON.stringify(wokenBeat)}; exit ${wokenCode})`);
+      } finally {
+        unavailable = false;
+      }
+
       // Each engine says it through a caller's stamper, consolidation's as
       // extraction's: waiting as its start wait begins, and no longer once a
       // stop ends it (SMD-2752 PR 3).

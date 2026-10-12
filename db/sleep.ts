@@ -902,7 +902,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         continue;
       }
       refusals = 0;
-      await stamper.stamp(sleepOutcome(), malformed ?? undefined);
+      // A sleep none of whose passes stamped (each waited at its start for the
+      // provider until the wake) says nothing of how they went: the row keeps
+      // its last word — a retried refusal's failed included — rather than read
+      // ok (SMD-2752 PR 3, review pass 3).
+      if (Object.keys(words).length) await stamper.stamp(sleepOutcome(), malformed ?? undefined);
+      else await stamper.alive();
       if (!FOLLOW) return r === "done" ? 0 : 1;
     }
     await stamper.end("stopped", malformed ?? undefined);

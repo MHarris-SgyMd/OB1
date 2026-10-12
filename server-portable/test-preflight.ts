@@ -3785,6 +3785,12 @@ else {
       const refusedOut = await run(LOG_ON);
       assert(/!\s+sleep\s+ended on a failure .*, refused at a pass's start \(key\);/.test(row(refusedOut.out, "sleep")) && /→ sleep ended 30 s ago on a pass's start refusal \(key\): the extraction key is extract-entities\.ts's to switch \(bun db\/extract-entities\.ts --switch-key/.test(fix(refusedOut.out, "sleep")) && /started before that, it refuses again/.test(fix(refusedOut.out, "sleep")) && !/: start it again —/.test(fix(refusedOut.out, "sleep")),
         `a scheduler ended by a start refusal names the kind and its remedy, not "start it again" alone (${row(refusedOut.out, "sleep")} | ${fix(refusedOut.out, "sleep")})`);
+      // A lookup that did not name the key may name it next time (too many
+      // connections, a lock): not told it refuses again (review pass 3 of PR 3).
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "lookup", slept: { from: await at(900), to: await at(700) } }), 30);
+      const lookupFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/start refusal \(lookup\): the worker key's lookup did not name the key/.test(lookupFix) && !/refuses again/.test(lookupFix),
+        `a lookup refusal's fix gives the cause, and does not say a restart refuses again (${lookupFix})`);
       // Ended on a failure with no refusal named (an older scheduler, a thrown pass): "start it again", as before.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, slept: { from: await at(900), to: await at(700) } }), 30);
       assert(/→ sleep ended on a failure 30 s ago — its log says why: start it again —/.test(fix((await run(LOG_ON)).out, "sleep")), "with no refusal on the row, an ended scheduler is told to start again, as before");

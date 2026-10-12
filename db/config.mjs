@@ -514,8 +514,8 @@ export function restartCommand(worker, job) {
  */
 export function startRefusalRemedy(kind) {
   switch (kind) {
-    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or set OB1_METADATA_MODEL back to the recorded key's model";
-    case "identity": return "a revoked or unlisted worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service";
+    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model";
+    case "identity": return "OB1_WORKER_KEY set without MCP_ACCESS_KEYS needs both, as the server has them; a revoked or unlisted worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service";
     case "model": return "pull the model its log names, or set OB1_METADATA_MODEL, OB1_JUDGE_MODEL or OB1_EXTRACT_ESCALATE_MODEL to one the provider serves";
     case "provider": return "the provider refused a one-token call: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
     case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>)";
