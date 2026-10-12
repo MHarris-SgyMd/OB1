@@ -1816,6 +1816,12 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Asleep with its pass waiting for the provider at its start, the row says
+  // so, as the sleep row does — not "its passes running" (SMD-2752 PR 3, review pass 2).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", waiting: ["consolidate"] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptWaiting = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  assert(/the sleep scheduler runs this key \(stamped 20 s ago; asleep, consolidate waiting for the provider at its start\)/.test(row(consSleptWaiting.out, "consolidate pass")),
+         `the consolidate pass row says the scheduler's pass waits for the provider, as the sleep row does (${row(consSleptWaiting.out, "consolidate pass")})`);
   // Asleep, the scheduler's own claim holds a live lease beside the workers
   // profile's old ended row: not "start it again", a second worker (review
   // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
@@ -3770,7 +3776,7 @@ else {
       // the row says so, not that its passes run, and warns with the provider.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null } }), 10);
       const waitOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+waiting at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
+      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
         `a pass waiting at its start for the provider is said, a warning naming the provider (${row(waitOut.out, "sleep")} | ${fix(waitOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract", "consolidate"], slept: { from: await at(130), to: null } }), 10);
       assert(/asleep, extract and consolidate waiting for the provider at their start/.test(row((await run(LOG_ON)).out, "sleep")), "both passes waiting are named, at their start");

@@ -11247,6 +11247,18 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       const carryCode = await carryRun.stop();
       assert(JSON.stringify(carried?.slept) === JSON.stringify(lastMark) && carried?.ended !== true && carryCode === 0,
         `a restarted scheduler's first row carries the last sleep until it sleeps (${JSON.stringify(carried)}; exit ${carryCode})`);
+      // The likelier restart: the last process killed mid-sleep, its mark with
+      // no end and its row's last stamp the sleep's end to within a minute;
+      // carried closed at that stamp, not as a sleep still under way (review pass 2).
+      const openFrom = "2026-10-02T00:00:00.000Z";
+      await sql`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", slept: { from: openFrom, to: null } })}, '2026-10-02T00:07:00.000Z')
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+      const openRun = followRun({ quiet: 300 });
+      let closed = null as { slept?: { from?: string; to?: string | null }; running?: boolean } | null;
+      await pollUntil(async () => (closed = (await beat()) as typeof closed) !== null && closed.running === false && closed.slept?.from === openFrom, 15_000);
+      const openCode = await openRun.stop();
+      assert(closed?.slept?.from === openFrom && closed.slept.to === "2026-10-02T00:07:00.000Z" && openCode === 0,
+        `a mark the last process never ended is carried closed at its row's last stamp (${JSON.stringify(closed?.slept)}; exit ${openCode})`);
       // brain-info's copy of the refusal kinds is the engines' list (SMD-2752 PR 3).
       assert(JSON.stringify([...SLEEP_REFUSALS]) === JSON.stringify([...START_REFUSALS]), `brain-info's SLEEP_REFUSALS is worker-bootstrap's START_REFUSALS (${SLEEP_REFUSALS.join(",")} | ${START_REFUSALS.join(",")})`);
 
@@ -11325,8 +11337,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
 
       // A pass waiting at its start for a provider that does not answer says
       // so on heartbeat:sleep (`waiting`), and the word goes once it answers
-      // (SMD-2752 PR 3): the provider answers the check, then is unavailable
-      // as the first sleep starts its passes.
+      // (SMD-2752 PR 3): the provider is unavailable from before the check,
+      // which does not wait on it, so the first sleep's pass waits at its start.
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       await capture("A note for the waiting pass.", "sync-sleep", 0, 13);
       // Unavailable from the start: the check does not wait on a provider that

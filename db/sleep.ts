@@ -281,11 +281,17 @@ async function followersOutside(sql: SQL): Promise<string[]> {
 
 /** The `slept` mark heartbeat:sleep carries now, when of the shape: what a refusal's stamp keeps (review pass 4). */
 async function lastSlept(sql: SQL): Promise<SleepMark | null> {
-  const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`) as { value: string }[];
+  const [r] = (await sql`SELECT value, updated_at FROM ob1_config WHERE key = 'heartbeat:sleep'`) as { value: string; updated_at: Date | string }[];
   if (!r) return null;
   try {
     const s = (JSON.parse(r.value) as { slept?: { from?: unknown; to?: unknown } }).slept;
-    return s && typeof s.from === "string" && (s.to === null || typeof s.to === "string") ? { from: s.from, to: s.to } : null;
+    if (!(s && typeof s.from === "string" && (s.to === null || typeof s.to === "string"))) return null;
+    // A sleep the last process never ended — killed mid-sleep, most likely,
+    // as it is asleep most of the time — ends at its row's last stamp, within
+    // a minute of the truth (it stamped at least that often asleep): a mark
+    // with no end reads "no sleep yet" to preflight's awake row (SMD-2752 PR 3,
+    // review pass 2).
+    return { from: s.from, to: s.to ?? new Date(r.updated_at).toISOString() };
   } catch {
     return null;
   }
@@ -306,7 +312,8 @@ const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.roun
 
 /**
  * The scheduler's line for a pass's start refusal that ends it — at the
- * check, or a permanent one at a later sleep — with what to do beyond the
+ * check, a permanent one at a later sleep, or one at a pass's first start in
+ * this process — with what to do beyond the
  * pass's own words: those name the cause, but the key's name a --switch-key
  * this script does not take, and a revoked key's no way back (review pass 6,
  * an operator's walk through each refusal).
@@ -526,7 +533,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // the whole value, and a restarted scheduler's first row read "no sleep
   // yet" in preflight (review pass 1 of SMD-2752 PR 3; SMD-2678's mark).
   if (FOLLOW) {
-    const last = await lastSlept(sql).catch(() => null);
+    // Through the start's outage wait, as the other start reads: a blip here
+    // would drop the mark (review pass 2). A stop during the wait, or another
+    // error, leaves it to the first sleep.
+    const last = await atStart(() => lastSlept(sql)).catch(() => null);
     if (last) stamper.slept?.(last);
   }
   const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;

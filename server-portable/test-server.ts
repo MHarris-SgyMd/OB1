@@ -1216,7 +1216,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `the scheduler's refusal is carried when one of the list, and its row counts either way (${JSON.stringify(refusals)})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
-      && heartbeatState({ ...bs, running: true, waiting: ["extract"] }) === "waiting at a pass's start (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, running: true }) === "running a pass (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, running: true, waiting: ["extract"] }) === "waiting for the provider at a pass's start (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, running: true }) === "running a pass (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
       && heartbeatState({ ...bs, outcome: "stopped", ended: true }) === "stopped (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, outcome: "failed", ended: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"

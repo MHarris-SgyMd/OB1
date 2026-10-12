@@ -4278,7 +4278,9 @@ if (configFailed) {
               // their words below (review pass 2).
               const sleeper = l.expired === 0 ? sleeping : undefined;
               if (sleeper) {
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
+                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2).
+                const waitingFor = sleeper.waiting?.length ? `asleep, ${sleeper.waiting.join(" and ")} waiting for the provider at ${sleeper.waiting.length > 1 ? "their" : "its"} start` : null;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   add("consolidate pass", "warn", `${words}, and its last pass failed`,

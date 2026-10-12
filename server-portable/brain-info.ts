@@ -898,7 +898,7 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   // down provider spends most of each pass in its pauses (review pass 3).
   // A pass the sleep scheduler started that waits at its start for the
   // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3).
-  const state = h.running ? (h.waiting?.length ? "waiting at a pass's start" : "running a pass") : "alive";
+  const state = h.running ? (h.waiting?.length ? "waiting for the provider at a pass's start" : "running a pass") : "alive";
   return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
 }
 
