@@ -1386,7 +1386,7 @@ its start are SMD-2752.
 `pg_dump` / `pg_restore`, `pg_dump` at least both servers' major (it reads
 `--to` too, to show it reaches it before the reset), and no image here
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
-(`oven/bun:1.4.0-alpine` plus `postgresql16-client`, the major of the postgres
+(`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
 in it, mounted read-only, on the stack's networks — `data`, where Postgres
 is, and `egress`, where a replay's embedding model is:
@@ -1922,6 +1922,11 @@ cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
 #   then recreate the servers (compose up -d server api; a restart keeps the old keys) and provision again
 ```
+
+`--url` names n8n's origin where it is not `http://127.0.0.1:$N8N_PORT`. A
+user and password in it (`http://user:pass@host`, for a front before n8n)
+are sent as Basic on every request, beside n8n's own key or session, on any
+Bun, and printed as `***@` (SMD-2894).
 
 `--init` writes `N8N_ENCRYPTION_KEY`, `N8N_OWNER_PASSWORD` and its bcrypt
 hash `N8N_OWNER_PASSWORD_HASH` (single-quoted, since compose would read its

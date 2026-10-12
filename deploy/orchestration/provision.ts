@@ -82,6 +82,7 @@ import { fileURLToPath } from "node:url";
 import { parseEnv } from "../../db/env.ts";
 import { setEnvValue, setEnvValues, singleQuoted } from "../env-file.ts";
 import { hashKey, parseKeyRecords, type Scope } from "../../server-portable/auth.ts";
+import { shownUrl, splitUserinfo } from "../../server-portable/embed.ts";
 import { DEFAULT_TIMEOUT_S, loadPipelines, PIPELINES_FILE, scheduleOf, type Pipeline } from "./runner.ts";
 
 // The env writer lives in ../env-file.ts, shared with the authorization server's provisioning (SMD-2285); importers of this module keep these names.
@@ -147,8 +148,21 @@ export function keyExpiry(key: string): number | null {
   }
 }
 
+/**
+ * Every request to n8n. A user and password in its URL (`--url
+ * http://user:pass@host`, for a front before n8n) are taken out by embed.ts's
+ * splitUserinfo (which says why) and sent as Basic (SMD-2894). n8n's own
+ * credential, the key or the session, rides its header as before.
+ */
+function n8nFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const { base, basic } = splitUserinfo(url);
+  const headers = new Headers(init.headers);
+  if (basic) headers.set("authorization", `Basic ${basic}`);
+  return fetch(base, { ...init, headers });
+}
+
 async function call(base: string, path: string, init: RequestInit, what: string): Promise<any> {
-  const r = await fetch(`${base}${path}`, init);
+  const r = await n8nFetch(`${base}${path}`, init);
   const text = await r.text();
   if (!r.ok) throw new Error(`${what} ${path} → ${r.status}: ${text.slice(0, 300)}`);
   try {
@@ -205,7 +219,7 @@ async function ownerSession(base: string, env: Record<string, string>): Promise<
     throw new Error("N8N_OWNER_PASSWORD_HASH does not match N8N_OWNER_PASSWORD — run --init to re-derive it, then recreate n8n (compose --profile orchestration up -d n8n; a `compose restart` keeps the old hash), which sets the owner from it");
   }
   const email = env.N8N_OWNER_EMAIL || DEFAULT_OWNER_EMAIL;
-  const login = await fetch(`${base}/rest/login`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ emailOrLdapLoginId: email, password }) });
+  const login = await n8nFetch(`${base}/rest/login`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ emailOrLdapLoginId: email, password }) });
   const cookie = login.headers.get("set-cookie")?.split(";")[0];
   if (login.status === 429) throw new Error(`n8n rate-limits sign-in (5 a minute per email, n8n 2.40.6) and answered 429 — wait a minute and run again`);
   if (!login.ok || !cookie) {
@@ -311,7 +325,7 @@ export async function ensureApiKey(o: Options): Promise<KeyResult> {
   // share one: sharing is what let each file's next mint revoke the other's.
   const inherited = Boolean(o.env.N8N_API_KEY_TAG) && ownTag(o) === undefined;
   if (stored && !o.rotate && covers && !inherited) {
-    const probe = await fetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } });
+    const probe = await n8nFetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": stored } });
     const exp = keyExpiry(stored);
     // A week, or half the key's life when N8N_API_KEY_DAYS is shorter than two:
     // a 3-day key would otherwise be re-minted on every run.
@@ -584,7 +598,7 @@ export async function provision(o: Options): Promise<{ steps: string[]; key: Key
     // different live keys passes the check above, and the sweep deletes the
     // file's own key. It is probed once more, and replaced if n8n now refuses it.
     if (!key.minted) {
-      const after = await fetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": key.key } });
+      const after = await n8nFetch(`${o.base}/api/v1/workflows?limit=1`, { headers: { "X-N8N-API-KEY": key.key } });
       if (after.status === 401 || after.status === 403) key = await ensureApiKey({ ...o, rotate: true });
     }
   }
@@ -695,10 +709,10 @@ async function listAll(base: string, key: string, path: string): Promise<any[]> 
 export async function waitReady(base: string, timeoutMs = 180_000): Promise<void> {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
-    if ((await fetch(`${base}/healthz/readiness`).catch(() => null))?.ok) return;
+    if ((await n8nFetch(`${base}/healthz/readiness`).catch(() => null))?.ok) return;
     await Bun.sleep(2_000);
   }
-  throw new Error(`n8n at ${base} was not ready after ${timeoutMs / 1000}s — is the profile up? (compose --profile orchestration ps)`);
+  throw new Error(`n8n at ${shownUrl(base)} was not ready after ${timeoutMs / 1000}s — is the profile up? (compose --profile orchestration ps)`);
 }
 
 /**
@@ -715,6 +729,8 @@ function fakeN8n() {
     creds: new Map<string, string>(), active: new Set<string>(), unpublished: [] as string[], deletedCreds: [] as string[],
     // The owner the fake knows: sign-in checks both, as n8n does.
     email: DEFAULT_OWNER_EMAIL, password: "Ob1-pw-1", cookie: `n8n-auth=${randomBytes(8).toString("hex")}`, lastScopes: [] as string[],
+    // Each request's Authorization, as a front before n8n would read it (SMD-2894).
+    authorizations: [] as (string | null)[],
     jwt: (exp: number | null) => `h.${Buffer.from(JSON.stringify(exp === null ? { sub: "o" } : { sub: "o", exp })).toString("base64url")}.s${s.next++}`,
     add(label: string, exp: number | null, scopes: string[] = SCOPES) { const id = `k${s.next}`; const raw = s.jwt(exp); s.keys.set(id, { raw, label, scopes }); return { id, raw }; },
   };
@@ -724,6 +740,8 @@ function fakeN8n() {
     async fetch(req) {
       const u = new URL(req.url);
       const j = (b: unknown, status = 200) => Response.json(b, { status });
+      s.authorizations.push(req.headers.get("authorization"));
+      if (u.pathname === "/healthz/readiness") return j({ status: "ok" });
       if (u.pathname === "/rest/login") {
         s.logins++;
         if (s.loginStatus !== 200) return new Response("no", { status: s.loginStatus });
@@ -1096,6 +1114,31 @@ async function selfCheck(): Promise<number> {
     expect("a password over 72 bytes is refused", await rejects(() => ensureApiKey(opts({ N8N_OWNER_PASSWORD: "Ob1-" + "x".repeat(70) }, { rotate: true })), /over 72 bytes/));
     writeFileSync(keyFile, `N8N_OWNER_PASSWORD_HASH=${otherHash}\n`, { mode: 0o600 });
     expect("an unquoted hash line is refused before anything is written", await rejects(() => provision(opts({ ...base, N8N_OWNER_PASSWORD_HASH: otherHash })), /not single-quoted/));
+
+    // A user and password in --url (a front before n8n) go as Basic on every
+    // request, on every Bun, beside n8n's own key or session, and no URL
+    // fetched carries them (SMD-2894). A mint, then a reuse: the readiness
+    // wait, the sign-in, the internal and public calls, both key probes.
+    const fronted = f.base.replace("://", "://op:p%40ss@");
+    const fetched: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign((input: string | URL | Request, init?: RequestInit) => {
+      fetched.push(input instanceof Request ? input.url : String(input));
+      return realFetch(input, init);
+    }, realFetch);
+    writeFileSync(keyFile, "", { mode: 0o600 });
+    f.s.authorizations.length = 0;
+    try {
+      await waitReady(fronted, 5_000);
+      await provision(opts({ ...base }, { base: fronted }));
+      await provision(opts({ ...base, ...file() }, { base: fronted }));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const basic = `Basic ${Buffer.from("op:p@ss").toString("base64")}`;
+    expect("--url's user and password go as Basic on every request", f.s.authorizations.length >= 6 && f.s.authorizations.every((a) => a === basic));
+    expect("no URL fetched carries --url's user and password", fetched.length === f.s.authorizations.length && fetched.every((x) => x.startsWith(f.base)));
+    expect("a failed readiness wait names n8n's URL with its password masked", await rejects(() => waitReady("http://op:secret@127.0.0.1:9", 0), /^n8n at http:\/\/\*\*\*@127\.0\.0\.1:9 was not ready/));
   } finally {
     f.stop();
     rmSync(keyFile, { force: true });
@@ -1135,7 +1178,7 @@ if (import.meta.main) {
   try {
     await waitReady(base);
     const { steps } = await provision({ base, env, envFile, credentials: [PROFILE_CREDENTIALS], workflows: templatesIn(PROFILE_TEMPLATES), pipelines: loadPipelines(PIPELINES_FILE), rotate: args.includes("--rotate"), adopt: args.includes("--adopt") });
-    console.log(`n8n at ${base} provisioned:\n  ${steps.join("\n  ")}`);
+    console.log(`n8n at ${shownUrl(base)} provisioned:\n  ${steps.join("\n  ")}`);
   } catch (e) {
     console.error(`provision failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);

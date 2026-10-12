@@ -294,9 +294,11 @@ export type LocalKnob = "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL" | "OB1_JEV_LOCAL";
  * A base URL's user and password, out of it: the base without them, and the
  * Basic credential they make (RFC 7617, UTF-8), or none. Bun's fetch sends
  * userinfo as Basic from 1.4.3 and dropped it before, so it is never left in a
- * URL for fetch to decide — nor for a message to print (SMD-2885).
+ * URL for fetch to decide — nor for a message to print (SMD-2885). The other
+ * fetches of an operator's URL, brain-compare's and n8n provisioning's, take
+ * it out the same way (SMD-2894).
  */
-function splitUserinfo(base: string): { base: string; basic?: string } {
+export function splitUserinfo(base: string): { base: string; basic?: string } {
   let url: URL;
   try {
     url = new URL(base);
@@ -334,8 +336,14 @@ function splitUserinfo(base: string): { base: string; basic?: string } {
  * `***@`. A base the URL parser refuses kept its userinfo (fetch refuses it
  * too), and is masked as store.ts's maskUrl masks it (second review pass).
  */
-export function shownBase(at: ProviderEndpoint): string {
+export function shownBase(at: Pick<ProviderEndpoint, "base" | "userinfo">): string {
   return at.userinfo ? at.base.replace("://", "://***@") : at.base.replace(/:\/\/[^/]*@/, "://***@");
+}
+
+/** A URL not yet split, as shownBase prints it: what a message names an operator's URL by (SMD-2894). */
+export function shownUrl(url: string): string {
+  const split = splitUserinfo(url);
+  return shownBase({ base: split.base, userinfo: split.basic !== undefined });
 }
 
 /** An endpoint from its parts, with the one header rule every call shares. */

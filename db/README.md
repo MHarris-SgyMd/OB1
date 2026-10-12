@@ -3576,7 +3576,7 @@ and a `pg_dump`/`pg_restore`, `pg_dump` at a major version of at least both
 servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
-builds `db/tier.Dockerfile` (`oven/bun:1.4.0-alpine` + `postgresql16-client`, the
+builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
 stack server's major) and runs this checkout's `tier.ts` in it on the stack's
 network, so a refresh migrates forward with the tree it was run from —
 `deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
@@ -3619,7 +3619,10 @@ same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
 key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
 `OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
-each labelled by host and path.
+each labelled by host and path. A user and password in a URL
+(`http://user:pass@host/mcp`, for a front before the brain) are sent as
+Basic beside the key, on any Bun, and are in neither the label nor the
+request's URL (SMD-2894).
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
 runs the refresh/replay/diff against the **published** images through the merge

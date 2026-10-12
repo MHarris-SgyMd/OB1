@@ -353,9 +353,17 @@
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
  *      their database; the tiers file is check 27's)
+ *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
+ *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
+ *      file git tracks or would track names a tag of the version
+ *      server-portable/Dockerfile's FROM names; a Dockerfile's FROM, a
+ *      compose `image:` or a workflow's `container:` names a tag; one tag pinned by digest names one
+ *      digest. changes/ and CHANGELOG.md, which record what was, are not
+ *      read. That a digest is its tag's image is the registry's fact: CI's
+ *      "The stack runs the pinned Bun" asks the running forwarder
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29 and 32 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32 and 33 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -2180,7 +2188,7 @@ function checkSupabaseIsms() {
 // `"ports":` key — and each time compose rendered the mapping with no host_ip
 // while the check passed; a walk over YAML text is not a YAML reader, and the
 // fourth spelling would have been found by the next pass. Bun.YAML.parse
-// (Bun 1.2+; CI and the Dockerfile pin 1.4.0) resolves anchors, aliases and
+// (Bun 1.2+; CI and the images pin the one version check 33 holds) resolves anchors, aliases and
 // merge keys (quoted or bare — a probe found no spelling it leaves unfolded),
 // normalises key spellings, reads flow and block sequences alike and refuses
 // tabs, so what this rule sees is what compose sees — with two exceptions it
@@ -5947,7 +5955,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a catch-all router to working behind U+0085 on a route table comment (run live, pass 6)", ["    routers:\n", "    routers:\n      # note\u0085      all:\u0085        rule: \"PathPrefix(`/`)\"\u0085        priority: 100\u0085        entryPoints: [web]\u0085        service: working\n"]],
   ["a catch-all router to working on a line led by a no-break space (run live, pass 7)", ["    routers:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: working}\n"]],
   ["a tab before a route table comment, which Traefik refuses whole (run live, pass 7)", ["    services:\n      stable:\n", "    services:\n      \t# a note\n      stable:\n"]],
-  ["a service answering as stable behind U+2028 on a comment", ["  ollama-pull:\n", "  # a note\u2028  shadow:\u2028    image: oven/bun:1.4.0-alpine\u2028    networks:\u2028      mesh:\u2028        aliases: [mcp.ob1.internal]\n  ollama-pull:\n"]],
+  ["a service answering as stable behind U+2028 on a comment", ["  ollama-pull:\n", "  # a note\u2028  shadow:\u2028    image: oven/bun:1.4.3-alpine\u2028    networks:\u2028      mesh:\u2028        aliases: [mcp.ob1.internal]\n  ollama-pull:\n"]],
   ["a !reset on the proxy's query-string drop, which compose honours and Bun.YAML reads past", ["QUERYPARAMETERS_DEFAULTMODE: drop", "QUERYPARAMETERS_DEFAULTMODE: !reset drop"]],
   ["a !reset through a %TAG handle on canary's mesh name (run live, pass 7)", ["# The three-brain promotion pipeline", "%TAG !0! !\n---\n# The three-brain promotion pipeline"], ["        aliases: [mcp.canary.ob1.internal]", "        aliases: !0!reset [mcp.canary.ob1.internal]"]],
   ["an octal retry count", ["    retries: 12\n", "    retries: 012\n"]],
@@ -5960,7 +5968,7 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["an include beside the services", ["\nvolumes:\n", "\ninclude: [other.yaml]\n\nvolumes:\n"]],
   ["another project's name", ["name: open-brain-tiers\n", "name: open-brain\n"]],
   ["the canary's volume named as stable's", ["  canary-pgdata:\n  working-pgdata:\n", "  canary-pgdata: {name: open-brain-tiers_stable-pgdata}\n  working-pgdata:\n"]],
-  ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\n  # ── the proxy "]],
+  ["a service named after the canary's mesh name", ["  # ── the proxy ", "  mcp.canary.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\n  # ── the proxy "]],
   ["Ollama extending the canary's server", ["  ollama:\n    image: *ollama-image\n", "  ollama:\n    extends: {service: canary-server}\n    image: *ollama-image\n"]],
   ["a hosts entry on the proxy naming a tier", ["    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.canary.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"]],
   ["the proxy waiting on stable", ["    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider", "    depends_on:\n      stable-server:\n        condition: service_started\n    restart: unless-stopped\n    logging: *logging\n\n  # ── the shared model provider"]],
@@ -6146,7 +6154,7 @@ const PROXY_SERVICE = {
 const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
 /** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy. */
 const FORWARDER_SERVICE = {
-  image: "docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb",
+  image: "docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373",
   user: "65534:65534",
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
@@ -6384,22 +6392,22 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
   ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
   ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
-  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.0-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
   ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
   ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
   // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
   ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
   ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
   ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
-  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.0-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
+  ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.3-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
   ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
   ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
   ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
   ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
-  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.0-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
+  ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.3-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
   ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
-  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.0-alpine\n\nnetworks:\n  # The ADR's networks"],
+  ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
   ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
@@ -6427,11 +6435,11 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // The forwarder and the proxy behind it (SMD-2583).
   ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
   ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "    networks: [edge, front]\n", "    networks: [edge, front, mesh]\n"],
-  ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
+  ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
   ["the forwarder's inline script dialling whatever its lookup answers", "compose.yaml", "return addresses.find((a) => own.has(a.toLowerCase()) === false", "return addresses[0] ?? addresses.find((a) => own.has(a.toLowerCase()) === false"],
   ["the forwarder's label a script other than its config's", "compose.yaml", "    labels:\n      ob1.forwarder: *forwarder\n", "    labels:\n      ob1.forwarder: \"an older script\"\n"],
   ["compose.yaml's front given a route out", "compose.yaml", "  front:\n    internal: true\n", "  front: {}\n"],
-  ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.0-alpine\n"],
+  ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.3-alpine\n"],
 ];
 function checkRouteTables() {
   // Every compose file under deploy/, an overlay added later included.
@@ -6939,6 +6947,125 @@ function checkRestartPolicies() {
   }
 }
 checkRestartPolicies();
+
+// ── 33. One Bun, pinned everywhere (SMD-2894) ────────────────────────────────
+//
+// CI's setup-bun steps, every image built FROM oven/bun and compose's oven/bun
+// services each name a Bun version, and nothing held them together: from
+// 2026-10-11 a maintainer's machine ran 1.4.3 while every pin named 1.4.0, and
+// a suite passed in CI and failed there (SMD-2885). Each is held to
+// server-portable/Dockerfile's FROM, the image the stack serves from, so a bump
+// is every pin or none. A tag is the version alone or with a variant
+// (`1.4.3-alpine`); a run line in a README or a header is read too, since it is
+// copied as written. A Dockerfile's FROM, a compose `image:` or a workflow's
+// `container:` with no tag is Docker's `latest`, which is no pin. That a digest is its tag's image is the
+// registry's fact, not the tree's: CI's "The stack runs the pinned Bun" asks the
+// running forwarder, the one service pinned by digest.
+const BUN_PIN_REF = "server-portable/Dockerfile";
+/** An `oven/bun:<tag>` reference, with its digest when pinned by one. */
+const BUN_IMAGE_TAG = /\boven\/bun:([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:@sha256:([0-9a-f]{64}))?/g;
+/** A Dockerfile's FROM (any case, as Docker reads it), a compose `image:` or a workflow's `container:` naming oven/bun with no tag, or by digest alone. */
+const BUN_IMAGE_UNTAGGED = /^\s*(?:FROM\s+(?:--platform=\S+\s+)?|-?\s*(?:image|container):\s*["']?)(?:docker\.io\/)?oven\/bun(@sha256:[0-9a-f]{64})?(?![:\w/@-])/gim;
+type BunPin = { where: string; tag: string | null; digest?: string };
+/** Every Bun image a text names, by line: its tag (null for none) and digest. */
+function bunImagesIn(rel: string, text: string): BunPin[] {
+  const lineOf = lineIndexer(text);
+  const pins: BunPin[] = [...text.matchAll(BUN_IMAGE_TAG)].map((m) => ({ where: `${rel}:${lineOf(m.index!)}`, tag: m[1], digest: m[2] }));
+  for (const m of text.matchAll(BUN_IMAGE_UNTAGGED)) pins.push({ where: `${rel}:${lineOf(m.index! + m[0].length - 1)}`, tag: null, digest: m[1]?.slice("@sha256:".length) });
+  return pins;
+}
+/** Every setup-bun step in a parsed workflow: its `bun-version` as a string, or null when it names none. */
+function setupBunPinsIn(rel: string, doc: unknown): BunPin[] {
+  const pins: BunPin[] = [];
+  const jobs = isMapping(doc) && isMapping(doc.jobs) ? doc.jobs : {};
+  for (const [job, def] of Object.entries(jobs)) {
+    const steps = isMapping(def) && Array.isArray(def.steps) ? def.steps : [];
+    steps.forEach((step, i) => {
+      if (!isMapping(step) || typeof step.uses !== "string" || !step.uses.startsWith("oven-sh/setup-bun@")) return;
+      const v = isMapping(step.with) ? step.with["bun-version"] : undefined;
+      pins.push({ where: `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`, tag: v === undefined || v === null ? null : String(v) });
+    });
+  }
+  return pins;
+}
+/** What strays from `version`: a setup-bun pin is the version, an image's tag is it or it with a variant, one tag has one digest. */
+function bunPinProblems(pins: BunPin[], version: string, setup: BunPin[]): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  for (const p of setup) {
+    if (p.tag === null) problems.push([p.where, `uses oven-sh/setup-bun with no bun-version, which installs the latest Bun — pin ${version}`]);
+    else if (p.tag !== version) problems.push([p.where, `pins bun-version ${p.tag}, not ${version}`]);
+  }
+  const digests = new Map<string, BunPin>();
+  for (const p of pins) {
+    if (p.tag === null) {
+      problems.push([p.where, p.digest
+        ? `names oven/bun by digest alone, which names no version this check can hold — pin oven/bun:${version}-<variant>@sha256:…`
+        : `names oven/bun with no tag, which is Docker's latest — pin oven/bun:${version}-<variant>`]);
+      continue;
+    }
+    if (p.tag !== version && !p.tag.startsWith(`${version}-`)) { problems.push([p.where, `names oven/bun:${p.tag}, not Bun ${version}`]); continue; }
+    if (!p.digest) continue;
+    const first = digests.get(p.tag);
+    if (first === undefined) digests.set(p.tag, p);
+    else if (first.digest !== p.digest) problems.push([p.where, `pins oven/bun:${p.tag} at sha256:${p.digest.slice(0, 12)}…, where ${first.where} pins it at sha256:${first.digest!.slice(0, 12)}… — one tag is one image`]);
+  }
+  return problems;
+}
+const BUN_PROBE_DIGEST_A = "a".repeat(64), BUN_PROBE_DIGEST_B = "b".repeat(64);
+/** [what, text, the 1-based lines the rule reports]. Read as one file at version 9.9.9. */
+const BUN_IMAGE_PROBES: [string, string, number[]][] = [
+  ["a FROM, a compose image by digest twice and prose, all as pinned", `FROM oven/bun:9.9.9-alpine AS deps\n    image: docker.io/oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n# a stock oven/bun image, \`oven/bun\` the reverse\n`, []],
+  ["a FROM left behind", "FROM oven/bun:9.9.9-alpine AS deps\nFROM oven/bun:9.9.8-alpine\n", [2]],
+  ["a run line in a README left behind", "  docker run --rm oven/bun:9.9.8-alpine sh -c 'bun x.ts'\n", [1]],
+  ["a version alone, no variant", "FROM oven/bun:9.9.9\n", []],
+  ["a version that only starts with the pin", "FROM oven/bun:9.9.90-alpine\n", [1]],
+  ["latest by name", "    image: oven/bun:latest\n", [1]],
+  ["a FROM with no tag", "FROM oven/bun AS deps\n", [1]],
+  ["a FROM with a platform and no tag", "FROM --platform=linux/amd64 oven/bun\n", [1]],
+  ["a compose image with no tag, quoted", "    image: \"docker.io/oven/bun\"\n", [1]],
+  ["a lowercase from with no tag (review pass 1)", "from oven/bun\n", [1]],
+  ["a workflow job's container with no tag, and prose (review pass 1)", "    container: oven/bun\n    container: the oven/bun image\n", [1]],
+  ["a compose image by digest alone (review pass 2)", `    image: docker.io/oven/bun@sha256:${BUN_PROBE_DIGEST_A}\n`, [1]],
+  ["one tag at two digests", `    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_B}\n`, [2]],
+  ["two tags, each at its own digest", `    image: oven/bun:9.9.9-alpine@sha256:${BUN_PROBE_DIGEST_A}\n    image: oven/bun:9.9.9-slim@sha256:${BUN_PROBE_DIGEST_B}\n`, []],
+];
+/** [what, workflow YAML, the steps (by name) the rule reports]. */
+const SETUP_BUN_PROBES: [string, string, string[]][] = [
+  ["every setup-bun step pinned, another action beside", `jobs:\n  a:\n    steps:\n      - uses: actions/checkout@x\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: "9.9.9"\n`, []],
+  ["a setup-bun step with no bun-version", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n`, ["Bun"]],
+  ["a setup-bun step left behind", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: "9.9.8"\n  b:\n    steps:\n      - name: Bun too\n        uses: oven-sh/setup-bun@x\n        with: { bun-version: 9.9.9 }\n`, ["Bun"]],
+  ["a setup-bun step on latest", `jobs:\n  a:\n    steps:\n      - name: Bun\n        uses: oven-sh/setup-bun@x\n        with:\n          bun-version: latest\n`, ["Bun"]],
+];
+function checkBunPins() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 33 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2894)`);
+    return;
+  }
+  for (const [what, text, expected] of BUN_IMAGE_PROBES) {
+    const got = bunPinProblems(bunImagesIn("probe", text), "9.9.9", []).map(([where]) => Number(where.split(":").pop()));
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 33 no longer reports exactly lines ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  // A digest alone is exact, so not "latest": its message says what it lacks (review pass 2).
+  const digestOnly = bunPinProblems(bunImagesIn("probe", `\n    image: oven/bun@sha256:${BUN_PROBE_DIGEST_A}\n`), "9.9.9", []);
+  if (digestOnly.length !== 1 || digestOnly[0][0] !== "probe:2" || !digestOnly[0][1].includes("by digest alone")) fail(SELF, `check 33 no longer says a pin by digest alone names no version, on its line (reported ${JSON.stringify(digestOnly)})`);
+  for (const [what, yaml, expected] of SETUP_BUN_PROBES) {
+    const got = bunPinProblems([], "9.9.9", setupBunPinsIn("probe.yml", Bun.YAML.parse(yaml))).map(([where]) => JSON.parse(where.split(", step ").pop()!));
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 33 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  const ref = /^FROM\s+oven\/bun:(\d+\.\d+\.\d+)(?:-[a-z0-9]+)*\b/m.exec(readFileSync(join(ROOT, BUN_PIN_REF), "utf8"))?.[1];
+  if (!ref) { fail(BUN_PIN_REF, "names no `FROM oven/bun:<version>`, which check 33 holds every Bun pin to (SMD-2894)"); return; }
+  const files = citationFiles().filter((rel) => !rel.startsWith("changes/") && rel !== "CHANGELOG.md");
+  const workflows = files.filter((rel) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(rel));
+  if (!workflows.includes(".github/workflows/fork-checks.yml") || !files.includes(BUN_PIN_REF)) fail(SELF, "check 33's listing does not reach fork-checks.yml and the server's Dockerfile — the listing is broken, not the tree clean");
+  const setup: BunPin[] = [];
+  for (const rel of workflows) {
+    try { setup.push(...setupBunPinsIn(rel, Bun.YAML.parse(readFileSync(join(ROOT, rel), "utf8")))); } catch (e) { fail(rel, `does not parse, so check 33 cannot read its setup-bun steps: ${(e as Error).message}`); }
+  }
+  if (!setup.length) fail(SELF, "check 33 found no setup-bun step in the workflows — the reading is broken, not the tree clean");
+  const pins = files.flatMap((rel) => bunImagesIn(rel, readFileSync(join(ROOT, rel), "utf8")));
+  for (const [where, detail] of bunPinProblems(pins, ref, setup)) fail(where, `${detail} — every Bun pin names the version ${BUN_PIN_REF} does (${ref}): bump them in one commit (check 33, SMD-2894)`);
+}
+checkBunPins();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
