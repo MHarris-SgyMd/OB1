@@ -45,6 +45,13 @@ export type Env = {
    */
   OB1_STOP_GRACE?: string;
   /**
+   * `1` continues a caller's W3C `traceparent` (telemetry.ts, SMD-1849 PR 2b),
+   * for a deployment whose proxy sets it; unset, a request starts its own
+   * trace and links the caller's. Read per request from the process's
+   * environment, beside the OTEL_* variables the SDK reads.
+   */
+  OB1_OTEL_TRUST_TRACEPARENT?: string;
+  /**
    * The opt-in trigram index. The migrator builds it; in the server's process
    * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
    * setting and the database apart. Declared here because this block is the

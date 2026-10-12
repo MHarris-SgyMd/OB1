@@ -388,6 +388,19 @@ jobs:
           CLOUDFLARE_API_TOKEN: ""
           WRANGLER_SEND_METRICS: "false"
 
+      # The Worker carries OpenTelemetry's API alone, whose spans are no-ops
+      # there: the SDK is loaded only on Bun, and wrangler.toml aliases its
+      # module to a stub, without which the bundler would put the whole SDK
+      # (its exporter, its context manager, async_hooks) in the Worker for
+      # code that never runs there (SMD-1849 PR 2b). The bundle names each
+      # module it holds by its path.
+      - name: The Worker bundles no OpenTelemetry SDK
+        working-directory: server-portable
+        run: |
+          bundled=$(grep -o 'node_modules/@opentelemetry/[a-z-]*' .cf-out/index.js | sort -u | tr '\n' ' ')
+          [ "$bundled" = "node_modules/@opentelemetry/api " ] \
+            || { echo "the Worker bundles more of OpenTelemetry than its API: $bundled" >&2; exit 1; }
+
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
@@ -2286,8 +2299,9 @@ jobs:
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an
-          # earlier call's.
-          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+\}$'
+          # earlier call's. A trace id closes the line where a `traceparent`
+          # came in or a collector is set (PR 2b); neither is, here.
+          STATS_LINE='^\{"ts":"[^"]+","door":"mcp","method":"POST","rpc":"tools/call","tool":"thought_stats","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+,"bytes":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$'
           stats_before=$(docker compose -f compose.yaml logs --no-color --no-log-prefix server | grep -cE "$STATS_LINE" || true)
           # Answered by the server, so Traefik took the absolute form and logged it:
           # a refusal before the log would leave the userinfo half untested.
@@ -2360,7 +2374,7 @@ jobs:
           sleep 1
           LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
           if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
-          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
 
       # SMD-2310: a plugin's webhook reaches the REST core only through the
       # /hooks overlay, and only for a plugin OB1_HOOKS names. The example

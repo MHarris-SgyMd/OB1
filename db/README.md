@@ -2876,10 +2876,15 @@ asks for a stopped follower's row to be retired, not started again.
 **A database not answering at its start** is waited out, as one mid-sleep
 is (SMD-2599's schedule), so the service started beside a restarting Postgres
 spends none of its three restarts. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the compose service's SIGTERM).
+So does each pass's start at every sleep: a follower waits out every statement
+up to its first claim — the tables check, the worker key's lookup, extraction's
+key, 079's check, the relations grants; not an operator's `--retry-*` — where it
+used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
+the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); quieter banners, configuration checks at its start, outage waits
-inside a pass's start and the provider-wait word (SMD-2752).
+(SMD-2679); quieter banners, configuration checks at its start and the
+provider-wait word (SMD-2752).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -4030,7 +4035,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2716 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1240 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1248 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -4183,7 +4188,15 @@ names the errors that mean the database is not answering (a connection
 refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
 `waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
 wakes it; a thought in hand records nothing, and its lease is returned when the
-database is back. It waits a provider outage out the same way.
+database is back. Its start's statements, up to the first claim, go through
+`throughOutage` — the statement itself again on the same schedule, null on a
+stop — and `workerIdentity`'s `outage` option throws a database outage at the
+key's lookup for it to wait, where it warned and went on unattributed
+(SMD-2752). The followers pass `lookupOutage`, which leaves out too many
+connections (53300): the lookup opens a connection beside the pass's pool,
+refused for as long as the brain is at `max_connections`, so that one is still
+warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
+out the same way.
 - **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
 - **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
 - **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.

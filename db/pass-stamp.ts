@@ -162,11 +162,19 @@ export function passStamper(opts: {
     }
   };
   const write = (running: boolean) => (queue = queue.then(() => send(running)));
+  /**
+   * A row once ended takes no stamp but another end: a pass still finishing
+   * after the sleep scheduler's hard stop stamped its word through the
+   * scheduler's stamper after the row was ended, which then read running —
+   * ended and running at once — until it went stale (SMD-2752 review pass 1).
+   */
+  const live = (running: boolean) => (ended ? queue : write(running));
   /** Inside `during`: what alive() stamps `running` as. */
   let inside = false;
   return {
     key,
     async stamp(o, m) {
+      if (ended) return;
       outcome = o;
       if (m !== undefined) malformed = m;
       await write(false);
@@ -181,9 +189,9 @@ export function passStamper(opts: {
       // Stamped as it starts, so a restarted worker's first long pass is not
       // read as the stopped one's stale row until the timer's first tick.
       inside = true;
-      void write(true);
+      void live(true);
       // Unref'd, as lease.ts's beat is: the timer never holds the process open.
-      const timer = setInterval(() => void write(true), Math.min(everyS * 1000, MAX_TIMER_MS));
+      const timer = setInterval(() => void live(true), Math.min(everyS * 1000, MAX_TIMER_MS));
       timer.unref?.();
       try {
         return await pass;
@@ -193,6 +201,7 @@ export function passStamper(opts: {
       }
     },
     async alive(o, m) {
+      if (ended) return;
       if (o !== undefined) outcome = o;
       if (m !== undefined) malformed = m;
       await write(inside);

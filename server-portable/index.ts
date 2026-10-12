@@ -11,7 +11,7 @@ import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
-import { beginRequest, cutOpenRequests, endsWithStream, errorCode, outcomeOf, traceOf, type RequestOutcome, type RequestTrace } from "./telemetry.ts";
+import { beginRequest, cutOpenRequests, endsWithStream, errorCode, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type RequestTrace, type ToolSpan } from "./telemetry.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -107,6 +107,19 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
     return registerTool(...args.slice(0, -1), (...call: unknown[]) => toolCalls.track(() => handler(...call)));
   };
 
+  // One tool call's end: on the request's record, for its line — how the
+  // call ended, and the code an error reply's structuredContent already
+  // carries (an enum spelling, telemetry.ts holds it to that; a success's
+  // value may hold a field of that name, which is not one) — and on the
+  // call's own span (PR 2b). Calls are counted, and a batch's line keeps its
+  // worst call's (worseOutcome).
+  const ended = (reply: say.Reply, outcome: "ok" | "refused" | "error", span: ToolSpan): say.Reply => {
+    const code = reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined;
+    recordCall(record, outcome, code);
+    span.end(outcome, code);
+    return reply;
+  };
+
   // A tool whose logic is in core/ (SMD-2283): registered only where the key's
   // scope unlocks the tool's group in the manifest (tools.ts's mayCall, the gate
   // the REST core asks too, SMD-1931) — a tool a key may not use is absent from
@@ -119,32 +132,23 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
     // The generic K loses the SDK's per-tool inference of `input`; SPECS[name]'s
     // schema is what it validates against, and Input<K> is that schema's output.
     const register = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: Input<K>) => Promise<say.Reply>) => unknown;
-    // How the call ended goes on the request's record: the reply's isError
-    // is a refusal from `run` (render.ts) and the fault from `fault`; the
-    // code is the one an error reply's structuredContent already carries (an
-    // enum spelling, telemetry.ts holds it to that) — a success's value may
-    // hold a field of that name, which is not one. Calls are counted, and a batch's line
-    // keeps its worst call's (worseOutcome).
-    const ended = (reply: say.Reply, outcome: RequestOutcome): say.Reply => {
-      const code = reply.structuredContent.code;
-      recordCall(record, outcome, reply.isError && typeof code === "string" ? code : undefined);
-      return reply;
-    };
-    register(name, SPECS[name], async (input) => {
+    // How the call ended (ended, above): the reply's isError is a refusal
+    // from `run` (render.ts) and the fault from `fault`.
+    register(name, SPECS[name], (input) => withToolSpan(name, async (span) => {
       try {
         const reply = await run(input);
-        return ended(reply, reply.isError ? "refused" : "ok");
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err: unknown) {
         // A fault reply that itself throws is still this call's end: an
         // error, counted, and the SDK says the throw (not `unrun`).
         try {
-          return ended(fault(err, input), "error");
+          return ended(fault(err, input), "error", span);
         } catch (faultErr: unknown) {
           recordCall(record, "error", undefined);
           throw faultErr;
         }
       }
-    });
+    }));
   };
 
   // The read tools: each is its operation in core/reads.ts — the search op
@@ -322,13 +326,16 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
   const registerPlugin = server.registerTool as unknown as (name: string, spec: unknown, handler: (input: unknown) => Promise<say.Reply>) => unknown;
   for (const op of plugins().flatMap((p) => p.operations)) {
     if (!unlocks(principal, op.scope)) continue;
-    registerPlugin(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input) => {
+    // Its end on the record and its span as a core tool's (PR 2b: a plugin
+    // call told the record nothing, so its line read `unrun`).
+    registerPlugin(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, (input) => withToolSpan(op.tool, async (span) => {
       try {
-        return say.renderPlugin(await runOperation(op, { core, principal, track: toolCalls.track }, input));
+        const reply = say.renderPlugin(await runOperation(op, { core, principal, track: toolCalls.track }, input));
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err: unknown) {
-        return say.failed(err);
+        return ended(say.failed(err), "error", span);
       }
-    });
+    }));
   }
 
   return server;
@@ -617,7 +624,8 @@ app.use("*", async (c, next) => {
   if (probe) return next();
   const trace = beginRequest("mcp", c.req.raw);
   try {
-    await next();
+    // Under the request's span, so each tool call's span is its child (PR 2b).
+    await trace.run(next);
   } catch (err) {
     trace.end({ status: 500, outcome: "error" });
     throw err;
@@ -1073,6 +1081,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   /** Refused before any tool ran: the key, the registry; the answer's status and why. */
   const refused = (response: Response, code: string): Response => {
     trace.status = response.status;
+    trace.refusedAtKey = true;
     finish("refused", code);
     return response;
   };
@@ -1269,6 +1278,8 @@ let bunServer: Stoppable | undefined;
 let cutByStop = false;
 if (SERVES_ON_BUN) {
   serveHere(SERVER_NAME); // builds the store now and wires the durable job store for this server (root.ts)
+  // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT): never on Workers (telemetry.ts).
+  void startTelemetry(SERVER_NAME);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   drainOnSignal({
@@ -1276,6 +1287,8 @@ if (SERVES_ON_BUN) {
     server: () => bunServer,
     calls: toolCalls,
     close: closeStore,
+    // The spans still batched go beside the pool's close, under its bound, said on their own.
+    flush: flushTelemetry,
     onCut: () => {
       cutByStop = true;
       // Every request still open gets its line — `cut`, or `abandoned` for a
