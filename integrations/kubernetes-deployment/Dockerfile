@@ -1,5 +1,5 @@
 # Bun, like server-portable/Dockerfile (SMD-1800; `denoland/deno` until then).
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 
 # Built with integrations/ as the context — `docker build -f Dockerfile ..` from
 # this directory — because index.ts imports the shared auth module from

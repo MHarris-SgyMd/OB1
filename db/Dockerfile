@@ -14,7 +14,7 @@
 # shares, SMD-2134) and db/connect.ts (how each reaches its database, SMD-2302);
 # db/package.json's one dependency, PGlite, is the tests'. The benches, tests
 # and workers beside it in db/ stay out.
-FROM oven/bun:1.4.0-alpine
+FROM oven/bun:1.4.3-alpine
 WORKDIR /app
 # The runner, the two contracts it shares with the server, its flag scanner, its
 # connection module and the migrations — at the paths migrate.ts reads them

@@ -256,7 +256,7 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   // three diallers, which take the configuration as an argument. Cases [2]
   // and [3] above are the server-level half: with neither chat knob set both
   // calls went to one endpoint, keyless, exactly as before the split.
-  const { resolveEmbedConfig, providerCall, ProviderError, shownBase } = await import("./embed.ts");
+  const { resolveEmbedConfig, providerCall, ProviderError, shownBase, shownUrl } = await import("./embed.ts");
   const { judgePair } = await import("./consolidate.ts");
   const { extractEntities } = await import("./entities.ts");
 
@@ -364,6 +364,12 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   const refused = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "https://user:s3cret#PW@provider.invalid/v1" });
   assert(!refused.embeddings.userinfo && shownBase(refused.embeddings) === "https://***@provider.invalid/v1",
          `a base the URL parser refuses is shown masked (${shownBase(refused.embeddings)})`);
+  // A URL not yet split (brain-compare's, n8n provisioning's) prints as a split
+  // endpoint would, a spelling with no `//` too, which no mask over the text
+  // reads as userinfo (SMD-2894).
+  assert(shownUrl("http:/op:pw@h.invalid/v1") === "http://***@h.invalid/v1" && shownUrl("http://h.invalid/v1") === "http://h.invalid/v1"
+         && shownUrl("https://user:s3cret#PW@provider.invalid/v1") === "https://***@provider.invalid/v1",
+         `shownUrl masks a URL's userinfo as shownBase masks an endpoint's (${shownUrl("http:/op:pw@h.invalid/v1")})`);
   await providerCall(resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: U, OB1_LLM_API_KEY: "key-u" }), "/embeddings", embBody, SUBJ);
   assert(lastB().auth === "Bearer key-u", "a key takes the Authorization header: Bearer, and the userinfo is not sent");
   const ownUser = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: B, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: U });
