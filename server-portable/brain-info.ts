@@ -256,7 +256,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Its waiting passes and its refusal (SMD-2752), each left off when not
     // of the shape: the passes by name, each once; the refusal of the list.
     const w = worker === "sleep" ? v!.waiting : undefined;
-    const waiting = Array.isArray(w) && w.length > 0 && w.length <= 2 && new Set(w).size === w.length && w.every((p) => p === "extract" || p === "consolidate")
+    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "extract" || p === "consolidate")
       ? (w as ("extract" | "consolidate")[])
       : undefined;
     const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;

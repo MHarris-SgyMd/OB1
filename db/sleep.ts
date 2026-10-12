@@ -115,32 +115,31 @@
  * provider that does not answer, while one is, and `refused` the start
  * refusal that ended it, so preflight's `sleep` row says each — not "its
  * passes running", nor "start it again", which would only refuse again
- * (SMD-2752). The passes stamp through it, not their
- * own rows, so a wake does not end a follower's row for preflight to warn
- * about, and preflight's consolidate pass row reads it as the scheduler at
- * work. Only --follow stamps: one sleep leaves no row to go stale, as a
- * one-shot pass does not. Followers run outside sleep (the workers profile)
- * do not yield, so the two profiles are alternatives: a run refuses (2) while
- * any of their heartbeats is fresh — at its start, and at every awake and
- * asleep poll, since a follower brought up beside it stamps only past its own
- * start probe — and --dry-run names them, each with how to stop them and
- * retire their rows (SMD-2678). Under --follow a refusal, at the start too,
- * ends the row on a failure, its last sleep kept, so preflight names the
- * followers keeping it down. Preflight's `sleep` row reads this heartbeat,
- * with its `slept` mark and its `reads` word on the query log, and the compose
- * service (`--profile sleep`) runs `--follow`. The start's reads, like the
- * sleep's, wait out a database not answering yet, and so does each pass's
- * start at every sleep, up to its first claim (SMD-2752).
+ * (SMD-2752). The passes stamp through it, not their own rows, so a wake does
+ * not end a follower's row for preflight to warn about, and preflight's
+ * consolidate pass row reads it as the scheduler at work. Only --follow
+ * stamps: one sleep leaves no row to go stale, as a one-shot pass does not.
+ * Followers run outside sleep (the workers profile) do not yield, so the two
+ * profiles are alternatives: a run refuses (2) while any of their heartbeats
+ * is fresh — at its start, and at every awake and asleep poll, since a
+ * follower brought up beside it stamps only past its own start probe — and
+ * --dry-run names them, each with how to stop them and retire their rows
+ * (SMD-2678). Under --follow a refusal, at the start too, ends the row on a
+ * failure, its last sleep kept, so preflight names the followers keeping it
+ * down. Preflight's `sleep` row reads this heartbeat, with its `slept` mark
+ * and its `reads` word on the query log, and the compose service
+ * (`--profile sleep`) runs `--follow`. The start's reads, like the sleep's,
+ * wait out a database not answering yet, and so does each pass's start at
+ * every sleep, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
- * A budget per pass
- * (statement_timeout, work_mem) and per sleep (a wall clock), and the
- * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). A pass waiting
- * mid-pass for the provider, after its workers' pauses, reads "running a
- * pass" on the row — the `waiting` word is its start's alone (SMD-2905). The frozen-belief
- * scan, decay relabelling and an HNSW heal are their own tickets' passes
- * (SMD-1722, SMD-1736, SMD-1632), as is the awake latency under a sleep at 1M
- * and 10M rows (SMD-1500's harness).
+ * A budget per pass (statement_timeout, work_mem) and per sleep (a wall
+ * clock), and the re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). A
+ * pass waiting mid-pass for the provider, after its workers' pauses, reads
+ * "running a pass" on the row — the `waiting` word is its start's alone
+ * (SMD-2905). The frozen-belief scan, decay relabelling and an HNSW heal are
+ * their own tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
+ * latency under a sleep at 1M and 10M rows (SMD-1500's harness).
  */
 
 import type { SQL } from "bun";
@@ -315,10 +314,10 @@ const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.roun
 /**
  * The scheduler's line for a pass's start refusal that ends it — at the
  * check, a permanent one at a later sleep, or one at a pass's first start in
- * this process — with what to do beyond the
- * pass's own words: those name the cause, but the key's name a --switch-key
- * this script does not take, and a revoked key's no way back (review pass 6,
- * an operator's walk through each refusal).
+ * this process — with what to do beyond the pass's own words: those name the
+ * cause, but the key's name a --switch-key this script does not take, and a
+ * revoked key's no way back (review pass 6, an operator's walk through each
+ * refusal).
  */
 function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: string): string {
   // The other kinds' own words name their fix; preflight's row gives every kind's (db/config.mjs, SMD-2752).
@@ -546,7 +545,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const words: Partial<Record<PassName, PassOutcome>> = {};
   let malformed: MalformedBlock | null | undefined;
   const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
-  /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   /**
    * The passes waiting at their start for a provider that does not answer,
    * as each says through its stamper: heartbeat:sleep carries them, so
@@ -558,6 +556,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
     await stamper.alive();
   };
+  /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
     key: stamper.key,
     async stamp(o, m) {

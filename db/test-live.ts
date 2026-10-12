@@ -11337,14 +11337,13 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
 
       // A pass waiting at its start for a provider that does not answer says
       // so on heartbeat:sleep (`waiting`), and the word goes once it answers
-      // (SMD-2752 PR 3): the provider is unavailable from before the check,
-      // which does not wait on it, so the first sleep's pass waits at its start.
+      // (SMD-2752 PR 3). The provider is unavailable from before the check,
+      // which does not wait on one that is out, so the first sleep's pass waits
+      // at its start every time; and the row's timer has a minute's floor, as
+      // in production, so `waiting` must come from the pass's own word, written
+      // as it is said (review pass 1).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       await capture("A note for the waiting pass.", "sync-sleep", 0, 13);
-      // Unavailable from the start: the check does not wait on a provider that
-      // is out, so the first sleep's pass waits at its start every time. A
-      // minute's floor for the row's timer, as in production, so `waiting`
-      // must come from the pass's own word, written as it is said (review pass 1).
       unavailable = true;
       const waitingRun = followRun({ quiet: 2, minStampEveryS: 60 });
       try {

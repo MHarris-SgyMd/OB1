@@ -256,6 +256,8 @@ const runningWords = (l: Leases, c: PassCounts) =>
 /** A pass whose only claimed rows' leases expired: its worker died holding them. */
 const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
+/** The sleep scheduler's passes waiting at their start for the provider, as its `sleep` and `consolidate pass` rows both say them (SMD-2752). */
+const providerWaitWords = (passes: readonly string[]) => `${passes.join(" and ")} waiting for the provider at ${passes.length > 1 ? "their" : "its"} start`;
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
@@ -4279,7 +4281,7 @@ if (configFailed) {
               const sleeper = l.expired === 0 ? sleeping : undefined;
               if (sleeper) {
                 // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2).
-                const waitingFor = sleeper.waiting?.length ? `asleep, ${sleeper.waiting.join(" and ")} waiting for the provider at ${sleeper.waiting.length > 1 ? "their" : "its"} start` : null;
+                const waitingFor = sleeper.waiting?.length ? `asleep, ${providerWaitWords(sleeper.waiting)}` : null;
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
@@ -4666,7 +4668,7 @@ if (configFailed) {
               // Its passes waiting at their start for a provider that does not
               // answer, by its own word (SMD-2752): asleep, but nothing runs.
               const waitingFor = !(h.stale || h.ended) && h.running && h.waiting?.length ? h.waiting : null;
-              const waitWords = waitingFor ? `${waitingFor.join(" and ")} waiting for the provider at ${waitingFor.length > 1 ? "their" : "its"} start` : "";
+              const waitWords = waitingFor ? providerWaitWords(waitingFor) : "";
               const sleepWords = h.stale || h.ended
                 ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
                 : h.running
