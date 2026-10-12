@@ -11286,14 +11286,15 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
       // refusal is retried, as one after a sleep that ran is (item 6).
       lines.length = 0;
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-      // A live read now: the scheduler stays awake its 2 s quiet after the
-      // check, stamping as it waits, so the model goes before the first sleep.
+      // A live read now: the scheduler stays awake its 8 s quiet, through the
+      // check and stamping as it waits, so the model goes before the first
+      // sleep however long a loaded runner takes over the check (review pass 3).
       await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check')`;
       const acChecked = new AbortController();
-      const checkedRun = sleepRun({ follow: true, quiet: 2, minStampEveryS: 1, signal: acChecked.signal });
+      const checkedRun = sleepRun({ follow: true, quiet: 8, minStampEveryS: 1, signal: acChecked.signal });
       await pollUntil(async () => (await beat()) !== null, 10_000);
       missing = true;
-      await pollUntil(async () => count(/tries it again/) >= 1, 20_000);
+      await pollUntil(async () => count(/tries it again/) >= 1, 30_000);
       missing = false;
       acChecked.abort();
       const checkedCode = await bounded(checkedRun, acChecked);

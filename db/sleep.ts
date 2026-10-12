@@ -9,7 +9,7 @@
  *   bun db/sleep.ts --url … --dry-run               # the idle reading and each pass's pool; writes nothing
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
  *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
- *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model or provider refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
+ *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
  * The brain is awake while it is used: a read the server logged (query_log,
@@ -453,8 +453,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // it at its own start, as before. The check runs before this process's
   // heartbeat exists — its probes up to a minute each, a database outage as
   // long as it lasts — so preflight reads the last process's row meanwhile,
-  // as during the start's reads above; a refusal ends the row failed, and an
-  // error the check throws ends the run as any start's does (review pass 1).
+  // as during the start's reads above; a refusal, or an error the check
+  // throws, ends the row failed (review passes 1 and 3). Its probes are model
+  // calls at the service's start whatever the brain's traffic — one token to
+  // each model, which on a tight GPU may swap a model in once per start.
   /**
    * The passes whose start got through in this process — the provider
    * answered their probe, the keys resolved — at this check or at a sleep's
@@ -467,9 +469,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // Written in the callback, which control-flow analysis does not follow:
     // the cast keeps the declared type (SMD-1932's idiom).
     let result = null as StartResult | null;
+    // A check that throws — a grant refused on a read, say — ends the row
+    // failed before it propagates, as a pass that throws at a sleep does in
+    // the loop below, rather than leave the last process's row (review pass 3).
     const code = await (pass === "extract" ? runExtract : runConsolidate)({
       url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: opts.signal, check: true,
       onStart: (r) => { result = r; }, writer: tagged(pass, () => false),
+    }).catch(async (e: unknown) => {
+      await endAtStart().catch(() => {});
+      throw e;
     });
     // The engine said its own "stopped before the pass began".
     if (code === 130) return 130;

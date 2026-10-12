@@ -1083,7 +1083,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // pass waits for it at its own start (SMD-2752).
   if (CHECK) {
     // The relations note at the start too; each pass says it again whatever its banner, since grants or 084 may change between sleeps (review pass 1).
-    if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; a pass under this role stores no relations, counting its related, evolves and duplicate verdicts only`);
+    if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; a pass stores no relations then, counting its related, evolves and duplicate verdicts only`);
     if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
     opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
     return 0;
