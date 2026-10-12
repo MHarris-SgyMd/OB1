@@ -371,9 +371,17 @@
  *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
  *      passed unrun for weeks; `eval-*` files are measurements, not suites,
  *      and are not read
+ *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
+ *      fork-checks.yml step runs (check 34's reader) is a `run` line of
+ *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
+ *      does not, from a directory the step may run it from, with the same
+ *      flags and environment (the database URLs aside); every typecheck step
+ *      is a `typecheck` line; a line no step runs as written is stale; and
+ *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
+ *      — an excuse for what CI no longer has is reported too
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33 and 34 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34 and 35 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -7108,44 +7116,61 @@ const SUITES_NOT_RUN: Record<string, string> = {
 };
 /** A tracked `test-*` script: what check 34 calls a suite. */
 const SUITE_FILE = /(?:^|\/)test-[\w.-]*\.(?:ts|mts|mjs|js|cjs)$/;
-/** bun or node, its flags, then the script it runs. */
-const SUITE_RUN = /\b(?:bun|node)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s;&|()<>'"`]+\.(?:ts|mts|mjs|js|cjs))(?![\w.])/g;
+/** bun or node, its flags, the script it runs, then the script's own flags. */
+const SCRIPT_RUN = /\b(?:bun|node)\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*([^\s;&|()<>'"`]+\.(?:ts|mts|mjs|js|cjs))(?![\w.])((?:[ \t]+--?[\w-]+(?:=[^\s;&|()<>'"`]+)?)*)/g;
 /** A `cd` in a run line, and the directory it names. */
 const SHELL_CD = /\bcd\s+([^\s;&|()<>'"`]+)/g;
+/** The `NAME=value` assignments that open a command, as the shell passes them to it. */
+const SHELL_ASSIGNS = /^\s*((?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()<>'"`]*\s+)*)/;
 /** A script a step runs, at one path it can resolve to, and the step. */
 type SuiteRun = { path: string; where: string };
+/** A script a step runs: every directory it may run from (the step's, then each a `cd` names), its own flags, the environment the step and the command give it, and where. */
+type ScriptRun = { dirs: string[]; script: string; args: string; env: Record<string, string>; job: string; where: string };
 /** A quoted string in a run line, read as nothing. */
 const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
 /** What follows a command that swallows its failure, up to the end of its line or a `;`. */
 const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
 /** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
 const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
-/** Every script a parsed workflow's steps run by bun or node whose failure fails the job, each with every path it can resolve to and the step it is in. */
-function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
-  const out: SuiteRun[] = [];
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35). */
+function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
+  const out: ScriptRun[] = [];
   const wdOf = (v: unknown): string | undefined => {
     const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
     return typeof d === "string" ? d : undefined;
   };
+  const envOf = (v: Mapping): Record<string, string> => isMapping(v.env) ? Object.fromEntries(Object.entries(v.env).map(([k, x]) => [k, String(x)])) : {};
   const top = isMapping(doc) ? wdOf(doc.defaults) : undefined;
+  const topEnv = isMapping(doc) ? envOf(doc) : {};
   const jobs = isMapping(doc) && isMapping(doc.jobs) ? doc.jobs : {};
   for (const [job, def] of Object.entries(jobs)) {
     if (!isMapping(def) || failureIgnored(def)) continue;
     const jobWd = wdOf(def.defaults) ?? top ?? ".";
+    const jobEnv = { ...topEnv, ...envOf(def) };
     const steps = Array.isArray(def.steps) ? def.steps : [];
     steps.forEach((step, i) => {
       if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
-      const wd = typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd;
+      const wd = posix.normalize(typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd);
       const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
-      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.join(wd, m[1]))];
+      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
       const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
-      for (const m of text.matchAll(SUITE_RUN)) {
+      const stepEnv = { ...jobEnv, ...envOf(step) };
+      for (const m of text.matchAll(SCRIPT_RUN)) {
         if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
-        for (const d of dirs) out.push({ path: posix.normalize(posix.join(d, m[1])), where });
+        // The command's own assignments open the segment it is in: after the
+        // last newline, `;`, `&`, `|` or `(` before it.
+        const before = text.slice(0, m.index!);
+        const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
+        const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+        out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
       }
     });
   }
   return out;
+}
+/** Every script a parsed workflow's steps run whose failure fails the job, at every path it can resolve to (check 34). */
+function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
+  return scriptRunsIn(rel, doc).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
 }
 /** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
 function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
@@ -7209,6 +7234,162 @@ function checkSuitesRun() {
   for (const [where, detail] of suiteProblems(suites, run, SUITES_NOT_RUN)) fail(where, `${detail} (check 34, SMD-2895)`);
 }
 checkSuitesRun();
+
+// ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
+//
+// ci-parity.sh is CI's local equivalent, and nothing held it to the workflow:
+// by SMD-2895 it missed fourteen of the suites fork-checks.yml runs and every
+// --self-check step, and ran the suites of CI's database-free jobs with
+// DATABASE_URL set. Each script a fork-checks.yml step runs (check 34's reader:
+// the same directories, flags, quoting and swallowed failures) is a line of
+// ci-parity.sh's — `run` where the step sets DATABASE_URL, `nodb` where it does
+// not — from one of the directories the step may run it from, with the same
+// flags and the same environment besides the database URLs, which are the
+// harness's; every typecheck step is a `typecheck` line. And the other way: a
+// line no step runs as written is stale. What ci-parity.sh cannot run is
+// excused by job or by script with why.
+const PARITY_SCRIPT = "db/ci-parity.sh";
+const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
+  jobs: {
+    "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
+    "auth-poc": "the authorization POC's own stacks in Docker (eval-auth.ts --up)",
+  },
+  scripts: {
+    "scripts/check-landing.ts": "reads a pull request's or merge group's commit range from the event",
+    "scripts/migrate-to-sql-shim.ts": "the codemod's round-trip rewrites tracked files and judges them by git diff, so a working tree with changes would be rewritten",
+  },
+};
+/** A line of ci-parity.sh that runs a script: its verb, directory, script, flags, the assignments before it, and its line. */
+type ParityRun = { verb: "run" | "nodb"; dir: string; script: string; args: string; env: Record<string, string>; line: number };
+/** `[NAME=value …] run|nodb DIR SCRIPT [FLAG…]`, and `typecheck DIR`, each a line of main(). */
+const PARITY_RUN_LINE = /^\s*((?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)(run|nodb)\s+(\S+)\s+(\S+\.(?:ts|mts|mjs|js|cjs))((?:\s+--?[\w-]+(?:=\S+)?)*)\s*$/;
+const PARITY_TYPECHECK_LINE = /^\s*typecheck\s+(\S+)\s*$/;
+/** Any line whose command is run, nodb or typecheck, read or not: one the two shapes above miss is reported, since bash runs it all the same. */
+const PARITY_VERB_LINE = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*(?:run|nodb|typecheck)(?:\s|$)/;
+function parityLinesIn(text: string): { runs: ParityRun[]; typechecks: { dir: string; line: number }[]; unread: number[] } {
+  const runs: ParityRun[] = [];
+  const typechecks: { dir: string; line: number }[] = [];
+  const unread: number[] = [];
+  text.split("\n").forEach((raw, i) => {
+    if (/^\s*#/.test(raw)) return;
+    const l = raw.replace(/\s+#.*$/, "");
+    const m = PARITY_RUN_LINE.exec(l);
+    if (m) {
+      const env = Object.fromEntries(m[1].trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1).replace(/^(["'])(.*)\1$/, "$2")]));
+      runs.push({ verb: m[2] as "run" | "nodb", dir: posix.normalize(m[3]), script: m[4], args: m[5].trim().split(/\s+/).filter(Boolean).join(" "), env, line: i + 1 });
+      return;
+    }
+    const t = PARITY_TYPECHECK_LINE.exec(l);
+    if (t) typechecks.push({ dir: posix.normalize(t[1]), line: i + 1 });
+    else if (PARITY_VERB_LINE.test(l)) unread.push(i + 1);
+  });
+  return { runs, typechecks, unread };
+}
+/** The environment the comparison holds: the database URLs are the harness's, so not compared; the verb says whether DATABASE_URL is set. */
+const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL"));
+const heldEnv = (env: Record<string, string>): string => JSON.stringify(heldEntries(env).sort(([a], [b]) => a.localeCompare(b)));
+const parityLine = (verb: string, dir: string, script: string, args: string, env: Record<string, string>): string =>
+  [...heldEntries(env).map(([k, v]) => `${k}=${v}`), verb, dir, script, args].filter(Boolean).join(" ");
+/** What check 35 reports, both ways, for CI's script runs and typecheck directories against ci-parity.sh's lines. */
+function parityProblems(ci: ScriptRun[], ciTsc: string[], ciJobs: string[], parity: ReturnType<typeof parityLinesIn>, notRun: typeof PARITY_NOT_RUN): [where: string, detail: string][] {
+  const problems: [string, string][] = [];
+  const excused = (r: ScriptRun) => r.job in notRun.jobs || r.dirs.some((d) => posix.join(d, r.script) in notRun.scripts);
+  const verbOf = (r: ScriptRun): "run" | "nodb" => ("DATABASE_URL" in r.env ? "run" : "nodb");
+  const matches = (r: ScriptRun, p: ParityRun) => r.dirs.includes(p.dir) && r.script === p.script && r.args === p.args && verbOf(r) === p.verb && heldEnv(r.env) === heldEnv(p.env);
+  for (const r of ci) {
+    if (excused(r) || parity.runs.some((p) => matches(r, p))) continue;
+    problems.push([r.where, `runs ${r.script}${r.args ? ` ${r.args}` : ""}, which ${PARITY_SCRIPT} does not run as CI does — add \`${parityLine(verbOf(r), r.dirs[r.dirs.length - 1], r.script, r.args, r.env)}\` at its place in CI's order, or excuse it in PARITY_NOT_RUN with why`]);
+  }
+  for (const p of parity.runs) {
+    if (ci.some((r) => !excused(r) && matches(r, p))) continue;
+    problems.push([`${PARITY_SCRIPT}:${p.line}`, `\`${parityLine(p.verb, p.dir, p.script, p.args, p.env)}\` is run by no ${SUITE_WORKFLOW} step as written (directory, flags, environment, and whether DATABASE_URL is set) — match the step, or take the line out if CI no longer runs it`]);
+  }
+  for (const n of parity.unread) problems.push([`${PARITY_SCRIPT}:${n}`, "runs a script check 35 cannot read — write it `[NAME=value …] run|nodb DIR SCRIPT [--flag …]` or `typecheck DIR`, with no quoted value and no argument but flags, so it can be held to the workflow"]);
+  const parityTsc = parity.typechecks.map((t) => t.dir);
+  const ciTscDirs = new Set(ciTsc.map((x) => posix.normalize(x)));
+  for (const d of ciTscDirs) if (!parityTsc.includes(d)) problems.push([SUITE_WORKFLOW, `type-checks ${d}, which ${PARITY_SCRIPT} does not — add \`typecheck ${d}\``]);
+  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or add the step`]);
+  for (const [job, why] of Object.entries(notRun.jobs)) {
+    if (!ciJobs.includes(job)) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job}, which ${SUITE_WORKFLOW} no longer has — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job} with no reason`]);
+  }
+  for (const [script, why] of Object.entries(notRun.scripts)) {
+    if (!ci.some((r) => r.dirs.some((d) => posix.join(d, r.script) === script))) problems.push([SELF, `PARITY_NOT_RUN excuses ${script}, which no ${SUITE_WORKFLOW} step runs — take it off the list`]);
+    else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses ${script} with no reason`]);
+  }
+  return problems;
+}
+/** [what, workflow YAML, each run as `dir|script|args|env` for its last directory, sorted]. */
+const SCRIPT_RUN_PROBES: [string, string, string[]][] = [
+  ["flags kept, a redirect and a chain not", `jobs:\n  a:\n    steps:\n      - working-directory: evals\n        run: bun eval-a.ts --self-check > "$RUNNER_TEMP/a.log" && bun eval-b.ts --gate --x=1\n`, ['evals|eval-a.ts|--self-check|{}', 'evals|eval-b.ts|--gate --x=1|{}']],
+  ["the step's env, a command's own assignments on a continued line, and not a flag's =", `jobs:\n  a:\n    env:\n      J: "1"\n    steps:\n      - working-directory: db\n        env:\n          DATABASE_URL: postgres://x\n          S: two\n        run: |\n          timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/d.log" 2>&1 &\n          OB1_W=768 OB1_M=n \\\n            timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/n.log" 2>&1 &\n`, ['db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","OB1_M":"n","OB1_W":"768","S":"two"}', 'db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","S":"two"}']],
+  ["a lowercase assignment opening the command (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: limit=5 bun x/test-l.ts\n`, ['.|x/test-l.ts||{"limit":"5"}']],
+  ["a cd's directory last", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: (cd ../server-portable && exec bun test-p.ts) &\n`, ['server-portable|test-p.ts||{}']],
+];
+const PARITY_PROBE_TEXT = [
+  "run() { suite db \"$@\"; }",
+  "  # run db test-commented.ts",
+  "  run db                 test-live.ts",
+  "  OB1_FIXTURE_RESET=1 run evals eval-p.ts --fixture-check",
+  "  nodb .                 deploy/forwarder.ts --self-check",
+  "  nodb db                test-cli.ts",
+  "  typecheck db",
+  "  typecheck jev",
+].join("\n");
+const PARITY_PROBE_CI = (): ScriptRun[] => [
+  { dirs: ["db"], script: "test-live.ts", args: "", env: { DATABASE_URL: "x" }, job: "db-live", where: "w:live" },
+  { dirs: ["evals"], script: "eval-p.ts", args: "--fixture-check", env: { DATABASE_URL: "x", OB1_FIXTURE_RESET: "1" }, job: "data-layer", where: "w:p" },
+  { dirs: ["."], script: "deploy/forwarder.ts", args: "--self-check", env: {}, job: "repo", where: "w:fwd" },
+  { dirs: ["db"], script: "test-cli.ts", args: "", env: {}, job: "replay", where: "w:cli" },
+  { dirs: ["db", "server-portable"], script: "test-pre.ts", args: "", env: { DATABASE_URL: "x", UPGRADE_DATABASE_URL: "y" }, job: "data-layer", where: "w:pre" },
+  { dirs: ["."], script: "scripts/check-landing.ts", args: "--event", env: { EVENT: "${{ github.event_name }}" }, job: "repo", where: "w:landing" },
+  { dirs: ["deploy"], script: "x.ts", args: "", env: {}, job: "stack", where: "w:stack" },
+];
+const PARITY_PROBE_NOT_RUN = { jobs: { stack: "why" }, scripts: { "scripts/check-landing.ts": "why" } };
+/** [what, the probe's ci-parity text changed, its CI runs changed, CI's tsc dirs, the wheres reported]. */
+const PARITY_PROBES: [string, (t: string) => string, (c: ScriptRun[]) => ScriptRun[], string[], string[]][] = [
+  ["the probe as written, a cd's directory taken", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c, ["db", "jev"], []],
+  ["a step ci-parity.sh lacks", (t) => t, (c) => c, ["db", "jev"], ["w:pre"]],
+  ["a line no step runs", (t) => `${t}\n  run server-portable test-pre.ts\n  nodb db test-gone.ts`, (c) => c, ["db", "jev"], [`${PARITY_SCRIPT}:10`]],
+  ["the database verb wrong", (t) => t.replace("nodb db                test-cli.ts", "run db test-cli.ts") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:cli", `${PARITY_SCRIPT}:6`]],
+  ["an environment variable dropped", (t) => t.replace("OB1_FIXTURE_RESET=1 run", "run") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:p", `${PARITY_SCRIPT}:4`]],
+  ["a flag changed", (t) => t.replace("--fixture-check", "--gate") + "\n  run server-portable test-pre.ts", (c) => c, ["db", "jev"], ["w:p", `${PARITY_SCRIPT}:4`]],
+  ["the same script from the wrong directory", (t) => `${t}\n  run db test-pre.ts`.replace("nodb db                test-cli.ts", "nodb server-portable test-cli.ts"), (c) => c, ["db", "jev"], ["w:cli", `${PARITY_SCRIPT}:6`]],
+  ["a typecheck missing, and one CI does not run", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c, ["db", "evals"], [SUITE_WORKFLOW, `${PARITY_SCRIPT}:8`]],
+  ["lines check 35 cannot read, which bash runs all the same (review pass 1)", (t) => `${t}\n  run server-portable test-pre.ts  # a trailing comment is read\n  run db test-a.ts --role reader\n  OB1_X="a b" run db test-a.ts\n  nodb db some-binary\n  typecheck`, (c) => c, ["db", "jev"], [`${PARITY_SCRIPT}:10`, `${PARITY_SCRIPT}:11`, `${PARITY_SCRIPT}:12`, `${PARITY_SCRIPT}:13`]],
+  ["an excuse for a job and a script CI no longer has", (t) => `${t}\n  run server-portable test-pre.ts`, (c) => c.filter((r) => r.job !== "stack" && r.script !== "scripts/check-landing.ts"), ["db", "jev"], [SELF, SELF]],
+];
+function checkCiParity() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 35 parses the workflow with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2903)`);
+    return;
+  }
+  for (const [what, yaml, expected] of SCRIPT_RUN_PROBES) {
+    const got = scriptRunsIn("probe.yml", Bun.YAML.parse(yaml)).map((r) => `${r.dirs[r.dirs.length - 1]}|${r.script}|${r.args}|${JSON.stringify(Object.fromEntries(Object.entries(r.env).sort(([a], [b]) => a.localeCompare(b))))}`).sort();
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 35 no longer reads exactly ${JSON.stringify(expected)} for its probe "${what}" (read ${JSON.stringify(got)})`);
+  }
+  const probeLines = parityLinesIn(PARITY_PROBE_TEXT);
+  if (probeLines.runs.length !== 4 || probeLines.typechecks.length !== 2 || probeLines.runs[1].env.OB1_FIXTURE_RESET !== "1") fail(SELF, `check 35 no longer reads its probe ci-parity text as four runs (one with OB1_FIXTURE_RESET) and two typechecks (read ${JSON.stringify(probeLines)})`);
+  for (const [what, text, ci, tsc, expected] of PARITY_PROBES) {
+    const runs = ci(PARITY_PROBE_CI());
+    const got = parityProblems(runs, tsc, [...new Set(runs.map((r) => r.job))], parityLinesIn(text(PARITY_PROBE_TEXT)), PARITY_PROBE_NOT_RUN).map(([where]) => where);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 35 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 35 cannot read what its steps run: ${(e as Error).message}`); return; }
+  const ci = scriptRunsIn(SUITE_WORKFLOW, doc);
+  const ciTsc = tscStepsIn(doc as WorkflowDoc);
+  const ciJobs = isMapping(doc) && isMapping(doc.jobs) ? Object.keys(doc.jobs) : [];
+  const parity = parityLinesIn(readFileSync(join(ROOT, PARITY_SCRIPT), "utf8"));
+  // FORK.md says to run it as ./db/ci-parity.sh, which a lost executable bit
+  // refuses (review pass 3: a restore by copy dropped it); a checkout carries
+  // the committed mode, so the file's mode is what a commit would hold.
+  if (!(statSync(join(ROOT, PARITY_SCRIPT)).mode & 0o100)) fail(PARITY_SCRIPT, "is not executable, so `./db/ci-parity.sh`, as FORK.md runs it, is refused — `chmod +x db/ci-parity.sh` (check 35, SMD-2903)");
+  // Were these missed, the reading is broken, not the two files in step.
+  if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
+  for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+}
+checkCiParity();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
