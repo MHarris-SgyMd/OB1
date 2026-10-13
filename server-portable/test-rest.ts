@@ -284,6 +284,59 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
     `the document names the forwarder slot, beside a caller's key and never alone (${statsSecurity.join(", ")})`);
 }
 
+console.log("\n[5c] A keyed /health answers the brain's record on the health surface to a key that may read it, cleared in time; liveness to any other (SMD-2287)");
+{
+  const record = { version: "1.0.0", database: { reachable: true }, counts: { thoughts: 3 } };
+  answer = async () => record;
+  identity = { status: "ok", agentId: "agent-1" };
+  const health = async (key?: string, method = "GET", extra: Record<string, string> = {}) => {
+    const r = await app.fetch(new Request("http://api/health", { method, headers: { ...(key ? { "x-brain-key": key } : {}), ...extra } }));
+    const text = await r.text();
+    return { status: r.status, body: text ? JSON.parse(text) as Record<string, unknown> : null };
+  };
+  const live = { status: "ok" };
+  calls.length = 0;
+  let r = await health();
+  assert(r.status === 200 && same(r.body, live) && calls.length === 0, `no key: liveness, nothing read (${JSON.stringify(r.body)})`);
+  for (const key of ["read-raw", "write-raw"]) {
+    calls.length = 0;
+    r = await health(key);
+    assert(r.status === 200 && same(r.body, record) && calls[0]?.name === "brainInfo" && calls[0]?.principal === ("health" as never), `${key}: the brain's record, read on the health surface (${JSON.stringify(r.body)} via ${calls[0]?.name}(${String(calls[0]?.principal)}))`);
+  }
+  for (const [label, key] of [["a capture key", "cap-raw"], ["a wrong key", "nope"], ["a forwarder key alone", "fwd-raw"]] as const) {
+    r = await health(key);
+    assert(r.status === 200 && same(r.body, live), `${label}: liveness, never a refusal (${JSON.stringify(r.body)})`);
+  }
+  // Present but the slot ignored: the record is the caller's key's to see, whoever carried it.
+  r = await health("read-raw", "GET", { "x-brain-forwarder": "nope" });
+  assert(r.status === 200 && same(r.body, record), `a read key with a junk forwarder slot: still the record (${JSON.stringify(r.body)})`);
+  r = await health("read-raw", "HEAD");
+  assert(r.status === 200 && r.body === null, "a keyed HEAD: 200 with no body, nothing read for it");
+  for (const [label, word] of [["revoked", { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null }], ["busy", { status: "busy" }]] as const) {
+    identity = word as AgentOutcome;
+    lines.length = 0;
+    r = await health("read-raw");
+    const line = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert(r.status === 200 && same(r.body, live) && line.outcome === "refused" && line.code === (label === "revoked" ? "REVOKED" : "BUSY"),
+      `a ${label} key: liveness, its line refused with ${line.code} (${JSON.stringify(r.body)})`);
+  }
+  identity = { status: "ok", agentId: "agent-1" };
+  resolveThrows = true;
+  r = await health("read-raw");
+  resolveThrows = false;
+  assert(r.status === 200 && same(r.body, live), "a registry that throws: liveness, not a 500");
+  // A registry that does not answer within the deadline could still say revoked: liveness, at the deadline.
+  let release: () => void = () => {};
+  resolveGate = new Promise<void>((done) => { release = done; });
+  const t0 = performance.now();
+  r = await health("read-raw");
+  const took = performance.now() - t0;
+  release();
+  resolveGate = null;
+  assert(r.status === 200 && same(r.body, live) && took >= 2_400 && took < 4_000, `a registry silent past the deadline: liveness, at it (${Math.round(took)} ms)`);
+  answer = async () => ok({});
+}
+
 console.log("\n[6] Inputs are the tool's schema; a refused one names the field, never its value");
 {
   calls.length = 0;
@@ -605,12 +658,18 @@ console.log("\n[8] One JSON line per request (telemetry.ts, SMD-1849): method, r
   const unmatchedLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
   assert(unmatched.status === 404 && lines.length === 1 && unmatchedLine.status === 404 && unmatchedLine.outcome === "refused" && unmatchedLine.code === "NO_ROUTE",
     `a path with an encoded line break: one 404 NO_ROUTE line (${lines.join(" / ")})`);
-  // The liveness probe has no record at all, keyed or not.
+  // The liveness probe — no key — has no record at all; a keyed /health is a
+  // request like any other, its line naming the route and the tool (SMD-2287).
   lines.length = 0;
   const probesBefore = openRequestCount();
-  await app.fetch(new Request("http://api/health", { headers: { "x-brain-key": "read-raw" } }));
+  await app.fetch(new Request("http://api/health"));
   await app.fetch(new Request("http://api/health", { method: "HEAD" }));
-  assert(lines.length === 0 && openRequestCount() === probesBefore, `GET and HEAD /health: no line, no record (${lines.length} lines)`);
+  assert(lines.length === 0 && openRequestCount() === probesBefore, `keyless GET and HEAD /health: no line, no record (${lines.length} lines)`);
+  await app.fetch(new Request("http://api/health", { headers: { "x-brain-key": "cap-raw" } }));
+  const keyedHealth = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(lines.length === 1 && keyedHealth.route === "/health" && keyedHealth.tool === "brain_info" && keyedHealth.outcome === "refused",
+    `a keyed /health its key may not read: one line, refused (${lines.join(" / ")})`);
+  lines.length = 0;
   // Any other method there is no probe: its 405 is logged (review pass 4).
   await app.fetch(new Request("http://api/health", { method: "POST" }));
   const postHealth = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;

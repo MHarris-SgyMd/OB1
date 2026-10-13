@@ -441,8 +441,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Liveness
-         * @description Internal only: the process is serving. No key, nothing about the brain.
+         * Liveness, and the brain's record for a key that may read it
+         * @description Internal only: the process is serving, `{ status: "ok" }`. With a key that may read brain_info, which the agent registry clears within the deadline, the brain's record on the health surface instead — what the MCP server's public /health shows (SMD-2287). Any other key is answered liveness, as no key is: this route refuses no one.
          */
         get: operations["health"];
         put?: never;
@@ -3057,12 +3057,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Serving. */
+            /** @description Serving: `{ status: "ok" }`, or the brain's record. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
             };
             /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
             405: {

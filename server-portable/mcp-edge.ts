@@ -13,6 +13,8 @@ import type { Context } from "hono";
 import { challengeHeader, UNREACHABLE_RETRY_AFTER_SECONDS } from "./oauth-edge.ts";
 import { traceOf, type RequestOutcome, type RequestTrace } from "./telemetry.ts";
 import type { ToolName } from "./tools.ts";
+import type { Input } from "./core/schemas.ts";
+import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 
 /**
  * What a request's tool calls tell its line (telemetry.ts): how many ran to
@@ -415,3 +417,47 @@ export function partsOf(body: ParsedBody): RequestParts {
 export function cutByStopLine(label: string, elapsedMs: number): string {
   return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running when the stop closed it, and the process exits now; a capture may or may not have landed (SMD-2250)`;
 }
+
+/** The keyed worker mirrors, each the REST mirror of its tool (SMD-2132, SMD-2272). */
+export type MirrorTool = "retry_failed" | "run_worker" | "release_stale_leases";
+
+/**
+ * A worker mirror's refusal, in words: each table words every code its
+ * operation refuses with (core/workers.ts), and no other, answered as a 400
+ * beside the code. One table for every server that answers the mirrors, so
+ * the MCP server as a REST client says them as this one does (SMD-2287).
+ */
+export const MIRROR_WORDS: { retry_failed: Record<RetryFailedCode, string>; run_worker: Record<RunWorkerCode, string>; release_stale_leases: Record<ReleaseLeasesCode, string> } = {
+  retry_failed: {
+    REFUSED_EMPTY_WORK_TYPE: "work_type is required — pass the exact workType worker_status reports.",
+  },
+  run_worker: {
+    REFUSED_EMPTY_WORK_TYPE: "work_type is required — pass the exact workType worker_status reports for the pool to drain.",
+    RUN_WORKER_DRAIN_NOT_AVAILABLE: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.",
+  },
+  release_stale_leases: {
+    REFUSED_EMPTY_WORK_TYPE: "work_type was given but blank — omit it to reap across all pools, or pass a real workType.",
+    REFUSED_LIVE_LEASE_NEEDS_WORKER: "include_live requires worker_id — releasing a live lease risks the holder double-processing.",
+  },
+};
+
+const named = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/**
+ * A worker mirror's JSON body as its operation's input: a work type that is
+ * no string is empty (the operation refuses it), a dry run is `true` alone,
+ * a `limit` a positive integer or left out, and a lease's ids made text.
+ */
+export const MIRROR_INPUT = {
+  retry_failed: (args: Record<string, unknown>) => ({ work_type: named(args.work_type) }),
+  run_worker: (args: Record<string, unknown>) => {
+    // limit is accepted from the body when it is a positive integer, else omitted.
+    const limit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
+    return { work_type: named(args.work_type), dry_run: args.dry_run === true, limit };
+  },
+  release_stale_leases: (args: Record<string, unknown>) => ({
+    work_type: args.work_type === undefined ? undefined : String(args.work_type),
+    worker_id: args.worker_id === undefined ? undefined : String(args.worker_id),
+    include_live: args.include_live === true,
+  }),
+} satisfies { [K in MirrorTool]: (args: Record<string, unknown>) => Input<K> };

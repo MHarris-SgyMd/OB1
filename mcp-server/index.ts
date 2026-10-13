@@ -1,0 +1,44 @@
+// The MCP server's entry (SMD-2287): `bun index.ts` serves app.ts on PORT,
+// reached as mcp.ob1.internal on the stack's mesh and at /mcp through the
+// proxy. It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
+// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --scope forward`) —
+// beside each caller's key. It reads no store and holds no key list: what a
+// key may do is the REST core's to say.
+
+import { createRestClient } from "../rest-client/index.ts";
+import { routable } from "../server-portable/auth.ts";
+import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
+import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
+
+/** Where the REST core answers on the mesh unless OB1_REST_URL says otherwise. */
+export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
+
+const env = process.env;
+const forwarderKey = env.OB1_FORWARDER_KEY?.trim();
+if (import.meta.main && !forwarderKey) {
+  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
+  process.exit(2);
+}
+
+const rest = createRestClient({ baseUrl: env.OB1_REST_URL?.trim() || DEFAULT_REST_URL, forwarderKey: forwarderKey || undefined, timeoutMs: REST_TIMEOUT_MS });
+const app = createMcpApp({ rest, edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
+
+/** The requests in flight, counted for the stop (SMD-2250): it waits for them within OB1_STOP_GRACE. */
+const calls = createCallCount();
+let bunServer: Stoppable | undefined;
+if (import.meta.main) {
+  const grace = drainBoundFrom(env.OB1_STOP_GRACE);
+  if (grace.problem) console.warn(grace.problem);
+  // No store to close here: the REST core holds it.
+  drainOnSignal({ drainBoundMs: grace.drainBoundMs, server: () => bunServer, calls, close: async () => true });
+}
+
+export default {
+  // An empty PORT is unset, not port 0 (SMD-1799).
+  port: Number(env.PORT || 8000),
+  fetch: (req: Request, server?: unknown) => {
+    if (import.meta.main && !bunServer && isStoppable(server)) bunServer = server;
+    // A request whose URL will not parse, rebuilt so it is routed and refused, not a 500 (SMD-2535).
+    return calls.track(() => Promise.resolve(app.fetch(routable(req))));
+  },
+};

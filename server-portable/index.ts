@@ -12,7 +12,7 @@ import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
 import { beginRequest, cutOpenRequests, endsWithStream, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "./telemetry.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "./oauth-edge.ts";
-import { BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS, METHOD_NOT_ALLOWED_HEADERS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody, partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing, unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type RequestParts } from "./mcp-edge.ts";
+import { BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS, METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody, partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing, unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type RequestParts } from "./mcp-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
@@ -571,27 +571,11 @@ app.post("*", async (c, next) => {
     if (trace) trace.code = o.refusal.code;
     return c.json({ error: words[o.refusal.code as C], code: o.refusal.code }, 400, corsHeaders);
   };
-  const named = (v: unknown): string => (typeof v === "string" ? v : "");
+  // The body made each operation's input, and its refusals worded, as mcp-edge.ts's tables say — the MCP server as a REST client reads the same (SMD-2287).
   try {
-    if (isRetry) return said(await core.retryFailed(caller, { work_type: named(args.work_type) }), {
-      REFUSED_EMPTY_WORK_TYPE: "work_type is required — pass the exact workType worker_status reports.",
-    });
-    if (isRun) {
-      // limit is accepted from the body when it is a positive integer, else omitted.
-      const limit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
-      return said(await core.runWorker(caller, { work_type: named(args.work_type), dry_run: args.dry_run === true, limit }), {
-        REFUSED_EMPTY_WORK_TYPE: "work_type is required — pass the exact workType worker_status reports for the pool to drain.",
-        RUN_WORKER_DRAIN_NOT_AVAILABLE: "the executing drain is not yet available — the server does not run the bulk LLM passes; the drain will land on a callable worker core (SMD-2304). Send dry_run: true to preview what a pass would claim.",
-      });
-    }
-    return said(await core.releaseStaleLeases(caller, {
-      work_type: args.work_type === undefined ? undefined : String(args.work_type),
-      worker_id: args.worker_id === undefined ? undefined : String(args.worker_id),
-      include_live: args.include_live === true,
-    }), {
-      REFUSED_EMPTY_WORK_TYPE: "work_type was given but blank — omit it to reap across all pools, or pass a real workType.",
-      REFUSED_LIVE_LEASE_NEEDS_WORKER: "include_live requires worker_id — releasing a live lease risks the holder double-processing.",
-    });
+    if (isRetry) return said(await core.retryFailed(caller, MIRROR_INPUT.retry_failed(args)), MIRROR_WORDS.retry_failed);
+    if (isRun) return said(await core.runWorker(caller, MIRROR_INPUT.run_worker(args)), MIRROR_WORDS.run_worker);
+    return said(await core.releaseStaleLeases(caller, MIRROR_INPUT.release_stale_leases(args)), MIRROR_WORDS.release_stale_leases);
   } catch (e) {
     // SQL-only (the PostgREST shim throws), or a store failure: a reason, not a bare 500 (parity with /worker-status).
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(e); }

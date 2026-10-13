@@ -1,0 +1,17 @@
+{
+  "name": "ob1-mcp-server",
+  "private": true,
+  "type": "module",
+  "comment": "The brain's MCP server as a client of its REST core (SMD-2287): MCP over streamable HTTP on SDK v2, every tool a call to the REST core through ../rest-client with the caller's key forwarded beside this server's forward-scope key, every answer worded by ../server-portable/render.ts, and the endpoint's HTTP edge server-portable's own (../server-portable/mcp-edge.ts). The MCP packages, hono and zod are pinned at server-portable's versions, so a tool's schema (server-portable/core/schemas.ts) and the SDK that validates it agree; the type pins move with server-portable's (check 18).",
+  "dependencies": {
+    "@modelcontextprotocol/core": "2.1.0",
+    "@modelcontextprotocol/server": "2.1.0",
+    "hono": "4.13.8",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "26.6.2",
+    "typescript": "5.9.3"
+  }
+}

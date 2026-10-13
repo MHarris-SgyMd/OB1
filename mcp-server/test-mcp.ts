@@ -1,0 +1,261 @@
+#!/usr/bin/env bun
+/**
+ * test-mcp.ts — the MCP server as a client of the REST core (SMD-2287), with
+ * no database: the real REST app over a stub core behind it, in process.
+ *
+ * It holds that the server says what server-portable says:
+ * - the tool list is the caller's operations, as whoami names them;
+ * - every reply is what render.ts makes of the outcome the in-process core
+ *   would have handed it — a success, a refusal (carried whole through the
+ *   forwarder slot), a fault and capture's STORE_UNAVAILABLE;
+ * - a scan's links sit under the endpoint;
+ * - the key refusals are the edge's envelopes (mcp-edge.ts), a refused
+ *   notification's answer bare;
+ * - /health, the worker mirrors and the job routes answer as index.ts's.
+ * test-auth.ts and (PR 3b) test-e2e-sql.ts run against it too, with
+ * OB1_MCP_UNDER_TEST=client.
+ *
+ *   bun test-mcp.ts
+ */
+
+import { createAssert } from "../db/test-support.ts";
+import { hashKey, type Principal } from "../server-portable/auth.ts";
+import type { Core } from "../server-portable/core/index.ts";
+import { ok, refuse, type Refusal } from "../server-portable/core/refusal.ts";
+import { createRestApp } from "../server-portable/rest/app.ts";
+import * as say from "../server-portable/render.ts";
+import { visibleToolNames } from "../server-portable/tools.ts";
+import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/mcp-edge.ts";
+import type { AgentOutcome } from "../server-portable/agents.ts";
+import { createRestClient } from "../rest-client/index.ts";
+import { createMcpApp } from "./app.ts";
+
+const { assert, report } = createAssert();
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+// ── The REST core over a stub core, and the MCP server in front of it ───────
+const calls: { name: string; principal: Principal | string; input: unknown }[] = [];
+let answer: (name: string) => unknown = () => ok({});
+const core = new Proxy({}, {
+  get: (_t, prop) => async (principal: Principal | string, input: unknown) => {
+    calls.push({ name: String(prop), principal, input });
+    return answer(String(prop));
+  },
+}) as unknown as Core;
+let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
+const restApp = createRestApp({
+  core,
+  init: () => {},
+  keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `chatgpt:read:${hashKey("read-raw")}`, `hook:capture:${hashKey("cap-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+  resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+  track: (run) => run(),
+  log: () => {},
+});
+let restDown = false;
+/** The REST core away for an operation, whoami still answering: a call that fails past the caller's check. */
+let restDownForCalls = false;
+const rest = createRestClient({
+  baseUrl: "http://api.ob1.internal",
+  fetch: async (req) => {
+    if (restDown || (restDownForCalls && !new URL(req.url).pathname.endsWith("/whoami"))) throw new TypeError("fetch failed: connection refused");
+    return restApp.fetch(req);
+  },
+  forwarderKey: "fwd-raw",
+});
+const warned: string[] = [];
+const app = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => warned.push(l) });
+
+let rpcId = 1;
+type Rpc = { status: number; headers: Headers; body: Record<string, unknown> | null };
+async function rpc(method: string, params: unknown, key?: string, opts: { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string } = {}): Promise<Rpc> {
+  const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const via = opts.via ?? "header";
+  if (key && via === "header") headers["x-brain-key"] = key;
+  if (key && via === "bearer") headers.authorization = `Bearer ${key}`;
+  const url = `http://mcp${opts.path ?? "/mcp"}${key && via === "query" ? `?key=${key}` : ""}`;
+  const message = opts.notification ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", id: rpcId++, method, params };
+  const r = await app.fetch(new Request(url, { method: "POST", headers, body: JSON.stringify(message) }));
+  const text = await r.text();
+  const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+  return { status: r.status, headers: r.headers, body: line ? JSON.parse(line) : null };
+}
+const toolsOf = async (key: string, via?: "header" | "query" | "bearer") =>
+  (((await rpc("tools/list", {}, key, { via })).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name).sort();
+type Reply = { text: string; sc: Record<string, unknown>; isError: boolean };
+async function tool(name: string, args: Record<string, unknown>, key = "write-raw", path?: string): Promise<Reply> {
+  const r = await rpc("tools/call", { name, arguments: args }, key, { path });
+  const result = (r.body?.result ?? {}) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+  return { text: (result.content ?? []).map((c) => c.text).join("\n"), sc: result.structuredContent ?? {}, isError: result.isError === true };
+}
+const expectReply = (got: Reply, want: say.Reply) => got.text === want.content[0].text && same(got.sc, want.structuredContent) && got.isError === (want.isError === true);
+
+console.log("[1] The tool list is the caller's operations, as the REST core's whoami names them");
+{
+  for (const [key, scope] of [["write-raw", "write"], ["read-raw", "read"], ["cap-raw", "capture"]] as const) {
+    const tools = await toolsOf(key);
+    assert(same(tools, [...visibleToolNames({ scope })].sort()), `${scope} key: its scope's tools (${tools.length})`);
+  }
+  assert(same(await toolsOf("read-raw", "query"), await toolsOf("read-raw")) && same(await toolsOf("read-raw", "bearer"), await toolsOf("read-raw")), "the key in ?key= or a Bearer token reads the same list");
+  // A forwarder key before a client's key is passed over: the client's key is the caller (auth.ts presentedKeys' order).
+  const r = await app.fetch(new Request("http://mcp/mcp?key=read-raw", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "fwd-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }));
+  const listed = ((JSON.parse((await r.text()).split("\n").find((l) => l.startsWith("data: "))?.slice(6) ?? "{}").result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort();
+  assert(same(listed, [...visibleToolNames({ scope: "read" })].sort()), `a forwarder key in x-brain-key beside a read key in ?key=: the read key's list (${listed.length})`);
+}
+
+console.log("\n[2] Each reply is what render.ts makes of the core's outcome, carried over REST");
+{
+  const thought = { id: "00000000-0000-4000-8000-000000000001", content: "alpha", metadata: { type: "idea" }, created_at: "2026-10-01T00:00:00Z" };
+  const stats = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
+  const cases: [string, Record<string, unknown>, string, unknown, (o: never) => say.Reply][] = [
+    ["thought_stats", {}, "thoughtStats", stats, (o) => say.renderThoughtStats(o)],
+    ["fetch", { id: thought.id }, "fetch", { id: thought.id, title: "alpha", text: "alpha", url: "https://x/1", metadata: {} }, (o) => say.renderFetch(o)],
+    ["list_thought_ids", { limit: 2 }, "listThoughtIds", { total: 1, digest: null, ids: [thought.id], cursor: null }, (o) => say.renderThoughtIds(o)],
+  ];
+  for (const [name, args, op, value, render] of cases) {
+    answer = (n) => (n === op ? ok(value) : ok({}));
+    calls.length = 0;
+    const got = await tool(name, args);
+    assert(expectReply(got, render(ok(value) as never)) && calls[0]?.name === op, `${name}: the in-process reply, from ${op} over REST (${got.text.slice(0, 60)})`);
+  }
+  // brain_info's table needs a whole record, which the suites over a real database render (test-auth, test-e2e-sql).
+}
+
+console.log("\n[3] A refusal is said as server-portable says it: the refusal whole, carried by the forwarder slot");
+{
+  const refusals: [string, Record<string, unknown>, string, Refusal, (o: never) => say.Reply][] = [
+    ["fetch", { id: "00000000-0000-4000-8000-000000000009" }, "fetch", { code: "NOT_FOUND", retryable: false, id: "00000000-0000-4000-8000-000000000009" }, (o) => say.renderFetch(o)],
+    ["search_thoughts", { query: "q", filter: { a: 1 } }, "searchThoughts", { code: "REFUSED_FILTER", retryable: false, message: "filter key a is not one the boundary knows" }, (o) => say.renderSearchThoughts(o, false)],
+    ["capture_thought", { content: "x", supersedes: "nope" }, "capture", { code: "REFUSED_SUPERSEDES_SHAPE", retryable: false, value: "nope", orNull: false }, (o) => say.renderCapture(o)],
+    ["delete_thought", { id: "00000000-0000-4000-8000-000000000002" }, "deleteThought", { code: "REFUSED_CITED", retryable: false, id: "00000000-0000-4000-8000-000000000002", citedBy: 1 }, (o) => say.renderDelete(o)],
+    ["run_worker", { work_type: "w" }, "runWorker", { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE", retryable: false }, (o) => say.renderRunWorker(o)],
+  ];
+  for (const [name, args, op, refusal, render] of refusals) {
+    answer = (n) => (n === op ? refuse(refusal as never) : ok({}));
+    const got = await tool(name, args);
+    assert(got.isError && expectReply(got, render({ ok: false, refusal } as never)), `${name} ${refusal.code}: the words in-process (${got.text.slice(0, 70)})`);
+  }
+  // A save whose vector did not attach: a 201 with the refusal beside it, said as the refusal.
+  const unattached = { code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "00000000-0000-4000-8000-000000000003", detail: "the vector write failed" } as const;
+  answer = (n) => (n === "capture" ? refuse(unattached) : ok({}));
+  const saved = await tool("capture_thought", { content: "y" });
+  assert(expectReply(saved, say.renderCapture({ ok: false, refusal: unattached } as never)), `capture saved without its vector: the in-process words (${saved.text.slice(0, 60)})`);
+}
+
+console.log("\n[4] A fault is the tool's fault words: FAILED, capture's STORE_UNAVAILABLE, and the REST core away");
+{
+  answer = () => { throw new Error("relation \"thoughts\" does not exist"); };
+  let got = await tool("thought_stats", {});
+  assert(expectReply(got, say.failed(new Error("relation \"thoughts\" does not exist"))), `a read's fault: Error and its message (${got.text})`);
+  got = await tool("update_thought", { id: "00000000-0000-4000-8000-000000000001", content: "z" });
+  assert(expectReply(got, say.failed(new Error("relation \"thoughts\" does not exist"), { lead: "update_thought failed: " })), `a write's fault: its lead (${got.text})`);
+  got = await tool("capture_thought", { content: "z" });
+  assert(expectReply(got, say.storeUnavailable(new Error("relation \"thoughts\" does not exist"))) && got.sc.code === "STORE_UNAVAILABLE" && got.sc.retryable === true,
+    `capture's fault: STORE_UNAVAILABLE, retryable, the verdict the session hook keys on (${JSON.stringify(got.sc)})`);
+  answer = () => ok({});
+  // The REST core away: whoami cannot answer, so the request itself fails; a call already past it is the tool's fault.
+  restDown = true;
+  const away = await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }));
+  restDown = false;
+  assert(away.status === 500, `the REST core away before the caller is known: a 500 (${away.status})`);
+  // Away mid-call: capture's STORE_UNAVAILABLE, so the session hook keeps the capture and retries; a re-capture of the text upserts its row (073).
+  restDownForCalls = true;
+  got = await tool("capture_thought", { content: "z" });
+  const read = await tool("thought_stats", {});
+  restDownForCalls = false;
+  assert(got.sc.code === "STORE_UNAVAILABLE" && got.sc.retryable === true && /connection refused/.test(got.text), `the REST core away mid-capture: STORE_UNAVAILABLE, retryable (${got.text})`);
+  assert(read.isError && /^Error: fetch failed: connection refused/.test(read.text), `…and mid-read: the read's fault words (${read.text})`);
+}
+
+console.log("\n[5] A scan's job links sit under the endpoint the call came to, as server-portable's do");
+{
+  answer = (n) => (n === "scanThoughts" ? ok({ jobId: "job-7", status: "accepted", poll: "/jobs/job-7", stream: "/jobs/job-7/stream" }) : ok({}));
+  for (const [path, base] of [["/mcp", "/mcp"], ["/", ""], ["//mcp/", "/mcp"]] as const) {
+    const got = await tool("scan_thoughts", { limit: 5 }, "write-raw", path);
+    assert(got.sc.poll === `${base}/jobs/job-7` && got.sc.stream === `${base}/jobs/job-7/stream`, `at ${path}: poll ${got.sc.poll}, stream ${got.sc.stream}`);
+  }
+  answer = () => ok({});
+}
+
+console.log("\n[6] The key refusals are the edge's: the JSON-RPC envelope for a request, a bare answer for a notification");
+{
+  let r = await rpc("tools/list", {});
+  assert(r.status === 200 && (r.body?.error as { code?: number } | undefined)?.code === -32001, `no key: the -32001 envelope (${JSON.stringify(r.body)})`);
+  r = await rpc("tools/list", {}, "wrong");
+  assert(r.status === 200 && (r.body?.error as { code?: number } | undefined)?.code === -32001, "a wrong key: the same");
+  r = await rpc("tools/list", {}, "fwd-raw");
+  assert(r.status === 200 && (r.body?.error as { code?: number } | undefined)?.code === -32001, "a forwarder key alone: the same, no tool list");
+  r = await rpc("notifications/initialized", {}, "wrong", { notification: true });
+  assert(r.status === 202 && r.body === null, `a notification with a wrong key: 202, no body (${r.status})`);
+  identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null };
+  r = await rpc("tools/list", {}, "write-raw");
+  assert((r.body?.error as { message?: string } | undefined)?.message === REVOKED_MESSAGE, "a revoked key: the revocation's own words");
+  identity = { status: "busy" } as AgentOutcome;
+  r = await rpc("tools/list", {}, "write-raw");
+  assert((r.body?.error as { code?: number; message?: string } | undefined)?.code === -32003 && (r.body?.error as { message?: string }).message === BUSY_MESSAGE && r.headers.get("retry-after") === "2", "a busy registry: -32003, Retry-After 2");
+  r = await rpc("notifications/initialized", {}, "write-raw", { notification: true });
+  assert(r.status === 503 && r.headers.get("retry-after") === "2", `…and a notification then: 503, Retry-After (${r.status})`);
+  identity = { status: "ok", agentId: "agent-1" };
+  // This server's own forwarder refused: a misconfiguration, a fault — never a caller's refusal.
+  const misconfigured = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: (req) => Promise.resolve(restApp.fetch(req)), forwarderKey: "not-a-forwarder" }), edge: () => ({ configured: false, origin: null }) });
+  const m = await misconfigured.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" }));
+  assert(m.status === 500, `a forwarder key the REST core refuses: a 500, not the caller's -32001 (${m.status})`);
+}
+
+console.log("\n[7] /health: liveness, and the brain's record for a key that may read it");
+{
+  const record = { version: "1.0.0", store: "sql" };
+  answer = () => record;
+  const health = async (key?: string, method = "GET") => {
+    const r = await app.fetch(new Request("http://mcp/mcp/health", { method, headers: key ? { "x-brain-key": key } : {} }));
+    return { status: r.status, text: await r.text() };
+  };
+  let h = await health();
+  assert(h.status === 200 && h.text === "ok", "no key: ok");
+  h = await health("read-raw");
+  const body = JSON.parse(h.text) as Record<string, unknown>;
+  assert(h.status === 200 && body.version === "1.0.0" && same(body.oauth, { configured: false, origin: null, advertised: false }), `a read key: the record, the edge's view beside it (${h.text})`);
+  for (const key of ["cap-raw", "wrong", "fwd-raw"]) {
+    h = await health(key);
+    assert(h.text === "ok", `${key}: ok`);
+  }
+  h = await health("read-raw", "HEAD");
+  assert(h.status === 200 && h.text === "", "a keyed HEAD: 200, no body");
+  answer = () => ok({});
+}
+
+console.log("\n[8] The keyed mirrors and the job routes answer as index.ts's");
+{
+  answer = (n) => (n === "workerStatus" ? ok({ pools: [{ workType: "w", pending: 1 }] }) : n === "runWorker" ? refuse({ code: "REFUSED_EMPTY_WORK_TYPE", retryable: false }) : ok({}));
+  let r = await app.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
+  assert(r.status === 200 && same(await r.json(), [{ workType: "w", pending: 1 }]), "GET /worker-status: the bare rows");
+  r = await app.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "cap-raw" } }));
+  assert(r.status === 200 && (await r.text()) === "ok", "…a capture key is shown ok");
+  r = await app.fetch(new Request("http://mcp/worker-run", { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ work_type: 5 }) }));
+  const run = await r.json() as Record<string, unknown>;
+  assert(r.status === 400 && same(run, { error: MIRROR_WORDS.run_worker.REFUSED_EMPTY_WORK_TYPE, code: "REFUSED_EMPTY_WORK_TYPE" }), `POST /worker-run with a work type that is no string: its words, a 400 (${JSON.stringify(run)})`);
+  r = await app.fetch(new Request("http://mcp/worker-run", { method: "POST", headers: { "x-brain-key": "read-raw" }, body: "{}" }));
+  assert(r.status === 200 && (await r.text()) === "ok", "…a read key is shown ok");
+  answer = (n) => (n === "jobStatus" ? ok({ jobId: "job-7", kind: "scan", status: "succeeded" }) : ok({}));
+  r = await app.fetch(new Request("http://mcp/mcp/jobs/job-7", { headers: { "x-brain-key": "read-raw" } }));
+  assert(r.status === 200 && same(await r.json(), { jobId: "job-7", kind: "scan", status: "succeeded" }), "GET /mcp/jobs/<id>: the job's state");
+  answer = (n) => (n === "jobStatus" ? refuse({ code: "NOT_FOUND", retryable: false, id: "job-8" }) : ok({}));
+  r = await app.fetch(new Request("http://mcp/mcp/jobs/job-8", { headers: { "x-brain-key": "read-raw" } }));
+  assert(r.status === 404 && same(await r.json(), { error: "not found" }), "an unknown job: 404 not found");
+  r = await app.fetch(new Request("http://mcp/mcp/jobs/job-8/stream", { headers: { "x-brain-key": "read-raw" } }));
+  assert(r.status === 404, `an unknown job's stream: 404 (${r.status})`);
+  answer = () => ok({});
+}
+
+console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");
+{
+  let r = await app.fetch(new Request("http://mcp/mcp"));
+  assert(r.status === 405 && r.headers.get("allow") === "POST, OPTIONS", `GET /mcp: 405, Allow POST, OPTIONS (${r.headers.get("allow")})`);
+  r = await app.fetch(new Request("http://mcp/mcp/health", { method: "PUT" }));
+  assert(r.status === 405 && r.headers.get("allow") === "GET, HEAD, POST, OPTIONS", "PUT at a health path: 405 naming its GET and HEAD");
+  r = await app.fetch(new Request("http://mcp/mcp", { method: "OPTIONS" }));
+  assert(r.status === 200 && r.headers.get("access-control-allow-origin") === "*", "OPTIONS: the CORS preflight");
+  r = await app.fetch(new Request("http://mcp/.well-known/oauth-protected-resource/mcp"));
+  assert(r.status === 404, "an unconfigured stack's protected-resource path: 404");
+}
+
+report();

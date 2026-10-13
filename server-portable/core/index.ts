@@ -17,6 +17,8 @@ export { failure } from "./refusal.ts";
 export { SPECS, type Input, type ToolSpec } from "./schemas.ts";
 export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from "./calls.ts";
 export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
+/** How long a keyed /health takes at most, the registry's word on its key included: either server's (SMD-2287). */
+export { HEALTH_DEADLINE_MS } from "./reads.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
