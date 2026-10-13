@@ -5334,9 +5334,25 @@ const INDEX_ROLE: TransportRole = {
     // The core's deadlines and filter parser — its operations are reached through createCore.
     ["./core/reads.ts", new Set(["HEALTH_DEADLINE_MS", "BRAIN_INFO_TOOL_DEADLINE_MS"])],
     ["./core/filter.ts", new Set(["parseFilter", "withActorFilter"])],
+    // The endpoint's HTTP edge (SMD-2287 PR 2): refusal envelopes, CORS, a request's parts — held below as a transport file of its own.
+    ["./mcp-edge.ts", "*"],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
+};
+// The MCP endpoint's HTTP edge, moved out of index.ts (SMD-2287 PR 2) for the
+// MCP server as a REST client to answer as this one does: HTTP alone — the
+// origin's challenge, the request record's types, the tool names — and no
+// store, no provider, no environment.
+const EDGE_ROLE: TransportRole = {
+  imports: new Map<string, "*" | ReadonlySet<string>>([
+    ["hono", new Set(["Context"])],
+    ["./oauth-edge.ts", new Set(["challengeHeader", "UNREACHABLE_RETRY_AFTER_SECONDS"])],
+    ["./telemetry.ts", new Set(["traceOf", "RequestOutcome", "RequestTrace"])],
+    ["./tools.ts", new Set(["ToolName"])],
+  ]),
+  wiring: false,
+  mustImport: "./telemetry.ts",
 };
 const ROOT_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
@@ -5380,6 +5396,7 @@ const REST_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
 const REST_ROLE: TransportRole = { imports: REST_IMPORTS, wiring: false, mustImport: "../core/index.ts" };
 const TRANSPORT_FILES = new Map<string, TransportRole>([
   ["server-portable/index.ts", INDEX_ROLE],
+  ["server-portable/mcp-edge.ts", EDGE_ROLE],
   ["server-portable/root.ts", ROOT_ROLE],
   ["server-portable/api.ts", API_ROLE],
   ["server-portable/rest/app.ts", REST_ROLE],

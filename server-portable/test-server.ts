@@ -191,7 +191,9 @@ console.log("\n[2] Runtime neutrality");
   // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
   const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
   const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
-  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc]]) {
+  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, is the Worker's as much as index.ts is.
+  const edgeSrc = await Bun.file(new URL("./mcp-edge.ts", import.meta.url)).text();
+  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc], ["mcp-edge.ts", edgeSrc]]) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
