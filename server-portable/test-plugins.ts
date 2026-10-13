@@ -1081,4 +1081,42 @@ console.log("\n[15] A plugin operation over REST has its span under its request'
   }
 }
 
+console.log("\n[16] A webhook's deferred work starts a trace of its own, linked to its delivery's request, as a job's body does (SMD-1849 PR 2d review pass 1)");
+{
+  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
+  const exporter = new InMemorySpanExporter();
+  const tracing = setUpTelemetry("open-brain-api-test", { exporter });
+  const tracked: Promise<unknown>[] = [];
+  const probe = definePlugin({ name: "probe-trace", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
+    hooks: {
+      fine: { description: "Defers work that succeeds.", handler: async (ctx) => { ctx.defer(async () => {}); return { status: 202 }; } },
+      fails: { description: "Defers work that throws.", handler: async (ctx) => { ctx.defer(async () => { throw new TypeError("planted-defer-text"); }); return { status: 202 }; } },
+      undone: { description: "Defers work with a discard, then fails.", handler: async (ctx) => { ctx.defer(async () => {}, async () => {}); throw new Error("after the claim"); } },
+    } });
+  const traceApp = createRestApp({ core, init: () => {}, keys: () => ({}), resolve: async () => identity, log: () => {}, faultLog: () => {},
+    track: (run) => { const p = run(); tracked.push(p); return p; },
+    plugins: () => loadPlugins("probe-trace", [probe]), hooks: () => ({ hooks: enabledHooks(loadPlugins("probe-trace", [probe]), "probe-trace"), secrets: new Map([["probe-trace", "s"]]) }) });
+  try {
+    for (const hook of ["fine", "fails", "undone"]) {
+      await (await traceApp.fetch(new Request(`http://api/hooks/probe-trace/${hook}`, { method: "POST", body: "{}" }))).text();
+      await Promise.all(tracked);
+    }
+    const spans = exporter.getFinishedSpans();
+    const requests = spans.filter((sp) => sp.kind === SpanKind.SERVER);
+    const deferred = spans.filter((sp) => sp.name === "defer probe-trace");
+    // Work runs after its answer: a root of its own, linked. A discard runs before its delivery's 500: its request's child (review pass 4).
+    const discard = deferred[2];
+    assert(requests.length === 3 && deferred.length === 3
+      && deferred.slice(0, 2).every((d, i) => d.parentSpanContext === undefined && d.spanContext().traceId !== requests[i]?.spanContext().traceId && d.links[0]?.context.spanId === requests[i]?.spanContext().spanId)
+      && discard?.parentSpanContext?.spanId === requests[2]?.spanContext().spanId && discard?.spanContext().traceId === requests[2]?.spanContext().traceId && discard?.links.length === 0
+      && deferred.map((d) => [d.attributes["ob1.defer"], d.attributes["ob1.outcome"]]).join(";") === "work,ok;work,error;discard,ok" && deferred.every((d) => d.attributes["ob1.plugin"] === "probe-trace")
+      && deferred[1].attributes["error.type"] === "TypeError" && deferred[1].status.code === SpanStatusCode.ERROR && !JSON.stringify(spans.map((sp) => sp.events)).includes("planted-defer-text"),
+      `deferred work a root span linked to its delivery's request, a discard its failed delivery's child; each with its plugin and what it was, a throw by its kind (${JSON.stringify(deferred.map((d) => [d.attributes, d.links.length]))})`);
+  } finally {
+    await tracing.shutdown();
+  }
+}
+
 report();

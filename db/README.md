@@ -1406,7 +1406,7 @@ the label is the caller's own or was not weighed — the operator's
 the structured content carries the outcome and, after a restamp, `labelMine`.
 It refuses
 to apply without 085 and 086. test-schema [80], test-upgrade [20ak],
-server-portable/test-server.ts [26], test-e2e-sql [13h], test-store-sql and
+server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql and
 test-store-postgrest [8d], test-rest-sql [3].
 
 ## What changed relative to the guide
@@ -1503,6 +1503,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
+| | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -4110,6 +4111,41 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   any of them is said once at start and the step stays off; a dry run needs
   the reads alone. Compose's `board-sync` connects as the owner and
   needs nothing.
+- **What became of it (SMD-2682).** `board-findings.ts --report` reads, from
+  the brain alone, what became of each ticket pair and word recorded:
+  **accepted** — its proposal accepted, or the board linking the pair since
+  (any active Linear link either way, `duplicate_of` included, timed from the
+  first link made since the post); **rejected** — a person rejected one of
+  its proposals (`--reject`) and none is pending or stale, a link since
+  notwithstanding; **withdrawn** — within the window, its proposal settled by
+  the pass's own re-judge (067's `settled by the pass:` note, a rejection no
+  person made), or a relation the judge stopped saying at that word (one
+  re-judged at the same word still stands); or its proposals or relation
+  deleted with a thought, which leaves no time — the comment stays on the
+  board, so past the window that reads unanswered (it is read from the rows
+  as they stand: a settle a later text move reopens, 067, is judged by its
+  current state, and a later settle's time replaces the first, so a finding
+  taken back within the window can read unanswered past it — understating
+  the rate, never inflating it; SMD-2913 records the first withdrawal);
+  **open** — a proposal pending, or stale (a text moved) and waiting on a
+  re-judge or a reviewer, or a relation standing; or **unanswered**, open past `--days`
+  (30). The board has no "no" for a relation: left unlinked past the window
+  is how it says one, and a judge that stops saying it afterwards does not
+  take that back. A pair is posted only unlinked as the brain knows it; a
+  link Linear made without moving either ticket's `updatedAt` arrives at the
+  next `--full` pass, after the post, and counts as an answer — the brain
+  cannot tell it from one made after the comment. The
+  acceptance rate is accepted over accepted, rejected and unanswered —
+  an unanswered finding counts against it, withdrawn and open are left out —
+  and SMD-2682 is done on it. Rows
+  recorded `found` are another poster's, listed apart and never in the rate.
+  A link reaches the brain with board-sync's pass, so a pair linked since the
+  last pass reads open until the next, and the time to an answer is counted
+  to the pass that brought the link in. The report reads only — no key, no
+  egress, no write — and takes neither `--dry-run` nor `--cap`.
+  `brain_info`'s `Findings` row is the same read, summed
+  (`server-portable/README.md`); the server reads it with `SELECT` on
+  `board_findings_posted`, the server group's since SMD-2682.
 
 ## Testing
 
@@ -4118,14 +4154,14 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2764 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1262 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1271 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
-bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject — no database
+bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject, and what became of a finding posted (SMD-2682) — no database
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
 

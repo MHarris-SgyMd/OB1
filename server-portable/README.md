@@ -388,6 +388,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
+Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
@@ -434,6 +435,28 @@ A board count counts rows — proposals, relation facets — not distinct pairs 
 tickets: five proposals between two tickets' thoughts count five, and a pair
 can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
 answer and `no table` before its table's migration.
+`Findings` is what became of the findings board-sync posted to the board
+(SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
+this brain posted: accepted (its proposal accepted, or the board linking the
+pair since — any active Linear link either way, `duplicate_of` included),
+rejected (a person rejected one of its proposals, none pending or stale — a
+link since does not undo that no), withdrawn (its proposals gone, or settled by
+the consolidation pass's own re-judge, or a relation the judge stopped saying,
+within the window), open (a proposal pending, or stale and waiting on a
+re-judge, or a relation standing), or unanswered once open past 30 days — a finding the judge takes
+back after that stays unanswered, and one deleted with its thought, which
+leaves no time, is unanswered once its comment is past the window. It is read
+from the rows as they stand: a settle that a later text move reopens (067) is
+judged by its current state, so a finding taken back within the window can read
+unanswered past it — the rate is understated by it, never inflated (SMD-2913
+records the first withdrawal). The rate is
+accepted over accepted, rejected and unanswered — an unanswered finding counts
+against it; withdrawn and open are left out — and the median is from the post to the first link since or the
+review. A link Linear made before the comment but board-sync brought in after
+it (a `--full` pass) counts as an answer: the brain cannot tell the two. Rows
+another poster's marker settled are counted apart, never in the rate. A stats
+read, as `Relations`; `no table — migration 087 is not applied` before 087.
+`db/board-findings.ts --report` lists the same rows one by one.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
@@ -443,8 +466,10 @@ database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
 heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 `proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
-relations as `relations`, `{ related, evolves, duplicate, boardPairs }`, each
-null when not read or absent; each `boardPairs` is a read of its own, last,
+relations as `relations`, `{ related, evolves, duplicate, boardPairs }`; what
+became of the findings posted as `findings`, `{ posted, comments, found,
+accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
+SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
 did not answer, null with no entry before 079 (or when its field was not read),
 and 0, not read, when there is nothing to count, SMD-2680) or
@@ -644,6 +669,15 @@ MCP tools do rather than a copy of it:
   own outcome and code, a fault its kind and code — the API's no-ops until
   `OTEL_EXPORTER_OTLP_ENDPOINT` (or a signal's own variable) names a collector
   (`deploy/README.md`, "Traces, metrics and log records").
+- **`spans.ts`** — the spans a provider call (`embed.ts`'s `providerCall`,
+  preflight's `--deep` probes), a store operation (`createStore`'s store), a
+  job's body (`startJob`) and a webhook's deferred work (each of the last two a
+  trace of its own, linked to what started it) run under, a provider call's
+  and a store operation's point on their histograms and a job's on its own, and
+  `faultOf`. It imports nothing — `embed.ts` and `store.ts` are imported by
+  `db/`'s workers and `evals/`, which install no package of this directory's —
+  so a span there is nothing until `telemetry.ts` installs **`tracing.ts`**, the
+  OpenTelemetry API's spans, as a server, or preflight under `--deep`, loads it.
 - **`otel-setup.ts`** — the OpenTelemetry SDK for traces, metrics and log
   records, loaded only then and only on Bun: an OTLP/HTTP exporter for each
   signal with a URL, spans and log records batched, the AsyncLocalStorage
@@ -757,9 +791,9 @@ stripped (`X-Forwarded-Prefix`).
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
   same — so a client holding two keys cannot stamp one as the other's carrier.
   The public `/api` route deletes the header, so it is read only inside the
-  stack (until SMD-2286 nothing sends it). Mint a
-  forwarder under a name never used before — the registry reads a known name
-  with a new digest as that agent's rotation.
+  stack (`rest-client/` sends it, and nothing in the stack does until the MCP
+  server forwards, SMD-2287). Mint a forwarder under a name never used before —
+  the registry reads a known name with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
   vector with the row, false when the egress gate refused the embedding call (on a
@@ -770,10 +804,16 @@ stripped (`X-Forwarded-Prefix`).
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
-  not built, 503 retry. A save whose vector did not attach (the PostgREST two-step)
-  is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
-  capture again. A refused input is a 400 `REFUSED_INPUT` naming each field and
-  zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
+  not built, 503 retry. Carried by a forwarder, a refusal also holds itself whole
+  as `refusal` — its words included, the caller's input quoted back and the
+  store's or the egress gate's — so the MCP server says it as it always has
+  (SMD-2287). It is the refusal as the operation made it for that caller, the
+  existence-oracle rule applied: what `render.ts` has always been handed, and
+  bounds into its text. A
+  save whose vector did not attach (the PostgREST two-step) is a 201 with
+  `embeddingAttached: false`, not a refusal, so a client does not capture again
+  (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
+  naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
   carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
@@ -795,23 +835,27 @@ stripped (`X-Forwarded-Prefix`).
 data each has something to say about, and holds that the MCP reply to a success is what
 `render.ts` makes of the REST answer, text and `structuredContent` both — so every word
 MCP shows is in the REST answer, which may carry more — and that a refusal is the same
-code and facts through both. A refusal's MCP text reads facts REST withholds (the
-caller's input, the store's words), so the MCP server as a REST client (SMD-2287) words
-those its own way.
+code and facts through both. A refusal's MCP text reads words its facts leave out (the
+caller's input, the store's words), so the suite also sends each refusal through the
+forwarder slot and holds that render.ts makes of the `refusal` it carries exactly the MCP
+reply, for every code that section reaches. Each renderer reads only the outcome it is
+handed, so a refusal whole is all the MCP server as a REST client (SMD-2287) needs to
+word any refusal as this one does.
+`rest-client/` is the REST core's typed client, generated from its OpenAPI document.
 
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1024 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
+bun test-server.ts        # 1058 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 351 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
-bun test-plugins.ts       # 258 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span and a webhook fault's
+bun test-rest.ts          # 357 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 257 — store conformance, real Postgres in a container
-bun run test:e2e          # 568 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 162 — the REST core beside the MCP server on one database: every operation through both
+bun run test:e2e          # 569 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+../db/with-postgres.sh bun test-rest-sql.ts  # 202 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

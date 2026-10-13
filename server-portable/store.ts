@@ -31,6 +31,8 @@ import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
+import { withSpan, withStoreSpan } from "./spans.ts";
+import { PLUGIN_NAME_RE } from "../db/config.mjs";
 
 export type ThoughtMatch = {
   id: string;
@@ -1760,7 +1762,50 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
 }
 
 /**
- * Build the configured store.
+ * Whether each member of a store is an operation the core calls, spanned as
+ * one (tracedStore): every member named, so one added to ThoughtStore is
+ * decided here or the typecheck fails. The job sink's maker and the close are
+ * not.
+ */
+const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
+  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
+  listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
+  resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
+  findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  pluginTx: true, jobSink: false, close: false,
+};
+
+/**
+ * The store with each operation the core calls run under a client span of its
+ * own, a child of the call that made it, and a point on
+ * `db.client.operation.duration` (spans.ts withStoreSpan, SMD-1849 PR 2d):
+ * the operation's name, the store's kind and a fault's SQLSTATE — no query, no
+ * parameter. A plugin's transaction is an internal span, `pluginTx` with its
+ * plugin, and no point: it runs the plugin's own code and SQL, and the
+ * operations it calls are spans and points of their own (review pass 1). Every other member
+ * is the store's own, each method called on the store itself, not this
+ * wrapper.
+ */
+export function tracedStore(store: ThoughtStore): ThoughtStore {
+  return new Proxy(store, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      const method = value as (...args: unknown[]) => unknown;
+      if (typeof prop !== "string" || !Object.hasOwn(STORE_OPERATIONS, prop) || !STORE_OPERATIONS[prop as keyof typeof STORE_OPERATIONS]) return method.bind(target);
+      if (prop === "pluginTx") {
+        return (...args: unknown[]) => withSpan("pluginTx", {
+          attributes: { "db.system.name": "postgresql", "ob1.store": target.kind, "ob1.plugin": typeof args[0] === "string" && PLUGIN_NAME_RE.test(args[0]) ? args[0] : "?" },
+        }, async () => method.apply(target, args));
+      }
+      return (...args: unknown[]) => withStoreSpan(prop, target.kind, async () => method.apply(target, args));
+    },
+  });
+}
+
+/**
+ * Build the configured store, each operation spanned (tracedStore).
  *
  * The SQL implementation is imported dynamically on purpose: it pulls in Bun's
  * Postgres client, which does not exist on Cloudflare Workers. A static import
@@ -1780,7 +1825,7 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     }
     const { SqlStore } = await import("./store-sql.ts");
     // Plugins' SQL logs in as the plugin login role (SMD-2310), never as this connection's role.
-    return new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD });
+    return tracedStore(new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD }));
   }
 
   if (kind === "postgrest") {
@@ -1790,7 +1835,7 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     const mismatch = postgrestOverPostgresUrl(env);
     if (mismatch) throw new Error(mismatch);
     const { PostgrestStore } = await import("./store-postgrest.ts");
-    return new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+    return tracedStore(new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY));
   }
 
   throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the default) or "postgrest" (Cloudflare Workers)`);

@@ -1,0 +1,15 @@
+{
+  "name": "ob1-rest-client",
+  "private": true,
+  "type": "module",
+  "comment": "The REST core's typed client (SMD-2287): openapi-fetch over the types openapi-typescript generates from the REST core's own OpenAPI document. `bun generate.ts` writes openapi.json, schema.d.ts and operations.ts from server-portable/rest/openapi.ts; `bun test-client.ts` fails when any is stale. Both pinned exactly: a generator bump changes schema.d.ts, which is a PR that regenerates it. The MCP server as a REST client (SMD-2287, to come in mcp-server/) and the operator GUI (SMD-2280) call the REST core through it. The type pins move with server-portable's (check 18).",
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "26.6.2",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

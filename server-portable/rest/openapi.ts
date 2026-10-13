@@ -121,7 +121,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
       ...(parameters.length ? { parameters } : {}),
       ...(readsQuery(route.method) ? {} : { requestBody: { required: required.size > 0, content: { "application/json": { schema: input } } } }),
       responses: {
-        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 089); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
+        [String(route.ok)]: { description: name === "capture_thought" ? "The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 089); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`, and carried by a forwarder its `refusal` too, the words the MCP server says it in." : "The operation's value.", content: { "application/json": { schema: { type: "object" } } } },
         ...answersFor(name),
       },
       security: KEYED,
@@ -147,7 +147,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
         forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing. Read only inside the stack: the public /api route deletes it." },
       },
       schemas: {
-        Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" } }, additionalProperties: true },
+        Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" }, refusal: { type: "object", description: "Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's), so the MCP server says it as it always has (SMD-2287)." } }, additionalProperties: true },
       },
     },
   };
