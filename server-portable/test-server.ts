@@ -915,6 +915,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const answer = (text: string): unknown[] => {
     statements.push(text);
     if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (lockProposals && /FROM supersession_proposals p\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
     if (/FROM board_findings_posted/.test(text)) {
       if (findingsRefused) throw pgError("permission denied for table board_findings_posted", "42501");
       return findingsAnswer;
@@ -958,6 +959,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
   let catalogFindings = false;
   let findingsRefused = false;
+  let lockProposals = false;
   let findingsAnswer: Record<string, unknown>[] = [];
   let failRelease: RegExp | null = null;
   let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
@@ -1105,29 +1107,39 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   lockFacets = true;
   const toldLocked = await readDatabaseFacts(fake);
   lockFacets = false;
+  // A lock refused on the queue's table: the queue's read waits on it once,
+  // and the findings read — after it, joining it — is not tried (review pass 1:
+  // it ran first and waited too).
+  lockProposals = true;
+  statements.length = 0;
+  const toldQueueLocked = await readDatabaseFacts(fake);
+  const queueSent = statements.filter((t) => /FROM supersession_proposals/.test(t)).length;
+  lockProposals = false;
   findingsAnswer = [fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "supersedes", age_s: 1 })];
   const toldOdd = await readDatabaseFacts(fake);
   findingsAnswer = [];
   const toldNone = await readDatabaseFacts(fake);
   catalogFindings = false;
-  const wantTold = { posted: 6, comments: 5, found: 1, accepted: 2, rejected: 1, withdrawn: 1, open: 1, unanswered: 1, windowDays: 30, medianAnswerS: 2 * day };
+  const wantTold = { posted: 6, comments: 5, found: 1, accepted: 2, rejected: 1, withdrawn: 0, open: 2, unanswered: 1, windowDays: 30, medianAnswerS: 2 * day };
   assert(JSON.stringify(told.findings) === JSON.stringify(wantTold) && !("findings" in told.unread) && leanTold.findings === null && toldSent === 1 && facts.findings === null && !("findings" in facts.unread)
       && toldRefused.findings === null && toldRefused.unread.findings?.reason === "refused" && toldRefused.relations?.related === 9
       && toldLocked.findings === null && /not tried — a lock on thought_facets/.test(toldLocked.unread.findings?.message ?? "")
+      && toldQueueLocked.proposals === null && toldQueueLocked.unread.proposals?.reason === "timeout" && /not tried — a lock on supersession_proposals/.test(toldQueueLocked.unread.findings?.message ?? "") && queueSent === 1
       && toldOdd.findings === null && toldOdd.unread.findings?.reason === "error" && JSON.stringify(toldNone.findings) === JSON.stringify({ ...wantTold, posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, medianAnswerS: null }),
     `the findings posted are a stats read of 087's table, by outcome, the found apart; absent, null and unnamed; refused, malformed or behind a refused lock, unread (${JSON.stringify(told.findings)}, ${JSON.stringify(toldLocked.unread.findings)}, ${JSON.stringify(toldOdd.unread.findings)})`);
   const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
   const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
-    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000))]
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000))]
     .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
   assert(toldRows.join("\n") === [
-    "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 1 open, 1 withdrawn — 2 of 4 answered accepted (50%), median 2 d to an answer; 1 found on the board from another poster",
+    "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — 2 of 4 answered accepted (50%), median 2 d to an answer; 1 found on the board from another poster",
     "Findings:        none posted",
     "Findings:        ? (board_findings_posted not readable by this role)",
     "Findings:        none posted — migration 087 is not applied",
     "Findings:        2 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 2 open, 0 withdrawn — none answered yet",
     "(no row)",
+    "Findings:        ? (thought_facets not read in time)",
   ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, none answered yet, and no row without the stats (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [

@@ -439,11 +439,15 @@ answer and `no table` before its table's migration.
 (SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
 this brain posted: accepted (its proposal accepted, or the board linking the
 pair since — any active Linear link either way, `duplicate_of` included),
-rejected (its proposals rejected, none pending — a link since does not undo
-a reviewer's no), withdrawn (its proposals stale or gone, or a relation the
-judge no longer says), open, or unanswered once open past 30 days. The rate is
+rejected (its proposals rejected, none pending or stale — a link since does
+not undo a reviewer's no), withdrawn (its proposals gone, or a relation the
+judge stopped saying within the window), open (a proposal pending, or stale
+and waiting on a re-judge), or unanswered once open past 30 days — a relation
+the judge stops saying after that stays unanswered. The rate is
 accepted over accepted, rejected and unanswered — withdrawn and open are not
-answers — and the median is from the post to the link or the review. Rows
+answers — and the median is from the post to the first link since or the
+review. A link Linear made before the comment but board-sync brought in after
+it (a `--full` pass) counts as an answer: the brain cannot tell the two. Rows
 another poster's marker settled are counted apart, never in the rate. A stats
 read, as `Relations`; `none posted — migration 087 is not applied` before 087.
 `db/board-findings.ts --report` lists the same rows one by one.
@@ -825,7 +829,7 @@ bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
-bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 563 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 ../db/with-postgres.sh bun test-rest-sql.ts  # 161 — the REST core beside the MCP server on one database: every operation through both
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)

@@ -513,13 +513,14 @@ export function boardPairsValue(field: string, row: { n?: unknown } | undefined)
 //
 //   * the board linked the pair since — an active Linear link either way,
 //     079's set (child_of, blocks, blocked_by, relates_to) or duplicate_of,
-//     the rule the finding was posted under, read now: a pair is posted only
-//     unlinked, so a link now came after. A link Linear adds without moving
-//     either ticket's updatedAt reaches the brain at board-sync's next --full
-//     pass, and is counted from then;
+//     the rule the finding was posted under, read now. A pair is posted only
+//     unlinked as the brain knows it; a link Linear made without moving either
+//     ticket's updatedAt reaches the brain at board-sync's next --full pass,
+//     after the post, and counts as an answer then — the brain cannot tell it
+//     from one made after the comment;
 //   * an outdates finding's proposals (029) were accepted or rejected;
 //   * a relation finding's facet (084) still stands, re-judged or not, at
-//     the same word.
+//     the same word, or when the judge stopped saying it.
 //
 // db/board-findings.ts --report prints the same rows one by one, from this
 // read and findingOutcome, so the CLI and brain_info cannot disagree.
@@ -545,6 +546,8 @@ export interface FindingRow {
   proposals: { accepted: number; rejected: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
   /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
   stands: boolean | null;
+  /** A relation finding no longer standing: seconds from posting to the close of the last relation of its word there; null when it stands, for outdates, or when the facets are gone. */
+  withdrawnS: number | null;
 }
 
 export type FindingOutcome = "accepted" | "rejected" | "withdrawn" | "open" | "unanswered";
@@ -579,18 +582,24 @@ export interface BoardFindings {
 export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
   SELECT b.ticket_a, b.ticket_b, b.word, b.posted_on, b.origin, b.posted_at,
          extract(epoch FROM now() - b.posted_at)::float8 AS age_s,
-         extract(epoch FROM l.at - b.posted_at)::float8 AS linked_s,
+         CASE WHEN l.linked_now THEN extract(epoch FROM coalesce(l.first_after, b.posted_at) - b.posted_at)::float8 END AS linked_s,
          p.accepted, p.rejected, p.stale, p.pending,
          extract(epoch FROM p.accepted_at - b.posted_at)::float8 AS accepted_s,
          extract(epoch FROM p.rejected_at - b.posted_at)::float8 AS rejected_s,
-         r.stands
+         r.stands, extract(epoch FROM r.gone_at - b.posted_at)::float8 AS withdrawn_s
     FROM board_findings_posted b
-    -- The link's target probes 053's target index; its holder is the other ticket's row.
+    -- The link's target probes 053's target index; its holder is the other
+    -- ticket's row. Linked is an active link now; answered is when the first
+    -- link since the post was made, closed ones included — a ticket head that
+    -- moves closes its links and the new head records them afresh (053), which
+    -- is no later answer. A link brought in after the post that Linear made
+    -- before it (board-sync's --full pass) cannot be told apart: it counts.
     LEFT JOIN LATERAL (
-      SELECT min(f.created_at) AS at
+      SELECT bool_or(f.valid_until IS NULL) AS linked_now,
+             min(f.created_at) FILTER (WHERE f.created_at >= b.posted_at) AS first_after
         FROM thought_facets f
         JOIN thoughts h ON h.id = f.thought_id
-       WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'system' = 'linear'
+       WHERE f.kind = 'link' AND f.payload->>'system' = 'linear'
          AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to', 'duplicate_of')
          AND f.payload->>'target' IN (b.ticket_a, b.ticket_b)
          AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = CASE WHEN f.payload->>'target' = b.ticket_a THEN b.ticket_b ELSE b.ticket_a END) l ON true
@@ -605,13 +614,17 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
        WHERE b.word = 'outdates' AND s.id = ANY (b.finding_ids)) p ON b.word = 'outdates'
     -- A re-judge closes a relation and writes its successor on the same pair
     -- of thoughts (084's one active relation per pair), so the named facet's
-    -- pair is where its word is looked for.
+    -- pair is where its word is looked for: standing now, or when the last
+    -- relation of that word there was closed.
+    -- Driven from the ids by primary key, the word tested inside: on a small
+    -- thought_facets the planner otherwise scanned it once per posted row,
+    -- outdates rows included (review pass 1).
     LEFT JOIN LATERAL (
-      SELECT EXISTS (SELECT 1
-                       FROM thought_facets o
-                       JOIN thought_facets n ON n.thought_id = o.thought_id AND n.payload->>'target' = o.payload->>'target'
-                      WHERE o.id = ANY (b.finding_ids) AND o.kind = 'relation'
-                        AND n.kind = 'relation' AND n.valid_until IS NULL AND n.payload->>'relation' = b.word) AS stands) r ON b.word <> 'outdates'
+      SELECT bool_or(n.valid_until IS NULL) IS TRUE AS stands, max(n.valid_until) AS gone_at
+        FROM unnest(b.finding_ids) AS x(id)
+        JOIN thought_facets o ON o.id = x.id AND o.kind = 'relation'
+        JOIN thought_facets n ON n.thought_id = o.thought_id AND n.kind = 'relation' AND n.payload->>'target' = o.payload->>'target'
+       WHERE b.word <> 'outdates' AND n.payload->>'relation' = b.word) r ON b.word <> 'outdates'
    ORDER BY b.posted_at DESC, b.ticket_a, b.ticket_b, b.word`;
 
 const FINDING_WORD_NAMES = ["outdates", "related", "evolves", "duplicate"] as const;
@@ -650,6 +663,7 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
           }
         : null,
       stands: word === "outdates" ? null : r.stands === true,
+      withdrawnS: word === "outdates" || r.stands === true ? null : secondsOf("findings", r.withdrawn_s),
     };
   });
 }
@@ -658,17 +672,21 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * What became of one posted finding, first match wins:
  *
  *   outdates   accepted   a proposal it named was accepted
- *              rejected   none is pending and one was rejected — a link on the
- *                         board since does not undo a reviewer's no
- *              accepted   the board links the pair (pending or stale)
- *              open       a proposal is still pending
- *              withdrawn  the rest: stale (a text moved) or gone
+ *              rejected   none is pending or stale and one was rejected — a
+ *                         link on the board since does not undo a reviewer's no
+ *              accepted   the board links the pair
+ *              open       a proposal is still pending, or stale: a text moved
+ *                         and it waits on a re-judge or a reviewer (063, 067)
+ *              withdrawn  the rest: every proposal it named is gone
  *   relation   accepted   the board links the pair
  *              open       a relation of its word still stands
- *              withdrawn  the judge no longer says it
+ *              withdrawn  the judge stopped saying it within the window
+ *              unanswered …or after it: the board had the window and left it
  *
  * An open finding posted more than `days` ago is unanswered. The board has no
- * "no" for a relation: left unlinked past the window is how it says one.
+ * "no" for a relation: left unlinked past the window is how it says one, and
+ * a judge that changes its mind afterwards does not take that back (review
+ * pass 1: a withdrawal after the window left the rate's denominator).
  */
 export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): FindingVerdict {
   const open = (): FindingVerdict => ({ outcome: r.ageS > days * 86_400 ? "unanswered" : "open", how: null, answeredS: null });
@@ -676,12 +694,13 @@ export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): Fin
   const p = r.proposals;
   if (p) {
     if (p.accepted > 0) return { outcome: "accepted", how: "proposal", answeredS: p.acceptedS === null ? null : Math.max(0, p.acceptedS) };
-    if (p.pending === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
+    if (p.pending === 0 && p.stale === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
     if (linked) return linked;
-    return p.pending > 0 ? open() : { outcome: "withdrawn", how: null, answeredS: null };
+    return p.pending + p.stale > 0 ? open() : { outcome: "withdrawn", how: null, answeredS: null };
   }
   if (linked) return linked;
-  return r.stands ? open() : { outcome: "withdrawn", how: null, answeredS: null };
+  if (r.stands) return open();
+  return r.withdrawnS !== null && r.withdrawnS > days * 86_400 ? { outcome: "unanswered", how: null, answeredS: null } : { outcome: "withdrawn", how: null, answeredS: null };
 }
 
 /** The rows as the record carries them: this brain's by outcome, the found apart. */
@@ -847,9 +866,6 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
             { field: "relations", table: "thought_facets" as const, read: async (sp: SqlTag) => { facts.relations = relationsValue((await RELATIONS_SQL(sp))[0]); }, clear: () => { facts.relations = null; } },
-            // A handful of rows a day at most (the poster's cap), each a few index probes (SMD-2682).
-            { field: "findings", table: "board_findings_posted" as const, joins: ["thoughts" as const, "thought_facets" as const, "supersession_proposals" as const],
-              read: async (sp: SqlTag) => { facts.findings = findingsValue(findingRows(await FINDING_OUTCOMES_SQL(sp))); }, clear: () => { facts.findings = null; } },
           ]
         : []),
       // Not a stats read: preflight's proposals row reads it (SMD-2680).
@@ -884,6 +900,15 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                    clear: () => { if (facts.relations) facts.relations.boardPairs = null; } }]
               : []),
           ]
+        : []),
+      // What became of the findings posted (SMD-2682): a handful of rows a
+      // day at most (the poster's cap), each a few index probes — after the
+      // queue and its board counts, so a lock on a table it joins is waited
+      // on by the queue's own read alone, and a slow answer here never stands
+      // in front of the queue (review pass 1).
+      ...(stats
+        ? [{ field: "findings", table: "board_findings_posted" as const, joins: ["thoughts" as const, "thought_facets" as const, "supersession_proposals" as const],
+             read: async (sp: SqlTag) => { facts.findings = findingsValue(findingRows(await FINDING_OUTCOMES_SQL(sp))); }, clear: () => { facts.findings = null; } }]
         : []),
     ];
     // A table that does not resolve is settled here, before any read: absent
@@ -1166,7 +1191,13 @@ function relationsLine(db: DatabaseSummary): string {
  */
 export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread" | "highestMigration">): string {
   const f = db.findings;
-  if (f === null) return "findings" in db.unread ? `? (${deniedObject(db.unread.findings.message)?.name ?? "board_findings_posted"} ${unreadWords(db.unread.findings)})` : "none posted — migration 087 is not applied";
+  if (f === null) {
+    const u = db.unread.findings;
+    if (!u) return "none posted — migration 087 is not applied";
+    // The read joins four tables: a refusal or an earlier lock names the one it was (review pass 1).
+    const named = deniedObject(u.message)?.name ?? /^not tried — a lock on (\w+)/.exec(u.message)?.[1] ?? "board_findings_posted";
+    return `? (${named} ${unreadWords(u)})`;
+  }
   const found = f.found ? `; ${f.found} found on the board from another poster` : "";
   if (f.posted === 0) return `none posted${found}`;
   const { accepted, answered } = acceptance(f);

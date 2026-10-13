@@ -4078,13 +4078,19 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
 - **What became of it (SMD-2682).** `board-findings.ts --report` reads, from
   the brain alone, what became of each ticket pair and word recorded:
   **accepted** — its proposal accepted, or the board linking the pair since
-  (any active Linear link either way, `duplicate_of` included; a pair is
-  posted only unlinked, so a link now came after); **rejected** — its
-  proposals rejected and none pending, a link since notwithstanding;
-  **withdrawn** — its proposals stale or gone, or a relation the judge no
-  longer says at that word (one re-judged at the same word still stands);
-  **open**; or **unanswered**, open past `--days` (30). The board has no "no"
-  for a relation: left unlinked past the window is how it says one. The
+  (any active Linear link either way, `duplicate_of` included, timed from the
+  first link made since the post); **rejected** — its proposals rejected and
+  none pending or stale, a link since notwithstanding; **withdrawn** — its
+  proposals gone, or a relation the judge stopped saying at that word within
+  the window (one re-judged at the same word still stands); **open** — a
+  proposal pending, or stale (a text moved) and waiting on a re-judge or a
+  reviewer, or a relation standing; or **unanswered**, open past `--days`
+  (30). The board has no "no" for a relation: left unlinked past the window
+  is how it says one, and a judge that stops saying it afterwards does not
+  take that back. A pair is posted only unlinked as the brain knows it; a
+  link Linear made without moving either ticket's `updatedAt` arrives at the
+  next `--full` pass, after the post, and counts as an answer — the brain
+  cannot tell it from one made after the comment. The
   acceptance rate is accepted over accepted, rejected and unanswered —
   withdrawn and open are not answers — and SMD-2682 is done on it. Rows
   recorded `found` are another poster's, listed apart and never in the rate.
