@@ -773,7 +773,9 @@ stripped (`X-Forwarded-Prefix`).
   not built, 503 retry. Carried by a forwarder, a refusal also holds itself whole
   as `refusal` — its words included, the caller's input quoted back and the
   store's or the egress gate's — so the MCP server says it as it always has
-  (SMD-2287); the key that sent the call reads those words over MCP anyway. A
+  (SMD-2287). It is the refusal as the operation made it for that caller, the
+  existence-oracle rule applied: what `render.ts` has always been handed, and
+  bounds into its text. A
   save whose vector did not attach (the PostgREST two-step) is a 201 with
   `embeddingAttached: false`, not a refusal, so a client does not capture again
   (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
@@ -817,7 +819,7 @@ bun test-jobs.ts          # 45 — the async job registry in memory: the lifecyc
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 196 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 201 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

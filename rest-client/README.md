@@ -39,10 +39,27 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
 - **`call(name, input, { key, signal })`** takes an operation's input as one object, as
   the MCP tool takes it: the path's fields fill the path, and the rest goes in the query
   string (GET, DELETE) or a JSON body (POST, PATCH), as the REST core reads it. The input
-  is typed from the document, so a missing required field or a field the operation does
-  not take fails to compile.
-- **Every status is an answer** (`{ status, ok, headers, body }`). Only a request that
-  never got one throws: the core away, the timeout, the caller's signal.
+  is typed from the document: for an operation that takes input, a missing required field
+  or one it does not take fails to compile. TypeScript checks no excess field against
+  an operation that takes none (`brain_info`), and the REST core refuses one
+  (`REFUSED_INPUT`).
+- **The input is what the tool's schema accepts.** The MCP server's SDK checks it there
+  first, and a TypeScript caller's types hold it. The REST core checks again what
+  arrives, but a query string carries text: a `null` or `undefined` there is left out,
+  and `"true"` reads as `true`, where the schema itself would refuse both.
+- **Every status is an answer** (`{ status, ok, headers, body, sent }`). Only a request
+  that never got one throws: the core away, the timeout, the caller's signal. A write
+  that threw may still have landed, because the server finishes what it started.
+- **An input a URL cannot carry** is answered without sending anything (`sent: false`),
+  with the REST core's own refusal, a 400 `REFUSED_INPUT` naming the field. That covers:
+  - a path field that is missing, not a string, empty, `.` or `..`. The URL parser
+    removes a dot segment however it is encoded, so such a request would reach
+    another route.
+  - text with a lone surrogate in the path or the query. A JSON body carries one.
+
+  A GET's input rides the URL, so it is held to the server's header limit. Measured on
+  Bun 1.4, a 16,000-character field passes and a 64,000-character one is a bodyless 431.
+  Free text a search runs on goes in a body.
 - **A success's value** is typed only as an object, which is all the document says of
   it. A caller that renders it holds it to the type its renderer reads, and the MCP
   server's renderer is held to the REST answers by `server-portable/test-rest-sql.ts`.
@@ -52,7 +69,11 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   leave out included, so the MCP server words it exactly as it always has.
 - **`headers()`** adds headers to each request as it is sent, such as the calling
   span's `traceparent`.
-- **`stream(jobId)`** returns a job's event stream as the response itself.
+- **`stream(jobId)`** returns a job's event stream as the response itself, unread, or a
+  refusal's JSON. `call` takes every operation but that one.
+- **The timeout and the caller's signal** end the wait even through a `fetch` that does
+  not heed the signal, such as a suite's in-process `app.fetch`. A signal already aborted
+  sends nothing.
 - **`raw`** is the openapi-fetch client, for a caller that names a path itself.
 
 ## Regenerate
@@ -71,5 +92,5 @@ bumps, so the generated files carry `snapshot` in its place.
 ## Test
 
 ```bash
-bun test-client.ts   # 62 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, the timeout, a job's stream
+bun test-client.ts   # 79 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry answered unsent, the timeout and the signal, a job's stream unread
 ```

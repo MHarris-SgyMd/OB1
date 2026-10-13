@@ -383,7 +383,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (head) return head;
     const id = c.req.param("job_id");
     const stream = await subscribeJob(p, id);
-    if (!stream) return answerError(c, refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
+    if (!stream) {
+      const r: Refusal = { code: "NOT_FOUND", retryable: false, id };
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, 404);
+    }
     const response = new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Its line is written where the stream ends — the job's end, the client
     // gone, the keepalive's ceiling — not as it opens (telemetry.ts
@@ -465,9 +468,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // Saved, but its vector did not attach (the PostgREST two-step): the row
       // is there, so the answer is the creation, flagged — a client that read a
       // refusal as "not written" would capture again.
-      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false, ...carried(p, r) }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
+      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false, ...wholeFor(p, r) }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
-      return answerError(c, { ...refusalValue(r), ...carried(p, r) }, status, status === 503 ? RETRY_AFTER : {});
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 ? RETRY_AFTER : {});
     });
   }
 
@@ -624,11 +627,14 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
  * A refusal whole, for a request a forwarder carried (SMD-2287): the MCP
  * server words it as it always has — the caller's input quoted back, the
  * store's or the egress gate's words — and those are what the facts leave out
- * (refusalValue). The key that sent the call reads the same words over MCP, so
- * the carrier is told nothing its client is not; a caller with no carrier gets
- * the facts alone.
+ * (refusalValue). It is the refusal as the operation made it for this caller,
+ * the existence-oracle rule applied, which render.ts has always been handed in
+ * process: the carrier is the renderer, and it bounds and picks from it as
+ * before (a citing statement cut at 120 characters; a write key's own registry
+ * kind, or its name, not said in full). A caller with no carrier gets the
+ * facts alone.
  */
-const carried = (p: Principal, r: Refusal): { refusal?: Refusal } => (p.act ? { refusal: r } : {});
+const wholeFor = (p: Principal, r: Refusal): { refusal?: Refusal } => (p.act ? { refusal: r } : {});
 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool

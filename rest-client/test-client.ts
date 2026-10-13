@@ -21,7 +21,7 @@ import { ROUTES } from "../server-portable/rest/routes.ts";
 import { createRestApp } from "../server-portable/rest/app.ts";
 import { TOOL_NAMES, type ToolName } from "../server-portable/tools.ts";
 import { renderAll } from "./generate.ts";
-import { createRestClient, FORWARDER_HEADER, OPERATIONS, type InputOf } from "./index.ts";
+import { createRestClient, FORWARDER_HEADER, OPERATIONS, type Answer, type InputOf } from "./index.ts";
 
 const { assert, report } = createAssert();
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -159,6 +159,10 @@ console.log("\n[5] Any status is an answer: a refusal's JSON, a key's 401, a fau
 
 console.log("\n[6] A call past the timeout is aborted; the caller's own signal ends one too");
 {
+  // Each call raced against a deadline, so a timeout or a signal that never
+  // ends the call fails its case rather than hanging the suite (review pass 1).
+  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
+    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
   // Answers nothing, ever; rejects as fetch does once the request's signal aborts — at once for one already aborted.
   const never = (req: Request) => new Promise<Response>((_resolve, reject) => {
     if (req.signal.aborted) return reject(req.signal.reason);
@@ -166,22 +170,80 @@ console.log("\n[6] A call past the timeout is aborted; the caller's own signal e
   });
   const slow = createRestClient({ baseUrl: "http://api", fetch: never, timeoutMs: 50 });
   const t0 = performance.now();
-  const err = await slow.call("thought_stats", {}).then(() => null, (e: unknown) => e as Error);
+  const err = await within(slow.call("thought_stats", {})).then(() => null, (e: unknown) => e as Error);
   const took = performance.now() - t0;
   assert(err?.name === "TimeoutError" && took < 2000, `the timeout ends the call with a TimeoutError (${err?.name} after ${took.toFixed(0)} ms)`);
   const ctl = new AbortController();
   const patient = createRestClient({ baseUrl: "http://api", fetch: never });
-  const pending = patient.call("thought_stats", {}, { signal: ctl.signal }).then(() => null, (e: unknown) => e as Error);
+  const pending = within(patient.call("thought_stats", {}, { signal: ctl.signal })).then(() => null, (e: unknown) => e as Error);
   ctl.abort();
   assert((await pending)?.name === "AbortError", "the caller's signal ends a call with no timeout");
+  // A fetch that never heeds the signal — the REST app's own, in a suite — is still cut at the timeout (review pass 1).
+  const deaf = () => new Promise<Response>(() => {});
+  const cut = createRestClient({ baseUrl: "http://api", fetch: deaf, timeoutMs: 50 });
+  const t1 = performance.now();
+  const deafErr = await within(cut.call("thought_stats", {})).then(() => null, (e: unknown) => e as Error);
+  const tookDeaf = performance.now() - t1;
+  assert(deafErr?.name === "TimeoutError" && tookDeaf < 2000, `…and so is one whose fetch ignores the signal (${deafErr?.name} after ${tookDeaf.toFixed(0)} ms)`);
+  // A signal aborted before the call sends nothing: the operation never runs.
+  seen.length = 0;
+  calls.length = 0;
+  const early = new AbortController();
+  early.abort();
+  const viaAppClient = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  const earlyErr = await within(viaAppClient.call("capture_thought", { content: "x" }, { key: "write-raw", signal: early.signal })).then(() => null, (e: unknown) => e as Error);
+  assert(earlyErr?.name === "AbortError" && seen.length === 0 && calls.length === 0, `a signal already aborted sends nothing, and no operation runs (${earlyErr?.name}, ${seen.length} sent, ${calls.length} run)`);
 }
 
-console.log("\n[7] A job's stream: the response itself, keyed");
+console.log("\n[6b] An input a URL cannot carry is answered here, nothing sent: the REST core's REFUSED_INPUT, naming the field");
+{
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  const cases: [string, () => Promise<Answer>, string][] = [
+    ["an empty id", () => client.call("fetch", { id: "" }, { key: "write-raw" }), "id"],
+    ["a dot segment", () => client.call("reset_capture_stamp", { id: "." }, { key: "write-raw" }), "id"],
+    ["two dots", () => client.call("update_thought", { id: "..", content: "x" }, { key: "write-raw" }), "id"],
+    ["a job id of one dot", () => client.call("job_status", { job_id: "." }, { key: "write-raw" }), "job_id"],
+    ["no id at all", () => client.call("fetch", {} as never, { key: "write-raw" }), "id"],
+    ["a null id", () => client.call("delete_thought", { id: null } as never, { key: "write-raw" }), "id"],
+    ["a number for an id", () => client.call("fetch", { id: 5 } as never, { key: "write-raw" }), "id"],
+    ["a lone surrogate in an id", () => client.call("fetch", { id: "\uD800x" }, { key: "write-raw" }), "id"],
+    ["a lone surrogate in a query field", () => client.call("list_thoughts", { topic: "a\uDC00" }, { key: "write-raw" }), "topic"],
+    ["…and in a query list", () => client.call("thought_changes", { actions: ["capture", "\uD800"] as never }, { key: "write-raw" }), "actions"],
+  ];
+  for (const [label, run, field] of cases) {
+    seen.length = 0;
+    calls.length = 0;
+    const r = await run();
+    const issue = (r.body as { issues?: { path: string }[] }).issues?.[0];
+    assert(r.status === 400 && !r.ok && !r.sent && (r.body as { code?: string }).code === "REFUSED_INPUT" && issue?.path === field && seen.length === 0 && calls.length === 0,
+      `${label}: 400 REFUSED_INPUT naming ${field}, sent nowhere (${r.status} ${JSON.stringify(r.body)}, ${seen.length} sent)`);
+  }
+  // A body carries what a URL cannot: a lone surrogate in a capture's content travels as JSON's escape.
+  calls.length = 0;
+  const body = await client.call("capture_thought", { content: "half \uD800 a pair" }, { key: "write-raw" });
+  assert(body.status === 201 && body.sent && (calls[0]?.input as { content?: string } | undefined)?.content === "half \uD800 a pair", `a lone surrogate in a body arrives as sent (${body.status})`);
+  const fine = await client.call("fetch", { id: "..." }, { key: "write-raw" });
+  assert(fine.status === 200 && fine.sent, `three dots are no dot segment, and are sent (${fine.status})`);
+}
+
+console.log("\n[7] A job's stream: the response itself, unread, keyed");
 {
   seen.length = 0;
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   const r = await client.stream("no-such-job", { key: "write-raw" });
   assert(r.status === 404 && seen[0]?.url === "http://api/v1/jobs/no-such-job/stream" && seen[0]?.headers.get("x-brain-key") === "write-raw", `GET /v1/jobs/<id>/stream with the key; an unknown job is its 404 (${r.status} ${seen[0]?.url})`);
+  // A refusal's response is handed back unread, so its caller can read it or pass it on (review pass 1: it came back already read).
+  const refusalText = await r.text().catch((e: Error) => `(unreadable: ${e.message})`);
+  assert(refusalText.startsWith("{") && same(JSON.parse(refusalText), { code: "NOT_FOUND", retryable: false }), `…its refusal still readable (${refusalText})`);
+  seen.length = 0;
+  const carrier = createRestClient({ baseUrl: "http://api", fetch: viaApp, forwarderKey: "fwd-raw", headers: () => ({ traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" }) });
+  const fwd = await carrier.stream("no-such-job", { key: "write-raw" });
+  assert(fwd.status === 404 && seen[0]?.headers.get(FORWARDER_HEADER) === "fwd-raw" && seen[0]?.headers.get("traceparent") !== null
+      && same(await fwd.json(), { code: "NOT_FOUND", retryable: false, refusal: { code: "NOT_FOUND", retryable: false, id: "no-such-job" } }),
+    "a stream carries the forwarder slot and the extra headers, and its forwarded refusal holds itself whole");
+  seen.length = 0;
+  const dot = await client.stream(".", { key: "write-raw" });
+  assert(dot.status === 400 && seen.length === 0 && (await dot.json() as { code?: string }).code === "REFUSED_INPUT", `a job id of one dot is refused here, not read as GET /v1/jobs/stream (${dot.status}, ${seen.length} sent)`);
   const events = createRestClient({ baseUrl: "http://api", fetch: async () => new Response("event: end\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } }) });
   const s = await events.stream("j");
   assert(s.headers.get("content-type") === "text/event-stream" && (await s.text()).startsWith("event: end"), "an open stream is handed back unread");
@@ -196,6 +258,8 @@ if (false as boolean) {
   void c.call("capture_thought", { content: "x", id: ID });
   // @ts-expect-error list_thoughts' limit is a number
   void c.call("list_thoughts", { limit: "5" });
+  // @ts-expect-error the job's event stream is stream()'s, not call()'s
+  void c.call("job_stream", { job_id: "j" });
 }
 
 report();

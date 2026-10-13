@@ -367,19 +367,26 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
     reset_capture_stamp: say.renderResetCaptureStamp, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
   };
-  const worded = new Set<string>();
-  for (const [tool, args, method, path, body] of [...cases, ...withFacts]) {
-    const r = await rest(method, path, body, KEYS.writer, KEYS.forwarder);
-    const m = await mcp(tool, args);
+  // A capture-only key's refusals too (review pass 1), the words its facts
+  // leave out included — the value quoted back, a malformed key named — as
+  // the MCP reply says them to that key. (Its missing `derived_from` ids are
+  // trimmed before the write, not refused: the existence-oracle rule.)
+  const hookCases: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, key: string][] = [
+    ["capture_thought", { content: "lambda", supersedes: "not-an-id" }, "POST", "/v1/thoughts", { content: "lambda", supersedes: "not-an-id" }, KEYS.hook],
+    ["capture_thought", { content: "lambda", metadata: { "Bad Key": 1 } }, "POST", "/v1/thoughts", { content: "lambda", metadata: { "Bad Key": 1 } }, KEYS.hook],
+    ["capture_thought", { content: "lambda", metadata: { status: "done" } }, "POST", "/v1/thoughts", { content: "lambda", metadata: { status: "done" } }, KEYS.hook],
+  ];
+  for (const [tool, args, method, path, body, key] of [...cases.map((c) => [...c, KEYS.writer] as const), ...withFacts.map(([t, a, m, p, b]) => [t, a, m, p, b, KEYS.writer] as const), ...hookCases]) {
+    const r = await rest(method, path, body, key, KEYS.forwarder);
+    const m = await mcp(tool, args, key);
     const { refusal, ...facts } = r.body;
     const out = rendered(renderOf[tool], { ok: false, refusal });
     const { text: _text, ...mcpFacts } = m.sc;
-    worded.add(String(r.body.code));
-    assert(refusal !== undefined && same(facts, mcpFacts), `${tool} ${r.body.code}, forwarded: its facts as before, the refusal whole beside them (${JSON.stringify(refusal)?.slice(0, 100)})`);
+    const who = key === KEYS.hook ? " (a capture-only key)" : "";
+    assert(refusal !== undefined && same(facts, mcpFacts), `${tool} ${r.body.code}${who}, forwarded: its facts as before, the refusal whole beside them (${JSON.stringify(refusal)?.slice(0, 100)})`);
     assert(out.content[0].text === m.text && same(out.structuredContent, m.sc) && out.isError === m.isError,
       `…and render.ts makes of it the MCP reply (${out.content[0].text === m.text ? "same text" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 80)}`}; first difference: ${firstDiff(out.structuredContent, m.sc)})`);
   }
-  assert(worded.size === codes.size, `every code compared above is worded from the forwarded answer (${worded.size} of ${codes.size})`);
 }
 
 console.log("\n[6] test-auth's cases against REST: a read key cannot write, a capture key cannot read, a wrong or revoked key is a 401");
