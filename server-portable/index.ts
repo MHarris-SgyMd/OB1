@@ -21,7 +21,7 @@ export { parseFilter, withActorFilter } from "./core/filter.ts";
 export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice, INGESTED_NOTICE, minTrustHint } from "./render.ts";
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
 export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
-// The HTTP edge's names the suites read from here, now mcp-edge.ts's (SMD-2287 PR 2).
+// The HTTP edge's names this module exported before they moved to mcp-edge.ts (SMD-2287 PR 2), the suites reading some.
 export { cutByStopLine, legacyRouteLine, recordCall, REFUSAL_BODY_LIMIT, type CallRecord, type RequestParts } from "./mcp-edge.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model

@@ -854,7 +854,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
   // /health is the probe target for platforms that can only GET and want 2xx:
   // it needs no key, and without one it says `ok` and nothing else. The match
-  // rule is the HEALTH_PATH comment in index.ts; these rows pin it. A key
+  // rule is the comment above index.ts's /health route (HEALTH_PATH is mcp-edge.ts's); these rows pin it. A key
   // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],

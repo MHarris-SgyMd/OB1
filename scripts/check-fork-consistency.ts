@@ -253,8 +253,8 @@
  *      remaining size (SMD-2126)
  *  25. a tripwire on server-portable/index.ts, its HTTP edge (mcp-edge.ts,
  *      SMD-2287), the process root it builds on (root.ts) and the REST core
- *      (api.ts, rest/*.ts), for the logic a
- *      move to server-portable/core/ leaves behind (SMD-2283, SMD-2284): each file's import and export statements
+ *      (api.ts, rest/*.ts), for the logic a move to server-portable/core/
+ *      leaves behind (SMD-2283, SMD-2284): each file's import and export statements
  *      name only its own TRANSPORT_FILES list's modules, whole or by the names
  *      listed and under those names (never egress.ts, embed.ts, metadata.ts
  *      or a store backend; root.ts's readers, the store's module,
@@ -5289,7 +5289,8 @@ checkPostgrestClients();
 // core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
 // The process root both entries build on — the environment, the store and the
 // agent registry — is root.ts, and the REST core (api.ts, rest/) is held as
-// index.ts is (SMD-2284), as is the endpoint's HTTP edge, mcp-edge.ts (SMD-2287). This is a tripwire for the forms a move leaves
+// index.ts is (SMD-2284), as is the endpoint's HTTP edge, mcp-edge.ts
+// (SMD-2287). This is a tripwire for the forms a move leaves
 // behind, not a proof: a text scan cannot follow a value. In each of
 // TRANSPORT_FILES:
 //   - every import and re-export statement (comments and strings blanked, so
@@ -5557,6 +5558,11 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { db } from "./root.ts";\nconst s = await db();\n', true, API_ROLE],
   ['import { failure, refusalValue, type Refusal, type RefusalCode } from "../core/refusal.ts";\n', false, REST_ROLE],
   ['import { refuse } from "../core/refusal.ts";\n', true, REST_ROLE],
+  // SMD-2287 PR 2: the endpoint's HTTP edge takes the origin's challenge and the record's types, by name, and no more of either module.
+  ['import { challengeHeader, UNREACHABLE_RETRY_AFTER_SECONDS } from "./oauth-edge.ts";\nimport { traceOf, type RequestOutcome, type RequestTrace } from "./telemetry.ts";\n', false, EDGE_ROLE],
+  ['import { refusalAt } from "./oauth-edge.ts";\n', true, EDGE_ROLE],
+  ['import { env } from "./root.ts";\n', true, EDGE_ROLE],
+  ['import { beginRequest } from "./telemetry.ts";\n', true, EDGE_ROLE],
   // SMD-2284 PR 3: the root's serveHere builds the store at a serving entry's start — the wiring calling itself.
   ["export function serveHere(door: string): void {\n  serving = door;\n  initEnv();\n  void db().catch(() => {});\n}\n", false, ROOT_ROLE],
   ["export function startUp(): void {\n  void db().catch(() => {});\n}\n", true, ROOT_ROLE],

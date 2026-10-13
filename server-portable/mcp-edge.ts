@@ -45,8 +45,9 @@ export function recordCall(record: CallRecord, outcome: RequestOutcome, code: st
 // and names the 405's `Allow`, so the two cannot drift. FORK.md change 75.
 export const MCP_METHODS = ["POST"];
 export const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
-// A health path serves GET and HEAD (index.ts's /health route) AND the MCP methods, since
-// the MCP handler is registered at every path. Derived from the same list.
+// A health path serves GET and HEAD (index.ts's /health route) AND the MCP
+// methods, since the MCP handler is registered at every path. Derived from the
+// same list.
 export const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"].join(", ");
 
 // The CORS list is a different question — what a browser may send so it can
@@ -408,10 +409,9 @@ export function partsOf(body: ParsedBody): RequestParts {
 /**
  * The close sse.ts's abandonedRequestLine says, when the server's own stop
  * made it: the request was still running when the stop closed it — at the
- * drain bound, or on a second
- * signal (shutdown.ts) — and the process exits next, so the call does not run
- * to its end (review pass 1 of SMD-2250 — before, this was logged as the
- * client leaving).
+ * drain bound, or on a second signal (shutdown.ts) — and the process exits
+ * next, so the call does not run to its end (review pass 1 of SMD-2250 —
+ * before, this was logged as the client leaving).
  */
 export function cutByStopLine(label: string, elapsedMs: number): string {
   return `request cut off by the server's stop after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — still running when the stop closed it, and the process exits now; a capture may or may not have landed (SMD-2250)`;
