@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2733 assertions: 2733 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-eight (88) migrations applied, and
+`bun test-schema.ts` prints `2756 assertions: 2756 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-nine (89) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-2694).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1373,6 +1373,24 @@ grants kept; it carries 073's mechanism for an earlier form a re-applied
 older file left, and refuses to apply without 073. test-schema [79], test-upgrade [20aj],
 server-portable/test-update-delete.ts [11], test-server.ts [23].
 
+Migration 089 adds `extraction_progress`, a long thought's extraction
+windows kept across a claim that does not finish (SMD-2694). A hard stop
+— the sleep scheduler's wake, the operator's second signal — aborted the
+window in hand and returned the claim, and every window already answered went
+with it, so a document longer than every sleep was never extracted while the
+brain kept waking. One row per claim: the parsed windows by index, each with
+the hash of the request it answered, under the thought's fingerprint and the
+worker's windowing — a write under another replaces the row, and a window is
+reused only for the request it answered — and the stops that took the claim,
+`stalled` the latest of them in a row that gained no window.
+`save_extraction_window` and `note_extraction_stop` write it for the claim's
+holder only, the claim row locked `FOR SHARE`, so a save after the lease went
+back keeps nothing. The row goes with its claim (`ON DELETE CASCADE`), and the
+worker deletes it at a succeeded release; a failed release keeps it, so
+`--retry-failed` resumes. It needs 015 only. See **Long thoughts resume**
+under [`extract-entities.ts`](#extract-entitiests). test-schema [80], test-upgrade [20ak],
+test-live [10], server-portable/test-local-provider.ts.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -1475,6 +1493,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
+| | `extraction_progress` (089) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 089's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
@@ -2198,6 +2217,29 @@ the graph until a later reading succeeds, since a failure writes nothing. A run 
 no failure exits 0, the partial rows listed on stdout, unless the model looks
 at fault (below).
 
+**Long thoughts resume (SMD-2694).** A windowed thought's windows are kept as
+they parse (migration 089's `extraction_progress`), so a claim that does not
+finish — a hard stop, the sleep scheduler's wake (db/sleep.ts) or the
+operator's second signal; a worker killed and its lease lapsed; a failed
+release — leaves them for the next claim of the same text, which sends only
+the windows still to do. Until this, a hard stop threw every answered window
+away: on the stable brain every extraction over ten minutes is a document of
+17 to 74 windows at 30 to 300 s each, and one longer than every sleep was
+never finished while the brain kept waking. A window is reused only for the
+request it answered — the same text by its fingerprint, the same windowing,
+and its own request by hash, so an edit, a change of window size, chunker,
+header rule or prompt asks it again — and a malformed window is never kept:
+the next claim asks it again. The windows are merged in order, the kept with
+the new, so the answer is an unbroken run's. A kept window cost no call in
+the claim that reuses it, and the summary's calls, answers, retries and
+aborts count only the windows sent. The hard stop counts itself on the
+thought in hand before its lease goes back (`stops`, and `stalled`, the
+latest of them in a row with no window gained), and `--status` lists the
+thoughts with windows kept or stops counted. A succeeded release deletes the
+row; a failed one keeps it, so `--retry-failed` resumes a thought that timed
+out in a late window. Without the table or the extraction group's grant on it,
+the worker keeps nothing and says so once.
+
 **A run whose model looks at fault says so and exits 3 (SMD-2266).** Since a
 windowed thought with any window parsed is succeeded, a model answering many
 windows malformed writes partial rows, not failed ones. So the run counts its
@@ -2849,10 +2891,13 @@ work. The passes it runs write no audit row, so they never wake it.
 **What it does asleep.** Extraction alone until its pool drains, then
 consolidation beside it — the order "Start `extract` alone on a backlog" asks
 of an operator. A wake hard-stops both: every lease returned, the model call in
-hand aborted, the thoughts in hand moved to the back of the queue. A thought
-longer than every sleep is never finished while the brain keeps waking, and
-consolidation does not join while it is pending (SMD-2694). A failed row stays
-failed: `--retry-failed` is the operator's.
+hand aborted, the thoughts in hand moved to the back of the queue. A long
+thought's answered windows are kept (089, [Long thoughts
+resume](#extract-entitiests)), so one longer than every sleep advances by the
+windows each sleep finishes, and is done once its last is; until then
+consolidation does not join, and a thought whose single window outlasts every
+sleep still holds it back (SMD-2694). A failed
+row stays failed: `--retry-failed` is the operator's.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -4081,8 +4126,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2733 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1262 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2756 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1273 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

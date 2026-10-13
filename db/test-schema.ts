@@ -13676,6 +13676,76 @@ console.log("\n[79] Migration 088: update_thought answers what it did — the ro
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
+console.log("\n[80] Migration 089: extraction_progress — a long thought's windows kept for the claim's holder only, replaced under another text or windowing, the stops counted and a stop that gained nothing stalled; the row goes with its claim (SMD-2694)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
+    .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer kept_at_stop:integer updated_at:timestamp with time zone",
+    `the table's columns, only windows nullable (${cols})`);
+  const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
+  assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
+  const sc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["save_extraction_window(uuid, text, text, text, text, int, int, jsonb)"])).c ?? "";
+  const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text)"])).c ?? "";
+  assert([tc, sc, nc].every((c) => /Migration 089 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 089, the ticket and the holder rule");
+
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "extract:stub-80@p2";
+  const thought = async (text: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [text])).id;
+  const id = await thought("[80] a long document");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
+  const [claimed] = await q<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'w-80', 1, 900)`, [JOB]);
+  assert(claimed?.thought_id === id, "the thought claimed by w-80");
+  const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
+  const save = (worker: string, fp: string, win: string, i: number, tid = id) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, 4, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i)]).then((r) => r.ok);
+  const note = (worker: string, fp: string, win: string, tid = id) =>
+    one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5) AS ok`, [tid, JOB, worker, fp, win]).then((r) => r.ok);
+  const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; kept_at_stop: number; fingerprint: string }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, kept_at_stop, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
+
+  assert((await save("w-80", "fpA", "winA", 0)) && (await save("w-80", "fpA", "winA", 1)), "the holder keeps two windows");
+  assert((await row())?.keys === "0,1" && (await row())?.windows === 4, "…keyed by index, with the thought's window count");
+  assert((await save("w-other", "fpA", "winA", 2)) === false && (await row())?.keys === "0,1", "a worker that does not hold the claim keeps nothing");
+  assert((await save("w-80", "fpA", "winA", 1)) && (await row())?.keys === "0,1", "a window saved again under its index replaces the one kept, no duplicate");
+  let r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 1 && r.stalled === 0 && r.kept_at_stop === 2, `a stop after windows were kept: one stop, not stalled, two windows at the stop (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 2 && r.stalled === 1 && r.kept_at_stop === 2, `a stop that gained no window since the last: stalled one (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 3 && r.stalled === 2, `…and another: stalled two (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 4 && r.stalled === 0 && r.kept_at_stop === 3, `a stop after a window was gained resets stalled (${JSON.stringify(r)})`);
+  assert((await note("w-other", "fpA", "winA")) === false && (await row())?.stops === 4, "a stop counted by a worker that does not hold the claim counts nothing");
+  r = (await save("w-80", "fpB", "winA", 3)) && await row();
+  assert(r && r.keys === "3" && r.stops === 0 && r.stalled === 0 && r.fingerprint === "fpB", `a window of other text replaces the row: its windows and its stops were the old text's (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpB", "winB")) && await row();
+  assert(r && r.keys === null && r.windows === null && r.stops === 1 && r.stalled === 1, `a stop under another windowing replaces the row too, this stop its first (${JSON.stringify(r)})`);
+  assert(/an index of at least 0/.test(await save("w-80", "fpB", "winB", -1).then(() => "", (e: Error) => e.message)), "a window with a negative index is refused");
+
+  await q(`SELECT release_claims_for_worker($1, 'w-80')`, [JOB]);
+  assert((await save("w-80", "fpB", "winB", 0)) === false && (await note("w-80", "fpB", "winB")) === false && (await row())?.stops === 1,
+    "once the lease is returned the old holder's save and stop write nothing — the row stands as it was");
+
+  // A single-window thought keeps no window: its first stop makes the row.
+  const lone = await thought("[80] one window");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, lone]);
+  await q(`SELECT claim_thoughts($1, 'w-80b', 2, 900)`, [JOB]);
+  r = (await note("w-80b", "fpL", "winA", lone)) && await row(lone);
+  assert(r && r.stops === 1 && r.stalled === 1 && r.keys === null, `a stop with no window kept is one stop, stalled (${JSON.stringify(r)})`);
+
+  const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
+  await reapply("089");
+  assert(JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "089 re-applied: the rows stand");
+  await db.exec(`DELETE FROM thought_work_claims WHERE work_type = '${JOB}' AND thought_id = '${lone}'`);
+  assert((await row(lone)) === undefined && (await row()) !== undefined, "a claim row deleted by hand takes its kept windows with it, and only its own");
+  await db.exec(`DELETE FROM thoughts WHERE id = '${id}'`);
+  assert((await row()) === undefined, "…and a thought deleted takes them through its claim");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

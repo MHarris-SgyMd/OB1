@@ -529,8 +529,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // capture-only key's stamp yields to the first classified key that can read
   // at a higher trust, SMD-2664), 086 (the operator resets such a label,
   // SMD-2744), 087 (what the findings step posted to the board,
-  // SMD-2681) and 088 (update_thought answers what it did, SMD-2744)
-  // stay recorded and
+  // SMD-2681), 088 (update_thought answers what it did, SMD-2744) and 089
+  // (a long thought's extraction windows kept, SMD-2694) stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
@@ -641,13 +641,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // redefines 085's restamp and backfill on their own bodies, refusing by
   // name without 046 or 085 ([20ah]); 087 adds a table and
   // needs nothing ([20ai]); 088 redefines 073's update_thought on
-  // its own body, refusing by name without 073 ([20aj]) — all
+  // its own body, refusing by name without 073 ([20aj]); 089 adds a table
+  // and two functions over 015's claims ([20ak]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 59, `030 is among the last fifty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 60, `030 is among the last sixty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3938,6 +3939,31 @@ console.log("\n[20aj] Migration 088: refused by name without 073; onto a populat
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the088 });
   assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 088 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20ak] Migration 089: onto a populated brain at the file before it, a claim in flight — the table and its two functions, no thought or claim moved; the claim's holder keeps a window after it; a re-apply a no-op that keeps it (SMD-2694)");
+{
+  await dropSchema(URL_);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the089 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;  // by name: renumbered when main takes its number
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the089 });
+  const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 089: a long document') RETURNING id`;
+  await sql`SELECT enqueue_thoughts('extract:stub@p2', ARRAY[${id}::uuid])`;
+  await sql`SELECT * FROM claim_thoughts('extract:stub@p2', 'w-upgrade', 1, 900)`;
+  const state = async () => JSON.stringify(await sql`SELECT t.id, t.content, t.updated_at, c.status, c.worker_id, c.enqueued_at, c.attempt_count FROM thoughts t JOIN thought_work_claims c ON c.thought_id = t.id ORDER BY t.id`);
+  const before = await state();
+  assert((await sql`SELECT to_regclass('extraction_progress') IS NULL AS absent`)[0].absent === true, "before 089 there is no table of kept windows");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 });
+  const [shape] = await sql`SELECT to_regclass('extraction_progress') IS NOT NULL AS t,
+    to_regprocedure('save_extraction_window(uuid, text, text, text, text, int, int, jsonb)') IS NOT NULL AS s,
+    to_regprocedure('note_extraction_stop(uuid, text, text, text, text)') IS NOT NULL AS n`;
+  assert(shape.t && shape.s && shape.n && (await state()) === before, "089 onto the populated brain: the table and both functions, and no thought or claim moved");
+  const [{ ok }] = await sql`SELECT save_extraction_window(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', 3, 0, ${{ index: 0, h: "h0" }}::jsonb) AS ok`;
+  assert(ok === true, "the claim in flight across the upgrade: its holder keeps a window after it");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 });
+  const [n] = await sql`SELECT count(*)::int AS n FROM extraction_progress`;
+  assert(n.n === 1 && (await state()) === before, "a re-apply of 089 is a no-op: the kept window stands, no thought or claim moved");
   await sql.close();
 }
 

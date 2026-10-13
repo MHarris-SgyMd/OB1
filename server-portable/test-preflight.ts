@@ -2615,6 +2615,8 @@ else {
   assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046, 055 then 060 re-applied put the column and the trigger back (060's body over 055's over 046's — SMD-2115, SMD-2116)");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
+  // 089's kept windows hang off the claims (SMD-2694): a brain before 015 has neither.
+  await claims.unsafe("DROP TABLE extraction_progress");
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
@@ -2623,7 +2625,7 @@ else {
          "…while the claim functions, which outlive the table, still read as 015's");
   assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "…and the consolidate pass check, which reads the same table, says so too");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") || f.endsWith("_extraction_progress.sql") });
 
   // SMD-2880's Verify: the walk index remedy followed literally. A ledger
   // the migrator wrote (--baseline over the full apply) records 039. 038

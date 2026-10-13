@@ -22,7 +22,7 @@
  */
 
 import { SQL } from "bun";
-import type { Extraction, ExtractWindowObservation } from "./entities.ts";
+import type { Extraction, ExtractionWindow, ExtractProgress, ExtractWindowObservation } from "./entities.ts";
 import { createAssert, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1428,6 +1428,64 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   holdMs = 0;
   assert(midStop !== null && stopMs < 1500 && reqs.length === 1 && madeBy(midStop) === 1,
          `a stop during the first of a long thought's windows aborts that call, not after its 3 s answer, and sends no other window (${stopMs} ms, ${reqs.length} sent, ${madeBy(midStop)} counted)`);
+
+  // SMD-2694: the windows a stopped claim answered are kept, and the next
+  // claim of the same text sends only the rest. An in-memory store stands in
+  // for 089's table: it keeps what `save` hands it and answers `kept` only for
+  // the request a window answered.
+  const { callsOf: callsOfD } = await import("./entities.ts");
+  type Stored = { part: ExtractionWindow; sent: string; windows: number };
+  const store = new Map<number, Stored>();
+  let onSave: ((n: number) => void) | null = null;
+  const progressD: ExtractProgress = {
+    kept: (i, sent) => (store.get(i)?.sent === sent ? store.get(i)!.part : undefined),
+    save: async (part, sent, windows) => { store.set(part.index, { part, sent, windows }); onSave?.(store.size); },
+  };
+  reqs.length = 0;
+  const unbroken = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  const all = reqs.length;
+  assert(all >= 3, `the unbroken run the resumed one is held to: ${all} windows`);
+  reqs.length = 0;
+  const stopAfterTwo = new AbortController();
+  onSave = (n) => { if (n === 2) stopAfterTwo.abort(); };
+  let firstClaim: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, stopAfterTwo.signal, progressD); } catch (e) { firstClaim = e; }
+  onSave = null;
+  assert(firstClaim !== null && reqs.length === 2 && store.size === 2 && [...store.keys()].join(",") === "0,1" && [...store.values()].every((s) => s.windows === all),
+         `a claim stopped after its second window keeps those two, each with the thought's window count (${reqs.length} sent, kept ${[...store.keys()].join(",")})`);
+  reqs.length = 0;
+  const resumed = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD);
+  assert(reqs.length === all - 2 && reqs.every((r, i) => r.part === `[Part ${i + 3} of ${all} of a longer note]`),
+         `the next claim sends only the windows still to do, from the third on (${reqs.map((r) => r.part).join(" | ")})`);
+  assert(JSON.stringify({ e: resumed.entities, r: resumed.relations, w: resumed.windows }) === JSON.stringify({ e: unbroken.entities, r: unbroken.relations, w: unbroken.windows }),
+         "…and its answer is the unbroken run's: the same entities, aliases and confidences in the same order, the same relations and window count");
+  assert(resumed.parts?.map((p) => p.resumed === true).join(",") === Array.from({ length: all }, (_, i) => i < 2).join(",") && callsOfD(resumed) === all - 2 && callsOfD(unbroken) === all,
+         `the kept windows are marked resumed and cost no call in this claim (calls ${callsOfD(resumed)} of ${all})`);
+  assert(store.size === all, `…and the windows it answered are kept as they parse (${store.size} of ${all})`);
+  // A kept window is reused only for the request it answered: one whose text
+  // changed under the same index — a chunker or header change — is asked again.
+  store.get(0)!.sent = "another request";
+  reqs.length = 0;
+  await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD);
+  assert(reqs.length === 1 && reqs[0].part === `[Part 1 of ${all} of a longer note]`, `a kept window whose request differs is asked again, and only it (${reqs.map((r) => r.part).join(" | ")})`);
+  // A malformed answer is never kept, and one kept anyway is asked again.
+  store.clear();
+  proseIf = /Priya/;
+  reqs.length = 0;
+  const withProse = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD);
+  proseIf = null;
+  const proseAt = withProse.coverage?.malformed?.[0];
+  assert(proseAt !== undefined && store.size === all - 1 && !store.has(proseAt), `the window answered in prose is not kept, the others are (kept ${[...store.keys()].join(",")}, prose ${proseAt})`);
+  // A store that hands the prose window back whatever the request: only the
+  // malformed mark keeps it from being reused.
+  const keepsProse: ExtractProgress = {
+    kept: (i, sent) => (i === proseAt ? withProse.parts![i] : progressD.kept(i, sent)),
+    save: progressD.save,
+  };
+  reqs.length = 0;
+  const reasked = await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, keepsProse);
+  assert(reqs.length === 1 && reqs[0].part === `[Part ${proseAt! + 1} of ${all} of a longer note]` && reasked.coverage === undefined,
+         `a malformed window kept anyway is asked again, and its answer now parses (${reqs.map((r) => r.part).join(" | ")})`);
   providerD.stop();
 }
 

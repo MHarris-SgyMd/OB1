@@ -4206,6 +4206,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
+  // …but its stop is counted on it before the lease went back (089,
+  // SMD-2694): a one-window note keeps no window, so the stop is stalled.
+  const stopsCounted = (await sql`SELECT stops, stalled, parts FROM extraction_progress WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[])`) as { stops: number; stalled: number; parts: Record<string, unknown> }[];
+  assert(stopsCounted.length === 1 && stopsCounted[0].stops === 1 && stopsCounted[0].stalled === 1 && Object.keys(stopsCounted[0].parts).length === 0,
+         `…its stop counted on the thought in hand alone, stalled, no window kept (${JSON.stringify(stopsCounted)})`);
   // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
   // one SIGINT stops after the thought in hand and exits 130; a second exits
   // 130 at once, with the thought still in hand and its lease returned.
@@ -4867,6 +4872,138 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   assert(mixed === `; the first call was aborted, or cut by the provider's repeat limit, on the stream 3.0 s in — ${ITEM}, or ${UNIT} — and the escalation to big-stub, read whole, did not converge either`,
     `…mixed windows name each reason once, the longest abort's time, and the escalation (${mixed})`);
   loopModel.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 089, SMD-2694)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const KEY = "extract:stub-meta@p2";
+  /** Each extraction call's part marker, in order; `slowMs` holds every answer. */
+  const sent: string[] = [];
+  let slowMs = 0;
+  const atlasModel = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      sent.push(/\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole");
+      await Bun.sleep(5 + slowMs);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Atlas", type: "project", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const rawKey = "d".repeat(64);
+  const env: Record<string, string | undefined> = {
+    ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${atlasModel.port}/v1`, OB1_LLM_LOCAL: "1",
+    OB1_METADATA_MODEL: "stub-meta", OB1_EXTRACT_CHUNK_TOKENS: "300", OB1_WORKER_KEY: rawKey, MCP_ACCESS_KEYS: `atlas-worker:write:${hashKey(rawKey)}`,
+  };
+  const inProcess = async (opts: Omit<ExtractOptions, "writer"> = {}): Promise<{ code: number; out: string }> => {
+    const lines: string[] = [];
+    const code = await runExtract({ url: URL_!, env, workers: 1, ...opts, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    return { code, out: lines.join("\n") };
+  };
+  // Six paragraphs of ~130 estimated tokens against 300-token windows, as [10]'s ledger.
+  const atlasText = Array.from({ length: 6 }, (_, p) => `The atlas rewrite, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Point ${p}.${i} about the atlas.`).join(" ")}`).join("\n\n");
+  const atlas = ((await sql`SELECT upsert_thought(${atlasText}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const progress = async () => (await sql`
+    SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled
+      FROM extraction_progress WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`)[0] as { keys: string | null; windows: number; stops: number; stalled: number } | undefined;
+
+  // The first run is hard-stopped with its third window in hand: the two
+  // answered are kept, the stop counted, the claim back in the pool.
+  slowMs = 400;
+  let stop: PassStop | undefined;
+  const first = inProcess({ onPass: (s) => { stop = s; } });
+  for (let i = 0; i < 200 && sent.length < 3; i++) await Bun.sleep(25);
+  stop?.();
+  await stop?.();
+  const firstRun = await first;
+  slowMs = 0;
+  const windows = (await progress())?.windows ?? 0;
+  const kept = await progress();
+  const [claim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`;
+  assert(firstRun.code === 130 && sent.join(",") === "1,2,3" && windows >= 4 && claim?.status === "pending",
+    `the first run is hard-stopped during the third of the thought's ${windows} windows, its claim back in the pool (exit ${firstRun.code}, sent ${sent.join(",")}, ${claim?.status})`);
+  assert(kept?.keys === "0,1" && kept.stops === 1 && kept.stalled === 0,
+    `…the two windows answered before the stop are kept, and the stop is counted on the row, not stalled (${JSON.stringify(kept)})`);
+
+  const status = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
+  assert(status.code === 0 && status.out.includes(`windows kept from a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
+    `--status names the thought, its windows kept and its stop (${status.out.split("\n").filter((l) => /kept/.test(l)).join(" | ")})`);
+
+  // The second run resumes: only the windows still to do are sent, and the
+  // thought is written whole — the kept windows' entity among the rest. The
+  // second window's request hash is altered first, as a chunker change would
+  // leave it: that window is asked again, the first is not.
+  await sql`UPDATE extraction_progress SET parts = jsonb_set(parts, '{1,h}', '"another request"') WHERE thought_id = ${atlas}::uuid`;
+  sent.length = 0;
+  const second = await inProcess();
+  const [done] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`;
+  assert(second.code === 0 && sent.join(",") === Array.from({ length: windows - 1 }, (_, i) => String(i + 2)).join(",") && done?.status === "succeeded",
+    `the next run sends only windows 2 to ${windows} — the first reused, the second's request no longer the one it answered — and the thought is extracted (sent ${sent.join(",")}, ${done?.status})`);
+  assert(new RegExp(`${windows - 1} model call\\(s\\)`).test(second.out),
+    `…its summary counts the ${windows - 1} calls it made, not the kept window (${second.out.split("\n").find((l) => /model call\(s\)/.test(l))?.trim()})`);
+  const [mention] = await sql`SELECT count(*)::int AS n FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${atlas}::uuid AND e.normalized_name = normalize_entity_name('Atlas')`;
+  assert(mention.n === 1 && (await progress()) === undefined, `…written once, and its kept windows deleted at the succeeded release (${mention.n} mention(s))`);
+
+  // A failed release keeps the windows, so --retry-failed resumes: the third
+  // window times out (--timeout 1), the thought is failed with two kept.
+  const globe = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "globe")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  let hangPart = "3";
+  const hanging = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const part = /\[Part (\d+) of \d+/.exec(body.messages?.find((m) => m.role === "user")?.content ?? "")?.[1] ?? "whole";
+      sent.push(part);
+      if (part === hangPart) await Bun.sleep(2500);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Globe", type: "project", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const hangEnv = { ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${hanging.port}/v1` };
+  sent.length = 0;
+  const failedRun = await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const globeKept = (await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${globe}::uuid`)[0] as { keys: string } | undefined;
+  const [globeClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${globe}::uuid AND work_type = ${KEY}`;
+  assert(failedRun === 1 && globeClaim?.status === "failed" && globeKept?.keys === "0,1",
+    `a thought failed by its third window's timeout keeps the two windows before it (exit ${failedRun}, ${globeClaim?.status}, kept ${globeKept?.keys})`);
+  hangPart = "none";
+  sent.length = 0;
+  const retried = await runExtract({ url: URL_!, env: hangEnv, workers: 1, retryFailed: true, writer: { out: () => {}, err: () => {} } });
+  const [globeDone] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${globe}::uuid AND work_type = ${KEY}`;
+  assert(retried === 0 && globeDone?.status === "succeeded" && sent[0] === "3" && !sent.includes("1") && !sent.includes("2"),
+    `…and --retry-failed resumes it from the third window (exit ${retried}, ${globeDone?.status}, sent ${sent.join(",")})`);
+  // An edit is other text: its windows are not the kept ones, even where a
+  // window's own request reads the same — the thought starts afresh.
+  const sphereText = atlasText.replaceAll("atlas", "sphere");
+  const sphere = ((await sql`SELECT upsert_thought(${sphereText}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  hangPart = "3";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const sphereKept = (await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${sphere}::uuid`)[0] as { keys: string } | undefined;
+  // Through update_thought, as a client edits: the fingerprint follows the text (a raw UPDATE leaves it).
+  const edited = ((await sql`SELECT update_thought(${sphere}::uuid, ${sphereText.replace("Point 5.23 about the sphere.", "Point 5.23 about the sphere, edited.")}) AS r`)[0].r as { ok: boolean });
+  hangPart = "none";
+  sent.length = 0;
+  const afterEdit = await runExtract({ url: URL_!, env: hangEnv, workers: 1, writer: { out: () => {}, err: () => {} } });
+  assert(sphereKept?.keys === "0,1" && edited.ok && afterEdit === 0 && sent.join(",") === "1,2,3,4,5,6",
+    `a thought edited after two of its windows were kept is extracted afresh — every window sent, the first two unchanged among them (kept ${sphereKept?.keys}, sent ${sent.join(",")})`);
+  hanging.stop(true);
+
+  // A brain without the table (a role without its grant reads the same):
+  // the worker keeps nothing, says so once, and extracts as before.
+  await sql`UPDATE thoughts SET content = ${`${atlasText}\n\nAn edit.`} WHERE id = ${atlas}::uuid`;
+  await sql`SELECT requeue_thought_work(${KEY}, ${atlas}::uuid)`;
+  await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+  sent.length = 0;
+  const without = await inProcess().finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
+  const saidOnce = without.out.split("\n").filter((l) => /could not .* a long thought's kept windows/.test(l));
+  assert(without.code === 0 && saidOnce.length === 1 && /no window is kept across a stop this run/.test(saidOnce[0]) && sent.length >= 4,
+    `without the table the worker says once that it keeps no window, and extracts the thought whole (exit ${without.code}, ${saidOnce.length} line(s), ${sent.length} sent)`);
+  atlasModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
 }
