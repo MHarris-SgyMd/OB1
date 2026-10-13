@@ -85,8 +85,9 @@
  * ── Measured ─────────────────────────────────────────────────────────────────
  * --report reads what became of each (pair, word) recorded: accepted (its
  * proposal accepted, or the board linking the pair since), rejected (its
- * proposals rejected), withdrawn (its proposals gone, or a relation the judge
- * stopped saying within the window), open (a proposal pending, or stale and
+ * proposals rejected by a person), withdrawn (its proposals gone, or settled
+ * by the pass's re-judge, or a relation the judge stopped saying, within the
+ * window), open (a proposal pending, or stale and
  * waiting on a re-judge), or unanswered (open past --days, 30 by default). The
  * acceptance rate is accepted over accepted, rejected and unanswered — the
  * number SMD-2682 is done on. It reads the brain alone, never Linear, from
@@ -754,7 +755,10 @@ export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string 
   const what =
     v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
     : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
-    : v.outcome === "withdrawn" ? (r.word === "outdates" ? "withdrawn: its proposal is gone" : `withdrawn: the judge stopped saying ${r.word}${r.withdrawnS === null ? "" : ` ${ago(r.withdrawnS)} after`}`)
+    : v.outcome === "withdrawn"
+      ? r.proposals
+        ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
+        : `withdrawn: the judge stopped saying ${r.word}${r.withdrawnS === null ? "" : ` ${ago(r.withdrawnS)} after`}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;
   return `    ${`${r.a} ~ ${r.b}`.padEnd(22)} ${r.word.padEnd(9)} posted ${ago(r.ageS)} ago on ${r.postedOn} — ${what}`;

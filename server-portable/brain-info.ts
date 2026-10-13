@@ -540,10 +540,10 @@ export interface FindingRow {
   postedAt: string;
   /** Seconds since, by the database's clock. */
   ageS: number;
-  /** Seconds from posting to the earliest active link between the pair the brain holds, at least 0; null when none. */
+  /** While a link between the pair is active: seconds from posting to the first link made since, closed ones included (0 when none was made since); null when none is active. */
   linkedS: number | null;
-  /** An outdates finding's proposals among those it named, by status, and when the first acceptance or the last rejection was made; null for a relation. */
-  proposals: { accepted: number; rejected: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
+  /** An outdates finding's proposals among those it named, by status — a person's rejection apart from the pass's settle (067) — and when the first acceptance, the last rejection and the last settle were made; null for a relation. */
+  proposals: { accepted: number; rejected: number; settled: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null; settledS: number | null } | null;
   /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
   stands: boolean | null;
   /** A relation finding no longer standing: seconds from posting to the close of the last relation of its word there; null when it stands, for outdates, or when the facets are gone. */
@@ -583,9 +583,10 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
   SELECT b.ticket_a, b.ticket_b, b.word, b.posted_on, b.origin, b.posted_at,
          extract(epoch FROM now() - b.posted_at)::float8 AS age_s,
          CASE WHEN l.linked_now THEN extract(epoch FROM coalesce(l.first_after, b.posted_at) - b.posted_at)::float8 END AS linked_s,
-         p.accepted, p.rejected, p.stale, p.pending,
+         p.accepted, p.rejected, p.stale, p.pending, p.settled,
          extract(epoch FROM p.accepted_at - b.posted_at)::float8 AS accepted_s,
          extract(epoch FROM p.rejected_at - b.posted_at)::float8 AS rejected_s,
+         extract(epoch FROM p.settled_at - b.posted_at)::float8 AS settled_s,
          r.stands, extract(epoch FROM r.gone_at - b.posted_at)::float8 AS withdrawn_s
     FROM board_findings_posted b
     -- The link's target probes 053's target index; its holder is the other
@@ -603,13 +604,18 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
          AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to', 'duplicate_of')
          AND f.payload->>'target' IN (b.ticket_a, b.ticket_b)
          AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = CASE WHEN f.payload->>'target' = b.ticket_a THEN b.ticket_b ELSE b.ticket_a END) l ON true
+    -- A rejection whose note carries 067's marker is the pass's own settle (a
+    -- re-judge found no conflict, or the two tickets linked), not a person's
+    -- no: counted apart (review pass 2).
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE s.status = 'accepted')::int AS accepted,
-             count(*) FILTER (WHERE s.status = 'rejected')::int AS rejected,
+             count(*) FILTER (WHERE s.status = 'rejected' AND coalesce(s.review_note, '') NOT LIKE 'settled by the pass:%')::int AS rejected,
+             count(*) FILTER (WHERE s.status = 'rejected' AND s.review_note LIKE 'settled by the pass:%')::int AS settled,
              count(*) FILTER (WHERE s.status = 'stale')::int AS stale,
              count(*) FILTER (WHERE s.status = 'pending')::int AS pending,
              min(s.reviewed_at) FILTER (WHERE s.status = 'accepted') AS accepted_at,
-             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected') AS rejected_at
+             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected' AND coalesce(s.review_note, '') NOT LIKE 'settled by the pass:%') AS rejected_at,
+             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected' AND s.review_note LIKE 'settled by the pass:%') AS settled_at
         FROM supersession_proposals s
        WHERE b.word = 'outdates' AND s.id = ANY (b.finding_ids)) p ON b.word = 'outdates'
     -- A re-judge closes a relation and writes its successor on the same pair
@@ -657,9 +663,9 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
       linkedS: linked === null ? null : Math.max(0, linked),
       proposals: word === "outdates"
         ? {
-            accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0),
+            accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0), settled: countOf("findings", r.settled ?? 0),
             stale: countOf("findings", r.stale ?? 0), pending: countOf("findings", r.pending ?? 0),
-            acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s),
+            acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s), settledS: secondsOf("findings", r.settled_s),
           }
         : null,
       stands: word === "outdates" ? null : r.stands === true,
@@ -672,11 +678,13 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * What became of one posted finding, first match wins:
  *
  *   outdates   accepted   a proposal it named was accepted
- *              rejected   none is pending or stale and one was rejected — a
- *                         link on the board since does not undo a reviewer's no
+ *              rejected   none is pending or stale and a person rejected one —
+ *                         a link on the board since does not undo that no
  *              accepted   the board links the pair
  *              open       a proposal is still pending, or stale: a text moved
  *                         and it waits on a re-judge or a reviewer (063, 067)
+ *              withdrawn  the pass settled it (067's marker: its re-judge found
+ *                         no conflict) within the window; after it, unanswered
  *              withdrawn  the rest: every proposal it named is gone
  *   relation   accepted   the board links the pair
  *              open       a relation of its word still stands
@@ -686,21 +694,31 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * An open finding posted more than `days` ago is unanswered. The board has no
  * "no" for a relation: left unlinked past the window is how it says one, and
  * a judge that changes its mind afterwards does not take that back (review
- * pass 1: a withdrawal after the window left the rate's denominator).
+ * pass 1: a withdrawal after the window left the rate's denominator). A
+ * proposal or a relation deleted with its thought leaves no time behind it:
+ * the comment is still on the board, so withdrawn within the window,
+ * unanswered past it.
  */
 export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): FindingVerdict {
   const open = (): FindingVerdict => ({ outcome: r.ageS > days * 86_400 ? "unanswered" : "open", how: null, answeredS: null });
   const linked: FindingVerdict | null = r.linkedS === null ? null : { outcome: "accepted", how: "linked", answeredS: r.linkedS };
+  // Taken back by the judge: within the window it was never the board's to
+  // answer; after it, the board had its time. Gone with its thought, no time
+  // is left: the comment is still on the board, so its age decides (review
+  // pass 2: deleting the newer thought read withdrawn at any age, the older
+  // by its close).
+  const withdrawn = (atS: number | null): FindingVerdict => ({ outcome: (atS ?? r.ageS) > days * 86_400 ? "unanswered" : "withdrawn", how: null, answeredS: null });
   const p = r.proposals;
   if (p) {
     if (p.accepted > 0) return { outcome: "accepted", how: "proposal", answeredS: p.acceptedS === null ? null : Math.max(0, p.acceptedS) };
     if (p.pending === 0 && p.stale === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
     if (linked) return linked;
-    return p.pending + p.stale > 0 ? open() : { outcome: "withdrawn", how: null, answeredS: null };
+    if (p.pending + p.stale > 0) return open();
+    return withdrawn(p.settled > 0 ? p.settledS : null);
   }
   if (linked) return linked;
   if (r.stands) return open();
-  return r.withdrawnS !== null && r.withdrawnS > days * 86_400 ? { outcome: "unanswered", how: null, answeredS: null } : { outcome: "withdrawn", how: null, answeredS: null };
+  return withdrawn(r.withdrawnS);
 }
 
 /** The rows as the record carries them: this brain's by outcome, the found apart. */
@@ -1194,9 +1212,11 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread" | "
   if (f === null) {
     const u = db.unread.findings;
     if (!u) return "none posted — migration 087 is not applied";
-    // The read joins four tables: a refusal or an earlier lock names the one it was (review pass 1).
-    const named = deniedObject(u.message)?.name ?? /^not tried — a lock on (\w+)/.exec(u.message)?.[1] ?? "board_findings_posted";
-    return `? (${named} ${unreadWords(u)})`;
+    // The read joins four tables: a refusal or an earlier lock names the one it
+    // was (review pass 1); its own timeout names none, since Postgres does not
+    // say which (review pass 2).
+    const named = deniedObject(u.message)?.name ?? /^not tried — a lock on (\w+)/.exec(u.message)?.[1] ?? (u.reason === "invisible" ? "board_findings_posted" : null);
+    return named ? `? (${named} ${unreadWords(u)})` : `? (${unreadWords(u)})`;
   }
   const found = f.found ? `; ${f.found} found on the board from another poster` : "";
   if (f.posted === 0) return `none posted${found}`;

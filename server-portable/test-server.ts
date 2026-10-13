@@ -1130,7 +1130,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
   const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
   const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
-    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000))]
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000))]
     .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
   assert(toldRows.join("\n") === [
     "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — 2 of 4 answered accepted (50%), median 2 d to an answer; 1 found on the board from another poster",
@@ -1140,6 +1141,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "Findings:        2 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 2 open, 0 withdrawn — none answered yet",
     "(no row)",
     "Findings:        ? (thought_facets not read in time)",
+    "Findings:        ? (not read in time)",
   ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, none answered yet, and no row without the stats (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [

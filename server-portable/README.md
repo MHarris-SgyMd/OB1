@@ -439,11 +439,13 @@ answer and `no table` before its table's migration.
 (SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
 this brain posted: accepted (its proposal accepted, or the board linking the
 pair since — any active Linear link either way, `duplicate_of` included),
-rejected (its proposals rejected, none pending or stale — a link since does
-not undo a reviewer's no), withdrawn (its proposals gone, or a relation the
-judge stopped saying within the window), open (a proposal pending, or stale
-and waiting on a re-judge), or unanswered once open past 30 days — a relation
-the judge stops saying after that stays unanswered. The rate is
+rejected (a person rejected its proposals, none pending or stale — a link
+since does not undo that no), withdrawn (its proposals gone, or settled by
+the consolidation pass's own re-judge, or a relation the judge stopped saying,
+within the window), open (a proposal pending, or stale and waiting on a
+re-judge), or unanswered once open past 30 days — a finding the judge takes
+back after that stays unanswered, and one deleted with its thought, which
+leaves no time, is unanswered once its comment is past the window. The rate is
 accepted over accepted, rejected and unanswered — withdrawn and open are not
 answers — and the median is from the post to the first link since or the
 review. A link Linear made before the comment but board-sync brought in after
