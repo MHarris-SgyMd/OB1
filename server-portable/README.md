@@ -766,9 +766,9 @@ stripped (`X-Forwarded-Prefix`).
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
   same — so a client holding two keys cannot stamp one as the other's carrier.
   The public `/api` route deletes the header, so it is read only inside the
-  stack (until SMD-2286 nothing sends it). Mint a
-  forwarder under a name never used before — the registry reads a known name
-  with a new digest as that agent's rotation.
+  stack (`rest-client/` sends it, and nothing in the stack does until the MCP
+  server forwards, SMD-2287). Mint a forwarder under a name never used before —
+  the registry reads a known name with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
   vector with the row, false when the egress gate refused the embedding call (on a
@@ -779,10 +779,16 @@ stripped (`X-Forwarded-Prefix`).
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
-  not built, 503 retry. A save whose vector did not attach (the PostgREST two-step)
-  is a 201 with `embeddingAttached: false`, not a refusal, so a client does not
-  capture again. A refused input is a 400 `REFUSED_INPUT` naming each field and
-  zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
+  not built, 503 retry. Carried by a forwarder, a refusal also holds itself whole
+  as `refusal` — its words included, the caller's input quoted back and the
+  store's or the egress gate's — so the MCP server says it as it always has
+  (SMD-2287). It is the refusal as the operation made it for that caller, the
+  existence-oracle rule applied: what `render.ts` has always been handed, and
+  bounds into its text. A
+  save whose vector did not attach (the PostgREST two-step) is a 201 with
+  `embeddingAttached: false`, not a refusal, so a client does not capture again
+  (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
+  naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
   carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
@@ -804,23 +810,27 @@ stripped (`X-Forwarded-Prefix`).
 data each has something to say about, and holds that the MCP reply to a success is what
 `render.ts` makes of the REST answer, text and `structuredContent` both — so every word
 MCP shows is in the REST answer, which may carry more — and that a refusal is the same
-code and facts through both. A refusal's MCP text reads facts REST withholds (the
-caller's input, the store's words), so the MCP server as a REST client (SMD-2287) words
-those its own way.
+code and facts through both. A refusal's MCP text reads words its facts leave out (the
+caller's input, the store's words), so the suite also sends each refusal through the
+forwarder slot and holds that render.ts makes of the `refusal` it carries exactly the MCP
+reply, for every code that section reaches. Each renderer reads only the outcome it is
+handed, so a refusal whole is all the MCP server as a REST client (SMD-2287) needs to
+word any refusal as this one does.
+`rest-client/` is the REST core's typed client, generated from its OpenAPI document.
 
 ## Expected outcome
 
 ```bash
 bun test-server.ts        # 1047 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 351 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 357 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 253 — store conformance, real Postgres in a container
 bun run test:e2e          # 562 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-../db/with-postgres.sh bun test-rest-sql.ts  # 161 — the REST core beside the MCP server on one database: every operation through both
+../db/with-postgres.sh bun test-rest-sql.ts  # 201 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```

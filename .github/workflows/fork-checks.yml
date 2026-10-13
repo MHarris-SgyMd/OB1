@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, plugins/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, plugins/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -188,6 +188,24 @@ jobs:
       - name: Typecheck
         working-directory: server-portable
         run: bunx tsc --noEmit
+
+      # The REST core's client (SMD-2287), which the MCP server and the
+      # operator GUI call the brain through: its generated files against the
+      # REST core's own document, so a route or a schema changed without
+      # `bun generate.ts` fails here, and every operation through it into the
+      # real REST app over a stub core. Its imports of ../server-portable
+      # resolve against that directory's install above.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the REST client
+        working-directory: rest-client
+        run: bunx tsc --noEmit
+
+      - name: The REST client against the REST core
+        working-directory: rest-client
+        run: bun test-client.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
