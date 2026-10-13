@@ -757,9 +757,9 @@ stripped (`X-Forwarded-Prefix`).
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
   same — so a client holding two keys cannot stamp one as the other's carrier.
   The public `/api` route deletes the header, so it is read only inside the
-  stack (until SMD-2286 nothing sends it). Mint a
-  forwarder under a name never used before — the registry reads a known name
-  with a new digest as that agent's rotation.
+  stack (`rest-client/` sends it, and nothing in the stack does until the MCP
+  server forwards, SMD-2287). Mint a forwarder under a name never used before —
+  the registry reads a known name with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
   vector with the row, false when the egress gate refused the embedding call (on a

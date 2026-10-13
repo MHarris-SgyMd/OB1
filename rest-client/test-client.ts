@@ -25,6 +25,21 @@ import { createRestClient, FORWARDER_HEADER, OPERATIONS, type Answer, type Input
 
 const { assert, report } = createAssert();
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+/**
+ * A promise raced against a deadline, so a timeout or a signal that never ends
+ * a call fails its case rather than hanging the suite (review pass 1).
+ */
+const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
+  Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
+/** What createRestClient throws for the options given, or null when it takes them. */
+const refuses = (o: Parameters<typeof createRestClient>[0]): Error | null => {
+  try {
+    createRestClient(o);
+    return null;
+  } catch (e) {
+    return e as Error;
+  }
+};
 
 console.log("[1] The committed files are what generate.ts renders from the REST core's document");
 {
@@ -159,10 +174,6 @@ console.log("\n[5] Any status is an answer: a refusal's JSON, a key's 401, a fau
 
 console.log("\n[6] A call past the timeout is aborted; the caller's own signal ends one too");
 {
-  // Each call raced against a deadline, so a timeout or a signal that never
-  // ends the call fails its case rather than hanging the suite (review pass 1).
-  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
-    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
   // Answers nothing, ever; rejects as fetch does once the request's signal aborts — at once for one already aborted.
   const never = (req: Request) => new Promise<Response>((_resolve, reject) => {
     if (req.signal.aborted) return reject(req.signal.reason);
@@ -251,8 +262,6 @@ console.log("\n[7] A job's stream: the response itself, unread, keyed");
 
 console.log("\n[8] What a header cannot carry, the configuration, an empty body, and what the abort leaves behind");
 {
-  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
-    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   // A key no header carries as presented is the core's 401, given here, nothing sent: an emoji or a NUL threw,
   // and a key with spaces at its ends arrived trimmed, as another key than the one presented (review pass 2).
@@ -270,7 +279,6 @@ console.log("\n[8] What a header cannot carry, the configuration, an empty body,
   assert(issue.path === "id" && !issue.message.startsWith("id "), `the local refusal's message does not repeat its path (${JSON.stringify(issue)})`);
 
   // The configuration is held at the start.
-  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
   assert(refuses({ baseUrl: "http://x?a=1" })?.name === "TypeError" && refuses({ baseUrl: "http://x#f" })?.name === "TypeError" && refuses({ baseUrl: "not a url" })?.name === "TypeError",
     "a base with a query or a fragment, or no URL at all, is refused at the start");
   assert(refuses({ baseUrl: "http://x", forwarderKey: "fwd\r\nx-evil: 1" })?.name === "TypeError" && refuses({ baseUrl: "http://x", forwarderKey: " fwd" })?.name === "TypeError" && refuses({ baseUrl: "http://x", forwarderKey: "fwd-raw" }) === null,
@@ -341,8 +349,6 @@ console.log("\n[8] What a header cannot carry, the configuration, an empty body,
 
 console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra header is a key, a redirect is an answer, an open stream ends on the caller's signal");
 {
-  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
-    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
   // `é` or a tab inside a key rides a header and is the core's to judge, not refused here (review pass 3).
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   for (const [label, key] of [["an é", "café-key"], ["a tab inside", "a\tb"]] as const) {
@@ -350,7 +356,6 @@ console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra
     const r = await client.call("thought_stats", {}, { key });
     assert(r.status === 401 && r.sent && seen.length === 1 && seen[0].headers.get("x-brain-key") === key, `a key holding ${label} is sent as presented, and the core answers it (${r.status}, sent ${r.sent})`);
   }
-  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
   assert(["http://x?", "http://x#", "http://x/api?#"].every((b) => refuses({ baseUrl: b })?.name === "TypeError"), "a base ending in a bare ? or # is refused: URL reads it as empty, and every path would follow it");
   const urls: string[] = [];
   const spy = createRestClient({ baseUrl: "http://x//", fetch: async (req) => { urls.push(req.url); return new Response("{}", { status: 404 }); } });
@@ -415,7 +420,6 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
   seen.length = 0;
   const del = await client.call("thought_stats", {}, { key: "wr\x7fite" });
   assert(del.status === 401 && !del.sent && seen.length === 0, `a DEL inside a key is the core's 401, sent nowhere (${del.status}, sent ${del.sent})`);
-  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
   assert(["\rfwd-raw", "fwd-raw\n", "fwd\x01raw"].every((forwarderKey) => refuses({ baseUrl: "http://x", forwarderKey })?.name === "TypeError"), "a forwarder key with a CR, an LF or a control character is refused at the start, not a bare 400 on every call");
   const badBases = ["http://u:p@x", "http://write-raw@x", "file:///tmp/x", "data:text/plain,hi", "api.ob1.internal:8000", "http://x/api/..", "http://x/api/%2e%2e", " http://x/x", "http://x/x ", "http://x/a\tb"];
   const slipped = badBases.filter((baseUrl) => refuses({ baseUrl })?.name !== "TypeError");
@@ -439,7 +443,6 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
 
 console.log("\n[11] A timeout a timer can hold, a query name a URL carries, a null key no key, a base with no control character anywhere");
 {
-  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
   // setTimeout fires at once past 2^31 - 1 and AbortSignal.timeout throws on Infinity (review pass 5): refused at the start.
   const badTimeouts = [3_000_000_000, 2 ** 31, Infinity, NaN, -1, 0, 1.5];
   const slipped = badTimeouts.filter((timeoutMs) => refuses({ baseUrl: "http://x", timeoutMs })?.name !== "TypeError");

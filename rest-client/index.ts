@@ -37,8 +37,9 @@ export interface CallInit {
 
 /**
  * An answer: its status, its headers, and its body — JSON parsed, or the text
- * as sent, or null for none. `sent` is false for the one answer the client
- * gives itself: an input a URL cannot carry (refusedHere).
+ * as sent, or null for none. `sent` is false for the answers the client gives
+ * itself, nothing sent: an input a URL cannot carry (refusedHere) and a key no
+ * header carries (unauthorizedHere).
  */
 export type Answer = { status: number; ok: boolean; headers: Headers; body: unknown; sent: boolean };
 
@@ -51,6 +52,15 @@ type Part<T> = [T] extends [never] ? {} : [T] extends [undefined] ? {} : NonNull
 type BodyOf<K extends OperationId> = NonNullable<Op<K>["requestBody"]> extends { content: { "application/json": infer B } } ? B : never;
 /** An operation's input as one object — its path's fields, its query's and its body's — as the MCP tool takes it. */
 export type InputOf<K extends OperationId> = Part<Op<K>["parameters"]["path"]> & Part<Op<K>["parameters"]["query"]> & Part<BodyOf<K>>;
+
+/** The words of the client's own refusals (refusedHere), after the field they name. */
+const LONE_SURROGATE = "holds a lone surrogate, which a URL cannot carry";
+const OBJECT_IN_QUERY = "is an object, which a query string cannot carry";
+
+/** The longest delay a timer holds: setTimeout fires at once past it. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+const JSON_TYPE = { "content-type": "application/json" };
 
 /** Whether text survives percent-encoding — not when it holds a lone surrogate, on which encodeURIComponent throws. */
 function encodable(text: string): boolean {
@@ -79,11 +89,6 @@ function unfitForPath(value: unknown): string | null {
   return null;
 }
 
-const LONE_SURROGATE = "holds a lone surrogate, which a URL cannot carry";
-
-/** The longest delay a timer holds: setTimeout fires at once past it. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
-
 /**
  * Why a query value cannot ride a URL, or null when it can: text with a lone
  * surrogate, which percent-encoding throws on, and an object, or a list
@@ -103,26 +108,23 @@ function unfitForQuery(value: unknown): string | null {
   return typeof value === "string" && !encodable(value) ? LONE_SURROGATE : null;
 }
 
-const OBJECT_IN_QUERY = "is an object, which a query string cannot carry";
-
 /**
- * Whether a value rides a header byte for byte as presented: tab, printable
- * ASCII and U+0080–U+00FF (a header's latin1 bytes; RFC 9110's field-vchar and
- * obs-text, DEL left out as a Go server — Traefik, on the /api route — refuses
- * it, review pass 5), with no space or tab
- * at either end, which HTTP strips — so a key ` k ` would arrive as `k`, read
- * as another key than the one presented (review pass 2). Not visible ASCII
- * alone: `é` or a tab inside a key rides a header and the core takes it
- * (review pass 3). Not what Headers accepts: it strips a CR or LF at either
- * end, so `\rk` arrived as `k`, and it passes the other control characters,
- * which Bun's server answers with a bare 400 (review pass 4).
+ * Whether a value rides a header byte for byte as presented: RFC 9110's
+ * field-vchar and obs-text — tab, printable ASCII and U+0080–U+00FF, a
+ * header's latin1 bytes — with no space or tab at either end. Each bound has
+ * its reason (review passes 2–5):
+ * - the ends: HTTP strips them, so ` k ` would arrive as `k`, another key;
+ * - an allow-list, not what Headers accepts: Headers strips a CR or LF at
+ *   either end (`\rk` arrived as `k`) and passes the other control characters,
+ *   which Bun's server answers with a bare 400;
+ * - not visible ASCII alone: `é`, or a tab inside, rides a header and the
+ *   core takes it;
+ * - no DEL: a Go server, Traefik on the /api route, refuses it.
  */
 const headerSafe = (value: string): boolean => /^[\t\x20-\x7e\x80-\xff]+$/.test(value) && !/^[ \t]|[ \t]$/.test(value);
 
 /** The headers a caller's key or this client's forwarder key ride: the call's and the client's own, never an extra header's (review pass 3). */
 const CREDENTIAL_HEADERS = new Set(["x-brain-key", "x-access-key", "authorization", FORWARDER_HEADER]);
-
-const JSON_TYPE = { "content-type": "application/json" };
 
 /**
  * The answer for an input a URL cannot carry, given here, nothing sent: the
@@ -138,8 +140,9 @@ const refusedHere = (field: string, message: string): Answer => ({
  * The answer for a key no header can carry as presented (headerSafe), given
  * here, nothing sent: the REST core's own answer to a key that matches none
  * (401 UNAUTHORIZED) — the core reads keys from headers alone, so no key it
- * could match is such a value (`health` reads none, and is answered so too). A legacy raw key past U+00FF, which `?key=`
- * carries to server-portable today, cannot reach the REST core at all.
+ * could match is such a value (`health` reads none, and is answered so too).
+ * A legacy raw key past U+00FF, which `?key=` carries to server-portable
+ * today, cannot reach the REST core at all.
  */
 const unauthorizedHere = (): Answer => ({
   status: 401, ok: false, sent: false, headers: new Headers({ ...JSON_TYPE, "www-authenticate": "Bearer" }),
@@ -148,17 +151,20 @@ const unauthorizedHere = (): Answer => ({
 
 /**
  * Why a base URL will not serve as the root every path is put under, or null
- * when it will: not http or https (`file:` read the disk, a host and port
- * with no scheme parsed as one); credentials in it, which fetch sends as an
- * Authorization header round the rule that no extra header is a key; a query
- * or a fragment, a bare `?` or `#` included, which URL reads as empty and
- * every path would follow (review pass 3); and a path the parser rewrites —
- * a dot segment, an encoded one, a space or a tab — so the requests would go
- * elsewhere than the base as written (review pass 4).
+ * when it will (review passes 3–5):
+ * - a space or a control character anywhere: the parser drops a tab or a line
+ *   break from a host as from a path (`http://ev\til.com` reached evil.com);
+ * - not http or https: `file:` read the disk, and a host and port with no
+ *   scheme parsed as one;
+ * - credentials in it, which fetch sends as an Authorization header round the
+ *   rule that no extra header is a key;
+ * - a query or a fragment, a bare `?` or `#` included, which URL reads as
+ *   empty and every path would follow;
+ * - a path the parser rewrites, a dot segment encoded or not, so the requests
+ *   would go elsewhere than the base as written.
  */
 function unfitBase(base: unknown): string | null {
   if (typeof base !== "string") return `is ${typeof base}, not a string`;
-  // A tab or a line break the parser drops from a host as from a path (review pass 5: `http://ev\til.com` reached evil.com).
   if (/[\x00-\x20\x7f]/.test(base)) return "holds a space or a control character";
   const at = URL.parse(base);
   if (!at) return "does not parse";
