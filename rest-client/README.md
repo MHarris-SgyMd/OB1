@@ -51,9 +51,12 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   an empty body has `body: null`. Only a request that never got one throws: the core
   away, the timeout, the caller's signal. A write that threw may still have landed,
   because the server finishes what it started.
-- **`baseUrl`** is an origin, or an origin and a path, with no query or fragment (a
-  bare `?` or `#` included). `createRestClient` refuses any other (a `TypeError`), and
-  it refuses a `forwarderKey` that no header carries as written.
+- **`baseUrl`** is an http or https origin, or an origin and a path. `createRestClient`
+  refuses any other with a `TypeError`. That covers another scheme, credentials in the
+  URL (fetch would send them as an `Authorization` header), a query or a fragment (a
+  bare `?` or `#` included), a space or a control character, and a path the URL parser
+  rewrites (a dot segment, encoded or not). It also refuses a `forwarderKey` that no
+  header carries as written.
 - **A redirect is an answer**, not followed: fetch carries custom headers to the next
   origin, and the key and the forwarder key ride them.
 - **An input a URL cannot carry** is answered without sending anything (`sent: false`),
@@ -62,6 +65,8 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
     removes a dot segment however it is encoded, so such a request would reach
     another route.
   - text with a lone surrogate in the path or the query. A JSON body carries one.
+  - an object, or a list holding one, in a GET's or a DELETE's input, which a query
+    string has no form for.
 
   A GET's input rides the URL, so it is held to the server's header limit. Measured on
   Bun 1.4, a 16,000-character field passes and a 64,000-character one is a bodyless 431.
@@ -71,9 +76,11 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   server's renderer is held to the REST answers by `server-portable/test-rest-sql.ts`.
 - **The key** goes in `x-brain-key`. A key no header carries as presented gets the REST
   core's own answer to a key that matches none, a 401 `UNAUTHORIZED`, given here with
-  nothing sent. That covers a key holding a control character other than tab, or
-  anything past U+00FF, and a space or tab at either end, which HTTP strips, so ` k `
-  would arrive as `k`. A key holding `é`, or a tab inside, is sent. A legacy raw
+  nothing sent. A key is sent only if it rides the header byte for byte: tab,
+  printable ASCII, DEL and U+0080–U+00FF, with no space or tab at either end. HTTP
+  strips those, and `Headers` strips a CR or LF there, so ` k ` or `\rk` would arrive
+  as `k`, which is another key. The other control characters are refused too: Bun's
+  server answers them with a bare 400. A key holding `é`, or a tab inside, is sent. A legacy raw
   `MCP_ACCESS_KEY` past U+00FF, which `?key=` carries to server-portable today, cannot
   reach the REST core at all. **`forwarderKey`** goes in `x-brain-forwarder` on every
   call: it names who carried the request (`act`) and grants nothing. A refusal carried
@@ -86,8 +93,10 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   refusal's JSON. `call` takes every operation but that one.
 - **The timeout** bounds a `call` to its whole answer, and a `stream` only until the
   answer's headers arrive: after that the stream runs as long as its job does. Both
-  the timeout and the caller's signal end the wait for an answer even through a
-  `fetch` that does not heed the signal, such as a suite's in-process `app.fetch`. A
+  the timeout and the caller's signal end the wait for an answer's headers even
+  through a `fetch` that does not heed the signal, such as a suite's in-process
+  `app.fetch`. Reading a `call`'s body is bounded only by a fetch that does heed it, as
+  `globalThis.fetch` does. A
   signal already aborted sends nothing, and an answer that arrives after the abort is
   cancelled unread. On an open stream, the caller's signal aborts the request, which
   ends the body of a fetch that heeds it, as `globalThis.fetch` does.
@@ -111,5 +120,5 @@ bumps, so the generated files carry `snapshot` in its place.
 ## Test
 
 ```bash
-bun test-client.ts   # 102 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key
+bun test-client.ts   # 115 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query
 ```

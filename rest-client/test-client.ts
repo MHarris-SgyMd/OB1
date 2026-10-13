@@ -398,6 +398,41 @@ console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra
   assert((await reading)?.name === "AbortError", "the caller's signal ends an open stream, its body read to an AbortError");
 }
 
+console.log("\n[10] A key is sent byte for byte or not at all; a base is http, credential-free and as written; an object rides no query string");
+{
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  // Headers strips a CR or LF at a value's ends (`\rwrite-raw` arrived as write-raw and authenticated), and passes the
+  // other control characters, which Bun's server answers with a bare 400 (review pass 4): each is the core's 401, unsent.
+  for (const [label, key] of [["a CR before it", "\rwrite-raw"], ["an LF after it", "write-raw\n"], ["a CR LF around it", "\nwrite-raw\r\n"], ["a 0x01 inside", "write\x01raw"], ["a vertical tab after it", "write-raw\x0b"]] as const) {
+    seen.length = 0;
+    const r = await client.call("thought_stats", {}, { key });
+    assert(r.status === 401 && !r.sent && seen.length === 0, `a key with ${label}: 401, sent nowhere — never another key's 200 (${r.status}, ${seen.length} sent)`);
+  }
+  seen.length = 0;
+  const del = await client.call("thought_stats", {}, { key: "wr\x7fite" });
+  assert(del.sent && seen[0]?.headers.get("x-brain-key") === "wr\x7fite", `a DEL inside a key rides the header byte for byte, the core's to judge (${del.status}, sent ${del.sent})`);
+  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
+  assert(["\rfwd-raw", "fwd-raw\n", "fwd\x01raw"].every((forwarderKey) => refuses({ baseUrl: "http://x", forwarderKey })?.name === "TypeError"), "a forwarder key with a CR, an LF or a control character is refused at the start, not a bare 400 on every call");
+  const badBases = ["http://u:p@x", "http://write-raw@x", "file:///tmp/x", "data:text/plain,hi", "api.ob1.internal:8000", "http://x/api/..", "http://x/api/%2e%2e", " http://x/x", "http://x/x ", "http://x/a\tb"];
+  const slipped = badBases.filter((baseUrl) => refuses({ baseUrl })?.name !== "TypeError");
+  assert(slipped.length === 0, `a base that is not http, carries credentials, or has a path the parser rewrites is refused at the start (let through: ${JSON.stringify(slipped)})`);
+  const goodBases = ["http://[::1]:8000", "HTTP://LOCALHOST", "http://x/api%3F", "https://brain.example/api/", "http://x//"];
+  const turned = goodBases.filter((baseUrl) => refuses({ baseUrl }) !== null);
+  assert(turned.length === 0, `…and an IPv6 host, an upper-case scheme, an encoded ? in the path, a path and trailing slashes are taken (refused: ${JSON.stringify(turned)})`);
+  // An object has no form in a query string; openapi-fetch's serializer threw on one (review pass 4).
+  for (const [label, run, field] of [
+    ["an object for a GET's field", () => client.call("list_thoughts", { topic: { a: 1 } } as never, { key: "write-raw" }), "topic"],
+    ["an object in a GET's list", () => client.call("thought_changes", { actions: [{ a: 1 }] } as never, { key: "write-raw" }), "actions"],
+    ["a lone surrogate inside an object in a GET", () => client.call("list_thoughts", { topic: { a: "\uD800" } } as never, { key: "write-raw" }), "topic"],
+    ["a list inside a GET's list", () => client.call("thought_changes", { actions: [["capture"]] } as never, { key: "write-raw" }), "actions"],
+  ] as const) {
+    seen.length = 0;
+    const r = await run();
+    const issue = (r.body as { issues?: { path: string }[] }).issues?.[0];
+    assert(r.status === 400 && !r.sent && issue?.path === field && seen.length === 0, `${label}: 400 REFUSED_INPUT naming ${field}, sent nowhere (${r.status} ${JSON.stringify(r.body)})`);
+  }
+}
+
 // Compile-time only: the generated types hold a call to its operation's input.
 if (false as boolean) {
   const c = createRestClient({ baseUrl: "http://api" });
