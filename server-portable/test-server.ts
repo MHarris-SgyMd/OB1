@@ -917,6 +917,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const answer = (text: string): unknown[] => {
     statements.push(text);
     if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (lockProposals && /FROM supersession_proposals p\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/FROM board_findings_posted/.test(text)) {
+      if (findingsRefused) throw pgError("permission denied for table board_findings_posted", "42501");
+      return findingsAnswer;
+    }
     if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
     if (/FROM schema_migrations/.test(text)) {
       if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
@@ -926,8 +931,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/server_version/.test(text)) {
       return [{
         postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
-        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true },
-        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public" },
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true, board_findings_posted: catalogFindings },
+        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public", ...(catalogFindings ? { board_findings_posted: "public" } : {}) },
         hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
         tickets_linked: catalogLinked,
       }];
@@ -953,6 +958,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let boardTimeout = false;
   let lockFacets = false;
   let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
+  let catalogFindings = false;
+  let findingsRefused = false;
+  let lockProposals = false;
+  let findingsAnswer: Record<string, unknown>[] = [];
   let failRelease: RegExp | null = null;
   let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   const slow = new Set<string>();
@@ -1072,6 +1082,71 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
       && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
     `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // What became of the findings posted to the board (SMD-2682): a stats read
+  // where 087's table resolves, each (pair, word) by its outcome, the found
+  // apart; null and unnamed without the table; refused, malformed or behind a
+  // refused lock on thought_facets, unread with the rest standing.
+  const day = 86_400;
+  const at0 = new Date("2026-10-01T00:00:00.000Z");
+  const fRow = (o: Record<string, unknown>) => ({ posted_on: o.ticket_b, origin: "posted", posted_at: at0, linked_s: null, accepted: 0, rejected: 0, stale: 0, pending: 0, accepted_s: null, rejected_s: null, stands: null, ...o });
+  findingsAnswer = [
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "related", age_s: 40 * day, linked_s: 3 * day, stands: true }),
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "outdates", age_s: 40 * day, accepted: 1, accepted_s: 1 * day }),
+    fRow({ ticket_a: "SMD-3", ticket_b: "SMD-4", word: "outdates", age_s: 10 * day, posted_at: new Date("2026-10-02T00:00:00.000Z"), rejected: 1, rejected_s: 2 * day, linked_s: day }),
+    fRow({ ticket_a: "SMD-5", ticket_b: "SMD-6", word: "evolves", age_s: 40 * day, stands: true }),
+    fRow({ ticket_a: "SMD-7", ticket_b: "SMD-8", word: "related", age_s: 5 * day, stands: true }),
+    fRow({ ticket_a: "SMD-9", ticket_b: "SMD-10", word: "outdates", age_s: 5 * day, stale: 1 }),
+    fRow({ ticket_a: "SMD-11", ticket_b: "SMD-12", word: "duplicate", origin: "found", age_s: 2 * day, stands: false }),
+  ];
+  catalogFindings = true;
+  statements.length = 0;
+  const told = await readDatabaseFacts(fake);
+  const leanTold = await readDatabaseFacts(fake, { stats: false });
+  const toldSent = statements.filter((t) => /FROM board_findings_posted/.test(t)).length;
+  findingsRefused = true;
+  const toldRefused = await readDatabaseFacts(fake);
+  findingsRefused = false;
+  lockFacets = true;
+  const toldLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  // A lock refused on the queue's table: the queue's read waits on it once,
+  // and the findings read — after it, joining it — is not tried (review pass 1:
+  // it ran first and waited too).
+  lockProposals = true;
+  statements.length = 0;
+  const toldQueueLocked = await readDatabaseFacts(fake);
+  const queueSent = statements.filter((t) => /FROM supersession_proposals/.test(t)).length;
+  lockProposals = false;
+  findingsAnswer = [fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "supersedes", age_s: 1 })];
+  const toldOdd = await readDatabaseFacts(fake);
+  findingsAnswer = [];
+  const toldNone = await readDatabaseFacts(fake);
+  catalogFindings = false;
+  const wantTold = { posted: 6, comments: 5, found: 1, accepted: 2, rejected: 1, withdrawn: 0, open: 2, unanswered: 1, windowDays: 30, medianAnswerS: 2 * day };
+  assert(JSON.stringify(told.findings) === JSON.stringify(wantTold) && !("findings" in told.unread) && leanTold.findings === null && toldSent === 1 && facts.findings === null && !("findings" in facts.unread)
+      && toldRefused.findings === null && toldRefused.unread.findings?.reason === "refused" && toldRefused.relations?.related === 9
+      && toldLocked.findings === null && /not tried — a lock on thought_facets/.test(toldLocked.unread.findings?.message ?? "")
+      && toldQueueLocked.proposals === null && toldQueueLocked.unread.proposals?.reason === "timeout" && /not tried — a lock on supersession_proposals/.test(toldQueueLocked.unread.findings?.message ?? "") && queueSent === 1
+      && toldOdd.findings === null && toldOdd.unread.findings?.reason === "error" && JSON.stringify(toldNone.findings) === JSON.stringify({ ...wantTold, posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, medianAnswerS: null }),
+    `the findings posted are a stats read of 087's table, by outcome, the found apart; absent, null and unnamed; refused, malformed or behind a refused lock, unread (${JSON.stringify(told.findings)}, ${JSON.stringify(toldLocked.unread.findings)}, ${JSON.stringify(toldOdd.unread.findings)})`);
+  const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
+  const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 1, comments: 1, withdrawn: 1 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000))]
+    .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
+  assert(toldRows.join("\n") === [
+    "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — acceptance 50% (2 of 4: accepted over accepted, rejected and unanswered), median 2 d to an answer; 1 found on the board from another poster",
+    "Findings:        none posted",
+    "Findings:        ? (board_findings_posted not readable by this role)",
+    "Findings:        no table — migration 087 is not applied",
+    "Findings:        2 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 2 open, 0 withdrawn — no rate yet (none answered, none past the window)",
+    "Findings:        1 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 1 withdrawn — no rate yet (none answered, none past the window)",
+    "(no row)",
+    "Findings:        ? (thought_facets not read in time)",
+    "Findings:        ? (not read in time)",
+  ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, and no row without the stats (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [
     { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },

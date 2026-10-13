@@ -2409,6 +2409,11 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     want.board = pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length;
     wantRel.boardPairs = facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length;
     assert(want.board === 1 && wantRel.boardPairs === 1, `…the link takes t0–t1 out of both counts by hand (${want.board}, ${wantRel.boardPairs})`);
+    // What became of a finding posted (SMD-2682): t1→t0's relation was posted
+    // three days before that link, which answers it.
+    const told = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${t[1]}::uuid AND payload->>'target' = ${t[0]}`)[0].id as string;
+    await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
+              VALUES ('SMD-7001', 'SMD-7002', 'related', 'SMD-7002', 'posted', 'c-e2e', ARRAY[${told}::uuid], now() - interval '3 days')`;
 
     const found = (await health("e2e-key") as Record<string, any>).database ?? {};
     const q = found.proposals ?? {};
@@ -2422,6 +2427,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     const rRow = table.split("\n").find((l) => l.startsWith("Relations"));
     assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\)$/.test(rRow ?? ""),
       `the tool's table carries the same counts (${pRow} / ${rRow})`);
+    const fRow = table.split("\n").find((l) => l.startsWith("Findings"));
+    assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
+        && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — acceptance 100% \(1 of 1: accepted over accepted, rejected and unanswered\), median 3 d to an answer$/.test(fRow ?? ""),
+      `the finding posted before the link reads accepted in keyed /health and the tool's table (${JSON.stringify(found.findings)} / ${fRow})`);
 
     // A server role granted capture and server — no worker group — reads the
     // queue: the server group's SELECT on supersession_proposals (SMD-2680).
@@ -2433,8 +2442,9 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     const asServer = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//e2e_server_only:server@"), max: 1 });
     try {
       const f = await (await import("./brain-info.ts")).readDatabaseFacts(asServer);
-      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread),
-        `a role granted capture and server alone reads the queue and the relations (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
+      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread)
+          && f.findings?.accepted === 1 && !("findings" in f.unread),
+        `a role granted capture and server alone reads the queue, the relations and what became of the findings posted (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
     } finally {
       await asServer.close();
       await sql.unsafe(`DROP OWNED BY e2e_server_only`);
@@ -2463,6 +2473,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
     await sql`DELETE FROM thought_facets WHERE kind = 'link' AND ((thought_id = ${t[0]}::uuid AND payload->>'target' = 'SMD-7002') OR (thought_id = ${t[2]}::uuid AND payload->>'target' = 'SMD-7003'))`;
     await sql`DELETE FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`;
+    await sql`DELETE FROM board_findings_posted WHERE ticket_a = 'SMD-7001' AND ticket_b = 'SMD-7002'`;
     await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
     for (const h of had) await sql`UPDATE thoughts SET metadata = metadata || ${h.keys}::jsonb WHERE id = ${h.id}::uuid`;
   }
