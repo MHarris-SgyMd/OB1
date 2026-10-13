@@ -934,8 +934,10 @@ nothing here).
 Each request is also an OpenTelemetry span, and each tool call (an MCP
 `tools/call`, a REST operation, a plugin's) a span under it (SMD-1849 PR 2b);
 each request is also a point on the request-duration histogram and a log
-record (PR 2c). All three are recorded and sent only when the server's
-environment names a collector. `OTEL_EXPORTER_OTLP_ENDPOINT` sends all three,
+record (PR 2c); each provider call and store operation a span under the work
+that made it and a point of its own, and a job's body and a webhook's deferred
+work a trace of their own (PR 2d). All three signals are recorded and sent
+only when the server's environment names a collector. `OTEL_EXPORTER_OTLP_ENDPOINT` sends all three,
 the key's name among a log record's fields; `OTEL_METRICS_EXPORTER=none` and
 `OTEL_LOGS_EXPORTER=none` keep it to traces — for a collector that takes only
 traces, which would refuse the rest and have their losses said every minute.
@@ -1043,14 +1045,81 @@ has, its `ts` the record's own time — named `ob1.request`, at `INFO` for an
 one, and carrying its span's trace and span ids, so a collector has the line
 without reading a container's log. stdout's line is written all the same.
 
+Inside a tool call, each call to the embedding or chat provider is a client
+span under the GenAI conventions' names — `embeddings <model>` or
+`chat <model>`, with `gen_ai.operation.name`, `gen_ai.request.model`, the
+endpoint's `server.address` and `server.port` (never its userinfo or path),
+and `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` where the
+answer says them; no `gen_ai.provider.name`, since an OpenAI-compatible
+endpoint does not say whose it is — and a point on
+`gen_ai.client.operation.duration`, in seconds on the conventions' bounds and
+on to 327.68 s, labelled with the operation, the model, the host and port and,
+for a call that failed, its `error.type`: the provider's status (`503`;
+`_OTHER` outside 300–599, so a provider cannot mint a series per status),
+`timeout`, `invalid_body` (a 2xx that is no JSON), or the runtime's code
+(`ECONNREFUSED`). A call the egress gate refuses is never made, and has none.
+
+Each operation the core calls on the store is a client span named for the
+operation (`matchThoughts`, `captureThought`) — one span per operation, not
+per query: no query's text is read, so a span cannot name its SQL, and
+`pg_stat_statements` (PR 3) times each SQL function — with `db.system.name`
+(`postgresql`), `db.operation.name` and `ob1.store` (`sql` or `postgrest`),
+and a point on `db.client.operation.duration` labelled with the same, on
+bounds finer than the conventions advise and on to 60 s. On the SQL store a
+fault's SQLSTATE is its `error.type` and `db.response.status_code`
+(any other fault's code or kind its `error.type`), and its time includes the
+pool's wait; the PostgREST store's faults are plain errors, `Error` — but for
+the key's registry lookup, which carries its SQLSTATE — and its time is an
+HTTP call's. No query or parameter is on either. A plugin's transaction is an
+internal span, `pluginTx`, with `ob1.plugin`, and no point: its time is the
+plugin's own code and SQL, and the operations it calls are spans and points
+of their own. The key's registry lookup (`resolveAgent`) runs before
+any tool call, so its span is under the request's.
+
+A job's body (`scan_thoughts`) starts a trace of its own, `job <kind>`, linked
+to the tool call that started it rather than under it, since it runs on for
+minutes after that call has answered; its provider calls and store operations
+are its children. A job its timer fails ends its span then, an error with the
+job's code (`JOB_TIMEOUT`). Each job is one point on `ob1.job.duration`, in
+seconds to an hour, by `ob1.job.kind` and how it failed. A webhook's deferred
+work, which runs after its answer, is a trace of its own the same way:
+`defer <plugin>`, linked to its delivery's request, with `ob1.defer` (`work`);
+a failed delivery's undoing of it (`discard`) runs before its 500, so it is
+that request's child. The stop ends whatever of these is still open as `cut`,
+with its request — after a drain that finished too, for work the drain does
+not count (a store call outside any request). The pool's connections in use
+are not counted here: Bun's client does not say them, and PR 3's Postgres
+exporter reads them from the database. Nor is the workers' traffic: `db/`'s
+passes (entity extraction, the consolidation judge, the re-embeds) make the
+heaviest provider and database calls, and install no OpenTelemetry, so a
+provider-latency panel shows the servers' calls alone (SMD-2910).
+
+`bun preflight.ts --deep` makes each provider probe a span and a point under
+the same names, marked `ob1.probe` (`preflight`) so a backend tells them from
+the server's calls — a probe's time is to the answer's headers, its error the
+status or, where no answer came, the runtime's code, and it carries no token
+counts — and sends them before it reports, as `open-brain-preflight` unless
+`OTEL_SERVICE_NAME` (or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`) names
+it. Its `telemetry` row says, within 5 s, whether they went: `ok` with where,
+naming spans, points or both by what is sent; a warning for an export not
+sent, or for an endpoint that is no URL or an SDK that would not start (the
+server would share either); a skip when no collector is named, when spans and
+points are both turned off or the SDK is disabled, or when no probe ran. A
+plain preflight, the one each container start runs, starts no telemetry, so a
+stack no one has used yet has a first point only from `--deep`.
+
 Never the URL, a query string, another header, a key, a body, an argument or
 any text — `test-server.ts` [22] sends each and looks for it in every span's
 name, attributes, events, status, trace state and resource, and a real
 `bun index.ts` looks for the key, the query string and the text in all it
 exports; [25] looks for a planted query string in every point's labels and
-log record, and for a key's name on any point; `test-rest.ts` [12] sends a key, query strings (one a `query=` at
-`/v1/search`) and a fault's message and looks in each span's name, attributes,
-events and status, and in what a real `bun api.ts` exports.
+log record, and for a key's name on any point; [26] sends planted text to a
+provider and a store and a base's userinfo, and looks in every span and point;
+`test-plugins.ts` [16] looks for a deferred fault's message;
+`test-preflight.ts` [11] looks in what `--deep` sends; `test-rest.ts` [12]
+sends a key, query strings (one a `query=` at `/v1/search`) and a fault's
+message and looks in each span's name, attributes, events and status, and in
+what a real `bun api.ts` exports.
 
 Where the signals go is the operator's decision: the brain is personal data,
 and a collector off this machine is a place it then goes; the `observability`
@@ -1060,11 +1129,20 @@ per request `http.request.method`, `http.route`, `http.response.status_code`,
 `gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
 `ob1.outcome`, `ob1.code` and `error.type`, a fault's `exception.type` and
 `ob1.fault.code`, and the line's fields again in its log record; per tool call
-`gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; the
-histogram's points by the labels above; the trace, span and linked ids, each
-span's name, kind and status, its parent's id and a link's flags, timestamps
-to the nanosecond, and a resource of `service.name`, `service.version` and
-`telemetry.sdk.*` (no host, no process) with whatever
+`gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; per provider
+call the model, the provider's host and port, its token counts and how it
+failed; per store operation its name, the store's kind and a SQLSTATE; per
+plugin transaction and deferred work its plugin's name (and `ob1.defer`); per
+job its kind; on each of these `db.system.name` where it is the store's, its
+`ob1.outcome` and `error.type`, and a fault's `exception.type` and
+`ob1.fault.code`; the histograms' points by the labels above; the trace, span
+and linked ids, each span's name, kind and status, its parent's id and a
+link's flags, timestamps to the nanosecond, and a resource of `service.name`,
+`service.version`, `service.instance.id` (a UUID fresh at each start, so the
+MCP server and the REST core under one name, or two tiers, are two series;
+each start so begins new series, and `OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<name>`
+pins one)
+and `telemetry.sdk.*` (no host, no process) with whatever
 `OTEL_RESOURCE_ATTRIBUTES` adds. Together they are a timeline of which client
 called which tool, when, and how much came back — so name keys after clients,
 not people (`ob1.agent`), before pointing at a collector elsewhere. Any client
