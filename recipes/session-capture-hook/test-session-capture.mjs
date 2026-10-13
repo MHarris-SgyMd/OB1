@@ -1709,9 +1709,14 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const capOwed2 = prepare({ session_id: "s-cap2", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   writeFileSync(capOwed2.payloadPath, JSON.stringify({ ...capOwed2.payload, captured_id: uuid(61) }));
   const capRunning = postPending(cfg);
-  await sleep(600); // the owed bookkeepings are done, the other session's slow payload is posting: the ends reach pending/ now, for the follow-up alone
-  for (let i = 1; i <= 6; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap.json`), JSON.stringify({ ...capBody, fingerprint: `cap-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nLater ${i}.\n\nSession s-cap`) }));
-  for (let i = 1; i <= 2; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap2.json`), JSON.stringify({ ...capBody, session_id: "s-cap2", chain_id: "s-cap2", fingerprint: `cap2-${i}`, prepared_at: iso(Date.parse(capBody.prepared_at) + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nSecond ${i}.\n\nSession s-cap2`) }));
+  await sleep(600); // s-cap's owed bookkeeping is done and the other session's slow payload is posting (s-cap2's waits behind it): the ends reach pending/ now, for the follow-up alone
+  // Stamped now, as the sections below stamp theirs: after both sessions' owed
+  // payloads were prepared, so each end is newer than what its session's state
+  // will record. Stamped from capEnd's prepared_at, s-cap2's newest end was
+  // older than s-cap2's own owed payload, prepared after capEnd, whenever that
+  // prepare took over 2 ms, and was dropped as obsolete (SMD-2591).
+  for (let i = 1; i <= 6; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap.json`), JSON.stringify({ ...capBody, fingerprint: `cap-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nLater ${i}.\n\nSession s-cap`) }));
+  for (let i = 1; i <= 2; i++) writeFileSync(join(STATE, "pending", `99999999999${i}-${i}-cap${i}-s-cap2.json`), JSON.stringify({ ...capBody, session_id: "s-cap2", chain_id: "s-cap2", fingerprint: `cap2-${i}`, prepared_at: iso(Date.now() + i), text: capBody.text.replace(/\n\nSession s-cap/, `\n\nSecond ${i}.\n\nSession s-cap2`) }));
   const capRun = await capRunning;
   const posted = received.slice(1).map((r) => (/\n\n(Later \d|Second \d)\./.exec(r.args.content) ?? [])[1]).sort().join(",");
   assert(capRun.length === 11 && posted === "Later 6,Second 2" && readdirSync(join(STATE, "pending")).length === 0 && readdirSync(join(STATE, "dead")).length === 6 && /following up: 5 payload\(s\) of (?:s-cap, s-cap2|s-cap2, s-cap) waited/.test(logText()) && (logText().match(/following up/g) ?? []).length === 2,
