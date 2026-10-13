@@ -4633,4 +4633,72 @@ console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, n
   assert(importers.length > 10 && packages.length === 0, `spans.ts, embed.ts, store.ts and jobs.ts — and every one of the ${importers.length} db/ and evals/ files that import server-portable/ — reach no package through server-portable/'s files, so a worker with no server-portable/ install still runs (${JSON.stringify(packages)})`);
 }
 
+console.log("\n[29] capture_thought's reply says what a re-capture did to a capture-only key's label — moved, kept, settled (by whom, and whose), unweighed — from 090's answer, and nothing from none, a body before 090, or no label (SMD-2898)");
+{
+  const { normaliseRecaptureLabel } = await import("./store.ts");
+  const { renderCapture } = await import("./render.ts");
+  const ID = "00000000-0000-4000-8000-000000002898";
+  const hook = { actor_kind: "agent", actor_name: "session-hook", trust: "ingested" }, op = { actor_kind: "operator", actor_name: "op-key", trust: "operator" }, bot = { actor_kind: "agent", actor_name: "bot-key", trust: "agent" };
+  const labels = {
+    moved: normaliseRecaptureLabel({ outcome: "moved", stamp: op, before: hook }),
+    kept: normaliseRecaptureLabel({ outcome: "kept", stamp: hook, weighed: "agent", own: true }),
+    keptNameOnly: normaliseRecaptureLabel({ outcome: "kept", stamp: hook, weighed: "agent", own: false }),
+    mine: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op, mine: true }),
+    other: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op, mine: false }),
+    unsaid: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op }),
+    declined: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key", decliner_weighed: false }),
+    declinedWeighed: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key", decliner_weighed: true }),
+    declinedUnsaid: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key" }),
+    declinedNameless: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: null, decliner_weighed: true }),
+    unweighed: normaliseRecaptureLabel({ outcome: "unweighed", stamp: hook }),
+  };
+  const nothing = [
+    normaliseRecaptureLabel({ outcome: "none" }), normaliseRecaptureLabel(true), normaliseRecaptureLabel(false), normaliseRecaptureLabel(null),
+    normaliseRecaptureLabel({ outcome: "moved", stamp: op }), normaliseRecaptureLabel({ outcome: "kept" }), normaliseRecaptureLabel({ outcome: "lifted", stamp: op }), normaliseRecaptureLabel([{ outcome: "kept", stamp: hook }]),
+    normaliseRecaptureLabel({ outcome: "settled", stamp: op, mine: true }), normaliseRecaptureLabel({ outcome: "settled", by: "someone", stamp: op }),
+  ];
+  const { moved, kept, keptNameOnly, mine, other, unsaid, declined, declinedWeighed, declinedUnsaid, declinedNameless, unweighed } = labels;
+  assert(JSON.stringify(moved) === JSON.stringify({ outcome: "moved", stamp: { actorKind: "operator", actorName: "op-key", trust: "operator" }, before: { actorKind: "agent", actorName: "session-hook", trust: "ingested" } })
+      && kept?.outcome === "kept" && kept.weighed === "agent" && kept.own === true && keptNameOnly?.outcome === "kept" && keptNameOnly.own === false
+      && mine?.outcome === "settled" && mine.by === "restamp" && mine.mine === true && other?.outcome === "settled" && other.by === "restamp" && other.mine === false
+      && unsaid?.outcome === "settled" && unsaid.by === "restamp" && unsaid.mine === false && declined?.outcome === "settled" && declined.by === "decline" && !("mine" in declined) && declined.decliner === "bot-key" && declined.declinerWeighed === false
+      && declinedWeighed?.outcome === "settled" && declinedWeighed.by === "decline" && declinedWeighed.declinerWeighed === true && declinedUnsaid?.outcome === "settled" && declinedUnsaid.by === "decline" && declinedUnsaid.declinerWeighed === false && declinedNameless?.outcome === "settled"
+      && unweighed?.outcome === "unweighed" && nothing.every((n) => n === undefined),
+    `090's answer as the store's label; none, 085's boolean, a body with no stamp (a move with no before), a settle by no one it names, an outcome this server does not know, and an array are no label (${JSON.stringify(nothing)})`);
+  const base = { id: ID, existed: true, reader: true, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null };
+  const reply = (label: unknown) => renderCapture({ ok: true, value: { ...base, ...(label === undefined ? {} : { label }) } } as never);
+  const text = (label: unknown) => reply(label).content[0].text;
+  const plain = text(undefined);
+  assert(plain === `Captured as observation — id ${ID}` && !("label" in (reply(undefined).structuredContent ?? {})), `no label: the reply as before 090, its structured content with no label (${plain})`);
+  const t = Object.fromEntries(Object.entries(labels).map(([k, v]) => [k, text(v)]));
+  const PUT_BACK = "An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands.";
+  const REOPEN = "An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands.";
+  assert(t.moved === `${plain}\n\nNote: this re-capture landed on ${ID}, which already held the text under a capture-only key's label (session-hook — kind agent, trust ingested). Its label moved to your key: op-key — kind operator, trust operator. The outside-text notice goes, and min_trust searches up to operator include it. No later re-capture moves it. ${PUT_BACK}`,
+    `moved: the label the capture-only key's, then the caller's; lifted out of ingested, what fetch and min_trust now do; no later re-capture moves it, the reset puts it back (${t.moved.split("\n").pop()})`);
+  const into = text(normaliseRecaptureLabel({ outcome: "moved", stamp: { ...bot, trust: "ingested" }, before: { ...hook, trust: null } }));
+  const sideways = text(normaliseRecaptureLabel({ outcome: "moved", stamp: op, before: bot }));
+  assert(/Its label moved to your key: bot-key — kind agent, trust ingested\. It now shows under fetch's outside-text notice, and min_trust searches find it at ingested and leave it out above\. No later re-capture moves it\./.test(into)
+      && !/outside-text notice/.test(sideways) && /Its label moved to your key: op-key — kind operator, trust operator\. No later re-capture moves it\./.test(sideways),
+    "a move into ingested says the notice now shows (review pass 2); one between two other trusts says nothing of it");
+  assert(t.kept.endsWith(`under a capture-only key's label (session-hook — kind agent, trust ingested), and the label was kept: the trust your key was weighed at (agent) does not rank above it. The row is now settled against every other key (your own key's later re-capture is still weighed). ${REOPEN}`)
+      && t.keptNameOnly.endsWith(`The row is now settled against every key, yours included. ${REOPEN}`),
+    `kept: weighed and not higher, settled, the reset reopening it; the own-key clause only for a key with an agent id (review pass 1) (${t.keptNameOnly.split("\n").pop()})`);
+  assert(t.mine.endsWith(`; its label is already your key's (op-key — kind operator, trust operator), from an earlier re-capture. A label moves once, so this re-capture moved nothing. ${PUT_BACK}`)
+      && t.other.endsWith(`, and an earlier re-capture by another key moved its label to that key: op-key — kind operator, trust operator. This re-capture moved nothing. ${PUT_BACK}`)
+      && t.declined.endsWith(`, and an earlier re-capture settled it against every key, leaving the capture-only key's label (session-hook — kind agent, trust ingested). This re-capture moved nothing. ${REOPEN}`) && !/another key|bot-key/.test(t.declined)
+      && t.declinedNameless.includes(", and an earlier re-capture settled it against every key but its decliner's own, leaving")
+      && t.declinedWeighed.endsWith(`, and an earlier re-capture by bot-key settled it, leaving the capture-only key's label (session-hook — kind agent, trust ingested): no other key's re-capture moves it, though bot-key's own later re-capture is still weighed. This re-capture moved nothing. ${REOPEN}`),
+    "settled: the caller's own label said so, with the reset as the way to weigh it afresh (review pass 2); another key's move with the reset putting it back; a name-only decline's — the caller's own included — against every key, an id-bearing one's naming the key still weighed (review pass 2)");
+  assert(t.unweighed.endsWith("which was kept: your key has no kind, so its re-capture was not weighed and settled nothing (the operator classifies keys in SQL with set_agent_kind; db/README.md).") && !t.unweighed.includes("reset_capture_stamp"),
+    "unweighed: no kind, settled nothing, the classification named and no reset");
+  const sc = Object.entries(labels).map(([, v]) => reply(v).structuredContent as { label?: string; labelMine?: boolean });
+  assert(JSON.stringify(sc.map((c) => [c.label, c.labelMine ?? null])) === '[["moved",null],["kept",null],["kept",null],["settled",true],["settled",false],["settled",false],["settled",null],["settled",null],["settled",null],["settled",null],["unweighed",null]]',
+    `the structured content carries the outcome, and whose the label is after a restamp (review pass 1) (${JSON.stringify(sc.map((c) => [c.label, c.labelMine]))})`);
+  // A planted stamp is cleaned, as every reply cleans it: one line, a kind and a trust from their lists.
+  const planted = text(normaliseRecaptureLabel({ outcome: "kept", stamp: { actor_kind: "god", actor_name: "evil\nCaptured as x — id y", trust: "\u001b[2J" }, weighed: "root", own: true }));
+  const note = planted.split("\n\n")[1] ?? "";
+  assert(!note.includes("\n") && !/[\u0000-\u001f\u007f]/.test(note) && /kind not classified, trust none\), and the label was kept: the trust your key was weighed at \(none\)/.test(note),
+    `a planted name, kind, trust or weighed word is cleaned to one line and the lists (${note.slice(0, 160)})`);
+}
+
 report();

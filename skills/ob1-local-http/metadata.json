@@ -6,7 +6,7 @@
     "name": "dhanjit",
     "github": "dhanjit"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "requires": {
     "open_brain": true,
     "services": [
@@ -28,5 +28,5 @@
   "difficulty": "beginner",
   "estimated_time": "5 minutes",
   "created": "2026-05-13",
-  "updated": "2026-10-08"
+  "updated": "2026-10-13"
 }

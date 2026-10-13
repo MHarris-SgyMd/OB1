@@ -2187,6 +2187,62 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       `the operator's own row is refused NOT_CAPTURE_STAMP, a missing id NOT_FOUND (${notCapture.sc.code}, ${missing.sc.code})`);
   }
 
+  // [13h] SMD-2898 (migration 090): capture_thought's reply says what a
+  // re-capture did to a capture-only key's label — moved to the caller, kept
+  // and settled, settled before (the caller's own, or another key's), or not
+  // weighed — and a new text, the capture key's own re-capture and a database
+  // before 090 say nothing of it.
+  {
+    const K = captureAs(CAPTURE_KEY);
+    const say = async (args: Record<string, unknown>, key: string) => {
+      const b = await rpcAs(key)("tools/call", { name: "capture_thought", arguments: args });
+      return { text: textOf(b), label: (b.result?.structuredContent as { label?: unknown } | undefined)?.label };
+    };
+    const NOTE = /Note: this re-capture landed on/;
+    const MOVED = "[13h] smd2898probe a page the hook labels outside text and the operator lifts";
+    await K({ content: MOVED, trust: "ingested" });
+    const moved = await say({ content: MOVED }, "op-raw");
+    assert(new RegExp(`Note: this re-capture landed on ${idIn(moved.text)}, which already held the text under a capture-only key's label \\(session-hook — kind agent, trust ingested\\)\\. Its label moved to your key: op-key — kind operator, trust operator\\. The outside-text notice goes, and min_trust searches up to operator include it\\. No later re-capture moves it\\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\\.`).test(moved.text)
+        && moved.label === "moved",
+      `[13h] the operator's re-capture of the hook's outside text: the label moved to it, no later re-capture moves it, the reset puts it back (${moved.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const mine = await say({ content: MOVED }, "op-raw"), others = await say({ content: MOVED }, "bot-raw");
+    const mineSc = (await rpcAs("op-raw")("tools/call", { name: "capture_thought", arguments: { content: MOVED } })).result?.structuredContent as { label?: string; labelMine?: boolean } | undefined;
+    assert(/; its label is already your key's \(op-key — kind operator, trust operator\), from an earlier re-capture\. A label moves once, so this re-capture moved nothing\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\.$/m.test(mine.text) && mine.label === "settled"
+        && /, and an earlier re-capture by another key moved its label to that key: op-key — kind operator, trust operator\. This re-capture moved nothing\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\./.test(others.text) && others.label === "settled"
+        && mineSc?.labelMine === true,
+      `…again: the operator told the label is its own (its structured content too), an agent key that another key's re-capture moved it, with the reset (${others.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const KEPT = "[13h] smd2898probe a page the hook labels outside text and an agent re-sends as outside text";
+    await K({ content: KEPT, trust: "ingested" });
+    const kept = await say({ content: KEPT, trust: "ingested" }, "bot-raw");
+    assert(/under a capture-only key's label \(session-hook — kind agent, trust ingested\), and the label was kept: the trust your key was weighed at \(ingested\) does not rank above it\. The row is now settled against every other key \(your own key's later re-capture is still weighed\)\. An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands\./.test(kept.text) && kept.label === "kept",
+      `an agent key's re-capture at the hook's own trust: kept and settled, the reset named (${kept.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const UNWEIGHED = "[13h] smd2898probe a page the hook labels outside text and an unclassified key re-sends";
+    await K({ content: UNWEIGHED, trust: "ingested" });
+    const unweighed = await say({ content: UNWEIGHED }, "e2e-key");  // the legacy key, which no one classifies
+    assert(/under a capture-only key's label \(session-hook — kind agent, trust ingested\), which was kept: your key has no kind, so its re-capture was not weighed and settled nothing \(the operator classifies keys in SQL with set_agent_kind; db\/README\.md\)\./.test(unweighed.text) && unweighed.label === "unweighed",
+      `an unclassified key's re-capture: not weighed, not settled (${unweighed.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const fresh = await say({ content: "[13h] smd2898probe the operator's own new note" }, "op-raw");
+    const again = await say({ content: "[13h] smd2898probe the operator's own new note" }, "op-raw");
+    const hookAgain = await K({ content: KEPT, trust: "ingested" });
+    assert(!NOTE.test(fresh.text) && fresh.label === undefined && !NOTE.test(again.text) && again.label === undefined && !NOTE.test(textOf(hookAgain)),
+      "a new text, a re-capture of a row no capture-only key captured, and the capture key's own re-capture say nothing of a label");
+    // A database before 090: 086's restamp, and no weighing that answers —
+    // the label still moves, and the reply is as it was.
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("086_") });
+    await sql`ALTER FUNCTION ob1_weigh_recapture(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture_hidden`;
+    try {
+      const OLD = "[13h] smd2898probe a page the hook labels outside text before 090";
+      await K({ content: OLD, trust: "ingested" });
+      const old = await say({ content: OLD }, "op-raw");
+      const [m] = await sql`SELECT metadata->>'actor_name' AS name FROM thoughts WHERE content = ${OLD}`;
+      assert(!NOTE.test(old.text) && old.label === undefined && m?.name === "op-key",
+        `a database before 090: the operator's re-capture still moves the label (086's restamp), and the reply says nothing of it (${m?.name})`);
+    } finally {
+      await sql`ALTER FUNCTION ob1_weigh_recapture_hidden(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture`;
+      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("090_") });
+    }
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).

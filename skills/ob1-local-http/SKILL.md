@@ -9,7 +9,7 @@ description: |
   "what did I note about X", "search my brain for Y", "what thoughts touched
   on Z", or any explicit request to record or recall personal memory.
 author: dhanjit
-version: 0.3.0
+version: 0.4.0
 ---
 
 # OB1 Local HTTP
@@ -72,7 +72,17 @@ curl -sS -X POST "$BRAIN_URL/v1/thoughts" \
 ```
 
 Answers 201 with the thought's `id`. `existed: true` means the same text was
-already a thought and that one is the answer. Optional fields: `metadata`
+already a thought and that one is the answer. When that thought carried a
+capture-only key's label (the Chrome extension's, say), `label` says what the
+re-capture did to it: `label.outcome` is `moved` (to your key), `kept` (the
+row is now settled; `label.own` false means against your key too), `settled`
+(an earlier re-capture settled it: `label.by` is `restamp`, with `label.mine`
+when the label is yours, or `decline`, which left the capture-only key's
+label — `label.decliner` names the key, and `label.declinerWeighed` says its
+own later re-capture is still weighed) or `unweighed` (your key has no kind).
+`label.stamp` is the label after: `actorKind`, `actorName`, `trust`.
+The operator's `POST /v1/thoughts/{id}/reset-capture-stamp` reopens a settled
+row. Optional fields: `metadata`
 (at most eight lower-case keys with string, number or boolean values; the
 brain's own keys such as `type` and `topics` are refused -- its extractor sets
 them), `trust` (`ingested` for text copied in from elsewhere), `supersedes`
@@ -113,8 +123,9 @@ Optional filters: `type=task`, `topic=…`, `person=…`, `days=7`. The reply is
 ## Output
 
 - For captures: confirm the `id`, and say when `existed` is true (the text was
-  already captured), in one sentence. Don't paraphrase the captured content
-  back at them.
+  already captured), in one sentence. When the body carries `label`, say what
+  `label.outcome` means for the thought's label, as the Capture section reads
+  it. Don't paraphrase the captured content back at them.
 - For searches: surface the top hits with similarity scores and created_at
   timestamps, in the order given. Mention a hit's `supersededBy` when it is
   set. If there are no hits, say so plainly and suggest rephrasing.

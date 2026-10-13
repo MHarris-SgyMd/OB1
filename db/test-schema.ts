@@ -7658,7 +7658,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 6 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 7 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -12713,12 +12713,13 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   const OP = { name: "op-key", via: "test-door" }, BOT = { name: "bot-key", via: "test-door" }, BOT2 = { name: "bot2-key", via: "test-door" };
   const IMP = { name: "imp-key", via: "test-door" }, NOBODY = { name: "unclassified-key", via: "test-door" };
 
-  // The shape.
-  const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`);
+  // The shape. Since 090 the body is ob1_weigh_recapture's, and 085's
+  // function answers whether it moved the label (SMD-2898).
+  const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, (SELECT max(prosrc) FROM pg_proc WHERE proname = 'ob1_weigh_recapture') AS body FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`);
   const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
   assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /085/.test(c) && /SMD-2664/.test(c) && /085 \/ SMD-2664/.test(bc),
-    "085's one function, its sentinel in its body; it and the backfill's comment name 085 and the ticket");
+    "085's one function, its sentinel in the body that carries it (090's ob1_weigh_recapture); it and the backfill's comment name 085 and the ticket");
   const bfSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'backfill_thought_actors(integer)'::regprocedure`)).s);
   assert(/\(a\.action = 'update' AND a\.diff \? 'restamped'\) AS restamped/.test(bfSrc) && /\(\(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\)\s+OR/.test(bfSrc)
       && /ORDER BY \(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\) DESC,/.test(bfSrc),
@@ -13182,11 +13183,12 @@ console.log("\n[77] Migration 086: the operator resets a capture-only key's sett
   const rc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
   assert(shape.fns === 1 && /ob1:reset-is-the-operators/.test(shape.body) && /086 \/ SMD-2744/.test(c) && /086 \/ SMD-2744/.test(rc) && /086 \/ SMD-2744/.test(bc)
-      && lastDefinerOf("ob1_reset_capture_stamp").startsWith("086") && lastDefinerOf("ob1_restamp_recapture").startsWith("086") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
-    "086's one function, its sentinel in its body; it, the restamp and the backfill name 086 and the ticket, 086 the last definer of all three");
-  const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_restamp_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
-  assert((rsSrc.match(/AND \(v_since IS NULL OR [a-z]\.seq > v_since\)/g) ?? []).length === 3 && /diff \? 'restamp_reset'/.test(rsSrc),
-    "the restamp reads the row's restamp, the other agents' declines and its own since the latest reset — three reads, each bounded");
+      && lastDefinerOf("ob1_reset_capture_stamp").startsWith("086") && lastDefinerOf("ob1_restamp_recapture").startsWith("090") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
+    "086's one function, its sentinel in its body; it, the restamp and the backfill name 086 and the ticket, 086 the last definer of the reset and the backfill (090 the restamp's, SMD-2898)");
+  // Since 090 the restamp's body is ob1_weigh_recapture's (SMD-2898).
+  const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_weigh_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
+  assert((rsSrc.match(/AND \(v_since IS NULL OR [a-z]\.seq > v_since\)/g) ?? []).length === 4 && /diff \? 'restamp_reset'/.test(rsSrc),
+    "the restamp reads the row's restamp, the other agents' declines and its own — and, since 090, the fingerprint moves on a settled row — since the latest reset, each bounded");
 
   // Keys as the server sees them: agent ids from the registry.
   const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
@@ -13672,6 +13674,242 @@ console.log("\n[79] Migration 088: update_thought answers what it did — the ro
   await reapply("088");
   assert(JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'update_thought'`)).n === 1,
     "088 re-applied: one update_thought, and no row moved");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[80] Migration 090: a re-capture over a capture-only key's label says what it did — moved, kept, settled (and whose), unweighed, or none — and the row's stamp after, read under the row lock; 085's function answers whether it moved, over the same body (SMD-2898)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type Meta = Record<string, unknown>;
+  type Answer = { outcome: string; by?: string; stamp?: Meta; before?: Meta; weighed?: string | null; own?: boolean; mine?: boolean; decliner?: string | null; decliner_weighed?: boolean };
+  await restoreShipped("ob1_weigh_recapture");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+
+  // The shape.
+  const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_weigh_recapture'`);
+  const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_weigh_recapture(uuid, text, jsonb, text)"])).c ?? "";
+  const rc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
+  const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_restamp_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
+  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /ob1:recapture-weighed-once/.test(shape.body) && /090 \/ SMD-2898/.test(c) && /090 \/ SMD-2898/.test(rc)
+      && lastDefinerOf("ob1_weigh_recapture").startsWith("090") && lastDefinerOf("ob1_restamp_recapture").startsWith("090") && /ob1_weigh_recapture\(/.test(rsSrc) && !/thought_audit/.test(rsSrc),
+    "090's one ob1_weigh_recapture, 085's two sentinels in its body, both comments naming 090 and the ticket; 085's function a call of it");
+
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  const HOOK = { name: "hook-80", agent_id: await agent("a", "hook-80", "capture"), via: "test-door", scope: "capture" };
+  const OP = { name: "op-80", agent_id: await agent("b", "op-80", "write"), via: "test-door" };
+  const BOT = { name: "bot-80", agent_id: await agent("c", "bot-80", "write"), via: "test-door" };
+  const BOT2 = { name: "bot2-80", agent_id: await agent("d", "bot2-80", "write"), via: "test-door" };
+  const UNC = { name: "unc-80", agent_id: await agent("e", "unc-80", "write"), via: "test-door" };
+  await db.exec(`SELECT set_agent_kind('hook-80', 'agent'); SELECT set_agent_kind('op-80', 'operator'); SELECT set_agent_kind('bot-80', 'agent'); SELECT set_agent_kind('bot2-80', 'agent')`);
+
+  const cap = async (content: string, envelope: Meta) =>
+    (await one<{ r: { id: string; fingerprint: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(80)])).r;
+  const weigh = async (id: string, fp: string | null, actor: Meta | null, trust: string | null = null) =>
+    (await one<{ r: Answer }>(`SELECT ob1_weigh_recapture($1::uuid, $2::text, $3::jsonb, $4::text) AS r`, [id, fp, actor === null ? null : JSON.stringify(actor), trust])).r;
+  /** A capture as the stores make it since 090: upsert_thought, then — landing on a row, without 'keep' — 082's note and the weighing. */
+  const capture = async (content: string, actor: Meta, trust: string | null = null) => {
+    const keep = actor.scope === "capture";
+    const r = await cap(content, { metadata: { source: "mcp" }, actor, ...(trust ? { event: { trust } } : {}), ...(keep ? { recapture: "keep" } : {}) });
+    if (r.existed && !keep) await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [r.id, JSON.stringify(actor)]);
+    return { ...r, a: r.existed && !keep ? await weigh(r.id, r.fingerprint, actor, trust) : null };
+  };
+  // Keys in one order, so the answer's stamp — its three keys and nothing
+  // else — and the row's compare.
+  const canon = (m: Meta | null | undefined) => JSON.stringify(Object.keys(m ?? {}).sort().map((k) => [k, (m ?? {})[k]]));
+  const row = async (id: string) => (await one<{ m: Meta }>(`SELECT metadata AS m FROM thoughts WHERE id = $1::uuid`, [id])).m;
+  const stampRow = async (id: string) => { const m = await row(id); return canon(Object.fromEntries(Object.entries(m ?? {}).filter(([k]) => ["actor_kind", "actor_name", "trust"].includes(k)))); };
+  const marks = async (id: string) => { const m = await row(id); return `${m?.actor_kind ?? "-"}/${m?.actor_name ?? "-"}/${m?.trust ?? "-"}`; };
+  const events = async (id: string) => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [id])).n;
+  const edit = async (id: string, content: string, actor: Meta) =>
+    one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL) AS r`, [id, content, JSON.stringify(actor)]);
+
+  // Moved: the operator's re-capture of the hook's outside text.
+  const T1 = "[80] the hook's outside text the operator re-captures";
+  const h1 = await capture(T1, HOOK, "ingested");
+  const moved = (await capture(T1, OP)).a;
+  assert(moved?.outcome === "moved" && canon(moved.stamp) === (await stampRow(h1.id)) && (await marks(h1.id)) === "operator/op-80/operator"
+      && canon(moved.before) === canon({ actor_kind: "agent", actor_name: "hook-80", trust: "ingested" }),
+    `a re-capture at a higher trust: moved, the stamp the row's after (the caller's), before the capture-only key's (${JSON.stringify(moved)})`);
+  // Settled, the caller's own; settled, another key's.
+  const again = (await capture(T1, OP)).a, other = (await capture(T1, BOT)).a;
+  assert(again?.outcome === "settled" && again.by === "restamp" && again.mine === true && canon(again.stamp) === (await stampRow(h1.id)),
+    `the operator again: settled, and the label already its own (${JSON.stringify(again)})`);
+  assert(other?.outcome === "settled" && other.by === "restamp" && other.mine === false && canon(other.stamp) === (await stampRow(h1.id)) && (await marks(h1.id)) === "operator/op-80/operator",
+    `another key after the move: settled, not its own, the stamp the restamper's (${JSON.stringify(other)})`);
+
+  // Kept: an agent key declaring the hook's own trust, weighed and not
+  // higher; again, its own decline is not written twice; then another key
+  // finds the row settled by it.
+  const T2 = "[80] the hook's outside text an agent re-sends as outside text";
+  const h2 = await capture(T2, HOOK, "ingested");
+  const kept = (await capture(T2, BOT, "ingested")).a;
+  const n2 = await events(h2.id);
+  const keptAgain = (await capture(T2, BOT, "ingested")).a;
+  assert(kept?.outcome === "kept" && kept.weighed === "ingested" && kept.own === true && canon(kept.stamp) === (await stampRow(h2.id)) && (await marks(h2.id)) === "agent/hook-80/ingested",
+    `a re-capture not at a higher trust: kept, weighed at its trust, the stamp the capture-only key's (${JSON.stringify(kept)})`);
+  assert(keptAgain?.outcome === "kept" && (await events(h2.id)) === n2,
+    `…the same key again: kept, its decline not written twice (${JSON.stringify(keptAgain)}; ${n2} → ${await events(h2.id)})`);
+  // Weighed below the row's trust: `weighed` is the caller's, not the row's.
+  const T2b = "[80] the hook's own note an agent re-sends as outside text";
+  const h2b = await capture(T2b, HOOK);
+  const lower = (await capture(T2b, BOT, "ingested")).a;
+  assert(lower?.outcome === "kept" && lower.weighed === "ingested" && lower.stamp?.trust === "agent" && (await marks(h2b.id)) === "agent/hook-80/agent",
+    `weighed below the row's trust: kept, weighed at the caller's trust, the row's left (${JSON.stringify(lower)})`);
+  const byDecline = (await capture(T2, OP)).a;
+  assert(byDecline?.outcome === "settled" && byDecline.by === "decline" && !("mine" in byDecline) && byDecline.decliner === "bot-80" && byDecline.decliner_weighed === true
+      && canon(byDecline.stamp) === (await stampRow(h2.id)) && (await marks(h2.id)) === "agent/hook-80/ingested",
+    `the operator after another key's decline: settled by a decline, naming the decliner and that its own landing is still weighed, the capture-only key's stamp (${JSON.stringify(byDecline)})`);
+  // …which it is: the decliner's own plain re-capture then moves the label
+  // (review pass 2: the reply had told the operator the row was fixed).
+  assert((await capture(T2, BOT)).a?.outcome === "moved" && (await marks(h2.id)) === "agent/bot-80/agent", "…and the decliner's own plain re-capture then moves it");
+  // A name-only key (its registry lookup failed): its decline names no agent,
+  // so it is not `own`, and its next re-capture finds the row settled by it
+  // (review pass 1: the reply had promised its own key a second weighing).
+  const NAMEONLY = { name: "bot-80", via: "test-door" };
+  const T2c = "[80] the hook's outside text a name-only key re-sends as outside text";
+  await capture(T2c, HOOK, "ingested");
+  const nameKept = (await capture(T2c, NAMEONLY, "ingested")).a, nameAgain = (await capture(T2c, NAMEONLY)).a;
+  assert(nameKept?.outcome === "kept" && nameKept.own === false && nameAgain?.outcome === "settled" && nameAgain.by === "decline" && nameAgain.decliner === "bot-80" && nameAgain.decliner_weighed === false,
+    `a name-only key: kept and not own, then settled by its own decline (${JSON.stringify([nameKept, nameAgain])})`);
+  // decliner_weighed is the decline's agent id, not the caller's (run-it,
+  // review pass 3): a caller with an id over a name-only decline, and a
+  // name-only caller over a decline with one.
+  const idOverNameOnly = (await capture(T2c, OP)).a;
+  const T2d = "[80] the hook's outside text an agent keeps and a name-only key re-sends";
+  await capture(T2d, HOOK, "ingested");
+  await capture(T2d, BOT2, "ingested");
+  const nameOnlyOverId = (await capture(T2d, NAMEONLY)).a;
+  assert(idOverNameOnly?.outcome === "settled" && idOverNameOnly.decliner_weighed === false && nameOnlyOverId?.outcome === "settled" && nameOnlyOverId.decliner === "bot2-80" && nameOnlyOverId.decliner_weighed === true,
+    `decliner_weighed is the decline's: false over a name-only decline whoever calls, true over one with an id whoever calls (${JSON.stringify([idOverNameOnly, nameOnlyOverId])})`);
+
+  // Unweighed: a key with no kind records nothing, and the next classified
+  // key is weighed.
+  const T3 = "[80] the hook's outside text an unclassified key re-sends";
+  const h3 = await capture(T3, HOOK, "ingested");
+  await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [h3.id, JSON.stringify(UNC)]);
+  const n3 = await events(h3.id);
+  const unweighed = await weigh(h3.id, h3.fingerprint, UNC);
+  assert(unweighed.outcome === "unweighed" && canon(unweighed.stamp) === (await stampRow(h3.id)) && (await events(h3.id)) === n3,
+    `a key with no kind: unweighed, the capture-only key's stamp, nothing written (${JSON.stringify(unweighed)})`);
+  assert((await capture(T3, BOT)).a?.outcome === "moved" && (await marks(h3.id)) === "agent/bot-80/agent", "…and the next classified key is weighed: moved");
+
+  // None: a write key's own row; a stale fingerprint; a gone row; a
+  // capture-scoped caller; metadata that is not an object.
+  const T4 = "[80] an agent's own note re-captured by the operator";
+  const b4 = await capture(T4, BOT);
+  assert(JSON.stringify((await capture(T4, OP)).a) === '{"outcome":"none"}' && (await marks(b4.id)) === "agent/bot-80/agent",
+    "a row no capture-only key captured: none, and nothing else");
+  const T5 = "[80] the hook's text weighed at odd moments";
+  const h5 = await capture(T5, HOOK, "ingested");
+  const n5 = await events(h5.id);
+  const nones = [
+    await weigh(h5.id, "not-its-fingerprint", OP),
+    await weigh("00000000-0000-4000-8000-000000000089", h5.fingerprint, OP),
+    await weigh(h5.id, h5.fingerprint, HOOK),
+  ];
+  assert(nones.every((a) => JSON.stringify(a) === '{"outcome":"none"}') && (await marks(h5.id)) === "agent/hook-80/ingested" && (await events(h5.id)) === n5,
+    `a stale fingerprint, a gone row, a capture-scoped caller: none, nothing written (${JSON.stringify(nones)})`);
+  await db.exec(`UPDATE thoughts SET metadata = '["a raw writer''s"]'::jsonb WHERE id = '${h5.id}'::uuid`);
+  assert(JSON.stringify(await weigh(h5.id, h5.fingerprint, OP)) === '{"outcome":"none"}', "metadata that is not an object: none");
+
+  // None: a settled row whose text another key changed since — the stamp the
+  // editor's, not the key the settle left (a decline's, then a restamp's).
+  const T6 = "[80] the hook's outside text an agent keeps", T6b = "[80] the operator's rewrite of the kept text";
+  const h6 = await capture(T6, HOOK, "ingested");
+  assert((await capture(T6, BOT2, "ingested")).a?.outcome === "kept", "setup: an agent key's decline settles the row");
+  await edit(h6.id, T6b, OP);
+  const afterDecline = (await capture(T6b, OP)).a;
+  assert(JSON.stringify(afterDecline) === '{"outcome":"none"}' && (await marks(h6.id)) === "operator/op-80/operator",
+    `…then the operator rewrote the text: its re-capture of the new text is none — the label the editor's, not settled (${JSON.stringify(afterDecline)})`);
+  const T7 = "[80] the hook's outside text an agent lifts", T7b = "[80] the operator's rewrite of the lifted text";
+  const h7 = await capture(T7, HOOK, "ingested");
+  assert((await capture(T7, BOT)).a?.outcome === "moved", "setup: an agent key's re-capture moves the label");
+  await edit(h7.id, T7b, OP);
+  const afterMove = (await capture(T7b, BOT)).a;
+  assert(JSON.stringify(afterMove) === '{"outcome":"none"}' && (await marks(h7.id)) === "operator/op-80/operator",
+    `…then the operator rewrote the text: the restamper's re-capture of the new text is none, not settled (${JSON.stringify(afterMove)})`);
+  // The restamper's own edit leaves its name on the stamp: still none, for it
+  // and for another key, and after an edit back to the captured text — the
+  // reset refuses such a row (review pass 1: the reply named it).
+  const T7c = "[80] the hook's outside text an agent lifts and rewrites", T7d = "[80] the agent's rewrite of the text it lifted";
+  const h7c = await capture(T7c, HOOK, "ingested");
+  assert((await capture(T7c, BOT)).a?.outcome === "moved", "setup: an agent key's re-capture moves the label");
+  await edit(h7c.id, T7d, BOT);
+  const byOther = (await capture(T7d, OP)).a, byMover = (await capture(T7d, BOT)).a;
+  const T7e = "[80] the hook's outside text an agent lifts, rewrites and restores";
+  const h7e = await capture(T7e, HOOK, "ingested");
+  await capture(T7e, BOT);
+  await edit(h7e.id, "[80] the agent's passing rewrite", BOT);
+  await edit(h7e.id, T7e, BOT);
+  const restored = (await capture(T7e, OP)).a;
+  const refused = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT ob1_reset_capture_stamp($1::uuid, $2::jsonb) AS r`, [h7e.id, JSON.stringify(OP)])).r;
+  assert(JSON.stringify([byOther, byMover, restored]) === '[{"outcome":"none"},{"outcome":"none"},{"outcome":"none"}]' && (await marks(h7c.id)) === "agent/bot-80/agent" && refused.error === "NOT_CAPTURE_STAMP",
+    `the restamper's own edit: none for another key and for it, and after an edit back — the row the reset refuses (${JSON.stringify([byOther, byMover, restored, refused])})`);
+  // …and after a decline (run-it, review pass 2).
+  const T7g = "[80] the hook's outside text an agent keeps and the operator respaces";
+  const h7g = await capture(T7g, HOOK, "ingested");
+  await capture(T7g, BOT2, "ingested");
+  await edit(h7g.id, T7g.replace(/ /g, "  "), OP);
+  const respacedDecline = (await capture(T7g, OP)).a;
+  assert(respacedDecline?.outcome === "settled" && respacedDecline.by === "decline" && (await marks(h7g.id)) === "agent/hook-80/ingested",
+    `an edit that moves no fingerprint after a decline: still settled, the capture-only key's label (${JSON.stringify(respacedDecline)})`);
+  // A whitespace edit moves no fingerprint, and 018 keeps the stamp: still settled.
+  const T7f = "[80] the hook's outside text an agent lifts and the operator respaces";
+  const h7f = await capture(T7f, HOOK, "ingested");
+  await capture(T7f, BOT);
+  await edit(h7f.id, T7f.replace(/ /g, "  "), OP);
+  const respaced = (await capture(T7f, OP)).a;
+  assert(respaced?.outcome === "settled" && respaced.by === "restamp" && respaced.mine === false && (await marks(h7f.id)) === "agent/bot-80/agent",
+    `an edit that moves no fingerprint after a move: still settled, the restamper's label (${JSON.stringify(respaced)})`);
+
+  // The order of the reads (run-it, review pass 1): a key with no kind on a
+  // row a decline settled finds it settled, not unweighed, and on one whose
+  // text moved since, none; a decline and then the same key's own move in one
+  // window read as the move.
+  const T10 = "[80] the hook's outside text an agent keeps, then an unclassified key re-sends";
+  const h10 = await capture(T10, HOOK, "ingested");
+  await capture(T10, BOT2, "ingested");
+  await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [h10.id, JSON.stringify(UNC)]);
+  const uncSettled = await weigh(h10.id, h10.fingerprint, UNC);
+  const uncEdited = await weigh(h6.id, (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [h6.id])).f, UNC);
+  const T11 = "[80] the hook's outside text an agent keeps and then lifts";
+  const h11 = await capture(T11, HOOK, "ingested");
+  const order = [(await capture(T11, BOT2, "ingested")).a?.outcome, (await capture(T11, BOT2)).a?.outcome];
+  const afterBoth = (await capture(T11, OP)).a;
+  assert(uncSettled.outcome === "settled" && uncSettled.by === "decline" && JSON.stringify(uncEdited) === '{"outcome":"none"}'
+      && JSON.stringify(order) === '["kept","moved"]' && afterBoth?.outcome === "settled" && afterBoth.by === "restamp" && afterBoth.mine === false && afterBoth.stamp?.actor_name === "bot2-80",
+    `a key with no kind on a settled row: settled; on a rewritten one: none; a decline then the same key's move: settled by the move (${JSON.stringify([uncSettled, uncEdited, order, afterBoth])})`);
+  // `mine` by name, as the stamp holds it: a name-only key that moved the
+  // label owns it; a call with no actor owns nothing.
+  const T12 = "[80] the hook's outside text a name-only key lifts";
+  const h12 = await capture(T12, HOOK, "ingested");
+  const nameMoved = (await capture(T12, NAMEONLY)).a, nameMine = (await capture(T12, NAMEONLY)).a;
+  const nobody = await weigh(h12.id, h12.fingerprint, null);
+  assert(nameMoved?.outcome === "moved" && nameMine?.outcome === "settled" && nameMine.mine === true && nobody.outcome === "settled" && nobody.mine === false,
+    `a name-only key's own move is its own; no actor's is no one's (${JSON.stringify([nameMoved?.outcome, nameMine, nobody])})`);
+
+  // 085's function: whether the label moved, over the same body.
+  const T8 = "[80] the hook's outside text through 085's function";
+  const h8 = await capture(T8, HOOK, "ingested");
+  const viaOld = async (actor: Meta, trust: string | null = null) =>
+    (await one<{ r: boolean }>(`SELECT ob1_restamp_recapture($1::uuid, $2::text, $3::jsonb, $4::text) AS r`, [h8.id, h8.fingerprint, JSON.stringify(actor), trust])).r;
+  const olds = [await viaOld(UNC), await viaOld(BOT2, "ingested"), await viaOld(OP)];
+  assert(JSON.stringify(olds) === "[false,false,false]" && (await marks(h8.id)) === "agent/hook-80/ingested",
+    `unweighed, kept and settled answer false through it (${JSON.stringify(olds)})`);
+  const T9 = "[80] the hook's outside text 085's function moves";
+  const h9 = await capture(T9, HOOK, "ingested");
+  assert((await one<{ r: boolean }>(`SELECT ob1_restamp_recapture($1::uuid, $2::text, $3::jsonb, NULL) AS r`, [h9.id, h9.fingerprint, JSON.stringify(OP)])).r === true && (await marks(h9.id)) === "operator/op-80/operator",
+    "…and a move answers true, the label moved");
+
+  // A re-apply moves nothing.
+  const rows = JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`));
+  await reapply("090");
+  assert(JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`)) === rows
+      && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('ob1_weigh_recapture', 'ob1_restamp_recapture')`)).n === 2,
+    "090 re-applied: one of each function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
 }

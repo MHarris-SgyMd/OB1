@@ -647,6 +647,13 @@ export type CaptureResult = {
    * row with no pointer; absent whenever `existed` is.
    */
   supersedes?: string | null;
+  /**
+   * Migration 090 (SMD-2898): what the re-capture did to a capture-only key's
+   * label, as ob1_weigh_recapture answered it under the row lock. Absent for a
+   * new text, a key that cannot read, a row that is not a capture-only key's
+   * to weigh (`none`), and a database before 090.
+   */
+  label?: RecaptureLabel;
 };
 
 /**
@@ -936,6 +943,53 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: o.error, kind: typeof o.kind === "string" ? o.kind : null };
   if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "NOT_CAPTURE_STAMP")) return { ok: false, error: o.error };
   throw new Error(`ob1_reset_capture_stamp answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
+ * What a re-capture did to a capture-only key's label (migration 090,
+ * SMD-2898). `moved`: the label moved to the caller — `stamp` the caller's,
+ * `before` the capture-only key's. `kept`: weighed now and not higher, the row
+ * settled — `weighed` the trust the caller was weighed at, `own` whether the
+ * caller's own later re-capture is weighed again (085 knows a key's own by its
+ * agent id alone). `settled`: an earlier re-capture settled the row — `by` a
+ * restamp (`mine` when the stamp is the caller's own) or a decline (`decliner`
+ * its key's name, `declinerWeighed` whether 085 still weighs that key's own
+ * later re-capture — a decline naming its agent id). `unweighed`:
+ * the caller's key has no kind, so nothing was weighed and this call settled
+ * nothing. `stamp`: the row's three stamp keys after the call.
+ */
+export type RecaptureLabel =
+  | { outcome: "moved"; stamp: ActorStamp; before: ActorStamp }
+  | { outcome: "kept"; stamp: ActorStamp; weighed: string | null; own: boolean }
+  | { outcome: "settled"; by: "restamp"; stamp: ActorStamp; mine: boolean }
+  | { outcome: "settled"; by: "decline"; stamp: ActorStamp; decliner: string | null; declinerWeighed: boolean }
+  | { outcome: "unweighed"; stamp: ActorStamp };
+
+/**
+ * ob1_weigh_recapture's jsonb (migration 090) as the store's label — one
+ * reading for both stores. `none`, an outcome this server does not know, or
+ * a body that is no envelope (085's boolean, from the function before 090)
+ * is no label: the capture landed, and the reply says what it said before.
+ */
+export function normaliseRecaptureLabel(r: unknown): RecaptureLabel | undefined {
+  const o = r !== null && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const stampOf = (v: unknown): ActorStamp | undefined => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+    const m = v as Record<string, unknown>;
+    return { actorKind: word(m.actor_kind), actorName: word(m.actor_name), trust: word(m.trust) };
+  };
+  const stamp = stampOf(o?.stamp);
+  if (!o || !stamp) return undefined;
+  switch (o.outcome) {
+    case "moved": { const before = stampOf(o.before); return before ? { outcome: "moved", stamp, before } : undefined; }
+    case "kept": return { outcome: "kept", stamp, weighed: word(o.weighed), own: o.own === true };
+    case "settled":
+      return o.by === "restamp" ? { outcome: "settled", by: "restamp", stamp, mine: o.mine === true }
+        : o.by === "decline" ? { outcome: "settled", by: "decline", stamp, decliner: word(o.decliner), declinerWeighed: o.decliner_weighed === true } : undefined;
+    case "unweighed": return { outcome: "unweighed", stamp };
+    default: return undefined;
+  }
 }
 
 /**
