@@ -45,7 +45,7 @@ export function recordCall(record: CallRecord, outcome: RequestOutcome, code: st
 // and names the 405's `Allow`, so the two cannot drift. FORK.md change 75.
 export const MCP_METHODS = ["POST"];
 export const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
-// A health path serves GET and HEAD (the route below) AND the MCP methods, since
+// A health path serves GET and HEAD (index.ts's /health route) AND the MCP methods, since
 // the MCP handler is registered at every path. Derived from the same list.
 export const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"].join(", ");
 
@@ -298,7 +298,7 @@ export const rawPath = (req: Request): string => new URL(req.url).pathname;
  * marks what it forwards with this header and its /mcp and health routes
  * delete it, so it is present only on a request that came to the old root URL
  * through the stack's proxy; a server with no proxy in front never sees it,
- * and its root is still the right URL. Every keyed route below calls
+ * and its root is still the right URL. Every keyed route in index.ts calls
  * noteLegacyRoute once its key has passed (the MCP endpoint, /health under a
  * prefix, /worker-status, the worker actions, /jobs), so a script on the root
  * is named as an MCP client is. Logged once per key name per process: the
@@ -406,8 +406,9 @@ export function partsOf(body: ParsedBody): RequestParts {
 
 
 /**
- * The same close when the server's own stop made it: the request was still
- * running when the stop closed it — at the drain bound, or on a second
+ * The close sse.ts's abandonedRequestLine says, when the server's own stop
+ * made it: the request was still running when the stop closed it — at the
+ * drain bound, or on a second
  * signal (shutdown.ts) — and the process exits next, so the call does not run
  * to its end (review pass 1 of SMD-2250 — before, this was logged as the
  * client leaving).

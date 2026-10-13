@@ -251,8 +251,9 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
- *  25. a tripwire on server-portable/index.ts, the process root it builds
- *      on (root.ts) and the REST core (api.ts, rest/*.ts), for the logic a
+ *  25. a tripwire on server-portable/index.ts, its HTTP edge (mcp-edge.ts,
+ *      SMD-2287), the process root it builds on (root.ts) and the REST core
+ *      (api.ts, rest/*.ts), for the logic a
  *      move to server-portable/core/ leaves behind (SMD-2283, SMD-2284): each file's import and export statements
  *      name only its own TRANSPORT_FILES list's modules, whole or by the names
  *      listed and under those names (never egress.ts, embed.ts, metadata.ts
@@ -5288,7 +5289,7 @@ checkPostgrestClients();
 // core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
 // The process root both entries build on — the environment, the store and the
 // agent registry — is root.ts, and the REST core (api.ts, rest/) is held as
-// index.ts is (SMD-2284). This is a tripwire for the forms a move leaves
+// index.ts is (SMD-2284), as is the endpoint's HTTP edge, mcp-edge.ts (SMD-2287). This is a tripwire for the forms a move leaves
 // behind, not a proof: a text scan cannot follow a value. In each of
 // TRANSPORT_FILES:
 //   - every import and re-export statement (comments and strings blanked, so

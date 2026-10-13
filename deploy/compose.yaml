@@ -96,7 +96,7 @@ x-hook-env: &hook-env
 #
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
-# (server-portable/index.ts, HEALTH_PATH), so `/mcp` needs no setting there.
+# (server-portable/index.ts's /health route, mcp-edge.ts's HEALTH_PATH), so `/mcp` needs no setting there.
 # The routers, highest priority first, each on the one public entrypoint
 # (`web`): a router that names none is on every entrypoint, the ping one
 # included, and so would be any entrypoint added later:
