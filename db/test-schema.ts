@@ -13688,7 +13688,7 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
   const sc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["save_extraction_window(uuid, text, text, text, text, int, int, jsonb)"])).c ?? "";
-  const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text)"])).c ?? "";
+  const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text, boolean)"])).c ?? "";
   assert([tc, sc, nc].every((c) => /Migration 089 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 089, the ticket and the holder rule");
 
   await db.exec(`DELETE FROM thoughts`);
@@ -13701,8 +13701,8 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
   const save = (worker: string, fp: string, win: string, i: number, tid = id, windows = 4) =>
     one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, $8, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i), windows]).then((r) => r.ok);
-  const note = (worker: string, fp: string, win: string, tid = id) =>
-    one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5) AS ok`, [tid, JOB, worker, fp, win]).then((r) => r.ok);
+  const note = (worker: string, fp: string, win: string, tid = id, long = true) =>
+    one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5, $6) AS ok`, [tid, JOB, worker, fp, win, long]).then((r) => r.ok);
   const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; gained: number; fingerprint: string }>(
     `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
 
@@ -13745,8 +13745,10 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   const lone = await thought("[80] one window");
   await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, lone]);
   await q(`SELECT claim_thoughts($1, 'w-80b', 2, 900)`, [JOB]);
-  r = (await note("w-80b", "fpL", "winA", lone)) && await row(lone);
-  assert(r && r.stops === 1 && r.stalled === 1 && r.keys === null, `a stop with no window kept is one stop, stalled (${JSON.stringify(r)})`);
+  r = (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 1 && r.stalled === 0 && r.keys === null, `a short stop with no window kept makes the row, one stop and no stall: a short sleep is no slow window (review pass 2) (${JSON.stringify(r)})`);
+  r = (await note("w-80b", "fpL", "winA", lone)) && (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 3 && r.stalled === 1, `a long stop stalls it, and a short one after leaves the stall as it was (${JSON.stringify(r)})`);
 
   const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
   await reapply("089");

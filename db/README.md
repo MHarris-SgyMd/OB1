@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2759 assertions: 2759 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2760 assertions: 2760 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighty-nine (89) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1382,7 +1382,7 @@ brain kept waking. One row per claim: the parsed windows by index, each with
 the hash of the request it answered, under the thought's fingerprint and the
 worker's windowing — a write under another replaces the row, and a window is
 reused only for the request it answered — and the stops that took the claim,
-`gained` the windows saved since the last, and `stalled` the latest stops in a row with none saved between.
+`gained` the windows saved since the last, and `stalled` the latest long stops in a row with none saved between — long when the worker had held the thought a minute, or its slowest window if longer, so short sleeps stall nothing.
 `save_extraction_window` and `note_extraction_stop` write it for the claim's
 holder only, the claim row locked `FOR SHARE`, so a save after the lease went
 back keeps nothing. The row goes with its claim (`ON DELETE CASCADE`), and the
@@ -2233,12 +2233,15 @@ the next claim asks it again. The windows are merged in order, the kept with
 the new, so the answer is an unbroken run's. A kept window cost no call in
 the claim that reuses it, and the summary's calls, answers, retries and
 aborts count only the windows sent. The hard stop counts itself on the
-thought in hand before its lease goes back (`stops`, and `stalled`, the
-latest of them in a row with no window gained), and `--status` lists the
+thought in hand before its lease goes back, waiting at most 1.5 s for the
+count (`stops`, and `stalled`, the latest long stops in a row with no window
+saved between — a stop is long when the thought had been in hand a minute,
+or its slowest window if longer, so a busy day's sleeps of seconds stall
+nothing), once however many hard calls land, and `--status` lists the
 thoughts with windows kept or stops counted, of the text in force. The
 worker's own release waits for the stop's count, which another worker's
 release would otherwise beat. A succeeded release deletes the
-row; a failed one keeps it, so `--retry-failed` resumes a thought that timed
+row in the same statement; a failed one keeps it, so `--retry-failed` resumes a thought that timed
 out in a late window. Without the table or the extraction group's grant on it,
 the worker keeps nothing and says so once.
 
@@ -4128,8 +4131,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2759 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1276 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2760 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1281 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

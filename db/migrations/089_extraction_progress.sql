@@ -33,9 +33,13 @@
 --     windows are kept; a malformed one is asked again.
 --   * stops counts the hard stops that took the claim from a worker with the
 --     row's text in hand; gained, the windows saved since the last of them;
---     stalled, the latest stops in a row with no window saved between — a
---     single window longer than every sleep, or a stop that keeps landing
---     after the last window, in the decider's call or the write. A thought
+--     stalled, the latest LONG stops in a row with no window saved between —
+--     a stop is long when the worker had held the thought at least its
+--     floor (db/extract-entities.ts: a minute, or the thought's slowest
+--     window if longer), so a burst of short sleeps on a busy day stalls
+--     nothing: a single window longer than every long sleep, or a stop that
+--     keeps landing after the last window, in the decider's call or the
+--     write. A short stop with no window saved leaves stalled as it was. A thought
 --     saving a window in every sleep is not stalled, and while gained is
 --     above 0 the row is gaining now, whatever stalled said at the last stop:
 --     SMD-2694's second PR lets consolidation join past a thought only while
@@ -50,9 +54,9 @@
 --     DELETE CASCADE — and so with the thought). The worker deletes it when
 --     it releases the claim succeeded; a failed release keeps it, so
 --     --retry-failed resumes a thought that timed out in a late window.
---     Nothing else deletes it: a row left beside a claim that is finished
---     is replaced or ignored, as every reader reads it beside a pending or
---     claimed row only.
+--     The worker's delete is one statement with its release, so a row is
+--     never left beside a claim released succeeded; one beside a failed
+--     claim stays for --retry-failed, which `--status` lists.
 --   * Grants: none here. db/config.mjs's `extraction` group holds SELECT,
 --     INSERT, UPDATE and DELETE on it. The functions are SECURITY INVOKER,
 --     as 015's are: the lock needs the worker group's UPDATE on
@@ -93,7 +97,7 @@ COMMENT ON COLUMN extraction_progress.parts IS
 COMMENT ON COLUMN extraction_progress.stops IS
   'Hard stops that took the claim from a worker with this text in hand.';
 COMMENT ON COLUMN extraction_progress.stalled IS
-  'Of stops, the latest in a row with no window saved between: a window longer than every sleep, or a stop that keeps landing past the last window.';
+  'Of stops, the latest long ones in a row with no window saved between (a short stop leaves it): a window longer than every long sleep, or a stop that keeps landing past the last window.';
 COMMENT ON COLUMN extraction_progress.gained IS
   'Windows saved since the last stop: above 0, the thought is gaining now, whatever stalled said at that stop.';
 
@@ -158,17 +162,19 @@ COMMENT ON FUNCTION save_extraction_window(uuid, text, text, text, text, int, in
 --
 -- Called by the stop before it returns the lease, under the same lock and the
 -- same holder rule as the save. stops goes up by one; stalled goes to 0 when a
--- window was saved since the last stop (gained), and up by one when none was
--- — a single-window thought, which keeps no window, stalls at every stop —
--- and gained starts again from 0. A row of another fingerprint or windowing
--- is replaced, this stop its first.
+-- window was saved since the last stop (gained), up by one when none was and
+-- the stop is long (p_long: the worker held the thought at least its floor) —
+-- a single-window thought, which keeps no window, stalls at every long stop
+-- — and stays as it was on a short one; gained starts again from 0. A row of
+-- another fingerprint or windowing is replaced, this stop its first.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION note_extraction_stop(
   p_thought_id  uuid,
   p_work_type   text,
   p_worker_id   text,
   p_fingerprint text,
-  p_windowing   text
+  p_windowing   text,
+  p_long        boolean
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -183,12 +189,13 @@ BEGIN
   END IF;
 
   INSERT INTO extraction_progress AS e (thought_id, work_type, fingerprint, windowing, stops, stalled)
-  VALUES (p_thought_id, p_work_type, p_fingerprint, p_windowing, 1, 1)
+  VALUES (p_thought_id, p_work_type, p_fingerprint, p_windowing, 1, CASE WHEN p_long THEN 1 ELSE 0 END)
   ON CONFLICT (thought_id, work_type) DO UPDATE SET
     stops   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stops + 1 ELSE 1 END,
-    stalled = CASE WHEN e.fingerprint <> EXCLUDED.fingerprint OR e.windowing <> EXCLUDED.windowing THEN 1
+    stalled = CASE WHEN e.fingerprint <> EXCLUDED.fingerprint OR e.windowing <> EXCLUDED.windowing THEN EXCLUDED.stalled
                    WHEN e.gained > 0 THEN 0
-                   ELSE e.stalled + 1 END,
+                   WHEN p_long THEN e.stalled + 1
+                   ELSE e.stalled END,
     gained  = 0,
     parts   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.parts ELSE '{}'::jsonb END,
     windows = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.windows ELSE NULL END,
@@ -199,5 +206,5 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION note_extraction_stop(uuid, text, text, text, text) IS
-  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1; gained back to 0. Migration 089 / SMD-2694.';
+COMMENT ON FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean) IS
+  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1 on a long stop (p_long) and kept on a short one; gained back to 0. Migration 089 / SMD-2694.';

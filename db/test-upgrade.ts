@@ -3957,7 +3957,7 @@ console.log("\n[20ak] Migration 089: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 });
   const [shape] = await sql`SELECT to_regclass('extraction_progress') IS NOT NULL AS t,
     to_regprocedure('save_extraction_window(uuid, text, text, text, text, int, int, jsonb)') IS NOT NULL AS s,
-    to_regprocedure('note_extraction_stop(uuid, text, text, text, text)') IS NOT NULL AS n`;
+    to_regprocedure('note_extraction_stop(uuid, text, text, text, text, boolean)') IS NOT NULL AS n`;
   assert(shape.t && shape.s && shape.n && (await state()) === before, "089 onto the populated brain: the table and both functions, and no thought or claim moved");
   const [{ ok }] = await sql`SELECT save_extraction_window(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', 3, 0, ${{ index: 0, h: "h0" }}::jsonb) AS ok`;
   assert(ok === true, "the claim in flight across the upgrade: its holder keeps a window after it");
