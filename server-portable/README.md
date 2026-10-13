@@ -388,7 +388,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
-Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — 3 of 5 answered accepted (60%), median 4 d to an answer
+Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
@@ -439,23 +439,23 @@ answer and `no table` before its table's migration.
 (SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
 this brain posted: accepted (its proposal accepted, or the board linking the
 pair since — any active Linear link either way, `duplicate_of` included),
-rejected (a person rejected its proposals, none pending or stale — a link
-since does not undo that no), withdrawn (its proposals gone, or settled by
+rejected (a person rejected one of its proposals, none pending or stale — a
+link since does not undo that no), withdrawn (its proposals gone, or settled by
 the consolidation pass's own re-judge, or a relation the judge stopped saying,
 within the window), open (a proposal pending, or stale and waiting on a
-re-judge), or unanswered once open past 30 days — a finding the judge takes
+re-judge, or a relation standing), or unanswered once open past 30 days — a finding the judge takes
 back after that stays unanswered, and one deleted with its thought, which
 leaves no time, is unanswered once its comment is past the window. It is read
 from the rows as they stand: a settle that a later text move reopens (067) is
 judged by its current state, so a finding taken back within the window can read
 unanswered past it — the rate is understated by it, never inflated (SMD-2913
 records the first withdrawal). The rate is
-accepted over accepted, rejected and unanswered — withdrawn and open are not
-answers — and the median is from the post to the first link since or the
+accepted over accepted, rejected and unanswered — an unanswered finding counts
+against it; withdrawn and open are left out — and the median is from the post to the first link since or the
 review. A link Linear made before the comment but board-sync brought in after
 it (a `--full` pass) counts as an answer: the brain cannot tell the two. Rows
 another poster's marker settled are counted apart, never in the rate. A stats
-read, as `Relations`; `none posted — migration 087 is not applied` before 087.
+read, as `Relations`; `no table — migration 087 is not applied` before 087.
 `db/board-findings.ts --report` lists the same rows one by one.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer

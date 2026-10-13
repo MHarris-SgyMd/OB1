@@ -84,17 +84,17 @@
  *
  * ── Measured ─────────────────────────────────────────────────────────────────
  * --report reads what became of each (pair, word) recorded: accepted (its
- * proposal accepted, or the board linking the pair since), rejected (its
- * proposals rejected by a person), withdrawn (its proposals gone, or settled
- * by the pass's re-judge, or a relation the judge stopped saying, within the
- * window), open (a proposal pending, or stale and
- * waiting on a re-judge), or unanswered (open past --days, 30 by default). The
- * acceptance rate is accepted over accepted, rejected and unanswered — the
- * number SMD-2682 is done on. It reads the brain alone, never Linear, from
- * the read brain_info's Findings row reads (server-portable/brain-info.ts,
- * FINDING_OUTCOMES_SQL), so the two cannot disagree. A link reaches the
- * brain with board-sync's pass, so a pair linked since the last pass reads
- * open until the next.
+ * proposal accepted, or the board linking the pair since), rejected (a
+ * person rejected one of its proposals), withdrawn (its proposals gone, or
+ * settled by the pass's re-judge, or a relation the judge stopped saying,
+ * within the window), open (a proposal pending, or stale and waiting on a
+ * re-judge, or a relation standing), or unanswered (open past --days, 30 by
+ * default). The acceptance rate is accepted over accepted, rejected and
+ * unanswered — the number SMD-2682 is done on. It reads the brain alone,
+ * never Linear, from the read brain_info's Findings row reads
+ * (server-portable/brain-info.ts, FINDING_OUTCOMES_SQL), so the two cannot
+ * disagree. A link reaches the brain with board-sync's pass, so a link made
+ * since the last pass is not read until the next.
  *
  * The key is LINEAR_COMMENT_API_KEY — a key that can comment, never
  * board-sync's LINEAR_API_KEY, which only reads and is someone's whole
@@ -758,9 +758,10 @@ export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string 
     : v.outcome === "withdrawn"
       ? r.proposals
         ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
-        : `withdrawn: the judge stopped saying ${r.word}${r.withdrawnS === null ? "" : ` ${ago(Math.max(0, r.withdrawnS))} after`}`
+        : r.withdrawnS === null ? "withdrawn: its relation is gone with a thought" : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
-    : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;
+    // A found row is never in the rate, so it has no window to count down (review pass 4).
+    : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;
   return `    ${`${r.a} ~ ${r.b}`.padEnd(22)} ${r.word.padEnd(9)} posted ${ago(r.ageS)} ago on ${r.postedOn} — ${what}`;
 }
 
@@ -770,7 +771,7 @@ export async function findingsReport(sql: SQL, days = UNANSWERED_AFTER_DAYS): Pr
   const posted = rows.filter((r) => r.origin === "posted");
   const found = rows.filter((r) => r.origin === "found");
   return [
-    `  findings on the board: ${findingsLine({ findings: findingsValue(rows, days), unread: {}, highestMigration: null })}`,
+    `  findings on the board: ${findingsLine({ findings: findingsValue(rows, days), unread: {} })}`,
     ...(posted.length ? ["  posted by this brain, newest first:", ...posted.map((r) => reportLine(r, days))] : []),
     ...(found.length ? ["  found on the board (another poster's comment; not in the rate):", ...found.map((r) => reportLine(r, days))] : []),
   ];

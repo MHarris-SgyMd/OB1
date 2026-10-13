@@ -2429,7 +2429,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
       `the tool's table carries the same counts (${pRow} / ${rRow})`);
     const fRow = table.split("\n").find((l) => l.startsWith("Findings"));
     assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
-        && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — 1 of 1 answered accepted \(100%\), median 3 d to an answer$/.test(fRow ?? ""),
+        && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — acceptance 100% \(1 of 1: accepted over accepted, rejected and unanswered\), median 3 d to an answer$/.test(fRow ?? ""),
       `the finding posted before the link reads accepted in keyed /health and the tool's table (${JSON.stringify(found.findings)} / ${fRow})`);
 
     // A server role granted capture and server — no worker group — reads the

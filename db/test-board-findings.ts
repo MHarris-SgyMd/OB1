@@ -17,7 +17,8 @@
  */
 
 import { resolveEgressPolicy } from "../server-portable/egress.ts";
-import { acceptance, findingOutcome, findingsValue, type FindingRow } from "../server-portable/brain-info.ts";
+import { acceptance, FINDING_OUTCOMES_SQL, findingOutcome, findingsValue, type FindingRow } from "../server-portable/brain-info.ts";
+import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { egressRefusal } from "./worker-bootstrap.ts";
 import {
   commentBody, DEFAULT_CAP, findingGate, findingLine, FINDING_UNITS, findingSubject, groupFindings, groupWords,
@@ -207,9 +208,13 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   const v = findingsValue(rows);
   ok(JSON.stringify(v) === JSON.stringify({ posted: 5, comments: 4, found: 1, accepted: 2, rejected: 1, withdrawn: 1, open: 0, unanswered: 1, windowDays: 30, medianAnswerS: 2 * D }),
     `the record counts this brain's rows by outcome, two words in one comment as one comment, a found row only as found (${JSON.stringify(v)})`);
-  ok(JSON.stringify(acceptance(v)) === JSON.stringify({ accepted: 2, answered: 4 }), "the rate is accepted over accepted, rejected and unanswered — withdrawn and open are not answers");
+  ok(JSON.stringify(acceptance(v)) === JSON.stringify({ accepted: 2, counted: 4 }), "the rate is accepted over accepted, rejected and unanswered — withdrawn and open are left out");
   ok(findingsValue(rows.slice(0, 2)).medianAnswerS === 2 * D && findingsValue([]).medianAnswerS === null, "an even count's median is the mean of the middle two; none answered, null");
 
+  // The settle marker in the read is consolidate.ts's PASS_SETTLED_PREFIX, which brain-info.ts may not import (review pass 4).
+  const readText = String((await FINDING_OUTCOMES_SQL(((parts: TemplateStringsArray) => Promise.resolve([parts.join("?")])) as never))[0]);
+  ok(readText.split(`'${PASS_SETTLED_PREFIX}%'`).length - 1 === 4 && !/'settled by[^']*'/.test(readText.split(`'${PASS_SETTLED_PREFIX}%'`).join("")),
+    "the read's settle marker is PASS_SETTLED_PREFIX, in all four places, and no other spelling of it");
   // --report's line: the pair, the word, where and when, and what became of it.
   const lines = [
     reportLine(row({ linkedS: 3 * D, ageS: 12 * D, a: "SMD-12", b: "SMD-40", postedOn: "SMD-40" })),
@@ -218,6 +223,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     reportLine(row({ word: "outdates", stands: null, proposals: prop({}) })),
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1, settledS: 4 * D }) })),
     reportLine(row({ word: "evolves", stands: false })),
+    reportLine(row({ origin: "found" })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: 2 * D })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: -3 })),
     reportLine(row({ ageS: 31 * D })),
@@ -229,7 +235,8 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — rejected: its proposal was rejected",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: its proposal is gone",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after",
-    "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves",
+    "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: its relation is gone with a thought",
+    "    SMD-1 ~ SMD-2          related   posted 5 d ago on SMD-2 — open",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 2 d after",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 0 s after",
     "    SMD-1 ~ SMD-2          related   posted 31 d ago on SMD-2 — unanswered: open past 30 d",

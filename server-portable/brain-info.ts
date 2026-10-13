@@ -606,7 +606,9 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
          AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = CASE WHEN f.payload->>'target' = b.ticket_a THEN b.ticket_b ELSE b.ticket_a END) l ON true
     -- A rejection whose note carries 067's marker is the pass's own settle (a
     -- re-judge found no conflict, or the two tickets linked), not a person's
-    -- no: counted apart (review pass 2).
+    -- no: counted apart (review pass 2). The literal is PASS_SETTLED_PREFIX
+    -- (consolidate.ts), which this file may not import; test-board-findings
+    -- holds the two equal.
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE s.status = 'accepted')::int AS accepted,
              count(*) FILTER (WHERE s.status = 'rejected' AND coalesce(s.review_note, '') NOT LIKE 'settled by the pass:%')::int AS rejected,
@@ -756,9 +758,9 @@ export function findingsValue(rows: readonly FindingRow[], days = UNANSWERED_AFT
   return out;
 }
 
-/** The acceptance rate's terms: accepted over accepted, rejected and unanswered — withdrawn and open are not answers. */
-export function acceptance(f: BoardFindings): { accepted: number; answered: number } {
-  return { accepted: f.accepted, answered: f.accepted + f.rejected + f.unanswered };
+/** The acceptance rate's terms: accepted over accepted, rejected and unanswered — an unanswered finding counts against it; withdrawn and open are left out. */
+export function acceptance(f: BoardFindings): { accepted: number; counted: number } {
+  return { accepted: f.accepted, counted: f.accepted + f.rejected + f.unanswered };
 }
 
 /**
@@ -1219,11 +1221,11 @@ function relationsLine(db: DatabaseSummary): string {
  * The Findings row: what became of the findings posted to the board, and the
  * acceptance rate over those answered (SMD-2682); none, or why not read.
  */
-export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread" | "highestMigration">): string {
+export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): string {
   const f = db.findings;
   if (f === null) {
     const u = db.unread.findings;
-    if (!u) return "none posted — migration 087 is not applied";
+    if (!u) return "no table — migration 087 is not applied";
     // The read joins four tables: a refusal or an earlier lock names the one it
     // was (review pass 1); its own timeout names none, since Postgres does not
     // say which (review pass 2).
@@ -1232,10 +1234,11 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread" | "
   }
   const found = f.found ? `; ${f.found} found on the board from another poster` : "";
   if (f.posted === 0) return `none posted${found}`;
-  const { accepted, answered } = acceptance(f);
-  const rate = answered
-    ? `${accepted} of ${answered} answered accepted (${Math.round((100 * accepted) / answered)}%)${f.medianAnswerS === null ? "" : `, median ${ago(f.medianAnswerS)} to an answer`}`
-    : "none answered yet";
+  // The unanswered are in the denominator, so the sentence does not call them answered (review pass 4).
+  const { accepted, counted } = acceptance(f);
+  const rate = counted
+    ? `acceptance ${Math.round((100 * accepted) / counted)}% (${accepted} of ${counted}: accepted over accepted, rejected and unanswered)${f.medianAnswerS === null ? "" : `, median ${ago(f.medianAnswerS)} to an answer`}`
+    : "no rate yet (none answered, none past the window)";
   return `${f.posted} posted in ${f.comments} comment(s): ${f.accepted} accepted, ${f.rejected} rejected, ${f.unanswered} unanswered after ${f.windowDays} d, ${f.open} open, ${f.withdrawn} withdrawn — ${rate}${found}`;
 }
 

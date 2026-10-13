@@ -4079,8 +4079,8 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   the brain alone, what became of each ticket pair and word recorded:
   **accepted** — its proposal accepted, or the board linking the pair since
   (any active Linear link either way, `duplicate_of` included, timed from the
-  first link made since the post); **rejected** — a person rejected its
-  proposals (`--reject`) and none is pending or stale, a link since
+  first link made since the post); **rejected** — a person rejected one of
+  its proposals (`--reject`) and none is pending or stale, a link since
   notwithstanding; **withdrawn** — within the window, its proposal settled by
   the pass's own re-judge (067's `settled by the pass:` note, a rejection no
   person made), or a relation the judge stopped saying at that word (one
@@ -4091,9 +4091,8 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   current state, and a later settle's time replaces the first, so a finding
   taken back within the window can read unanswered past it — understating
   the rate, never inflating it; SMD-2913 records the first withdrawal);
-  **open** — a
-  proposal pending, or stale (a text moved) and waiting on a re-judge or a
-  reviewer, or a relation standing; or **unanswered**, open past `--days`
+  **open** — a proposal pending, or stale (a text moved) and waiting on a
+  re-judge or a reviewer, or a relation standing; or **unanswered**, open past `--days`
   (30). The board has no "no" for a relation: left unlinked past the window
   is how it says one, and a judge that stops saying it afterwards does not
   take that back. A pair is posted only unlinked as the brain knows it; a
@@ -4101,7 +4100,8 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   next `--full` pass, after the post, and counts as an answer — the brain
   cannot tell it from one made after the comment. The
   acceptance rate is accepted over accepted, rejected and unanswered —
-  withdrawn and open are not answers — and SMD-2682 is done on it. Rows
+  an unanswered finding counts against it, withdrawn and open are left out —
+  and SMD-2682 is done on it. Rows
   recorded `found` are another poster's, listed apart and never in the rate.
   A link reaches the brain with board-sync's pass, so a pair linked since the
   last pass reads open until the next, and the time to an answer is counted
