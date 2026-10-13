@@ -804,7 +804,9 @@ MCP shows is in the REST answer, which may carry more — and that a refusal is 
 code and facts through both. A refusal's MCP text reads words its facts leave out (the
 caller's input, the store's words), so the suite also sends each refusal through the
 forwarder slot and holds that render.ts makes of the `refusal` it carries exactly the MCP
-reply: the MCP server as a REST client (SMD-2287) words every refusal as this one does.
+reply, for every code that section reaches. Each renderer reads only the outcome it is
+handed, so a refusal whole is all the MCP server as a REST client (SMD-2287) needs to
+word any refusal as this one does.
 `rest-client/` is the REST core's typed client, generated from its OpenAPI document.
 
 ## Expected outcome

@@ -249,6 +249,96 @@ console.log("\n[7] A job's stream: the response itself, unread, keyed");
   assert(s.headers.get("content-type") === "text/event-stream" && (await s.text()).startsWith("event: end"), "an open stream is handed back unread");
 }
 
+console.log("\n[8] What a header cannot carry, the configuration, an empty body, and what the abort leaves behind");
+{
+  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
+    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  // A key no header carries as presented is the core's 401, given here, nothing sent: an emoji or a NUL threw,
+  // and a key with spaces at its ends arrived trimmed, as another key than the one presented (review pass 2).
+  for (const [label, key] of [["an emoji", "😀"], ["a NUL", "a\u0000b"], ["a line break", "write-raw\r\nx-evil: 1"], ["spaces at its ends", " write-raw "]] as const) {
+    seen.length = 0;
+    calls.length = 0;
+    const r = await client.call("thought_stats", {}, { key });
+    const s = await client.stream("j", { key });
+    assert(r.status === 401 && !r.sent && same(r.body, { code: "UNAUTHORIZED" }) && s.status === 401 && seen.length === 0 && calls.length === 0,
+      `a key holding ${label}: 401 UNAUTHORIZED from call and stream, sent nowhere (${r.status}, ${s.status}, ${seen.length} sent)`);
+  }
+  // The local refusal's message is zod's shape, after its path, not the field named twice.
+  const dot = await client.call("fetch", { id: "." }, { key: "write-raw" });
+  const issue = (dot.body as { issues: { path: string; message: string }[] }).issues[0];
+  assert(issue.path === "id" && !issue.message.startsWith("id "), `the local refusal's message does not repeat its path (${JSON.stringify(issue)})`);
+
+  // The configuration is held at the start.
+  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
+  assert(refuses({ baseUrl: "http://x?a=1" })?.name === "TypeError" && refuses({ baseUrl: "http://x#f" })?.name === "TypeError" && refuses({ baseUrl: "not a url" })?.name === "TypeError",
+    "a base with a query or a fragment, or no URL at all, is refused at the start");
+  assert(refuses({ baseUrl: "http://x", forwarderKey: "fwd\r\nx-evil: 1" })?.name === "TypeError" && refuses({ baseUrl: "http://x", forwarderKey: " fwd" })?.name === "TypeError" && refuses({ baseUrl: "http://x", forwarderKey: "fwd-raw" }) === null,
+    "a forwarder key no header carries as written is refused at the start; a sound one is taken");
+  // call() and stream() build the same URL under a base with a path and a trailing slash.
+  const urls: string[] = [];
+  const spy = createRestClient({ baseUrl: "http://x/api/", fetch: async (req) => { urls.push(req.url); return new Response("{}", { status: 404 }); } });
+  await spy.call("job_status", { job_id: "j" });
+  await spy.stream("j");
+  assert(same(urls, ["http://x/api/v1/jobs/j", "http://x/api/v1/jobs/j/stream"]), `a base with a path and a trailing slash: call and stream under the same root (${urls.join(" ")})`);
+
+  // An error with an empty body has none: null, not "" (review pass 2).
+  for (const [label, make] of [["empty text", () => new Response("", { status: 431 })], ["no body", () => new Response(null, { status: 502 })]] as const) {
+    const empty = createRestClient({ baseUrl: "http://api", fetch: async () => make() });
+    const r = await empty.call("thought_stats", {});
+    assert(r.body === null, `an error answered with ${label}: its body null (${JSON.stringify(r.body)})`);
+  }
+
+  // A fetch that throws at once rejects the call with its error and leaves no listener on the caller's signal.
+  const ctl = new AbortController();
+  let added = 0;
+  let removed = 0;
+  const addListener = ctl.signal.addEventListener.bind(ctl.signal);
+  const removeListener = ctl.signal.removeEventListener.bind(ctl.signal);
+  ctl.signal.addEventListener = ((...a: Parameters<AbortSignal["addEventListener"]>) => { added++; addListener(...a); }) as AbortSignal["addEventListener"];
+  ctl.signal.removeEventListener = ((...a: Parameters<AbortSignal["removeEventListener"]>) => { removed++; removeListener(...a); }) as AbortSignal["removeEventListener"];
+  const throwing = createRestClient({ baseUrl: "http://api", fetch: () => { throw new Error("thrown at once"); } });
+  const thrown = await within(throwing.call("thought_stats", {}, { signal: ctl.signal })).then(() => null, (e: unknown) => e as Error);
+  assert(thrown?.message === "thrown at once" && added > 0 && added === removed, `a fetch that throws at once: the call rejects with its error, every listener taken off (${thrown?.message}; ${added} added, ${removed} removed)`);
+
+  // An answer that comes after the timeout is cancelled unread, not left to the collector.
+  let cancelled = false;
+  const late = createRestClient({
+    baseUrl: "http://api", timeoutMs: 10,
+    // A body that closes itself at 500 ms, so a client that read it rather than cancel it ends rather than hangs.
+    fetch: () => Bun.sleep(60).then(() => new Response(new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode("x")); setTimeout(() => { try { c.close(); } catch {} }, 500); },
+      cancel() { cancelled = true; },
+    }))),
+  });
+  const lateErr = await within(late.call("thought_stats", {})).then(() => null, (e: unknown) => e as Error);
+  await Bun.sleep(120);
+  assert(lateErr?.name === "TimeoutError" && cancelled, `an answer after the timeout: the call a TimeoutError, the late body cancelled (${lateErr?.name}, cancelled ${cancelled})`);
+
+  // stream()'s timeout holds until the headers arrive, and not after (review pass 2: it had none).
+  const deaf = createRestClient({ baseUrl: "http://api", timeoutMs: 50, fetch: () => new Promise<Response>(() => {}) });
+  const t0 = performance.now();
+  const streamErr = await within(deaf.stream("j")).then(() => null, (e: unknown) => e as Error);
+  const took = performance.now() - t0;
+  assert(streamErr?.name === "TimeoutError" && took < 2000, `a stream whose headers never come ends at the timeout (${streamErr?.name} after ${took.toFixed(0)} ms)`);
+  let signalOf: AbortSignal | undefined;
+  const slowBody = createRestClient({
+    baseUrl: "http://api", timeoutMs: 50,
+    fetch: async (req) => {
+      signalOf = req.signal;
+      return new Response(new ReadableStream({ async start(c) { await Bun.sleep(150); c.enqueue(new TextEncoder().encode("event: end\n\n")); c.close(); } }), { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  const open = await within(slowBody.stream("j"));
+  const events = await within(open.text());
+  assert(events === "event: end\n\n" && signalOf?.aborted === false, `an open stream runs past the timeout: its events read whole, its request not aborted (${JSON.stringify(events)}, aborted ${signalOf?.aborted})`);
+  const caller = new AbortController();
+  const ended = createRestClient({ baseUrl: "http://api", fetch: (req) => new Promise<Response>((_r, reject) => req.signal.addEventListener("abort", () => reject(req.signal.reason), { once: true })) });
+  const pending = within(ended.stream("j", { signal: caller.signal })).then(() => null, (e: unknown) => e as Error);
+  caller.abort();
+  assert((await pending)?.name === "AbortError", "…and the caller's signal still ends a stream");
+}
+
 // Compile-time only: the generated types hold a call to its operation's input.
 if (false as boolean) {
   const c = createRestClient({ baseUrl: "http://api" });

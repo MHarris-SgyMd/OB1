@@ -47,9 +47,13 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   first, and a TypeScript caller's types hold it. The REST core checks again what
   arrives, but a query string carries text: a `null` or `undefined` there is left out,
   and `"true"` reads as `true`, where the schema itself would refuse both.
-- **Every status is an answer** (`{ status, ok, headers, body, sent }`). Only a request
-  that never got one throws: the core away, the timeout, the caller's signal. A write
-  that threw may still have landed, because the server finishes what it started.
+- **Every status is an answer** (`{ status, ok, headers, body, sent }`); an error with
+  an empty body has `body: null`. Only a request that never got one throws: the core
+  away, the timeout, the caller's signal. A write that threw may still have landed,
+  because the server finishes what it started.
+- **`baseUrl`** is an origin, or an origin and a path, with no query or fragment.
+  `createRestClient` refuses any other (a `TypeError`), and it refuses a `forwarderKey`
+  that no header carries as written.
 - **An input a URL cannot carry** is answered without sending anything (`sent: false`),
   with the REST core's own refusal, a 400 `REFUSED_INPUT` naming the field. That covers:
   - a path field that is missing, not a string, empty, `.` or `..`. The URL parser
@@ -63,18 +67,26 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
 - **A success's value** is typed only as an object, which is all the document says of
   it. A caller that renders it holds it to the type its renderer reads, and the MCP
   server's renderer is held to the REST answers by `server-portable/test-rest-sql.ts`.
-- **The key** goes in `x-brain-key`. **`forwarderKey`** goes in `x-brain-forwarder`
-  on every call: it names who carried the request (`act`) and grants nothing. A
+- **The key** goes in `x-brain-key`. A key no header carries as presented gets the REST
+  core's own answer to a key that matches none, a 401 `UNAUTHORIZED`, given here with
+  nothing sent. That means anything but visible ASCII, or spaces at either end, which
+  HTTP would strip, so ` k ` would arrive as `k`. **`forwarderKey`** goes in
+  `x-brain-forwarder` on every call: it names who carried the request (`act`) and
+  grants nothing. A
   refusal carried that way also holds itself whole as `refusal`, the words its facts
   leave out included, so the MCP server words it exactly as it always has.
 - **`headers()`** adds headers to each request as it is sent, such as the calling
   span's `traceparent`.
 - **`stream(jobId)`** returns a job's event stream as the response itself, unread, or a
   refusal's JSON. `call` takes every operation but that one.
-- **The timeout and the caller's signal** end the wait even through a `fetch` that does
-  not heed the signal, such as a suite's in-process `app.fetch`. A signal already aborted
-  sends nothing.
-- **`raw`** is the openapi-fetch client, for a caller that names a path itself.
+- **The timeout** bounds a `call` to its whole answer, and a `stream` only until the
+  answer's headers arrive: after that the stream runs as long as its job does. The
+  caller's signal ends either. Both end the wait even through a `fetch` that does not
+  heed the signal, such as a suite's in-process `app.fetch`, and a signal already
+  aborted sends nothing. An answer that arrives after the abort is cancelled unread.
+- **`raw`** is the openapi-fetch client, for a caller that names a path itself. It
+  carries the forwarder slot and the extra headers, but no timeout: bound it with
+  your own `signal`.
 
 ## Regenerate
 
@@ -92,5 +104,5 @@ bumps, so the generated files carry `snapshot` in its place.
 ## Test
 
 ```bash
-bun test-client.ts   # 79 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry answered unsent, the timeout and the signal, a job's stream unread
+bun test-client.ts   # 94 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread
 ```

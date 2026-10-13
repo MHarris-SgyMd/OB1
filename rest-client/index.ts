@@ -73,25 +73,50 @@ const fieldsOf = (path: string): string[] => [...path.matchAll(/\{([a-z_]+)\}/g)
  * GET /v1/jobs/stream, review pass 1).
  */
 function unfitForPath(value: unknown): string | null {
-  if (typeof value !== "string") return `is ${value === null ? "null" : typeof value}, not a string`;
-  if (value === "" || value === "." || value === "..") return `is ${JSON.stringify(value)}, which a URL path cannot carry`;
-  if (!encodable(value)) return "holds a lone surrogate, which a URL cannot carry";
+  if (typeof value !== "string") return `expected a string, received ${value === null ? "null" : typeof value}`;
+  if (value === "" || value === "." || value === "..") return `${JSON.stringify(value)} is no value a URL path can carry`;
+  if (!encodable(value)) return LONE_SURROGATE;
   return null;
 }
+
+const LONE_SURROGATE = "holds a lone surrogate, which a URL cannot carry";
 
 /** A query value a URL cannot carry: text with a lone surrogate, which percent-encoding throws on. */
 const unfitForQuery = (value: unknown): boolean =>
   Array.isArray(value) ? value.some(unfitForQuery) : typeof value === "string" && !encodable(value);
 
 /**
+ * Whether a value can ride a header as sent: visible ASCII, spaces inside it
+ * but none at its ends, which HTTP strips — so a key ` k ` would arrive as
+ * `k` and be read as another key than the one presented (review pass 2).
+ */
+const headerSafe = (value: string): boolean => /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(value);
+
+const JSON_TYPE = { "content-type": "application/json" };
+
+/**
  * The answer for an input a URL cannot carry, given here, nothing sent: the
- * REST core's own refusal of an input (REFUSED_INPUT, naming the field), so a
- * caller words it as it would the core's.
+ * REST core's own refusal of an input (REFUSED_INPUT, the field its path, a
+ * zod-like message after it), so a caller words it as it would the core's.
  */
 const refusedHere = (field: string, message: string): Answer => ({
-  status: 400, ok: false, sent: false, headers: new Headers({ "content-type": "application/json" }),
-  body: { code: "REFUSED_INPUT", issues: [{ path: field, message: `${field} ${message}` }] },
+  status: 400, ok: false, sent: false, headers: new Headers(JSON_TYPE),
+  body: { code: "REFUSED_INPUT", issues: [{ path: field, message }] },
 });
+
+/**
+ * The answer for a key no header can carry as presented (headerSafe), given
+ * here, nothing sent: the REST core's own answer to a key that matches none
+ * (401 UNAUTHORIZED) — no configured key is such a value, since every key the
+ * core takes arrives in a header.
+ */
+const unauthorizedHere = (): Answer => ({
+  status: 401, ok: false, sent: false, headers: new Headers({ ...JSON_TYPE, "www-authenticate": "Bearer" }),
+  body: { code: "UNAUTHORIZED" },
+});
+
+/** An Answer as a Response, for stream(), which hands back responses. */
+const asResponse = (a: Answer): Response => new Response(JSON.stringify(a.body), { status: a.status, headers: a.headers });
 
 /** A request's signal: the caller's, the timeout's, both, or none. */
 function signalFor(init: CallInit, timeoutMs: number | undefined): AbortSignal | undefined {
@@ -103,7 +128,10 @@ function signalFor(init: CallInit, timeoutMs: number | undefined): AbortSignal |
  * The fetch given, held to its request's signal: one already aborted sends
  * nothing, and an abort ends the wait though the fetch does not heed it (a
  * suite's in-process app.fetch does not; review pass 1). What the server
- * started still runs: a write that timed out may have landed.
+ * started still runs: a write that timed out may have landed. The fetch runs
+ * after a turn, so one that throws at once rejects like one that fails later
+ * and leaves no listener behind; an answer that comes after the abort is
+ * cancelled unread, its body not left to the collector (review pass 2).
  */
 function heeding(send: (request: Request) => Promise<Response>): (request: Request) => Promise<Response> {
   return (request) => {
@@ -112,7 +140,13 @@ function heeding(send: (request: Request) => Promise<Response>): (request: Reque
     return new Promise<Response>((resolve, reject) => {
       const onAbort = () => reject(signal.reason);
       signal.addEventListener("abort", onAbort, { once: true });
-      send(request).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+      Promise.resolve()
+        .then(() => send(request))
+        .then((response) => {
+          if (signal.aborted) void response.body?.cancel().catch(() => {});
+          resolve(response);
+        }, reject)
+        .finally(() => signal.removeEventListener("abort", onAbort));
     });
   };
 }
@@ -151,8 +185,16 @@ export type RestClient = {
 };
 
 export function createRestClient(opts: RestClientOptions): RestClient {
+  // The configuration is held at the start, not at the first call: a base
+  // with a query or a fragment puts every path after it, and a forwarder key
+  // no header carries as written would throw on every call (review pass 2).
+  const at = URL.parse(opts.baseUrl);
+  if (!at || at.search || at.hash) throw new TypeError(`baseUrl must be an origin, or an origin and a path, with no query or fragment: ${JSON.stringify(opts.baseUrl)}`);
+  if (opts.forwarderKey !== undefined && !headerSafe(opts.forwarderKey)) throw new TypeError("forwarderKey is no value a header carries as written (visible ASCII, no space at either end)");
+  // One trailing slash dropped, as openapi-fetch drops it, so stream() and call() build the same URL.
+  const base = opts.baseUrl.replace(/\/$/, "");
   const send = heeding(opts.fetch ?? ((request: Request) => globalThis.fetch(request)));
-  const raw = createClient<paths>({ baseUrl: opts.baseUrl, fetch: send });
+  const raw = createClient<paths>({ baseUrl: base, fetch: send });
   /** The headers every request carries beside its own: the forwarder slot, and the extra headers as they are now. */
   const carry = (headers: Headers): void => {
     if (opts.forwarderKey !== undefined) headers.set(FORWARDER_HEADER, opts.forwarderKey);
@@ -169,6 +211,7 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   return {
     raw,
     async call(name, input, init = {}) {
+      if (init.key !== undefined && !headerSafe(init.key)) return unauthorizedHere();
       const { method, path } = OPERATIONS[name];
       const rest: Record<string, unknown> = { ...(input as Record<string, unknown>) };
       const pathParams: Record<string, string> = {};
@@ -180,7 +223,7 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       }
       const readsQuery = method === "GET" || method === "DELETE";
       if (readsQuery) {
-        for (const [field, value] of Object.entries(rest)) if (unfitForQuery(value)) return refusedHere(field, "holds a lone surrogate, which a URL cannot carry");
+        for (const [field, value] of Object.entries(rest)) if (unfitForQuery(value)) return refusedHere(field, LONE_SURROGATE);
       }
       // Untyped here: the method and path are the operation's own, read from the document by its name, which the generic types cannot follow.
       const request = raw.request as unknown as (method: string, path: string, init: Record<string, unknown>) => Promise<{ data?: unknown; error?: unknown; response: Response }>;
@@ -191,21 +234,31 @@ export function createRestClient(opts: RestClientOptions): RestClient {
         signal: signalFor(init, opts.timeoutMs),
         parseAs: "text",
       });
-      // openapi-fetch parses an error's JSON itself; a success's text is parsed here.
-      return { status: response.status, ok: response.ok, sent: true, headers: response.headers, body: response.ok ? parsed(data as string | undefined) : error ?? null };
+      // openapi-fetch parses an error's JSON itself, and hands back "" for an empty body, which is none (review pass 2); a success's text is parsed here.
+      return { status: response.status, ok: response.ok, sent: true, headers: response.headers, body: response.ok ? parsed(data as string | undefined) : error === "" ? null : error ?? null };
     },
     async stream(jobId, init = {}) {
+      if (init.key !== undefined && !headerSafe(init.key)) return asResponse(unauthorizedHere());
       const unfit = unfitForPath(jobId);
-      if (unfit) {
-        const { status, headers, body } = refusedHere("job_id", unfit);
-        return new Response(JSON.stringify(body), { status, headers });
-      }
+      if (unfit) return asResponse(refusedHere("job_id", unfit));
       // Sent here, not through openapi-fetch, which reads a refusal's body
       // itself and would hand back a response already read (review pass 1).
       const headers = new Headers(keyed(init));
       carry(headers);
-      const base = opts.baseUrl.replace(/\/+$/, "");
-      return send(new Request(`${base}/v1/jobs/${encodeURIComponent(jobId)}/stream`, { headers, signal: signalFor(init, undefined) }));
+      // The timeout holds until the answer's headers arrive, and not after:
+      // the stream itself runs as long as its job does (review pass 2: no
+      // bound at all, while a call's was kept). The caller's signal ends
+      // either.
+      const ctl = new AbortController();
+      const onAbort = () => ctl.abort(init.signal?.reason);
+      if (init.signal?.aborted) onAbort();
+      else init.signal?.addEventListener("abort", onAbort, { once: true });
+      const timer = opts.timeoutMs === undefined ? undefined : setTimeout(() => ctl.abort(new DOMException("The operation timed out.", "TimeoutError")), opts.timeoutMs);
+      try {
+        return await send(new Request(`${base}/v1/jobs/${encodeURIComponent(jobId)}/stream`, { headers, signal: ctl.signal }));
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
