@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2733 assertions: 2733 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighty-eight (88) migrations applied, and
+`bun test-schema.ts` prints `2764 assertions: 2764 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighty-nine (89) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-2898).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1372,6 +1372,42 @@ take, at the value it holds. The body is 073's, the signature the same, the
 grants kept; it carries 073's mechanism for an earlier form a re-applied
 older file left, and refuses to apply without 073. test-schema [79], test-upgrade [20aj],
 server-portable/test-update-delete.ts [11], test-server.ts [23].
+
+Migration 089 has a re-capture over a capture-only key's label say what it
+did (SMD-2898). Under 085 and 086 a key that can read re-capturing such a text
+moves the label to it or keeps it and records a decline, and either settles
+the row; `ob1_restamp_recapture` answered a boolean the stores dropped, so
+`capture_thought`'s reply said none of it and only `thought_changes` did.
+`ob1_weigh_recapture` now holds 086's body and answers, from inside the call
+with the row locked, `outcome`: `moved` (the label moved to the caller —
+`stamp` the caller's, `before` the capture-only key's), `kept` (weighed now
+and not higher, the row settled — `weighed` the caller's trust, `own` whether
+the caller has the agent id by which 085 weighs a key's own later landing
+again), `settled` (an earlier re-capture settled it — `by` a restamp, with
+`mine` when the stamp is the caller's own, or a decline, another key's or a
+name-only key's own, with `decliner` and `decliner_weighed`, whether 085 still
+weighs that key's own later landing), `unweighed` (the
+caller's key has no kind; nothing recorded) or `none` (not a capture-only
+key's label to weigh); `stamp` is the row's three stamp keys after the call.
+A settled row whose text moved since — any update whose diff moved
+`content_fingerprint` (055), the settling key's own edit included — reads as
+`none`: 085 settles only an unchanged text and 086's reset refuses a changed
+one, so the move came after the settle, and no edit is hashed (a raw content
+UPDATE that leaves the fingerprint stale records no move, and still reads
+settled). `ob1_restamp_recapture` keeps its signature and
+boolean, as a call of it: a return type cannot change in place, and 085's and
+086's files re-applied over a jsonb form would fail. The server calls
+`ob1_weigh_recapture`, falling back to `ob1_restamp_recapture` on a database
+at 085–088 (the label moves, the reply says nothing) and to neither before
+085; the reply's note says the text landed on an existing thought, whether its
+label moved or was kept, whether the row is now settled, and — except where
+the label is the caller's own or was not weighed — the operator's
+`reset_capture_stamp`, which puts a moved label back and reopens a kept one;
+the structured content carries the outcome and, after a restamp, `labelMine`.
+It refuses
+to apply without 085 and 086. test-schema [80], test-upgrade [20ak],
+server-portable/test-server.ts [26], test-e2e-sql [13h], test-store-sql and
+test-store-postgrest [8d], test-rest-sql [3].
 
 ## What changed relative to the guide
 
@@ -4081,7 +4117,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2733 assertions, PGlite, no container
+bun test-schema.ts                          # 2764 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1262 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

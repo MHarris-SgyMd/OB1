@@ -825,6 +825,63 @@ export const renderJobHandle = (o: Outcome<JobHandle>): Reply => render(o, (v) =
 // ── The write tools (SMD-2283 PR 2) ──────────────────────────────────────────
 
 /**
+ * What a re-capture did to a capture-only key's label (089, SMD-2898): that the
+ * text landed on an existing thought, whether its label moved to the caller or
+ * was kept, and whether the row is now settled — what only thought_changes
+ * said before. Where a label moved or was kept, the operator's reset is named
+ * as the way to weigh it afresh. No label (a new text, a key that cannot read, a row that is
+ * not a capture-only key's, a database before 089) says nothing.
+ */
+function explainRecaptureLabel(v: Captured): string {
+  const l = v.label;
+  if (!l) return "";
+  // Not 035's "already captured as" opening: both notes can fire on one reply.
+  const head = `\n\nNote: this re-capture landed on ${v.id}, which already held the text`;
+  // What the reset does by what is there: a move it puts back, a decline it
+  // only clears (086) — "puts it back" over a kept label had nothing to put
+  // back (review pass 1).
+  const putBack = " An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands.";
+  const reopen = " An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands.";
+  switch (l.outcome) {
+    case "moved": {
+      // Into or out of `ingested`: what fetch and min_trust now do with it,
+      // as the reset's reply says it (review passes 1 and 2).
+      const before = oneOf(TRUST, l.before.trust), after = oneOf(TRUST, l.stamp.trust);
+      const notice = before === "ingested" && after !== "ingested" && after !== null
+        ? ` The outside-text notice goes, and min_trust searches up to ${after} include it.`
+        : before !== "ingested" && after === "ingested"
+          ? " It now shows under fetch's outside-text notice, and min_trust searches find it at ingested and leave it out above."
+          : "";
+      return `${head} under a capture-only key's label (${stampText(l.before)}). Its label moved to your key: ${stampText(l.stamp)}.${notice} No later re-capture moves it.${putBack}`;
+    }
+    case "kept":
+      return `${head} under a capture-only key's label (${stampText(l.stamp)}), and the label was kept: the trust your key was weighed at (${oneOf(TRUST, l.weighed) ?? "none"}) does not rank above it. ` +
+        // 085 weighs a key's own later landing again only by its agent id:
+        // a name-only decline settles the row for every caller (review passes 1 and 2).
+        `The row is now settled against ${l.own ? "every other key (your own key's later re-capture is still weighed)" : "every key, yours included"}.${reopen}`;
+    case "settled": {
+      if (l.by === "decline") {
+        // The decliner's own later re-capture is still weighed when its
+        // decline names its agent id (review pass 2: the operator was told the
+        // row was fixed, and the decliner moved it after).
+        const who = l.decliner !== null ? snipText(l.decliner, 80) : null;
+        // A weighed decliner with no name is still weighed (review pass 3).
+        return !l.declinerWeighed
+          ? `${head}, and an earlier re-capture settled it against every key, leaving the capture-only key's label (${stampText(l.stamp)}). This re-capture moved nothing.${reopen}`
+          : who !== null
+            ? `${head}, and an earlier re-capture by ${who} settled it, leaving the capture-only key's label (${stampText(l.stamp)}): no other key's re-capture moves it, though ${who}'s own later re-capture is still weighed. This re-capture moved nothing.${reopen}`
+            : `${head}, and an earlier re-capture settled it against every key but its decliner's own, leaving the capture-only key's label (${stampText(l.stamp)}). This re-capture moved nothing.${reopen}`;
+      }
+      return l.mine
+        ? `${head}; its label is already your key's (${stampText(l.stamp)}), from an earlier re-capture. A label moves once, so this re-capture moved nothing.${putBack}`
+        : `${head}, and an earlier re-capture by another key moved its label to that key: ${stampText(l.stamp)}. This re-capture moved nothing.${putBack}`;
+    }
+    case "unweighed":
+      return `${head} under a capture-only key's label (${stampText(l.stamp)}), which was kept: your key has no kind, so its re-capture was not weighed and settled nothing (the operator classifies keys in SQL with set_agent_kind; db/README.md).`;
+  }
+}
+
+/**
  * What a capture or an edit reply says when the whole-content vector could
  * not be had for a reason that says nothing about the next attempt — a 429, a
  * 5xx, a lost connection, OB1_LLM_TIMEOUT. The head window stands in, which is
@@ -897,6 +954,9 @@ function captureRefusal(r: Refusal): string {
 const safeCapture: Safe<Captured> = (v) => ({
   id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }),
   embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures,
+  // The outcome, and for a settle by a restamp whether the label is the
+  // caller's — "settled" alone cannot say (review pass 1).
+  ...(v.label ? { label: v.label.outcome, ...(v.label.outcome === "settled" && v.label.by === "restamp" ? { labelMine: v.label.mine } : {}) } : {}),
 });
 
 export function renderCapture(o: Outcome<Captured>): Reply {
@@ -937,6 +997,8 @@ export function renderCapture(o: Outcome<Captured>): Reply {
             // from before 035 cannot say.
             (reader ? `This database does not say which this was.` : `This reply does not say which.`);
     }
+
+    confirmation += explainRecaptureLabel(v);
 
     // A chunk whose situating blurb could not be generated is embedded bare
     // and stored with a NULL context, which is a legitimate state and a

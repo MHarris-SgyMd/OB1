@@ -242,6 +242,18 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   // against itself, which a swapped entry passes (review pass 1).
   const ownRow = await rest("POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {});
   const noRow = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a4/reset-capture-stamp", {});
+  // What a re-capture did to the hook's label (089, SMD-2898), while the
+  // writer is the operator: REST's body carries the label, the MCP tool's
+  // structured content its outcome and its text the note.
+  const liftRest = "omega: the hook's outside text the writer lifts through REST", liftMcp = "omega: the hook's outside text the writer lifts through MCP";
+  await rest("POST", "/v1/thoughts", { content: liftRest, trust: "ingested" }, KEYS.hook);
+  await rest("POST", "/v1/thoughts", { content: liftMcp, trust: "ingested" }, KEYS.hook);
+  const lifted = await rest("POST", "/v1/thoughts", { content: liftRest });
+  const liftedMcp = await mcp("capture_thought", { content: liftMcp });
+  const liftedLabel = lifted.body.label as { outcome?: string; stamp?: { actorName?: string; trust?: string }; before?: { trust?: string } } | undefined;
+  assert(lifted.body.existed === true && liftedLabel?.outcome === "moved" && liftedLabel.stamp?.actorName === "writer" && liftedLabel.stamp?.trust === "operator" && liftedLabel.before?.trust === "ingested"
+      && liftedMcp.sc.label === "moved" && /Its label moved to your key: writer — kind operator, trust operator\./.test(liftedMcp.text),
+    `a re-capture over the hook's label: REST's body carries the label, the MCP tool its outcome and the note (${JSON.stringify(liftedLabel)} | ${liftedMcp.sc.label})`);
   await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
   const notOperator = await rest("POST", `/v1/thoughts/${hookRest.body.id}/reset-capture-stamp`, {});
   assert(ownRow.status === 409 && ownRow.body.code === "REFUSED_NOT_CAPTURE_STAMP" && noRow.status === 404 && noRow.body.code === "NOT_FOUND"
