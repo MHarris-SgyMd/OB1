@@ -86,11 +86,25 @@ const unfitForQuery = (value: unknown): boolean =>
   Array.isArray(value) ? value.some(unfitForQuery) : typeof value === "string" && !encodable(value);
 
 /**
- * Whether a value can ride a header as sent: visible ASCII, spaces inside it
- * but none at its ends, which HTTP strips — so a key ` k ` would arrive as
- * `k` and be read as another key than the one presented (review pass 2).
+ * Whether a value can ride a header as presented: what a header carries —
+ * Headers refuses a control character but tab, and anything past U+00FF —
+ * with no space or tab at either end, which HTTP strips, so a key ` k ` would
+ * arrive as `k` and be read as another key than the one presented (review
+ * pass 2). Not visible ASCII alone: `é` or a tab inside a key rides a header
+ * and the core takes it (review pass 3).
  */
-const headerSafe = (value: string): boolean => /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(value);
+function headerSafe(value: string): boolean {
+  if (value === "" || /^[ \t]|[ \t]$/.test(value)) return false;
+  try {
+    new Headers([["x-probe", value]]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The headers a caller's key or this client's forwarder key ride: the call's and the client's own, never an extra header's (review pass 3). */
+const CREDENTIAL_HEADERS = new Set(["x-brain-key", "x-access-key", "authorization", FORWARDER_HEADER]);
 
 const JSON_TYPE = { "content-type": "application/json" };
 
@@ -107,8 +121,9 @@ const refusedHere = (field: string, message: string): Answer => ({
 /**
  * The answer for a key no header can carry as presented (headerSafe), given
  * here, nothing sent: the REST core's own answer to a key that matches none
- * (401 UNAUTHORIZED) — no configured key is such a value, since every key the
- * core takes arrives in a header.
+ * (401 UNAUTHORIZED) — the core reads keys from headers alone, so no key it
+ * could match is such a value. A legacy raw key past U+00FF, which `?key=`
+ * carries to server-portable today, cannot reach the REST core at all.
  */
 const unauthorizedHere = (): Answer => ({
   status: 401, ok: false, sent: false, headers: new Headers({ ...JSON_TYPE, "www-authenticate": "Bearer" }),
@@ -143,7 +158,7 @@ function heeding(send: (request: Request) => Promise<Response>): (request: Reque
       Promise.resolve()
         .then(() => send(request))
         .then((response) => {
-          if (signal.aborted) void response.body?.cancel().catch(() => {});
+          if (signal.aborted) void response?.body?.cancel().catch(() => {});
           resolve(response);
         }, reject)
         .finally(() => signal.removeEventListener("abort", onAbort));
@@ -188,17 +203,20 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   // The configuration is held at the start, not at the first call: a base
   // with a query or a fragment puts every path after it, and a forwarder key
   // no header carries as written would throw on every call (review pass 2).
-  const at = URL.parse(opts.baseUrl);
-  if (!at || at.search || at.hash) throw new TypeError(`baseUrl must be an origin, or an origin and a path, with no query or fragment: ${JSON.stringify(opts.baseUrl)}`);
-  if (opts.forwarderKey !== undefined && !headerSafe(opts.forwarderKey)) throw new TypeError("forwarderKey is no value a header carries as written (visible ASCII, no space at either end)");
-  // One trailing slash dropped, as openapi-fetch drops it, so stream() and call() build the same URL.
-  const base = opts.baseUrl.replace(/\/$/, "");
+  // A bare `?` or `#` is a query or a fragment too, though URL reads it as empty (review pass 3).
+  if (!URL.parse(opts.baseUrl) || /[?#]/.test(opts.baseUrl)) throw new TypeError(`baseUrl must be an origin, or an origin and a path, with no query or fragment: ${JSON.stringify(opts.baseUrl)}`);
+  if (opts.forwarderKey !== undefined && !headerSafe(opts.forwarderKey)) throw new TypeError("forwarderKey is no value a header carries as written (no control character, nothing past U+00FF, no space at either end)");
+  // Every trailing slash dropped, so openapi-fetch (which drops one more if it finds one) and stream() build under one root.
+  const base = opts.baseUrl.replace(/\/+$/, "");
   const send = heeding(opts.fetch ?? ((request: Request) => globalThis.fetch(request)));
-  const raw = createClient<paths>({ baseUrl: base, fetch: send });
-  /** The headers every request carries beside its own: the forwarder slot, and the extra headers as they are now. */
+  // A redirect is an answer, not followed: fetch carries custom headers to the
+  // next origin, and the caller's key and this client's forwarder key ride
+  // them (review pass 3: a 307 elsewhere took both).
+  const raw = createClient<paths>({ baseUrl: base, fetch: send, redirect: "manual" });
+  /** The headers every request carries beside its own: the forwarder slot, and the extra headers as they are now — never a key's. */
   const carry = (headers: Headers): void => {
     if (opts.forwarderKey !== undefined) headers.set(FORWARDER_HEADER, opts.forwarderKey);
-    for (const [name, value] of Object.entries(opts.headers?.() ?? {})) headers.set(name, value);
+    for (const [name, value] of Object.entries(opts.headers?.() ?? {})) if (!CREDENTIAL_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   };
   raw.use({
     onRequest({ request }) {
@@ -247,15 +265,16 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       carry(headers);
       // The timeout holds until the answer's headers arrive, and not after:
       // the stream itself runs as long as its job does (review pass 2: no
-      // bound at all, while a call's was kept). The caller's signal ends
-      // either.
-      const ctl = new AbortController();
-      const onAbort = () => ctl.abort(init.signal?.reason);
-      if (init.signal?.aborted) onAbort();
-      else init.signal?.addEventListener("abort", onAbort, { once: true });
-      const timer = opts.timeoutMs === undefined ? undefined : setTimeout(() => ctl.abort(new DOMException("The operation timed out.", "TimeoutError")), opts.timeoutMs);
+      // bound at all, while a call's was kept). The caller's signal ends the
+      // wait for the headers, and then the request, whose body a fetch that
+      // heeds its signal ends. Joined by AbortSignal.any, which holds no
+      // listener on the caller's signal past the request (review pass 3: one
+      // stayed on a long-lived signal per stream).
+      const clock = new AbortController();
+      const signal = init.signal ? AbortSignal.any([init.signal, clock.signal]) : clock.signal;
+      const timer = opts.timeoutMs === undefined ? undefined : setTimeout(() => clock.abort(new DOMException("The operation timed out.", "TimeoutError")), opts.timeoutMs);
       try {
-        return await send(new Request(`${base}/v1/jobs/${encodeURIComponent(jobId)}/stream`, { headers, signal: ctl.signal }));
+        return await send(new Request(`${base}/v1/jobs/${encodeURIComponent(jobId)}/stream`, { headers, signal, redirect: "manual" }));
       } finally {
         clearTimeout(timer);
       }

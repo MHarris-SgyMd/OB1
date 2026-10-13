@@ -339,6 +339,65 @@ console.log("\n[8] What a header cannot carry, the configuration, an empty body,
   assert((await pending)?.name === "AbortError", "…and the caller's signal still ends a stream");
 }
 
+console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra header is a key, a redirect is an answer, an open stream ends on the caller's signal");
+{
+  const within = <T>(p: Promise<T>, ms = 3000): Promise<T> =>
+    Promise.race([p, Bun.sleep(ms).then(() => { throw Object.assign(new Error(`no end within ${ms} ms`), { name: "Deadline" }); })]);
+  // `é` or a tab inside a key rides a header and is the core's to judge, not refused here (review pass 3).
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  for (const [label, key] of [["an é", "café-key"], ["a tab inside", "a\tb"]] as const) {
+    seen.length = 0;
+    const r = await client.call("thought_stats", {}, { key });
+    assert(r.status === 401 && r.sent && seen.length === 1 && seen[0].headers.get("x-brain-key") === key, `a key holding ${label} is sent as presented, and the core answers it (${r.status}, sent ${r.sent})`);
+  }
+  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
+  assert(["http://x?", "http://x#", "http://x/api?#"].every((b) => refuses({ baseUrl: b })?.name === "TypeError"), "a base ending in a bare ? or # is refused: URL reads it as empty, and every path would follow it");
+  const urls: string[] = [];
+  const spy = createRestClient({ baseUrl: "http://x//", fetch: async (req) => { urls.push(req.url); return new Response("{}", { status: 404 }); } });
+  await spy.call("job_status", { job_id: "j" });
+  await spy.stream("j");
+  assert(same(urls, ["http://x/v1/jobs/j", "http://x/v1/jobs/j/stream"]), `a base with two trailing slashes: call and stream under one root (${urls.join(" ")})`);
+  // An extra header is never a key: headers() cannot put a key, or the forwarder slot, beside or over the call's.
+  seen.length = 0;
+  const sly = createRestClient({ baseUrl: "http://api", fetch: viaApp, forwarderKey: "fwd-raw", headers: () => ({ "X-Brain-Key": "other", "x-access-key": "other", authorization: "Bearer other", "x-brain-forwarder": "other", traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" }) });
+  await sly.call("thought_stats", {}, { key: "write-raw" });
+  await sly.stream("j", { key: "write-raw" });
+  assert(seen.length === 2 && seen.every((q) => q.headers.get("x-brain-key") === "write-raw" && q.headers.get(FORWARDER_HEADER) === "fwd-raw" && !q.headers.has("x-access-key") && !q.headers.has("authorization") && q.headers.has("traceparent")),
+    "headers() adds what it may (a traceparent) and no key: the call's key and the client's forwarder stand, from call and stream");
+  // A redirect is an answer: fetch would carry the key and the forwarder to the next origin (review pass 3).
+  const elsewhere: string[] = [];
+  const other = Bun.serve({ port: 0, fetch: (req) => { elsewhere.push(req.headers.get("x-brain-key") ?? "-"); return new Response("{}"); } });
+  const redirecting = Bun.serve({ port: 0, fetch: (req) => new Response(null, { status: 307, headers: { location: `http://localhost:${other.port}${new URL(req.url).pathname}` } }) });
+  const real = createRestClient({ baseUrl: `http://127.0.0.1:${redirecting.port}`, forwarderKey: "fwd-raw" });
+  const moved = await within(real.call("thought_stats", {}, { key: "write-raw" }));
+  const movedStream = await within(real.stream("j", { key: "write-raw" }));
+  assert(moved.status === 307 && moved.sent && movedStream.status === 307 && elsewhere.length === 0, `a 307 to another origin is the answer, from call and stream; the key went nowhere else (${moved.status}, ${movedStream.status}, ${elsewhere.length} at the other origin)`);
+  redirecting.stop(true);
+  other.stop(true);
+  // stream() holds no listener on the caller's signal past its request (review pass 3: one stayed per stream).
+  const ctl = new AbortController();
+  let added = 0;
+  let removed = 0;
+  const add = ctl.signal.addEventListener.bind(ctl.signal);
+  const remove = ctl.signal.removeEventListener.bind(ctl.signal);
+  ctl.signal.addEventListener = ((...a: Parameters<AbortSignal["addEventListener"]>) => { added++; add(...a); }) as AbortSignal["addEventListener"];
+  ctl.signal.removeEventListener = ((...a: Parameters<AbortSignal["removeEventListener"]>) => { removed++; remove(...a); }) as AbortSignal["removeEventListener"];
+  const quick = createRestClient({ baseUrl: "http://api", fetch: async () => new Response("event: end\n\n", { headers: { "content-type": "text/event-stream" } }) });
+  for (let i = 0; i < 20; i++) await (await quick.stream("j", { signal: ctl.signal })).text();
+  await within(quick.stream("j", { signal: ctl.signal, key: "bad\u0000" }));
+  assert(added === removed, `twenty streams on one caller's signal leave no listener on it (${added} added, ${removed} removed)`);
+  // The caller's signal ends an open stream too, through a fetch whose body heeds the request's signal.
+  const caller = new AbortController();
+  const heedful = createRestClient({
+    baseUrl: "http://api",
+    fetch: async (req) => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("event: tick\n\n")); req.signal.addEventListener("abort", () => c.error(req.signal.reason), { once: true }); } }), { headers: { "content-type": "text/event-stream" } }),
+  });
+  const open = await within(heedful.stream("j", { signal: caller.signal }));
+  const reading = within(open.text()).then(() => null, (e: unknown) => e as Error);
+  caller.abort();
+  assert((await reading)?.name === "AbortError", "the caller's signal ends an open stream, its body read to an AbortError");
+}
+
 // Compile-time only: the generated types hold a call to its operation's input.
 if (false as boolean) {
   const c = createRestClient({ baseUrl: "http://api" });
