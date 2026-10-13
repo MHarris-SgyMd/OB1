@@ -3809,7 +3809,8 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
 
 console.log("\n[25] Each request a point on the request-duration histogram and a log record (SMD-1849 PR 2c), a fault's kind and code on its span and never its message, and each signal said by itself when it is not sent");
 {
-  const { beginRequest, cutOpenRequests, faultOf, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { beginRequest, cutOpenRequests, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { faultOf } = await import("./spans.ts");
   const { batchOptions, batchSizes, flushesResult, flushSignal, logDrops, metricTimes, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
   const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
@@ -4171,6 +4172,388 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   dropMeter.createCounter("otel.sdk.processor.log.processed").add(1);
   dropMeter.createHistogram("h").record(1);
   assert(counted.join() === "2", `the log batch's meter counts its queue's drops alone (${counted.join()})`);
+}
+
+console.log("\n[26] A provider call, a store operation and a job's body under spans of their own (SMD-1849 PR 2d): a provider's model, host and token counts, a store's operation and SQLSTATE, a job's own trace linked to its call — a point each, no text, no userinfo — and nothing in a process that installs no tracing");
+{
+  const { beginRequest, cutOpenRequests, flushTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
+  const { faultOf, useTracing, withSpan, withStoreSpan } = await import("./spans.ts");
+  const { OTEL_TRACING, openSpanCount } = await import("./tracing.ts");
+  const { providerCall, resolveEmbedConfig } = await import("./embed.ts");
+  const { createStore, tracedStore } = await import("./store.ts");
+  const { markRunningLost, startJob } = await import("./jobs.ts");
+  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  type Span = import("@opentelemetry/sdk-trace-base").ReadableSpan;
+  type Point = { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } };
+  const PLANTED = "planted-2d-text-7c31";
+  const spans = new InMemorySpanExporter();
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+  let started = false;
+  try {
+    started = await startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured }) }));
+  } finally {
+    if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
+  }
+  const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
+  const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === name);
+  const pointsOf = async (name: string) => {
+    await flushTelemetry();
+    return (measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === name).flatMap((m) => m.dataPoints as unknown as Point[]);
+  };
+  const said = () => JSON.stringify([spans.getFinishedSpans().map((s) => [s.name, s.attributes, s.events, s.links]), measured.getMetrics()]);
+  // A provider that answers each model its own way: tokens counted, a 503, a body that is not JSON, and one that never answers.
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: [0.1, 0.2] }], usage: { prompt_tokens: 7, total_tokens: 7, completion_tokens: PLANTED } });
+      const { model } = (await req.json()) as { model: string };
+      if (model === "slow-model") return new Promise<Response>(() => {});
+      if (model === "refused-model") return new Response(`overloaded ${PLANTED}`, { status: 503 });
+      if (model === "garbled-model") return new Response("not json");
+      if (model === "huge-tokens") return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 1e308, completion_tokens: 2 ** 64 } });
+      if (model === "negative-tokens") return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: -1, completion_tokens: 3 } });
+      return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 11, completion_tokens: 3 } });
+    },
+  });
+  try {
+    assert(started, "the suite's SDK is started as a server's is");
+    const LOCAL = { OB1_LLM_LOCAL: "1", OB1_CHAT_LOCAL: "1" };
+    const cfg = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://user:${PLANTED}@127.0.0.1:${provider.port}/v1`, OB1_LLM_TIMEOUT: "0.3" });
+    const nowhere = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
+    const SUBJ = { kind: "capture" as const };
+    const chat = (model: string, at = cfg) => providerCall(at, "/chat/completions", { model, messages: [{ role: "user", content: PLANTED }] }, SUBJ);
+    const ends: string[] = [];
+    await withToolSpan("capture_thought", async () => {
+      await providerCall(cfg, "/embeddings", { model: "embed-model", input: PLANTED }, SUBJ);
+      await chat("chat-model");
+      for (const model of ["refused-model", "garbled-model", "slow-model", `bad model ${PLANTED}`]) ends.push(await chat(model).then(() => "answered", (e: Error) => e.name));
+      ends.push(await chat("chat-model", nowhere).then(() => "answered", (e: Error) => e.name));
+    });
+    const tool = named("execute_tool capture_thought");
+    const calls = spans.getFinishedSpans().filter((s) => s.kind === SpanKind.CLIENT);
+    assert(calls.length === 7 && calls.every((s) => s.parentSpanContext?.spanId === tool?.spanContext().spanId && s.spanContext().traceId === tool?.spanContext().traceId),
+      `each provider call a client span, a child of the tool call that made it (${calls.map((s) => s.name).join(", ")})`);
+    const embed = named("embeddings embed-model");
+    const answered = named("chat chat-model");
+    assert(JSON.stringify(attrs(embed)) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port, "gen_ai.usage.input_tokens": 7, "ob1.outcome": "ok" })
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(embed?.resource.attributes["service.instance.id"]))
+      && attrs(answered)["gen_ai.usage.input_tokens"] === 11 && attrs(answered)["gen_ai.usage.output_tokens"] === 3 && answered?.status.code === SpanStatusCode.UNSET,
+      `a call's span: the GenAI conventions' name and operation, its model, the endpoint's host and port, the answer's token counts; the process's own instance id on the resource (${JSON.stringify([attrs(embed), attrs(answered)])})`);
+    const failedAs = (name: string) => { const s = named(name); return s?.status.code === SpanStatusCode.ERROR ? attrs(s)["error.type"] : "not an error"; };
+    assert(ends.slice(0, 3).join() === "ProviderError,ProviderError,ProviderError" && failedAs("chat refused-model") === "503" && failedAs("chat garbled-model") === "invalid_body" && failedAs("chat slow-model") === "timeout"
+      && named("chat ?") !== undefined && named(`chat bad model ${PLANTED}`) === undefined
+      && JSON.stringify(named("chat refused-model")?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "ProviderError" }]]),
+      `a failed call: the provider's status, a body that is not JSON, the deadline — each its error.type, the throw's kind on its span; a model's name that is no name is \`?\` (${JSON.stringify(calls.map((s) => [s.name, attrs(s)["error.type"]]))})`);
+    const refusedConnection = calls.find((s) => attrs(s)["server.port"] === 1);
+    assert(ends[4] !== "answered" && refusedConnection?.status.code === SpanStatusCode.ERROR && attrs(refusedConnection)["error.type"] === "ECONNREFUSED" && calls.every((s) => s.links.length === 0),
+      `a connection refused: the runtime's own error, by its code or kind (${JSON.stringify(attrs(refusedConnection))})`);
+    const providerPoints = await pointsOf("gen_ai.client.operation.duration");
+    const pointOf = (model: string) => providerPoints.find((p) => p.attributes["gen_ai.request.model"] === model && p.attributes["server.port"] === provider.port);
+    assert(providerPoints.length === 7 && JSON.stringify(pointOf("embed-model")?.attributes) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port })
+      && pointOf("refused-model")?.attributes["error.type"] === "503" && (pointOf("slow-model")?.value.sum ?? 0) >= 0.25 && (pointOf("slow-model")?.value.sum ?? 99) < 5
+      && providerPoints.every((p) => p.value.count === 1) && pointOf("embed-model")?.value.buckets.boundaries.at(-1) === 327.68
+      && !("gen_ai.usage.input_tokens" in (pointOf("embed-model")?.attributes ?? {})),
+      `each call a point on gen_ai.client.operation.duration: its operation, model, host and port, and how it failed; no token count as a label (${JSON.stringify(providerPoints.map((p) => [p.attributes, p.value.sum]))})`);
+    assert(!said().includes(PLANTED) && !said().includes("user:"), "no text sent, no answer's words, no base's userinfo in a span or a point");
+    // An IPv6 host as the conventions spell an address, without the brackets a URL keeps it in (review pass 1).
+    await chat("chat-model", resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://[::1]:1/v1" })).catch(() => {});
+    const six = spans.getFinishedSpans().filter((s) => attrs(s)["server.port"] === 1).map((s) => attrs(s)["server.address"]);
+    assert(six.join() === "127.0.0.1,::1", `an IPv6 provider's address without its brackets (${six.join()})`);
+    // A base with no port is the scheme's; a model's name past 128 characters is no name (review pass 2).
+    spans.reset();
+    await chat("a".repeat(128), resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://127.0.0.1/v1", OB1_LLM_TIMEOUT: "2" })).catch(() => {});
+    await chat("a".repeat(129)).catch(() => {});
+    const bounded = spans.getFinishedSpans().map((s) => [attrs(s)["gen_ai.request.model"], attrs(s)["server.port"]]);
+    assert(JSON.stringify(bounded) === JSON.stringify([["a".repeat(128), 80], ["?", provider.port]]), `a base with no port is the scheme's, 80; a model's name of 129 characters is \`?\` (${JSON.stringify(bounded).slice(0, 120)})`);
+    // A token count past a safe integer is none: an export holding 1e308 as an int64 is refused whole (review pass 3).
+    spans.reset();
+    await chat("huge-tokens");
+    await chat("negative-tokens");
+    const huge = attrs(named("chat huge-tokens"));
+    const negative = attrs(named("chat negative-tokens"));
+    assert(!("gen_ai.usage.input_tokens" in huge) && !("gen_ai.usage.output_tokens" in huge) && huge["ob1.outcome"] === "ok"
+      && !("gen_ai.usage.input_tokens" in negative) && negative["gen_ai.usage.output_tokens"] === 3,
+      `a token count of 1e308, 2^64 or -1 is no count on the span; a count beside it is kept (${JSON.stringify([huge, negative])})`);
+    // A status no HTTP failure has is \`_OTHER\`: a runtime takes any three digits (review pass 3).
+    const { createServer } = await import("node:net");
+    // Answers each request with the status its model names (`s300`), 999 for any other.
+    const odd = createServer((socket) => {
+      let got = "";
+      socket.on("data", (chunk) => {
+        got += chunk.toString();
+        if (!/"model":"[^"]*"/.test(got)) return;
+        const status = /"model":"s(\d+)"/.exec(got)?.[1] ?? "999";
+        socket.end(`HTTP/1.1 ${status} Odd\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno`);
+      });
+    });
+    await new Promise<void>((done) => odd.listen(0, "127.0.0.1", () => done()));
+    try {
+      const oddPort = (odd.address() as { port: number }).port;
+      spans.reset();
+      const oddAt = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://127.0.0.1:${oddPort}/v1` });
+      for (const model of ["chat-model", "s300", "s599", "s600"]) await chat(model, oddAt).catch(() => {});
+      const oddTypes = spans.getFinishedSpans().filter((s) => attrs(s)["server.port"] === oddPort).map((s) => [attrs(s)["gen_ai.request.model"], attrs(s)["error.type"]]);
+      assert(JSON.stringify(oddTypes) === JSON.stringify([["chat-model", "_OTHER"], ["s300", "300"], ["s599", "599"], ["s600", "_OTHER"]]),
+        `a provider's status from 300 to 599 is itself; 600 or 999, \`_OTHER\`, no series of its own (${JSON.stringify(oddTypes)})`);
+    } finally {
+      odd.close();
+    }
+
+    // A store's operations, each a client span under its call; the store's own methods on the store itself (a private field reads).
+    spans.reset();
+    class FakeStore {
+      #rows = 3;
+      readonly kind = "sql" as const;
+      async countThoughts() { return this.#rows; }
+      async getThought() { throw Object.assign(new Error(`duplicate ${PLANTED}`), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno: "23505" }); }
+      async listThoughts() { throw Object.assign(new Error("broken pipe"), { code: "EPIPE" }); }
+      async deleteThought() { throw Object.assign(new Error("raised"), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno: "P0001" }); }
+      async pluginTx<T>(_plugin: string, fn: (sql: never) => Promise<T>) { return this.#rows > 0 ? fn(undefined as never) : fn(undefined as never); }
+      jobSink() { return null; }
+      async close() { return this.#rows; }
+    }
+    const store = tracedStore(new FakeStore() as unknown as import("./store.ts").ThoughtStore);
+    let counted = 0;
+    const storeEnds: string[] = [];
+    await withToolSpan("thought_stats", async () => {
+      counted = await store.countThoughts();
+      storeEnds.push(await store.getThought("x").then(() => "answered", (e: Error) => e.name));
+      storeEnds.push(await store.listThoughts({} as never).then(() => "answered", (e: Error) => e.name));
+      storeEnds.push(await store.deleteThought({ id: "x" }).then(() => "answered", (e: Error) => e.name));
+      await store.pluginTx!("example-plugin", async () => 1);
+      await store.pluginTx!(`Bad ${PLANTED}`, async () => 1);
+      store.jobSink("mcp");
+      storeEnds.push(String(await store.close()), typeof store.toString());
+    });
+    const statsTool = named("execute_tool thought_stats");
+    const ops = spans.getFinishedSpans().filter((s) => s.kind === SpanKind.CLIENT);
+    const txs = spans.getFinishedSpans().filter((s) => s.name === "pluginTx");
+    assert(counted === 3 && storeEnds.join() === "PostgresError,Error,PostgresError,3,string" && ops.map((s) => s.name).join() === "countThoughts,getThought,listThoughts,deleteThought"
+      && ops.every((s) => s.parentSpanContext?.spanId === statsTool?.spanContext().spanId),
+      `each store operation a client span under its call, the store's own method on the store itself, its throw rethrown as it came; no span for the job sink's maker, the close (on the store itself) or an inherited member (${ops.map((s) => s.name).join()}; ${storeEnds.join()})`);
+    assert(JSON.stringify(attrs(ops[0])) === JSON.stringify({ "db.system.name": "postgresql", "db.operation.name": "countThoughts", "ob1.store": "sql", "ob1.outcome": "ok" })
+      && attrs(ops[1])["error.type"] === "23505" && attrs(ops[1])["db.response.status_code"] === "23505" && ops[1].status.code === SpanStatusCode.ERROR
+      && attrs(ops[2])["error.type"] === "EPIPE" && !("db.response.status_code" in attrs(ops[2]))
+      && attrs(ops[3])["error.type"] === "P0001" && attrs(ops[3])["db.response.status_code"] === "P0001",
+      `a store span: the operation, the store's kind, a fault's SQLSTATE as its status code — a plpgsql raise's P0001 too, a system error's five letters not (${JSON.stringify(ops.map(attrs))})`);
+    assert(txs.length === 2 && txs.every((s) => s.kind === SpanKind.INTERNAL && s.parentSpanContext?.spanId === statsTool?.spanContext().spanId)
+      && attrs(txs[0])["ob1.plugin"] === "example-plugin" && attrs(txs[1])["ob1.plugin"] === "?" && !("db.operation.name" in attrs(txs[0]))
+      && attrs(txs[0])["db.system.name"] === "postgresql" && attrs(txs[0])["ob1.store"] === "sql" && !said().includes(PLANTED),
+      `a plugin's transaction: an internal span with its plugin's name held to a plugin's and the store's, no database operation; no fault's message or plugin name planted in any store span (${JSON.stringify(txs.map((s) => [s.kind, attrs(s)]))})`);
+    const storePoints = await pointsOf("db.client.operation.duration");
+    assert(storePoints.length === 4 && JSON.stringify(storePoints.find((p) => p.attributes["db.operation.name"] === "getThought")?.attributes) === JSON.stringify({ "db.system.name": "postgresql", "db.operation.name": "getThought", "ob1.store": "sql", "error.type": "23505", "db.response.status_code": "23505" })
+      && storePoints.every((p) => p.attributes["db.operation.name"] !== "pluginTx" && !("ob1.plugin" in p.attributes) && p.value.count === 1)
+      && storePoints[0]?.value.buckets.boundaries.join() === "0.0005,0.001,0.0025,0.005,0.0075,0.01,0.025,0.05,0.075,0.1,0.25,0.5,0.75,1,2.5,5,10,30,60",
+      `each operation one point on db.client.operation.duration, none for a plugin's transaction, whose time is the plugin's own code (${JSON.stringify(storePoints.map((p) => [p.attributes, p.value.count]))})`);
+    // The store's kind is the store's own.
+    spans.reset();
+    await tracedStore(Object.assign(new FakeStore(), { kind: "postgrest" }) as unknown as import("./store.ts").ThoughtStore).countThoughts();
+    assert(attrs(named("countThoughts"))["ob1.store"] === "postgrest", `a span's store kind is the store's (${JSON.stringify(attrs(named("countThoughts")))})`);
+    // The configured store is the wrapped one: an operation on a database that is not there is a span that failed.
+    spans.reset();
+    const real = await createStore({ DATABASE_URL: "postgres://u:pw@127.0.0.1:1/x" });
+    await real.countThoughts().catch(() => {});
+    await real.close().catch(() => {});
+    const realSpan = named("countThoughts");
+    assert(realSpan?.status.code === SpanStatusCode.ERROR && attrs(realSpan)["ob1.store"] === "sql" && !said().includes("u:pw"), `createStore's store spans its operations (${JSON.stringify(attrs(realSpan))})`);
+
+    // A job's body starts a trace of its own, linked to the call that started it; what it does is its child.
+    spans.reset();
+    const principal = { keyHash: "h".repeat(64), name: "w" };
+    let ran: Promise<unknown> = Promise.resolve();
+    const track = <T,>(r: () => Promise<T>) => { const p = r(); ran = p; return p; };
+    await withToolSpan("scan_thoughts", async () => startJob(principal, "scan_thoughts", async () => store.countThoughts(), { track }));
+    await ran;
+    await withToolSpan("scan_thoughts", async () => startJob(principal, "scan_thoughts", async () => { throw new TypeError(PLANTED); }, { track }));
+    await ran;
+    const callSpans = spans.getFinishedSpans().filter((s) => s.name === "execute_tool scan_thoughts");
+    const jobs = spans.getFinishedSpans().filter((s) => s.name === "job scan_thoughts");
+    const inJob = named("countThoughts");
+    assert(jobs.length === 2 && jobs.every((j, i) => j.parentSpanContext === undefined && j.spanContext().traceId !== callSpans[i]?.spanContext().traceId && j.links[0]?.context.spanId === callSpans[i]?.spanContext().spanId)
+      && inJob?.parentSpanContext?.spanId === jobs[0].spanContext().spanId && inJob?.spanContext().traceId === jobs[0].spanContext().traceId
+      && attrs(jobs[0])["ob1.job.kind"] === "scan_thoughts" && attrs(jobs[0])["ob1.outcome"] === "ok"
+      && attrs(jobs[1])["error.type"] === "TypeError" && jobs[1].status.code === SpanStatusCode.ERROR && !said().includes(PLANTED),
+      `a job's body: a root span of its own, linked to its call, its store operations its children; a body that throws an error by its kind, never its message (${JSON.stringify(jobs.map((j) => [attrs(j), j.links.length, j.parentSpanContext?.spanId]))})`);
+    spans.reset();
+    const quiet = (signal: AbortSignal) => new Promise<string>((resolve) => signal.addEventListener("abort", () => resolve("partial"), { once: true }));
+    startJob(principal, "scan_thoughts", (job) => quiet(job.signal), { track, maxRunMs: 50 });
+    await ran;
+    startJob(principal, "scan_thoughts", () => Bun.sleep(300).then(() => "late"), { track, maxRunMs: 50 });
+    await ran;
+    const timedOut = spans.getFinishedSpans().filter((s) => s.name === "job scan_thoughts");
+    const msOf = (t: readonly [number, number]) => t[0] * 1e3 + t[1] / 1e6;
+    assert(timedOut.length === 2 && timedOut.every((s) => attrs(s)["ob1.outcome"] === "error" && attrs(s)["error.type"] === "JOB_TIMEOUT" && s.status.code === SpanStatusCode.ERROR)
+      && msOf(timedOut[1].endTime) - msOf(timedOut[1].startTime) < 280,
+      `a job its timer fails: an error by the record's code, ended as the timer fires — whether its body returns quietly on the abort or runs on (${JSON.stringify(timedOut.map((s) => [attrs(s), Math.round(msOf(s.endTime) - msOf(s.startTime))]))})`);
+    const jobPoints = await pointsOf("ob1.job.duration");
+    const jobPoint = (type: string | undefined) => jobPoints.find((p) => p.attributes["ob1.job.kind"] === "scan_thoughts" && p.attributes["error.type"] === type);
+    assert(jobPoint("JOB_TIMEOUT")?.value.count === 2 && jobPoint(undefined)?.value.count === 1 && jobPoint("TypeError")?.value.count === 1 && jobPoint("JOB_TIMEOUT")?.value.buckets.boundaries.join() === "0.1,0.5,1,5,10,30,60,300,600,1800,3600",
+      `each job one point on ob1.job.duration, by its kind and how it failed (${JSON.stringify(jobPoints.map((p) => [p.attributes, p.value.count]))})`);
+    startJob(principal, `Kind ${PLANTED}`, async () => 1, { track });
+    await ran;
+    assert(attrs(named("job ?"))["ob1.job.kind"] === "?", `a job's kind that is no kind as the code names one is \`?\` (${spans.getFinishedSpans().map((s) => s.name).join(", ")})`);
+    // A tool call's throw is `error` by its outcome, as it has been since PR 2b, not by the throw's kind: a tool's code is its reply's.
+    spans.reset();
+    await withToolSpan("thought_stats", async () => { throw new TypeError("x"); }).catch(() => {});
+    const thrownTool = named("execute_tool thought_stats");
+    assert(attrs(thrownTool)["error.type"] === "error" && attrs(thrownTool)["ob1.outcome"] === "error" && thrownTool?.events[0]?.attributes?.["exception.type"] === "TypeError",
+      `a tool call that throws: error.type \`error\`, its kind on its event (${JSON.stringify([attrs(thrownTool), thrownTool?.events.map((e) => e.attributes)])})`);
+    // A job the stop loses before any cut ends: an error by the record's code (review pass 2).
+    spans.reset();
+    startJob(principal, "scan_thoughts", () => new Promise<never>(() => {}), { track: (r) => void r() });
+    markRunningLost();
+    const lost = named("job scan_thoughts");
+    assert(attrs(lost)["error.type"] === "SERVER_STOPPING" && lost?.status.code === SpanStatusCode.ERROR, `a job lost at the stop, no cut first: an error by its code (${JSON.stringify(attrs(lost))})`);
+
+    // The stop's cut ends what is still running: a job's body and a provider call that never answers.
+    spans.reset();
+    const patient = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_TIMEOUT: "30" });
+    const pending = chat("slow-model", patient).catch(() => {});
+    void startJob(principal, "scan_thoughts", () => new Promise<never>(() => {}), { track: (r) => void r() });
+    await Bun.sleep(50);
+    cutOpenRequests();
+    const cut = spans.getFinishedSpans();
+    assert(cut.map((s) => [s.name, attrs(s)["ob1.outcome"]]).sort().join(";") === "chat slow-model,cut;job scan_thoughts,cut" && cut.every((s) => s.status.code === SpanStatusCode.ERROR),
+      `the stop's cut ends a provider call and a job's body still running, each \`cut\` (${JSON.stringify(cut.map((s) => [s.name, attrs(s)["ob1.outcome"]]))})`);
+    // The record as the stop's drain leaves it, so no later section inherits a job still running.
+    markRunningLost();
+    provider.stop(true);
+    await pending;
+
+    // A process that installs no tracing — a db/ worker, an eval — makes no span, with an SDK running beside it: the work runs, and that is all.
+    spans.reset();
+    useTracing(undefined);
+    let untraced: number | undefined;
+    try {
+      untraced = await withSpan("nothing", {}, async (span) => { span.set({ a: 1 }); span.fault(new Error("x")); span.end("error", "X"); return 5; });
+    } finally {
+      useTracing(OTEL_TRACING);
+    }
+    const traced = await withSpan("something", {}, async () => 6);
+    assert(openSpanCount() === 0, `every work span ended leaves the registry, so the stop's cut finds none (${openSpanCount()} open)`);
+    assert(JSON.stringify([new DOMException("x", "AbortError"), new DOMException("x", "TimeoutError")].map(faultOf)) === JSON.stringify([{ kind: "AbortError" }, { kind: "TimeoutError" }]),
+      `an abort's or a timeout's DOMException by its name, not its legacy number (${JSON.stringify([new DOMException("x", "AbortError"), new DOMException("x", "TimeoutError")].map(faultOf))})`);
+    assert(untraced === 5 && traced === 6 && spans.getFinishedSpans().map((s) => s.name).join() === "something",
+      `with no tracing installed a span is nothing and the work's value comes back; installed again, it is a span (${spans.getFinishedSpans().map((s) => s.name).join()})`);
+  } finally {
+    provider.stop(true);
+    await stopTelemetry();
+  }
+
+  // Each setup its own instance: two processes under one service name are two series (review passes 3–4).
+  {
+    const idOf = async () => {
+      const exporter = new InMemorySpanExporter();
+      const set = setUpTelemetry("open-brain-test", { exporter });
+      try {
+        await withSpan("probe", {}, async () => {});
+        return String(exporter.getFinishedSpans()[0]?.resource.attributes["service.instance.id"]);
+      } finally {
+        await set.shutdown();
+      }
+    };
+    const ids = [await idOf(), await idOf()];
+    assert(ids.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) && ids[0] !== ids[1], `each setup a fresh service.instance.id (${ids.join(", ")})`);
+  }
+  // An SDK that throws as a span starts, is told, or ends is never the work's undoing: a write that landed is
+  // reported as it landed, a throw as the work's own (review pass 1).
+  {
+    const otelApi = await import("@opentelemetry/api");
+    const boom = () => { throw new Error("the SDK fell over"); };
+    const broken = { spanContext: () => otelApi.INVALID_SPAN_CONTEXT, setAttribute: boom, setAttributes: boom, addEvent: boom, addLink: boom, addLinks: boom, setStatus: boom, updateName: boom, end: boom, isRecording: () => true, recordException: boom };
+    let starts = 0;
+    otelApi.trace.setGlobalTracerProvider({ getTracer: () => ({ startSpan: () => (++starts === 3 ? boom() : broken), startActiveSpan: boom }) } as never);
+    let writes = 0;
+    const own = new Error("the work's own");
+    try {
+      const landed = await withStoreSpan("captureThought", "sql", async () => { writes++; return "landed"; });
+      const thrown = await withStoreSpan("getThought", "sql", async () => { throw own; }).then(() => undefined, (e: unknown) => e);
+      const unstarted = await withStoreSpan("countThoughts", "sql", async () => 7);
+      assert(landed === "landed" && writes === 1 && thrown === own && unstarted === 7 && openSpanCount() === 0,
+        `an SDK that throws loses its span, not the work: the write's value, the work's own throw, the work run with no span (${landed}, ${writes}, ${thrown === own}, ${unstarted})`);
+      // …and a request's own span: one whose start throws, and one whose end does, each still ends with its line (review pass 2).
+      const requestLines: string[] = [];
+      let requestThrew = false;
+      try {
+        starts = 2;
+        const unspanned = beginRequest("api", new Request("http://api/v1/whoami"), (r) => requestLines.push(requestLine(r)));
+        unspanned.end({ status: 200 });
+        beginRequest("api", new Request("http://api/v1/stats"), (r) => requestLines.push(requestLine(r))).end({ status: 200 });
+      } catch {
+        requestThrew = true;
+      }
+      assert(!requestThrew && requestLines.length === 2, `an SDK that throws as a request's span starts or ends fails no request: each line written (${requestThrew}, ${requestLines.length})`);
+    } finally {
+      otelApi.trace.disable();
+    }
+  }
+}
+
+console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2)");
+  {
+    const { telemetryRow } = await import("./telemetry.ts");
+    const GOES = "telemetry: open-brain-preflight's spans and metrics go to http://c:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849)";
+    const BOTH = { traces: "http://c:4318/v1/traces", metrics: "http://c:4318/v1/metrics" };
+    const base = { started: true, said: [GOES], urls: BOTH, probes: 2, sent: "sent" as const, boundMs: 5000 };
+    const cells = [
+      telemetryRow({ ...base, started: false, said: [], urls: {} }),
+      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_SDK_DISABLED=true: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
+      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
+      telemetryRow({ ...base, urls: { logs: "http://c:4318/v1/logs" }, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_TRACES_EXPORTER=none: no spans are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, probes: 0, sent: "none" }),
+      telemetryRow({ ...base, probes: 0, sent: "none", said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, sent: "none" }),
+      telemetryRow({ ...base, said: [GOES, 'telemetry: OTEL_TRACES_EXPORTER "console" is not read (only otlp or none): spans go as OTLP/HTTP JSON (SMD-1849)'] }),
+      telemetryRow({ ...base, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, sent: "failed", said: [GOES, "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)", "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)"] }),
+      telemetryRow({ ...base, sent: "timeout" }),
+      telemetryRow({ ...base, urls: { traces: BOTH.traces } }),
+    ];
+    assert(JSON.stringify(cells.map((c) => [c.status, c.fix !== undefined])) === JSON.stringify([
+      ["skip", false], ["skip", false], ["warn", true], ["skip", false], ["skip", false], ["warn", true], ["ok", false], ["ok", false], ["warn", true], ["warn", true], ["warn", true], ["ok", false],
+    ]) && /^no collector named/.test(cells[0].detail) && /^the probes' spans and points go nowhere — .*OTEL_TRACES_EXPORTER=none/.test(cells[3].detail)
+      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans and metrics go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
+      && /^the provider probes' spans and points sent — .*is not an http\(s\) URL/.test(cells[8].detail)
+      && /^the provider probes' spans and points not all sent — /.test(cells[9].detail) && cells[9].detail.split("HTTP 400").length === 2
+      && /^the provider probes' spans and points not all sent within 5 s — /.test(cells[10].detail) && /^the provider probes' spans sent — /.test(cells[11].detail),
+      `the telemetry row: no collector, a skip; off on purpose, a skip; a wrong endpoint, a warning, sent or not and probed or not; nothing left after probes ran, sent; a loss once; the timeout's bound; spans alone (${JSON.stringify(cells.map((c) => [c.status, c.detail.slice(0, 60)]))})`);
+  }
+
+console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, nor does any db/ worker or eval through server-portable/'s files: none of them installs one (SMD-1849 PR 2d)");
+{
+  const scanner = new Bun.Transpiler({ loader: "ts" });
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { dirname, resolve } = await import("node:path");
+  const reached = (entry: string): string[] => {
+    const seen = new Set<string>();
+    const bare = new Set<string>();
+    const walk = (file: string) => {
+      if (seen.has(file) || !existsSync(file)) return;
+      seen.add(file);
+      for (const i of scanner.scan(readFileSync(file, "utf8")).imports) {
+        if (i.kind === "dynamic-import") continue;
+        if (i.path.startsWith(".")) walk(resolve(dirname(file), i.path));
+        // Through server-portable/'s own files alone: a db/ or evals/ file's own package (PGlite) is its directory's install.
+        else if (!i.path.startsWith("node:") && i.path !== "bun" && file.startsWith(import.meta.dir)) bare.add(`${file.slice(import.meta.dir.length + 1)} → ${i.path}`);
+      }
+    };
+    walk(resolve(import.meta.dir, entry));
+    return [...bare];
+  };
+  const { readdirSync } = await import("node:fs");
+  // Every file under db/ and evals/ that names server-portable/, nested directories too (evals/orchestration/), installs aside.
+  const importers = ["db", "evals"].flatMap((dir) => (readdirSync(resolve(import.meta.dir, "..", dir), { recursive: true }) as string[])
+    .filter((f) => /\.(ts|mjs)$/.test(f) && !f.includes("node_modules") && readFileSync(resolve(import.meta.dir, "..", dir, f), "utf8").includes("/server-portable/"))
+    .map((f) => `../${dir}/${f}`));
+  const entries = ["spans.ts", "embed.ts", "store.ts", "jobs.ts", ...importers];
+  const packages = entries.map((e) => [e, reached(e)] as const).filter(([, p]) => p.length > 0);
+  assert(importers.length > 10 && packages.length === 0, `spans.ts, embed.ts, store.ts and jobs.ts — and every one of the ${importers.length} db/ and evals/ files that import server-portable/ — reach no package through server-portable/'s files, so a worker with no server-portable/ install still runs (${JSON.stringify(packages)})`);
 }
 
 report();
