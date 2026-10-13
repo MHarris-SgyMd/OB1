@@ -46,8 +46,8 @@ export const READ_LOCK_TIMEOUT_MS = 1_000;
 export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "ob1_entities"] as const;
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
-/** The tables the read asks after: the counted ones, the config, the ledger, and where consolidation's findings stand (SMD-2680). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets"] as const;
+/** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -142,6 +142,16 @@ export interface DatabaseFacts {
    * 084, which holds none.
    */
   relations: StandingRelations | null;
+  /**
+   * What became of the findings db/board-findings.ts posted to the board
+   * (087, SMD-2682): each (ticket pair, word) this brain posted, as accepted,
+   * rejected, withdrawn, open or unanswered (see findingOutcome), and the
+   * rows another poster's marker settled (`found`), apart. The acceptance
+   * rate SMD-2682 is done on is accepted over accepted, rejected and
+   * unanswered. Null when the table is absent (no `unread` entry: before 087),
+   * not read (`unread` names it) or not asked (`stats: false`).
+   */
+  findings: BoardFindings | null;
   /** Every HNSW index on a table on this connection's search_path. */
   hnsw: HnswIndex[];
   /** Field → why its read did not answer. Empty when every read answered. */
@@ -493,6 +503,215 @@ export function boardPairsValue(field: string, row: { n?: unknown } | undefined)
   return countOf(field, row?.n);
 }
 
+// ── What became of a finding posted to the board (SMD-2682) ─────────────────
+//
+// db/board-findings.ts posts a consolidation finding between two tickets the
+// board does not link as one Linear comment, and records each (ticket pair,
+// word) in board_findings_posted (087, SMD-2681). Whether those comments were
+// worth a maintainer's attention is read from what the brain already holds,
+// never asked of Linear:
+//
+//   * the board linked the pair since — an active Linear link either way,
+//     079's set (child_of, blocks, blocked_by, relates_to) or duplicate_of,
+//     the rule the finding was posted under, read now: a pair is posted only
+//     unlinked, so a link now came after. A link Linear adds without moving
+//     either ticket's updatedAt reaches the brain at board-sync's next --full
+//     pass, and is counted from then;
+//   * an outdates finding's proposals (029) were accepted or rejected;
+//   * a relation finding's facet (084) still stands, re-judged or not, at
+//     the same word.
+//
+// db/board-findings.ts --report prints the same rows one by one, from this
+// read and findingOutcome, so the CLI and brain_info cannot disagree.
+
+/** An open finding posted longer ago than this is unanswered: the tracker's "a month" (SMD-2682). */
+export const UNANSWERED_AFTER_DAYS = 30;
+
+/** One posted (pair, word) as the read answers it. */
+export interface FindingRow {
+  a: string;
+  b: string;
+  word: "outdates" | "related" | "evolves" | "duplicate";
+  /** The ticket the comment is on. */
+  postedOn: string;
+  origin: "posted" | "found";
+  /** When it was recorded, a UTC instant. */
+  postedAt: string;
+  /** Seconds since, by the database's clock. */
+  ageS: number;
+  /** Seconds from posting to the earliest active link between the pair the brain holds, at least 0; null when none. */
+  linkedS: number | null;
+  /** An outdates finding's proposals among those it named, by status, and when the first acceptance or the last rejection was made; null for a relation. */
+  proposals: { accepted: number; rejected: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
+  /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
+  stands: boolean | null;
+}
+
+export type FindingOutcome = "accepted" | "rejected" | "withdrawn" | "open" | "unanswered";
+
+/** What became of one posted finding, how it was answered, and how long after posting. */
+export interface FindingVerdict {
+  outcome: FindingOutcome;
+  /** accepted or rejected through a proposal's review, or accepted by a link on the board; null otherwise. */
+  how: "proposal" | "linked" | null;
+  answeredS: number | null;
+}
+
+/** What became of the findings this brain posted, as the record carries them. */
+export interface BoardFindings {
+  /** (pair, word) rows this brain posted, and the comments they were posted in. */
+  posted: number;
+  comments: number;
+  /** Rows a marker already on the board settled (another poster's): not this brain's, and not in the rest. */
+  found: number;
+  accepted: number;
+  rejected: number;
+  withdrawn: number;
+  open: number;
+  unanswered: number;
+  /** The window past which an open finding is unanswered. */
+  windowDays: number;
+  /** The median seconds from posting to an acceptance or a rejection; null when none was answered. */
+  medianAnswerS: number | null;
+}
+
+/** Every recorded (pair, word), newest first, with what the brain holds of its answer. */
+export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
+  SELECT b.ticket_a, b.ticket_b, b.word, b.posted_on, b.origin, b.posted_at,
+         extract(epoch FROM now() - b.posted_at)::float8 AS age_s,
+         extract(epoch FROM l.at - b.posted_at)::float8 AS linked_s,
+         p.accepted, p.rejected, p.stale, p.pending,
+         extract(epoch FROM p.accepted_at - b.posted_at)::float8 AS accepted_s,
+         extract(epoch FROM p.rejected_at - b.posted_at)::float8 AS rejected_s,
+         r.stands
+    FROM board_findings_posted b
+    -- The link's target probes 053's target index; its holder is the other ticket's row.
+    LEFT JOIN LATERAL (
+      SELECT min(f.created_at) AS at
+        FROM thought_facets f
+        JOIN thoughts h ON h.id = f.thought_id
+       WHERE f.kind = 'link' AND f.valid_until IS NULL AND f.payload->>'system' = 'linear'
+         AND f.payload->>'relation' IN ('child_of', 'blocks', 'blocked_by', 'relates_to', 'duplicate_of')
+         AND f.payload->>'target' IN (b.ticket_a, b.ticket_b)
+         AND coalesce(h.metadata->>'ticket', h.metadata->>'issue') = CASE WHEN f.payload->>'target' = b.ticket_a THEN b.ticket_b ELSE b.ticket_a END) l ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*) FILTER (WHERE s.status = 'accepted')::int AS accepted,
+             count(*) FILTER (WHERE s.status = 'rejected')::int AS rejected,
+             count(*) FILTER (WHERE s.status = 'stale')::int AS stale,
+             count(*) FILTER (WHERE s.status = 'pending')::int AS pending,
+             min(s.reviewed_at) FILTER (WHERE s.status = 'accepted') AS accepted_at,
+             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected') AS rejected_at
+        FROM supersession_proposals s
+       WHERE b.word = 'outdates' AND s.id = ANY (b.finding_ids)) p ON b.word = 'outdates'
+    -- A re-judge closes a relation and writes its successor on the same pair
+    -- of thoughts (084's one active relation per pair), so the named facet's
+    -- pair is where its word is looked for.
+    LEFT JOIN LATERAL (
+      SELECT EXISTS (SELECT 1
+                       FROM thought_facets o
+                       JOIN thought_facets n ON n.thought_id = o.thought_id AND n.payload->>'target' = o.payload->>'target'
+                      WHERE o.id = ANY (b.finding_ids) AND o.kind = 'relation'
+                        AND n.kind = 'relation' AND n.valid_until IS NULL AND n.payload->>'relation' = b.word) AS stands) r ON b.word <> 'outdates'
+   ORDER BY b.posted_at DESC, b.ticket_a, b.ticket_b, b.word`;
+
+const FINDING_WORD_NAMES = ["outdates", "related", "evolves", "duplicate"] as const;
+
+/** A number of seconds the read answered, or null; anything else is a read that did not answer. */
+function secondsOf(field: string, v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error(`the ${field} read answered a duration that is not a number`);
+  return n;
+}
+
+/** The read's rows as the record reads them. */
+export function findingRows(rows: readonly Record<string, unknown>[]): FindingRow[] {
+  return rows.map((r) => {
+    const word = String(r.word);
+    const origin = String(r.origin);
+    if (!(FINDING_WORD_NAMES as readonly string[]).includes(word) || (origin !== "posted" && origin !== "found")) throw new Error("the findings read answered a row not of 087's shape");
+    const at = r.posted_at instanceof Date ? r.posted_at : new Date(String(r.posted_at));
+    if (Number.isNaN(at.getTime())) throw new Error("the findings read answered a posted_at that is not an instant");
+    const linked = secondsOf("findings", r.linked_s);
+    return {
+      a: String(r.ticket_a),
+      b: String(r.ticket_b),
+      word: word as FindingRow["word"],
+      postedOn: String(r.posted_on),
+      origin,
+      postedAt: at.toISOString(),
+      ageS: Math.max(0, secondsOf("findings", r.age_s) ?? 0),
+      linkedS: linked === null ? null : Math.max(0, linked),
+      proposals: word === "outdates"
+        ? {
+            accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0),
+            stale: countOf("findings", r.stale ?? 0), pending: countOf("findings", r.pending ?? 0),
+            acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s),
+          }
+        : null,
+      stands: word === "outdates" ? null : r.stands === true,
+    };
+  });
+}
+
+/**
+ * What became of one posted finding, first match wins:
+ *
+ *   outdates   accepted   a proposal it named was accepted
+ *              rejected   none is pending and one was rejected — a link on the
+ *                         board since does not undo a reviewer's no
+ *              accepted   the board links the pair (pending or stale)
+ *              open       a proposal is still pending
+ *              withdrawn  the rest: stale (a text moved) or gone
+ *   relation   accepted   the board links the pair
+ *              open       a relation of its word still stands
+ *              withdrawn  the judge no longer says it
+ *
+ * An open finding posted more than `days` ago is unanswered. The board has no
+ * "no" for a relation: left unlinked past the window is how it says one.
+ */
+export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): FindingVerdict {
+  const open = (): FindingVerdict => ({ outcome: r.ageS > days * 86_400 ? "unanswered" : "open", how: null, answeredS: null });
+  const linked: FindingVerdict | null = r.linkedS === null ? null : { outcome: "accepted", how: "linked", answeredS: r.linkedS };
+  const p = r.proposals;
+  if (p) {
+    if (p.accepted > 0) return { outcome: "accepted", how: "proposal", answeredS: p.acceptedS === null ? null : Math.max(0, p.acceptedS) };
+    if (p.pending === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
+    if (linked) return linked;
+    return p.pending > 0 ? open() : { outcome: "withdrawn", how: null, answeredS: null };
+  }
+  if (linked) return linked;
+  return r.stands ? open() : { outcome: "withdrawn", how: null, answeredS: null };
+}
+
+/** The rows as the record carries them: this brain's by outcome, the found apart. */
+export function findingsValue(rows: readonly FindingRow[], days = UNANSWERED_AFTER_DAYS): BoardFindings {
+  const out: BoardFindings = { posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, windowDays: days, medianAnswerS: null };
+  const comments = new Set<string>();
+  const answered: number[] = [];
+  for (const r of rows) {
+    if (r.origin === "found") { out.found++; continue; }
+    out.posted++;
+    // One comment is one transaction: its rows share the pair and posted_at (postedToday's count).
+    comments.add(`${r.a}\u0000${r.b}\u0000${r.postedAt}`);
+    const v = findingOutcome(r, days);
+    out[v.outcome]++;
+    if (v.answeredS !== null && (v.outcome === "accepted" || v.outcome === "rejected")) answered.push(v.answeredS);
+  }
+  out.comments = comments.size;
+  if (answered.length) {
+    answered.sort((x, y) => x - y);
+    const m = answered.length >> 1;
+    out.medianAnswerS = Math.round(answered.length % 2 ? answered[m] : (answered[m - 1] + answered[m]) / 2);
+  }
+  return out;
+}
+
+/** The acceptance rate's terms: accepted over accepted, rejected and unanswered — withdrawn and open are not answers. */
+export function acceptance(f: BoardFindings): { accepted: number; answered: number } {
+  return { accepted: f.accepted, answered: f.accepted + f.rejected + f.unanswered };
+}
+
 /**
  * Read the database's facts over a direct connection — the SQL store's pool, or
  * preflight's own client — in one transaction. Raises only when the transaction
@@ -541,12 +760,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'thought_chunks', to_regclass('thought_chunks') IS NOT NULL,
                'ob1_entities', to_regclass('ob1_entities') IS NOT NULL,
                'supersession_proposals', to_regclass('supersession_proposals') IS NOT NULL,
-               'thought_facets', to_regclass('thought_facets') IS NOT NULL) AS resolved,
+               'thought_facets', to_regclass('thought_facets') IS NOT NULL,
+               'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -576,6 +796,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       workers: null,
       proposals: null,
       relations: null,
+      findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
     };
@@ -626,6 +847,9 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
             { field: "relations", table: "thought_facets" as const, read: async (sp: SqlTag) => { facts.relations = relationsValue((await RELATIONS_SQL(sp))[0]); }, clear: () => { facts.relations = null; } },
+            // A handful of rows a day at most (the poster's cap), each a few index probes (SMD-2682).
+            { field: "findings", table: "board_findings_posted" as const, joins: ["thoughts" as const, "thought_facets" as const, "supersession_proposals" as const],
+              read: async (sp: SqlTag) => { facts.findings = findingsValue(findingRows(await FINDING_OUTCOMES_SQL(sp))); }, clear: () => { facts.findings = null; } },
           ]
         : []),
       // Not a stats read: preflight's proposals row reads it (SMD-2680).
@@ -936,6 +1160,22 @@ function relationsLine(db: DatabaseSummary): string {
   return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})`;
 }
 
+/**
+ * The Findings row: what became of the findings posted to the board, and the
+ * acceptance rate over those answered (SMD-2682); none, or why not read.
+ */
+export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread" | "highestMigration">): string {
+  const f = db.findings;
+  if (f === null) return "findings" in db.unread ? `? (${deniedObject(db.unread.findings.message)?.name ?? "board_findings_posted"} ${unreadWords(db.unread.findings)})` : "none posted — migration 087 is not applied";
+  const found = f.found ? `; ${f.found} found on the board from another poster` : "";
+  if (f.posted === 0) return `none posted${found}`;
+  const { accepted, answered } = acceptance(f);
+  const rate = answered
+    ? `${accepted} of ${answered} answered accepted (${Math.round((100 * accepted) / answered)}%)${f.medianAnswerS === null ? "" : `, median ${ago(f.medianAnswerS)} to an answer`}`
+    : "none answered yet";
+  return `${f.posted} posted in ${f.comments} comment(s): ${f.accepted} accepted, ${f.rejected} rejected, ${f.unanswered} unanswered after ${f.windowDays} d, ${f.open} open, ${f.withdrawn} withdrawn — ${rate}${found}`;
+}
+
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
@@ -990,6 +1230,7 @@ export function renderBrainInfo(info: BrainInfo): string {
     );
   }
   lines.push(row("Proposals", proposalsLine(db)));
+  if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   lines.push(row("HNSW", db.hnsw.length === 0 ? "none" : db.hnsw.map((h) => `${h.index} on ${h.table} (m ${h.m}, ef_construction ${h.efConstruction})`).join("; ")));
   const unread = Object.entries(db.unread);

@@ -388,6 +388,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
+Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — 3 of 5 answered accepted (60%), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
 ```
@@ -434,6 +435,18 @@ A board count counts rows — proposals, relation facets — not distinct pairs 
 tickets: five proposals between two tickets' thoughts count five, and a pair
 can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
 answer and `no table` before its table's migration.
+`Findings` is what became of the findings board-sync posted to the board
+(SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
+this brain posted: accepted (its proposal accepted, or the board linking the
+pair since — any active Linear link either way, `duplicate_of` included),
+rejected (its proposals rejected, none pending — a link since does not undo
+a reviewer's no), withdrawn (its proposals stale or gone, or a relation the
+judge no longer says), open, or unanswered once open past 30 days. The rate is
+accepted over accepted, rejected and unanswered — withdrawn and open are not
+answers — and the median is from the post to the link or the review. Rows
+another poster's marker settled are counted apart, never in the rate. A stats
+read, as `Relations`; `none posted — migration 087 is not applied` before 087.
+`db/board-findings.ts --report` lists the same rows one by one.
 
 **`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
 token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
@@ -443,8 +456,10 @@ database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
 heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 `proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
-relations as `relations`, `{ related, evolves, duplicate, boardPairs }`, each
-null when not read or absent; each `boardPairs` is a read of its own, last,
+relations as `relations`, `{ related, evolves, duplicate, boardPairs }`; what
+became of the findings posted as `findings`, `{ posted, comments, found,
+accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
+SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it
 did not answer, null with no entry before 079 (or when its field was not read),
 and 0, not read, when there is nothing to count, SMD-2680) or
@@ -802,7 +817,7 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1015 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
+bun test-server.ts        # 1017 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
 bun test-rest.ts          # 351 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 258 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span and a webhook fault's

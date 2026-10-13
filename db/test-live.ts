@@ -38,7 +38,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
-import { SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
@@ -11878,6 +11878,118 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     assert(false, `[41] stopped: ${(err as Error).stack}`);
   } finally {
     stub.stop(true);
+    await bsql.close();
+  }
+}
+
+console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (stale, or a relation the judge closed or re-judged to another word), open (a relation re-judged at its word still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
+{
+  const bsql = new SQL({ url: URL_!, max: 2 });
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
+  const ticket = (n: number) => row(`ZR-${n} — a ticket (findings-report fixture)`, { source: "linear", issue: `ZR-${n}` });
+  const propose = async (older: { id: string; fp: string }, newer: { id: string; fp: string }) =>
+    String(((await bsql`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.9::numeric, 'replaced', 0.9::float, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: unknown }).r);
+  const relate = async (newer: { id: string; fp: string }, older: { id: string; fp: string }, relation: string | null, confidence = 0.8) =>
+    ((await bsql`SELECT record_thought_relation(${newer.id}::uuid, ${older.id}::uuid, ${relation}, ${confidence}::numeric, 'consolidate:stub@p4', NULL::uuid, ${older.fp}, ${newer.fp}, NULL::jsonb) AS r`)[0] as { r: { action: string; id: string | null } }).r;
+  const link = (holder: { id: string }, relation: string, target: string) =>
+    bsql`SELECT record_source_links(${holder.id}::uuid, 'linear', ${JSON.stringify([{ relation, target }])}::text::jsonb)`;
+  const review = (id: string, decision: "accept" | "reject") => bsql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'findings-report fixture')`;
+  const told = (a: number, b: number, word: string, ids: string[], daysAgo: number, origin = "posted") =>
+    bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
+         VALUES (${`ZR-${a}`}, ${`ZR-${b}`}, ${word}, ${`ZR-${b}`}, ${origin}, ${origin === "posted" ? `c-zr-${a}` : null}, ${`{${ids.join(",")}}`}::uuid[], now() - make_interval(days => ${daysAgo}))`;
+  try {
+    // The ticket pairs sort as text, so each pair is (ZR-1n, ZR-1m) with n < m below 10.
+    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31].map(async (n) => [n, await ticket(n)] as const)));
+    // accepted through the proposal; rejected with a link since; pending, linked from a section row, the other way; stale.
+    const pA = await propose(t[10], t[11]); await review(pA, "accept"); await told(10, 11, "outdates", [pA], 6);
+    const pB = await propose(t[12], t[13]); await review(pB, "reject"); await told(12, 13, "outdates", [pB], 6); await link(t[12], "relates_to", "ZR-13");
+    const pC = await propose(t[14], t[15]); await told(14, 15, "outdates", [pC], 6);
+    const section = await row("ZR-15 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-15" });
+    await link(section, "blocks", "ZR-14");
+    const pD = await propose(t[16], t[17]); await bsql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${pD}::uuid`; await told(16, 17, "outdates", [pD], 6);
+    // relations: standing past the window; re-judged at its word (a new facet); closed; marked duplicate since; a found row.
+    const rE = await relate(t[19], t[18], "related"); await told(18, 19, "related", [rE.id!], 31);
+    const rF = await relate(t[21], t[20], "related", 0.7); await told(20, 21, "related", [rF.id!], 5);
+    const rF2 = await relate(t[21], t[20], "related", 0.9);
+    const rG = await relate(t[23], t[22], "evolves"); await told(22, 23, "evolves", [rG.id!], 5); const rG2 = await relate(t[23], t[22], null);
+    const rH = await relate(t[25], t[24], "duplicate"); await told(24, 25, "duplicate", [rH.id!], 5); await link(t[25], "duplicate_of", "ZR-24");
+    const rI = await relate(t[27], t[26], "related"); await told(26, 27, "related", [rI.id!], 2, "found");
+    // A link Linear made and took back: board-sync's next pass closes it (record_source_links is the set), and the finding is open again.
+    const rJ = await relate(t[29], t[28], "related"); await told(28, 29, "related", [rJ.id!], 5); await link(t[28], "relates_to", "ZR-29");
+    await bsql`SELECT record_source_links(${t[28].id}::uuid, 'linear', '[]'::jsonb)`;
+    // A link to one side from a third ticket answers nothing between the two.
+    await link(t[10], "blocks", "ZR-21");
+    // Re-judged to another word: the judge no longer says related.
+    const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "evolves");
+    assert(rF2.action === "replaced" && rF2.id !== rF.id && rG2.action === "closed", `the fixtures: a re-judge at its word replaces the facet, a NULL closes one (${rF2.action}, ${rG2.action})`);
+
+    const rows = findingRows((await FINDING_OUTCOMES_SQL(bsql)) as Record<string, unknown>[]);
+    const zr = rows.filter((r) => r.a.startsWith("ZR-"));
+    const said = Object.fromEntries(zr.map((r) => { const v = findingOutcome(r); return [`${r.a}~${r.b}`, `${v.outcome}/${v.how}`]; }));
+    const want = {
+      "ZR-10~ZR-11": "accepted/proposal", "ZR-12~ZR-13": "rejected/proposal", "ZR-14~ZR-15": "accepted/linked", "ZR-16~ZR-17": "withdrawn/null",
+      "ZR-18~ZR-19": "unanswered/null", "ZR-20~ZR-21": "open/null", "ZR-22~ZR-23": "withdrawn/null", "ZR-24~ZR-25": "accepted/linked", "ZR-26~ZR-27": "open/null", "ZR-28~ZR-29": "open/null", "ZR-30~ZR-31": "withdrawn/null",
+    };
+    const closedLink = Number(((await bsql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[28].id}::uuid AND valid_until IS NOT NULL`)[0] as { n: number }).n);
+    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 11 && closedLink === 1,
+      `each posted pair reads what became of it, from the database (${JSON.stringify(said)})`);
+    const linked = zr.find((r) => r.a === "ZR-14")!;
+    assert(linked.linkedS !== null && Math.abs(linked.linkedS - 6 * 86_400) < 3600 && zr.find((r) => r.a === "ZR-10")!.proposals?.acceptedS !== null,
+      `the time to an answer is the link's or the review's, after the post (${linked.linkedS})`);
+    const v = findingsValue(zr);
+    assert(v.posted === 10 && v.comments === 10 && v.found === 1 && v.accepted === 3 && v.rejected === 1 && v.withdrawn === 3 && v.open === 2 && v.unanswered === 1,
+      `the ZR pairs count 3 accepted, 1 rejected, 1 unanswered, 2 open, 3 withdrawn, 1 found (${JSON.stringify(v)})`);
+
+    // brain_info's read is the same read: its record is findingsValue over every row.
+    const facts = await readDatabaseFacts(bsql);
+    assert(JSON.stringify(facts.findings) === JSON.stringify(findingsValue(rows)) && !("findings" in facts.unread) && (await readDatabaseFacts(bsql, { stats: false })).findings === null,
+      `brain_info's Findings is the report's read over the whole table, on a stats read only (${JSON.stringify(facts.findings)})`);
+
+    // The CLI: the summary, a line per pair, found apart; --days moves the window; flags it does not take are refused.
+    const env = { ...process.env } as Record<string, string>;
+    const rep = await runScript(["bun", join(HERE, "board-findings.ts"), "--url", URL_!, "--report"], { env, cwd: HERE });
+    const short = await runScript(["bun", join(HERE, "board-findings.ts"), "--url", URL_!, "--report", "--days", "3"], { env, cwd: HERE });
+    const bad = await Promise.all([["--report", "--dry-run"], ["--report", "--cap", "2"], ["--days", "3"], ["--report", "--days", "0"]]
+      .map((extra) => runScript(["bun", join(HERE, "board-findings.ts"), "--url", URL_!, ...extra], { env, cwd: HERE })));
+    const lineOf = (out: string, pair: string) => out.split("\n").find((l) => l.includes(pair)) ?? "";
+    assert(rep.code === 0 && /^  findings on the board: \d+ posted in \d+ comment\(s\): /m.test(rep.stdout)
+        && /ZR-12 ~ ZR-13 +outdates +posted 6 d ago on ZR-13 — rejected: its proposal was rejected/.test(lineOf(rep.stdout, "ZR-12 ~ ZR-13"))
+        && /ZR-14 ~ ZR-15 +outdates .* — accepted: the board linked them 6 d after/.test(lineOf(rep.stdout, "ZR-14 ~ ZR-15"))
+        && /— unanswered: open past 30 d/.test(lineOf(rep.stdout, "ZR-18 ~ ZR-19")) && /— open: 25 d before it counts as unanswered/.test(lineOf(rep.stdout, "ZR-20 ~ ZR-21"))
+        && rep.stdout.indexOf("ZR-26 ~ ZR-27") > rep.stdout.indexOf("found on the board (another poster's comment; not in the rate):")
+        && /— unanswered: open past 3 d/.test(lineOf(short.stdout, "ZR-20 ~ ZR-21")) && short.code === 0,
+      `--report prints each pair's outcome, the found apart, and --days moves the window (${rep.code}: ${[lineOf(rep.stdout, "ZR-14 ~ ZR-15"), lineOf(short.stdout, "ZR-20 ~ ZR-21")].join(" / ")}${rep.stderr.slice(0, 300)})`);
+    assert(bad.every((b) => b.code === 2) && /--report reads what became/.test(bad[0].stderr) && /--report reads what became/.test(bad[2].stderr) && /--days/.test(bad[3].stderr) && !bad.some((b) => /findings on the board/.test(b.stdout)),
+      `--report takes no --dry-run or --cap, --days is its own, and a zero window is refused (${bad.map((b) => b.code).join(",")})`);
+
+    // A server role: brain_info reads it with --groups capture,server; without the grant it is unread, naming the table.
+    const SROLE = "ob1_live_findings_report";
+    const sUrl = URL_!.replace(/\/\/[^@]*@/, `//${SROLE}:ob1report@`);
+    const [{ mayCreate }] = (await bsql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (sUrl === URL_ || !mayCreate) {
+      skip("the findings report under a granted server role", sUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropS = () => bsql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SROLE}') THEN EXECUTE 'DROP OWNED BY ${SROLE}'; EXECUTE 'DROP ROLE ${SROLE}'; END IF; END $$`);
+      await dropS();
+      const rs = new SQL({ url: sUrl, max: 1 });
+      try {
+        await bsql.unsafe(`CREATE ROLE ${SROLE} LOGIN PASSWORD 'ob1report'`);
+        const granted = await migrateInProcess({ grant: SROLE, groups: "capture,server" });
+        const asServer = await readDatabaseFacts(rs);
+        await bsql.unsafe(`REVOKE SELECT ON board_findings_posted FROM ${SROLE}`);
+        const without = await readDatabaseFacts(rs);
+        assert(granted.code === 0 && JSON.stringify(asServer.findings) === JSON.stringify(facts.findings) && !("findings" in asServer.unread)
+            && without.findings === null && without.unread.findings?.reason === "refused" && /board_findings_posted/.test(without.unread.findings?.message ?? "") && without.proposals !== null,
+          `a capture,server role reads what became of the findings; without the grant the field is unread, naming the table, the queue beside it read (${JSON.stringify(without.unread.findings)})`);
+      } finally {
+        await rs.close();
+        await dropS();
+      }
+    }
+  } catch (err) {
+    assert(false, `[42] stopped: ${(err as Error).stack}`);
+  } finally {
     await bsql.close();
   }
 }
