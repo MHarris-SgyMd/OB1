@@ -2907,16 +2907,18 @@ hand aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (089, [Long thoughts
 resume](#extract-entitiests)), so one longer than every sleep advances by the
 windows each sleep finishes, and is done once its last is. Consolidation also
-joins once extraction holds nothing but thoughts that three or more hard stops
-in a row took with no window saved between, and none saved since (089's
-`stalled` and `gained`, SMD-2694) — a single window longer than every sleep,
+joins once extraction holds nothing but thoughts that three or more long hard
+stops in a row took with no window saved between, and none saved since (089's
+`stalled` and `gained`, SMD-2694; long: the thought held a minute, or its
+slowest window, so a busy day's short sleeps count none) — a single window
+longer than every long sleep,
 or a stop that keeps landing past the last window, in the decider's call or
 the write — which would otherwise hold it back for as long as the brain keeps
 waking. The cost is an unextracted neighbour's: a newer thought judged
 meanwhile misses its pair with such a thought, which consolidation reaches
-from its newer side only and does not revisit. The decision is the sleep's,
-made at its start: a night long enough to finish the thought still judges
-beside it. The thought is tried at every sleep and finished by the first long
+from its newer side only and does not revisit. Once taken, the decision
+holds for the rest of the sleep: a night long enough to finish the thought
+still judges beside it. The thought is tried at every sleep and finished by the first long
 enough. A brain before 089, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
@@ -2967,8 +2969,9 @@ words, and the `sleep` row says each:
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 089): how many, and the three most
 stalled with their stops and windows kept — stalled as the scheduler reads it,
-0 once a window is saved since the last stop — read at its start, after each
-wake, at least every minute and before the row ends, so a thought finished in
+0 once a window is saved since the last stop — read at its first stamp awake
+or poll asleep, after each wake, at least every minute and before the row
+ends (but on a second signal, whose exit it would delay), so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
 names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a

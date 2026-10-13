@@ -11861,7 +11861,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
     lines.length = 0;
     const ac = new AbortController();
-    const run = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    // A 2 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in (the minute's floor is for the brain's real sleeps).
+    const run = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 2000, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
     let sleeps = 0, reached = false;
     const asleep = () => lines.filter((l) => /asleep: no live call/.test(l)).length;
     const deadline = Date.now() + cap * 8000;
@@ -12010,6 +12011,38 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     assert(startHeld?.held?.total === 2 && awakeHeld?.held?.total === 1,
       `a scheduler started while thoughts are held names them on its row before any sleep, and awake reads them again at its stamps (${JSON.stringify(startHeld?.held?.total)} → ${JSON.stringify(awakeHeld?.held?.total)})`);
     await sql`DELETE FROM thoughts WHERE id = ${planted2}::uuid`;
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    // The row's end reads them again: one finished by hand while it ran is not left named (review pass 2).
+    const acEnd = new AbortController();
+    const endRun = runSleep({ url: URL_!, env, quiet: 300, poll: 1, follow: true, minStampEveryS: 60, signal: acEnd.signal, writer: { out: () => {}, err: () => {} } });
+    await pollUntil(async () => (await beat())?.held !== undefined, 10_000);
+    await sql`DELETE FROM extraction_progress WHERE thought_id = ${planted}::uuid`;
+    acEnd.abort();
+    await Promise.race([endRun, Bun.sleep(15_000)]);
+    const endedBeat = await beat() as { ended?: boolean; held?: unknown } | null;
+    assert(endedBeat?.ended === true && endedBeat.held === undefined, `the row's end reads the held thoughts again: none left named (${JSON.stringify(endedBeat)})`);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    // The table gone after the start found it (a grant revoked reads the
+    // same): the first sleep's stalled read meets it, says so once, and the
+    // scheduler goes on (review pass 2: the read ran inside reading(), which
+    // rethrew it, and the scheduler ended). Renamed once the start has
+    // probed — its passes' checks print — and before the first sleep reads.
+    const goneLines: string[] = [];
+    const acGone = new AbortController();
+    const goneRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, signal: acGone.signal, writer: { out: (l) => goneLines.push(l), err: (l) => goneLines.push(l) } });
+    await pollUntil(async () => goneLines.some((l) => /\[extract\]/.test(l)), 15_000);
+    await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+    let goneCode = -2;
+    try {
+      await pollUntil(async () => goneLines.some((l) => /could not read the stalled thoughts/.test(l)), 15_000);
+      await Bun.sleep(1500);
+      acGone.abort();
+      goneCode = await Promise.race([goneRun, Bun.sleep(30_000).then(() => -1)]);
+    } finally {
+      await sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`;
+    }
+    assert(goneCode === 0 && goneLines.filter((l) => /could not read the stalled thoughts/.test(l)).length === 1,
+      `the stalled read failing mid-run is said once, and the scheduler goes on to a clean stop (exit ${goneCode})`);
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
 
     // A brain without 089's table (a role without its grant reads the same):

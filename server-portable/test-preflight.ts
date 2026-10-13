@@ -3831,12 +3831,16 @@ else {
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
       assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
-        && /→ 22222222-2222-4222-8222-222222222222 has been stopped by 3 or more wakes in a row with no window gained: a window of it outlasts the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough — overnight, most likely — finishes it\. Sooner: stop the scheduler .*--profile sleep stop sleep.*bun extract-entities\.ts --url \$DATABASE_URL.*then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        && /→ 22222222-2222-4222-8222-222222222222 has been stopped by 3 or more long hard stops in a row with no window gained: a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough — overnight, most likely — finishes it\. Sooner: stop the scheduler .*--profile sleep stop sleep.*bun extract-entities\.ts --url \$DATABASE_URL.*then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
         `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
       // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });
-      assert(/→ 11111111-1111-4111-8111-111111111111 has been stopped by 3 or more wakes in a row with no window gained: its windows are all kept, and the stops land past the last — in the decider's call or the write\. Consolidation joins past it once extraction holds nothing else/.test(fix((await run(LOG_ON)).out, "sleep")),
+      assert(/→ 11111111-1111-4111-8111-111111111111 has been stopped by 3 or more long hard stops in a row with no window gained: its windows all kept, the stops landing past the last — in the decider's call or the write\. Consolidation joins past it once extraction holds nothing else/.test(fix((await run(LOG_ON)).out, "sleep")),
         "a stalled thought whose windows are all kept is told apart: the stops land past its last window");
+      // Two stalled, each with its own reason (review pass 2).
+      await sleeping({ total: 2, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }, { id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] });
+      assert(/→ 2 thoughts have been stopped by 3 or more long hard stops in a row with no window gained: 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the sleeps\./.test(fix((await run(LOG_ON)).out, "sleep")),
+        "two stalled thoughts are each given their own reason");
       // More held than named: the rest counted.
       await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       assert(/held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
@@ -3844,7 +3848,7 @@ else {
       // a hand run may have finished it since (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, reads: "yes", held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
       const endedHeld = await run(LOG_ON);
-      assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/been stopped by 3 or more wakes/.test(fix(endedHeld.out, "sleep")),
+      assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/been stopped by 3 or more/.test(fix(endedHeld.out, "sleep")),
         `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);
       // A held word out of its bounds is left off: more thoughts than its total, or more windows kept than sent.
       for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }]) {
