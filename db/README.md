@@ -2887,10 +2887,18 @@ lasted; "its last pass failed" while a pass's last word was a failure (into
 the next sleep, until one of its passes stamps); stopped once it ends, or
 stale, each with the service's restart; and what wakes it — a search or a
 write, or writes alone and why, each lesser case a warning with its fix. The
-`workers` row no longer reads it. A pass waiting at its start for a provider
-that does not answer stamps nothing, so the row keeps its last word then
-(SMD-2752). Its `consolidate pass` row reads a fresh one as the scheduler
-working the current judge's key, rather than asking for a second worker.
+`workers` row no longer reads it. Since SMD-2752 the row carries two more
+words, and the `sleep` row says each:
+- `waiting`, the passes waiting at their start for a provider that does not
+  answer — "asleep, extract waiting for the provider at its start", a warning
+  naming the provider, where it read "its passes running";
+- `refused`, the start refusal that ended it — "refused at a pass's start
+  (key)", with that kind's remedy before the restart, where "start it again"
+  alone would only refuse again.
+
+Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
+scheduler working the current judge's key, its pass's start wait said there
+too, rather than asking for a second worker.
 Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
 **From the `workers` profile.** Its followers do not yield, so the two are
@@ -2919,7 +2927,8 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); the provider-wait word (SMD-2752).
+(SMD-2679); a `waiting` word for a pass waiting mid-pass for the provider,
+which reads "running a pass" — `waiting` is its start's alone (SMD-2905).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -4073,7 +4082,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2733 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1255 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1262 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

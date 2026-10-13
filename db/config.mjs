@@ -505,6 +505,28 @@ export function restartCommand(worker, job) {
 }
 
 /**
+ * What mends the start refusal that ended the sleep scheduler, by its kind
+ * (db/worker-bootstrap.ts's StartRefusal), "" for one not of the list. The
+ * scheduler's own line adds it where a pass's words mislead — the key's name
+ * a --switch-key sleep.ts does not take, a revoked key's no way back — and
+ * preflight's `sleep` row gives it for every kind, where "start it again"
+ * would only refuse again (SMD-2752).
+ */
+export function startRefusalRemedy(kind) {
+  switch (kind) {
+    case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model";
+    case "identity": return "OB1_WORKER_KEY set without MCP_ACCESS_KEYS needs both, as the server has them; a revoked, unlisted or forward-scope worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service";
+    case "model": return "pull the model its log names, or set OB1_JUDGE_MODEL or OB1_EXTRACT_ESCALATE_MODEL to one the provider serves — OB1_METADATA_MODEL names the extraction key, so another one there is the key's switch too (bun db/extract-entities.ts --switch-key)";
+    case "provider": return "the provider refused a one-token call: check the chat endpoint's key and base URL (OB1_CHAT_API_KEY and OB1_CHAT_BASE_URL, else OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
+    case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>)";
+    case "egress": return "the egress policy refuses every call the pass would make (OB1_EGRESS_* in deploy/.env; this preflight's egress rows say why)";
+    case "lookup": return "the worker key's lookup did not name the key, and the egress policy admits that actor alone: its log says why the lookup failed (too many connections, a lock)";
+    case "usage": return "a pass refused the options the scheduler gave it, which no setting in deploy/.env mends: report it, with the log";
+    default: return "";
+  }
+}
+
+/**
  * The window count one thought is extracted in at most: OB1_EXTRACT_MAX_WINDOWS
  * when it is a positive safe integer once floored, else EXTRACT_MAX_WINDOWS.
  * It sets the text bound a run chunk.ts cannot split meets too, so widening

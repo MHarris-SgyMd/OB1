@@ -112,6 +112,8 @@ export const EXTRACT_MALFORMED_ALARM_MIN: number;
 export function malformedAlarm(answers: number, malformed: number): boolean;
 /** The command that starts a long-running worker again, from its heartbeat's worker and job (SMD-2261). */
 export function restartCommand(worker: "board-sync" | "extract" | "consolidate" | "sleep", job: string | null): string;
+/** What mends the start refusal that ended the sleep scheduler, by its kind; "" for one not of the list (SMD-2752). */
+export function startRefusalRemedy(kind: string): string;
 /** OB1_EXTRACT_MAX_WINDOWS when a positive safe integer once floored, else EXTRACT_MAX_WINDOWS; `from` says which. */
 export function resolveExtractMaxWindows(raw: string | undefined): { windows: number; from: "OB1_EXTRACT_MAX_WINDOWS" | "default" };
 
