@@ -95,6 +95,10 @@ console.log("\n[3] A query string is read as the schema's types");
   assert(JSON.stringify(q("limit=5&others_only=true")) === JSON.stringify({ input: { limit: 5, others_only: true } }), "a number and a boolean are read as such");
   assert(JSON.stringify(q("actions=capture&actions=delete")) === JSON.stringify({ input: { actions: ["capture", "delete"] } }), "an array field takes every value");
   assert(JSON.stringify(q("limit=five")) === JSON.stringify({ input: { limit: "five" } }), "a number that is not one stays text, for the schema to refuse");
+  // As JavaScript prints a number (SMD-2287): a client sends String(n), which must read back as n.
+  const days = (s: string) => inputFromQuery("list_thoughts", new URLSearchParams(s));
+  assert(JSON.stringify(days(`days=${encodeURIComponent(String(1e-7))}`)) === JSON.stringify({ input: { days: 1e-7 } }) && JSON.stringify(days(`days=${encodeURIComponent(String(1e21))}`)) === JSON.stringify({ input: { days: 1e21 } }), `a number in exponent form, as String() prints one, is read as that number (${String(1e-7)}, ${String(1e21)})`);
+  assert(JSON.stringify(days("days=1e")) === JSON.stringify({ input: { days: "1e" } }) && JSON.stringify(days("days=0x10")) === JSON.stringify({ input: { days: "0x10" } }), "…and a half-written one, or hex, stays text");
   assert("problem" in q("limit=1&limit=2"), "a scalar given twice is refused");
 }
 
@@ -217,6 +221,21 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   answer = async () => ok({});
   r = await json(await fwd("/v1/stats", "cap-raw", "fwd-raw"));
   assert(r.status === 403 && r.body.needs === "read", `…and still cannot read (${r.status})`);
+  // A forwarded refusal carries the refusal whole, the words its facts leave
+  // out, for the MCP server to say them (SMD-2287); one not forwarded, the facts alone.
+  const filter = { code: "REFUSED_FILTER", retryable: false, message: "said_by must be one of the known writers" } as const;
+  answer = async () => refuse(filter);
+  r = await json(await fwd("/v1/search", "read-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ query: "q" }) }));
+  assert(r.status === 400 && same(r.body, { code: "REFUSED_FILTER", retryable: false, refusal: filter }), `a forwarded refusal: its facts and, beside them, the refusal whole (${JSON.stringify(r.body)})`);
+  r = await json(await hit("/v1/search", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "q" }) }));
+  assert(r.status === 400 && same(r.body, { code: "REFUSED_FILTER", retryable: false }), `…and not forwarded, the facts alone (${JSON.stringify(r.body)})`);
+  const unattached = { code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "saved-id", detail: "the vector write failed" } as const;
+  answer = async () => refuse(unattached);
+  r = await json(await fwd("/v1/thoughts", "cap-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 201 && same(r.body, { id: "saved-id", embeddingAttached: false, refusal: unattached }), `a forwarded save whose vector did not attach: the creation, with its refusal beside it (${JSON.stringify(r.body)})`);
+  r = await json(await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 201 && same(r.body, { id: "saved-id", embeddingAttached: false }), `…and not forwarded, the creation alone (${JSON.stringify(r.body)})`);
+  answer = async () => ok({});
 
   // Anything else in the slot is refused, naming the slot, whatever the
   // caller's scope (review pass 1: a capture caller alone left a scope-keyed

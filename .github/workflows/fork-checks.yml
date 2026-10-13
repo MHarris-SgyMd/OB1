@@ -189,6 +189,24 @@ jobs:
         working-directory: server-portable
         run: bunx tsc --noEmit
 
+      # The REST core's client (SMD-2287), which the MCP server and the
+      # operator GUI call the brain through: its generated files against the
+      # REST core's own document, so a route or a schema changed without
+      # `bun generate.ts` fails here, and every operation through it into the
+      # real REST app over a stub core. Its imports of ../server-portable
+      # resolve against that directory's install above.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the REST client
+        working-directory: rest-client
+        run: bunx tsc --noEmit
+
+      - name: The REST client against the REST core
+        working-directory: rest-client
+        run: bun test-client.ts
+
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
       # them: SMD-1903 gave getEmbedding a required argument, the compiler fixed

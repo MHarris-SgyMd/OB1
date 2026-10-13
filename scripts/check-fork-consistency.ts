@@ -136,7 +136,8 @@
  *      scripts/gen-version.ts renders from db/version.mjs, releases.json and
  *      db/migrations/ (17e, SMD-2041)
  *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
- *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
+ *      db/, evals/, scripts/, jev/, deploy/auth/ and rest-client/ (SMD-2287)
+ *      — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
  *      value server-portable pins (TypeScript dedupes a package by name and
  *      version, so one directory bumping alone loads two bun-types into the
@@ -4014,7 +4015,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
