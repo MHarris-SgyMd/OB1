@@ -11,7 +11,7 @@ import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
-import { beginRequest, cutOpenRequests, endsWithStream, errorCode, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type RequestTrace, type ToolSpan } from "./telemetry.ts";
+import { beginRequest, cutOpenRequests, endsWithStream, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type RequestTrace, type ToolSpan } from "./telemetry.ts";
 import { authReachability, challengeHeader, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, UNREACHABLE_RETRY_AFTER_SECONDS, type EdgeSettings } from "./oauth-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
@@ -139,6 +139,8 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
         const reply = await run(input);
         return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err: unknown) {
+        // Its kind and code on the call's span, never its message (PR 2c).
+        span.fault(err);
         // A fault reply that itself throws is still this call's end: an
         // error, counted, and the SDK says the throw (not `unrun`).
         try {
@@ -333,6 +335,7 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
         const reply = say.renderPlugin(await runOperation(op, { core, principal, track: toolCalls.track }, input));
         return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err: unknown) {
+        span.fault(err);
         return ended(say.failed(err), "error", span);
       }
     }));
@@ -609,8 +612,8 @@ const app = new Hono<{ Bindings: Env }>();
 // deferred and ends it itself; every other is ended here, with its answer's
 // status, outcome and code — or `abandoned` for a client already gone, or
 // what the handler said of it (a mirror that showed its caller nothing: `refused`).
-// The time is noted before the answer's code is read, so `ms` is the
-// request's. One request gets no record at all: the liveness probe — a GET or
+// An answer's code is the one its handler set (a worker action's refusal),
+// never read back from its body (PR 2c). One request gets no record at all: the liveness probe — a GET or
 // HEAD at a health path that presents no key, which the health route answers
 // `ok` (a 200, unless the environment will not seed, a 500 the healthcheck itself sees) — sent every 30 s by the image's HEALTHCHECK; decided
 // as it arrives, so nothing (PR 2b's span included) starts for it. A wrong or
@@ -627,13 +630,14 @@ app.use("*", async (c, next) => {
     // Under the request's span, so each tool call's span is its child (PR 2b).
     await trace.run(next);
   } catch (err) {
+    trace.fault(err);
     trace.end({ status: 500, outcome: "error" });
     throw err;
   }
   if (trace.deferred || trace.ended) return;
   const at = performance.now();
   const gone = trace.clientGone;
-  const code = gone ? undefined : trace.code ?? await errorCode(c.res);
+  const code = gone ? undefined : trace.code;
   const outcome = gone ? "abandoned" : trace.outcome ?? outcomeOf(c.res.status, code);
   trace.end({ status: c.res.status, outcome, code }, at);
 });
@@ -725,6 +729,7 @@ function noteLegacyRoute(req: Request, name: string): void {
 function notCleared(c: Context, trace: RequestTrace | undefined, identity: { status: string } | null): Response {
   if (trace) {
     trace.outcome = "refused";
+    trace.refusedAtKey = true;
     trace.code = identity?.status === "revoked" ? "REVOKED" : identity?.status === "busy" ? "BUSY" : undefined;
   }
   return c.text("ok", 200, corsHeaders);
@@ -736,7 +741,10 @@ function notCleared(c: Context, trace: RequestTrace | undefined, identity: { sta
  * line says `refused`, by no key's name.
  */
 function shownNothing(c: Context, trace: RequestTrace | undefined): Response {
-  if (trace) trace.outcome = "refused";
+  if (trace) {
+    trace.outcome = "refused";
+    trace.refusedAtKey = true;
+  }
   return c.text("ok", 200, corsHeaders);
 }
 
@@ -858,8 +866,8 @@ app.get("*", async (c, next) => {
     return c.json(status.ok ? status.value.pools : [], 200, corsHeaders);
   } catch (e) {
     // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
-    // Its line says `error`, whatever the 200 (review pass 4: it read `ok`).
-    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; }
+    // Its line says `error`, whatever the 200 (review pass 4: it read `ok`); its span the throw's kind and code (PR 2c).
+    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(e); }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
   }
 });
@@ -906,10 +914,12 @@ app.post("*", async (c, next) => {
   // affected thought, stamped with the resolved agent id (SMD-2132). A dry run
   // mutates nothing, so it writes none.
   const caller: Principal = { ...principal, agentId: identity.agentId };
-  // Each table words every code its operation refuses with (core/workers.ts), and no other.
-  const said = <T extends object, C extends RefusalCode>(o: Outcome<T, C>, words: Record<NoInfer<C>, string>) => o.ok
-    ? c.json(o.value, 200, corsHeaders)
-    : c.json({ error: words[o.refusal.code as C], code: o.refusal.code }, 400, corsHeaders);
+  // Each table words every code its operation refuses with (core/workers.ts), and no other; a refusal's code goes on the record for the line as it is answered (PR 2c).
+  const said = <T extends object, C extends RefusalCode>(o: Outcome<T, C>, words: Record<NoInfer<C>, string>) => {
+    if (o.ok) return c.json(o.value, 200, corsHeaders);
+    if (trace) trace.code = o.refusal.code;
+    return c.json({ error: words[o.refusal.code as C], code: o.refusal.code }, 400, corsHeaders);
+  };
   const named = (v: unknown): string => (typeof v === "string" ? v : "");
   try {
     if (isRetry) return said(await core.retryFailed(caller, { work_type: named(args.work_type) }), {
@@ -933,7 +943,7 @@ app.post("*", async (c, next) => {
     });
   } catch (e) {
     // SQL-only (the PostgREST shim throws), or a store failure: a reason, not a bare 500 (parity with /worker-status).
-    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; }
+    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(e); }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
   }
 });
@@ -1242,6 +1252,8 @@ app.on(MCP_METHODS, "*", async (c) => {
   } catch (err) {
     settled = true;
     trace.status = 500;
+    // Its kind on the request's span, as the REST core's onError puts it there (PR 2c review pass 3).
+    trace.fault(err);
     finish("error");
     throw err;
   }
@@ -1287,8 +1299,11 @@ if (SERVES_ON_BUN) {
     server: () => bunServer,
     calls: toolCalls,
     close: closeStore,
-    // The spans still batched go beside the pool's close, under its bound, said on their own.
+    // The telemetry still batched goes beside the pool's close, under its bound, said on its own.
     flush: flushTelemetry,
+    // A record the runtime no longer counts but that is still open — a mirror whose client left while it waits on the
+    // registry — ends before that flush, on every path, though no cut came: a drained stop runs no onCut (PR 2c review pass 3).
+    endOpen: cutOpenRequests,
     onCut: () => {
       cutByStop = true;
       // Every request still open gets its line — `cut`, or `abandoned` for a
