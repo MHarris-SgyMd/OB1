@@ -768,17 +768,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /**
    * The thoughts with windows kept from a claim that did not finish, or with
    * stops counted (089, SMD-2694) — pending, in flight or failed, the newest
-   * first — each with how many windows are kept and how many stops took it,
-   * the latest of them in a row with none gained. Nothing on a brain before
-   * 089, or under a role that cannot read it.
+   * first, each row of the text and windowing in force (one of earlier text is
+   * replaced at the next claim, review pass 1) — each with how many windows
+   * are kept and how many stops took it, the latest of them in a row with
+   * none gained. Nothing on a brain before 089, or under a role that cannot
+   * read it.
    */
   async function printKept(limit = 10): Promise<void> {
     let rows: { thought_id: string; status: string; windows: number | null; kept: number; stops: number; stalled: number; total: number }[];
     try {
       rows = (await sql`
         SELECT e.thought_id, c.status, e.windows, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.stops, e.stalled, count(*) OVER ()::int AS total
-          FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type)
-         WHERE e.work_type = ${JOB} AND c.status IN ('pending', 'claimed', 'failed')
+          FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type) JOIN thoughts t ON t.id = e.thought_id
+         WHERE e.work_type = ${JOB} AND c.status IN ('pending', 'claimed', 'failed') AND e.windowing = ${JSON.stringify(WINDOWING)}
+           AND e.fingerprint = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
          ORDER BY e.updated_at DESC LIMIT ${limit}`) as typeof rows;
     } catch (e) {
       const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
@@ -786,7 +789,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       throw e;
     }
     if (rows.length === 0) return;
-    out(`  windows kept from a claim that did not finish (${rows.length} of ${rows[0].total}) — the next claim of the same text sends only the windows still to do (SMD-2694):`);
+    out(`  windows kept or stops counted on a claim that did not finish (${rows.length} of ${rows[0].total}) — the next claim of the same text sends only the windows still to do (SMD-2694):`);
     for (const r of rows) {
       const kept = r.kept ? `${r.kept}${r.windows ? ` of ${r.windows}` : ""} window(s) kept` : "no window kept";
       out(`    ${r.thought_id}  ${r.status}, ${kept}, ${r.stops} stop(s)${r.stalled ? `, the last ${r.stalled} with none gained` : ""}`);
@@ -1035,18 +1038,29 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    */
   const WINDOWING_SIG = JSON.stringify(WINDOWING);
   let keeping = true;
-  let saidKeeping = false;
+  /** Each kind said once: a passing error first does not hide the one that ends keeping (review pass 1). */
+  const saidKeeping = { passing: false, ended: false };
   const keepingFailed = (e: unknown, what: string): void => {
     const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
     // The table or a function missing, or the grant: no later write would land.
-    if (code === "42P01" || code === "42883" || code === "42501") keeping = false;
-    if (saidKeeping) return;
-    saidKeeping = true;
-    errAside(`  could not ${what} a long thought's kept windows (${(e as Error).message}) — ${keeping ? "the thought goes on, its windows unkept" : "no window is kept across a stop this run: that needs migration 089 and the extraction group's grant on extraction_progress"}`);
+    const ends = code === "42P01" || code === "42883" || code === "42501";
+    if (ends) keeping = false;
+    const kind = ends ? "ended" : "passing";
+    if (saidKeeping[kind]) return;
+    saidKeeping[kind] = true;
+    errAside(`  could not ${what} a long thought's kept windows (${(e as Error).message}) — ${ends ? "no window is kept across a stop this run: that needs migration 089 and the extraction group's grant on extraction_progress, which a running follower takes up once restarted" : "the thought goes on, its windows unkept"}`);
   };
   const hashOf = (sent: string): string => createHash("sha256").update(sent).digest("hex").slice(0, 32);
   /** The thought each worker has in hand, for the hard stop's count (noteStop): set while processRow runs. */
   const inHand = new Map<string, { id: string; fingerprint: string }>();
+  /**
+   * The hard stop's count for each worker, which the worker's own release
+   * waits for: the stop aborts the call in hand, and the worker unwinding to
+   * its finally released the claim first on another connection, so the count
+   * found it no longer held (review pass 1 — 26 of 40 stops lost at four
+   * workers, and every one with an idle second worker, the scheduler's shape).
+   */
+  const stopNotes = new Map<string, Promise<void>>();
 
   /** The windows an earlier claim of this text kept, and where this claim keeps its own: none for a thought with no fingerprint. */
   async function progressFor(row: Row, workerId: string): Promise<ExtractProgress | undefined> {
@@ -1066,12 +1080,17 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       kept(index, sent) {
         const p = kept.get(index);
         if (!p || p.h !== hashOf(sent)) return undefined;
+        // An answer of another shape — kept before a change to what a window
+        // returns — is asked again rather than merged (review pass 1).
+        if (!Array.isArray(p.entities) || !Array.isArray(p.relations) || p.rejected === null || typeof p.rejected !== "object") return undefined;
         const { h: _h, ...part } = p;
         return part;
       },
       async save(part, sent, windows) {
-        // Past the hard stop the claim is the pool's: the function would keep nothing.
-        if (!keeping || hardStopped) return;
+        // Past the hard stop too: the claim is the worker's until the stop's
+        // count has landed, and the function keeps nothing once it is not
+        // (review pass 1 — a window answered as the stop came was dropped).
+        if (!keeping) return;
         try {
           await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
         } catch (e) {
@@ -1473,7 +1492,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             if (outcome.leftOut) { leftOut++; leftOutWindows += outcome.leftOut; } else if (outcome.caveat) partial++;
             // Its kept windows are spent (089). A failed release keeps them, so
             // --retry-failed resumes a thought that timed out in a late window.
-            if (keeping) await sql`DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB}`.catch((e: unknown) => keepingFailed(e, "clear"));
+            // Of this text only: an edit since the release may have another worker's windows here (review pass 1).
+            if (keeping && row?.fingerprint) await sql`DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND fingerprint = ${row.fingerprint}`.catch((e: unknown) => keepingFailed(e, "clear"));
           }
           outage.settled(b.thought_id);
           progress();
@@ -1487,6 +1507,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // before the release goes out, so another worker's claim of one counts it.
       for (const id of hb.held) taken.delete(id);
       let freed = 0;
+      // The hard stop's count first, while the claim is still this worker's.
+      await stopNotes.get(workerId);
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
@@ -1517,7 +1539,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // Started before the line is written: a Writer that throws does not keep
       // the leases. Each thought in hand has its stop counted first, while its
       // claim is still the worker's (089, SMD-2694).
-      const release = Promise.all([...activeWorkers].map((w) => noteStop(w).then(() => sql`SELECT release_claims_for_worker(${JOB}, ${w})`).catch(() => null)));
+      const release = Promise.all([...activeWorkers].map((w) => {
+        const noted = noteStop(w);
+        stopNotes.set(w, noted);
+        return noted.then(() => sql`SELECT release_claims_for_worker(${JOB}, ${w})`).catch(() => null);
+      }));
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return release;
     }

@@ -4931,7 +4931,7 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
     `…the two windows answered before the stop are kept, and the stop is counted on the row, not stalled (${JSON.stringify(kept)})`);
 
   const status = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
-  assert(status.code === 0 && status.out.includes(`windows kept from a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
+  assert(status.code === 0 && status.out.includes(`windows kept or stops counted on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
     `--status names the thought, its windows kept and its stop (${status.out.split("\n").filter((l) => /kept/.test(l)).join(" | ")})`);
 
   // The second run resumes: only the windows still to do are sent, and the
@@ -4971,6 +4971,9 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
   const [globeClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${globe}::uuid AND work_type = ${KEY}`;
   assert(failedRun === 1 && globeClaim?.status === "failed" && globeKept?.keys === "0,1",
     `a thought failed by its third window's timeout keeps the two windows before it (exit ${failedRun}, ${globeClaim?.status}, kept ${globeKept?.keys})`);
+  const failedStatus = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: hangEnv as Record<string, string>, cwd: HERE });
+  assert(failedStatus.out.includes(`${globe}  failed, 2 of 6 window(s) kept, 0 stop(s)\n`),
+    `--status lists the failed thought with its kept windows, which --retry-failed resumes (${failedStatus.out.split("\n").filter((l) => l.includes(globe)).join(" | ")})`);
   hangPart = "none";
   sent.length = 0;
   const retried = await runExtract({ url: URL_!, env: hangEnv, workers: 1, retryFailed: true, writer: { out: () => {}, err: () => {} } });
@@ -4986,12 +4989,36 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
   const sphereKept = (await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${sphere}::uuid`)[0] as { keys: string } | undefined;
   // Through update_thought, as a client edits: the fingerprint follows the text (a raw UPDATE leaves it).
   const edited = ((await sql`SELECT update_thought(${sphere}::uuid, ${sphereText.replace("Point 5.23 about the sphere.", "Point 5.23 about the sphere, edited.")}) AS r`)[0].r as { ok: boolean });
+  // The row is of the earlier text now: --status no longer lists it as kept (review pass 1).
+  const editedStatus = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: hangEnv as Record<string, string>, cwd: HERE });
   hangPart = "none";
   sent.length = 0;
   const afterEdit = await runExtract({ url: URL_!, env: hangEnv, workers: 1, writer: { out: () => {}, err: () => {} } });
+  assert(!editedStatus.out.includes(sphere) && editedStatus.code === 0, `--status leaves out a row of the text before an edit, which the next claim replaces (${editedStatus.out.split("\n").filter((l) => l.includes(sphere)).join(" | ") || "not listed"})`);
   assert(sphereKept?.keys === "0,1" && edited.ok && afterEdit === 0 && sent.join(",") === "1,2,3,4,5,6",
     `a thought edited after two of its windows were kept is extracted afresh — every window sent, the first two unchanged among them (kept ${sphereKept?.keys}, sent ${sent.join(",")})`);
   hanging.stop(true);
+
+  // Two follower workers and one long thought, the second worker idle — the
+  // sleep scheduler's shape under --workers 2: the hard stop's count lands
+  // before either release, so the stop is counted (review pass 1: the idle
+  // worker's own release won the race in every trial, and the stop was lost).
+  const orbit = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "orbit")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  for (let trial = 0; trial < 3; trial++) {
+    sent.length = 0;
+    slowMs = 300;
+    let racedStop: PassStop | undefined;
+    const raced = inProcess({ workers: 2, follow: 1, onPass: (s) => { racedStop = s; } });
+    for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+    racedStop?.();
+    await racedStop?.();
+    await raced;
+    slowMs = 0;
+  }
+  const [orbitRow] = await sql`SELECT stops, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${orbit}::uuid AND work_type = ${KEY}`;
+  assert(Number(orbitRow?.stops) === 3 && Number(orbitRow?.kept) >= 3,
+    `two follower workers, one long thought: each of three hard stops is counted on it, and its windows kept (${JSON.stringify(orbitRow)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${orbit}::uuid`;
 
   // A brain without the table (a role without its grant reads the same):
   // the worker keeps nothing, says so once, and extracts as before.

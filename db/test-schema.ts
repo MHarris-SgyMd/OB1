@@ -13682,7 +13682,7 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
     .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
-  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer kept_at_stop:integer updated_at:timestamp with time zone",
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone",
     `the table's columns, only windows nullable (${cols})`);
   const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
   assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
@@ -13699,26 +13699,38 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   const [claimed] = await q<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'w-80', 1, 900)`, [JOB]);
   assert(claimed?.thought_id === id, "the thought claimed by w-80");
   const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
-  const save = (worker: string, fp: string, win: string, i: number, tid = id) =>
-    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, 4, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i)]).then((r) => r.ok);
+  const save = (worker: string, fp: string, win: string, i: number, tid = id, windows = 4) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, $8, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i), windows]).then((r) => r.ok);
   const note = (worker: string, fp: string, win: string, tid = id) =>
     one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5) AS ok`, [tid, JOB, worker, fp, win]).then((r) => r.ok);
-  const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; kept_at_stop: number; fingerprint: string }>(
-    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, kept_at_stop, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
+  const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; gained: number; fingerprint: string }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
 
   assert((await save("w-80", "fpA", "winA", 0)) && (await save("w-80", "fpA", "winA", 1)), "the holder keeps two windows");
   assert((await row())?.keys === "0,1" && (await row())?.windows === 4, "…keyed by index, with the thought's window count");
   assert((await save("w-other", "fpA", "winA", 2)) === false && (await row())?.keys === "0,1", "a worker that does not hold the claim keeps nothing");
-  assert((await save("w-80", "fpA", "winA", 1)) && (await row())?.keys === "0,1", "a window saved again under its index replaces the one kept, no duplicate");
+  assert((await save("w-80", "fpA", "winA", 1)) && (await row())?.keys === "0,1" && (await row())?.gained === 3, "a window saved again under its index replaces the one kept, no duplicate — every save counted as gained");
   let r = (await note("w-80", "fpA", "winA")) && await row();
-  assert(r && r.stops === 1 && r.stalled === 0 && r.kept_at_stop === 2, `a stop after windows were kept: one stop, not stalled, two windows at the stop (${JSON.stringify(r)})`);
+  assert(r && r.stops === 1 && r.stalled === 0 && r.gained === 0, `a stop after windows were saved: one stop, not stalled, gained back to 0 (${JSON.stringify(r)})`);
   r = (await note("w-80", "fpA", "winA")) && await row();
-  assert(r && r.stops === 2 && r.stalled === 1 && r.kept_at_stop === 2, `a stop that gained no window since the last: stalled one (${JSON.stringify(r)})`);
+  assert(r && r.stops === 2 && r.stalled === 1 && r.gained === 0, `a stop with no window saved since the last: stalled one (${JSON.stringify(r)})`);
   r = (await note("w-80", "fpA", "winA")) && await row();
   assert(r && r.stops === 3 && r.stalled === 2, `…and another: stalled two (${JSON.stringify(r)})`);
+  // A window saved over an index already kept — one whose request changed
+  // under it, a chunker's — is a window gained, though the row holds no more
+  // keys (review pass 1: counting keys read it stalled).
+  r = (await save("w-80", "fpA", "winA", 1)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 4 && r.stalled === 0 && r.keys === "0,1", `a stop after a window was saved, over a kept index, resets stalled (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && await row();
+  assert(r && r.gained === 1 && r.stalled === 0, `a save between stops counts in gained, which a reader takes for gaining now (${JSON.stringify(r)})`);
+  // Another window count under the same text and settings (a chunker
+  // changed): the old indexes are of other windows, so the row's windows go;
+  // its stops were this text's and stay.
+  r = (await save("w-80", "fpA", "winA", 0, id, 5)) && await row();
+  assert(r && r.keys === "0" && r.windows === 5 && r.stops === 4, `a window saved under another window count replaces the windows kept, and keeps the stops (${JSON.stringify(r)})`);
   r = (await save("w-80", "fpA", "winA", 2)) && (await note("w-80", "fpA", "winA")) && await row();
-  assert(r && r.stops === 4 && r.stalled === 0 && r.kept_at_stop === 3, `a stop after a window was gained resets stalled (${JSON.stringify(r)})`);
-  assert((await note("w-other", "fpA", "winA")) === false && (await row())?.stops === 4, "a stop counted by a worker that does not hold the claim counts nothing");
+  assert(r && r.stops === 5 && r.stalled === 0 && r.gained === 0, `…and the stop after it, windows saved, is not stalled (${JSON.stringify(r)})`);
+  assert((await note("w-other", "fpA", "winA")) === false && (await row())?.stops === 5, "a stop counted by a worker that does not hold the claim counts nothing");
   r = (await save("w-80", "fpB", "winA", 3)) && await row();
   assert(r && r.keys === "3" && r.stops === 0 && r.stalled === 0 && r.fingerprint === "fpB", `a window of other text replaces the row: its windows and its stops were the old text's (${JSON.stringify(r)})`);
   r = (await note("w-80", "fpB", "winB")) && await row();

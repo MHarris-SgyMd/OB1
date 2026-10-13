@@ -1368,7 +1368,9 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
       const answered: ExtractionWindow = { index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs, ...(ex.abortedBy ? { abortedBy: ex.abortedBy } : {}) } : {}), ms: Date.now() - t0 };
       parts.push(answered);
       // A malformed answer is not kept: the next claim asks that window again.
-      if (progress && !answered.malformed) await progress.save(answered, sent, windows.length);
+      // Nor is a lone window — a prefix cut to one (review pass 1): with
+      // nothing after it there is nothing to resume.
+      if (progress && !answered.malformed && windows.length > 1) await progress.save(answered, sent, windows.length);
     }
     const merged = mergeExtractions(parts);
     // The windows that parsed are the answer and the rest are named on it, as

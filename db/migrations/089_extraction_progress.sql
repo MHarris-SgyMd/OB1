@@ -25,16 +25,21 @@
 --     carrying the hash of the text it was sent (`h`), so a window is reused
 --     only for the text it answered. The row says which text and windowing
 --     its windows are of — the thought's content fingerprint (003) and the
---     worker's windowing, which decides where the windows fall — and a write
---     under another fingerprint or windowing replaces the row: an edit, or a
---     change of window size, starts afresh. Only parsed windows are kept; a
---     malformed one is asked again.
+--     worker's windowing, which decides where the windows fall and how each
+--     is asked — and a write under another fingerprint or windowing replaces
+--     the row: an edit, or a change of window size, starts afresh; so does a
+--     window saved under another window count (a chunker changed under the
+--     same settings), whose old indexes are of other windows. Only parsed
+--     windows are kept; a malformed one is asked again.
 --   * stops counts the hard stops that took the claim from a worker with the
---     row's text in hand; stalled, the latest of them in a row that gained no
---     window (kept_at_stop is how many windows the row held at the last
---     one). A thought gaining a window in every sleep is not stalled; one
---     whose single window outlasts every sleep is, and SMD-2694's second PR
---     lets consolidation join past it.
+--     row's text in hand; gained, the windows saved since the last of them;
+--     stalled, the latest stops in a row with no window saved between — a
+--     single window longer than every sleep, or a stop that keeps landing
+--     after the last window, in the decider's call or the write. A thought
+--     saving a window in every sleep is not stalled, and while gained is
+--     above 0 the row is gaining now, whatever stalled said at the last stop:
+--     SMD-2694's second PR lets consolidation join past a thought only while
+--     it is stalled and has gained nothing since.
 --   * save_extraction_window(…) and note_extraction_stop(…) write it, and
 --     only for the claim's holder: each locks the claim row FOR SHARE and
 --     writes nothing (false) unless the row is claimed by the worker named.
@@ -65,41 +70,42 @@ CREATE TABLE IF NOT EXISTS extraction_progress (
   parts        jsonb       NOT NULL DEFAULT '{}'::jsonb,
   stops        int         NOT NULL DEFAULT 0,
   stalled      int         NOT NULL DEFAULT 0,
-  kept_at_stop int         NOT NULL DEFAULT 0,
+  gained       int         NOT NULL DEFAULT 0,
   updated_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (thought_id, work_type),
   CONSTRAINT extraction_progress_claim FOREIGN KEY (thought_id, work_type)
     REFERENCES thought_work_claims (thought_id, work_type) ON DELETE CASCADE,
   CONSTRAINT extraction_progress_parts_object CHECK (jsonb_typeof(parts) = 'object'),
-  CONSTRAINT extraction_progress_counts CHECK (stops >= 0 AND stalled >= 0 AND stalled <= stops AND kept_at_stop >= 0),
+  CONSTRAINT extraction_progress_counts CHECK (stops >= 0 AND stalled >= 0 AND stalled <= stops AND gained >= 0),
   CONSTRAINT extraction_progress_windows CHECK (windows IS NULL OR windows > 1)
 );
 
 COMMENT ON TABLE extraction_progress IS
-  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, and how many in a row gained no window. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 089 / SMD-2694.';
+  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the windows saved since the last, and how many stops in a row saved none. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 089 / SMD-2694.';
 COMMENT ON COLUMN extraction_progress.fingerprint IS
   'The content fingerprint (003) of the text the windows answered; a write under another replaces the row.';
 COMMENT ON COLUMN extraction_progress.windowing IS
-  'The worker''s windowing (entities.ts windowingFor, as JSON) the windows fell under; a write under another replaces the row.';
+  'The worker''s windowing (entities.ts windowingFor, as JSON): where the windows fall and how each is asked; a write under another replaces the row.';
 COMMENT ON COLUMN extraction_progress.windows IS
-  'How many windows the thought is sent in (a prefix''s, over the bound); NULL until a window is kept.';
+  'How many windows the thought is sent in (a prefix''s, over the bound); NULL until a window is kept. A window saved under another count replaces the row.';
 COMMENT ON COLUMN extraction_progress.parts IS
-  'The windows answered and parsed, keyed by window index: each window''s answer as entities.ts returns it, with `h`, the hash of the text it was sent.';
+  'The windows answered and parsed, keyed by window index: each window''s answer as entities.ts returns it, with `h`, the hash of the request it answered.';
 COMMENT ON COLUMN extraction_progress.stops IS
   'Hard stops that took the claim from a worker with this text in hand.';
 COMMENT ON COLUMN extraction_progress.stalled IS
-  'Of stops, the latest in a row that gained no window: a thought whose window outlasts every sleep.';
-COMMENT ON COLUMN extraction_progress.kept_at_stop IS
-  'How many windows the row held at the last stop, which the next stop compares against.';
+  'Of stops, the latest in a row with no window saved between: a window longer than every sleep, or a stop that keeps landing past the last window.';
+COMMENT ON COLUMN extraction_progress.gained IS
+  'Windows saved since the last stop: above 0, the thought is gaining now, whatever stalled said at that stop.';
 
 -- ---------------------------------------------------------------------------
 -- save_extraction_window — keep one answered window for the claim's holder
 --
 -- Locks the claim row FOR SHARE, so a release in flight is waited for and then
 -- read, and writes nothing (false) unless the row is claimed by p_worker. A
--- row of another fingerprint or windowing is replaced — its windows, its stops
--- and its stalled count are of other text — and a window already kept under
--- the same index is replaced by this one.
+-- row of another fingerprint, windowing or window count is replaced — its
+-- windows, its stops and its stalled count are of other windows — and a
+-- window already kept under the same index is replaced by this one. Every
+-- save counts in gained, which the next stop reads.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION save_extraction_window(
   p_thought_id  uuid,
@@ -126,34 +132,36 @@ BEGIN
     RETURN false;
   END IF;
 
-  INSERT INTO extraction_progress AS e (thought_id, work_type, fingerprint, windowing, windows, parts)
-  VALUES (p_thought_id, p_work_type, p_fingerprint, p_windowing, p_windows, jsonb_build_object(p_index::text, p_part))
+  INSERT INTO extraction_progress AS e (thought_id, work_type, fingerprint, windowing, windows, parts, gained)
+  VALUES (p_thought_id, p_work_type, p_fingerprint, p_windowing, p_windows, jsonb_build_object(p_index::text, p_part), 1)
   ON CONFLICT (thought_id, work_type) DO UPDATE SET
-    parts        = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing
-                        THEN e.parts || EXCLUDED.parts ELSE EXCLUDED.parts END,
-    stops        = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stops ELSE 0 END,
-    stalled      = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stalled ELSE 0 END,
-    kept_at_stop = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.kept_at_stop ELSE 0 END,
-    fingerprint  = EXCLUDED.fingerprint,
-    windowing    = EXCLUDED.windowing,
-    windows      = EXCLUDED.windows,
-    updated_at   = now();
+    parts   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing AND e.windows IS NOT DISTINCT FROM EXCLUDED.windows
+                   THEN e.parts || EXCLUDED.parts ELSE EXCLUDED.parts END,
+    -- The stops a row of other text or windowing counted were not this text's;
+    -- a change of window count alone keeps them, as the text's stops still were.
+    stops   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stops ELSE 0 END,
+    stalled = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stalled ELSE 0 END,
+    gained  = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.gained + 1 ELSE 1 END,
+    fingerprint = EXCLUDED.fingerprint,
+    windowing   = EXCLUDED.windowing,
+    windows     = EXCLUDED.windows,
+    updated_at  = now();
   RETURN true;
 END;
 $$;
 
 COMMENT ON FUNCTION save_extraction_window(uuid, text, text, text, text, int, int, jsonb) IS
-  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, and a window kept under the same index. Migration 089 / SMD-2694.';
+  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint, windowing or window count, and a window kept under the same index; counts the save in gained. Migration 089 / SMD-2694.';
 
 -- ---------------------------------------------------------------------------
 -- note_extraction_stop — count a hard stop for the claim's holder
 --
 -- Called by the stop before it returns the lease, under the same lock and the
--- same holder rule as the save. stops goes up by one; stalled goes to 0 when
--- the row holds more windows than at the last stop, and up by one when it
--- holds none more — a single-window thought, which keeps no window, stalls at
--- every stop. A row of another fingerprint or windowing is replaced, this stop
--- its first.
+-- same holder rule as the save. stops goes up by one; stalled goes to 0 when a
+-- window was saved since the last stop (gained), and up by one when none was
+-- — a single-window thought, which keeps no window, stalls at every stop —
+-- and gained starts again from 0. A row of another fingerprint or windowing
+-- is replaced, this stop its first.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION note_extraction_stop(
   p_thought_id  uuid,
@@ -177,20 +185,19 @@ BEGIN
   INSERT INTO extraction_progress AS e (thought_id, work_type, fingerprint, windowing, stops, stalled)
   VALUES (p_thought_id, p_work_type, p_fingerprint, p_windowing, 1, 1)
   ON CONFLICT (thought_id, work_type) DO UPDATE SET
-    stops        = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stops + 1 ELSE 1 END,
-    stalled      = CASE WHEN e.fingerprint <> EXCLUDED.fingerprint OR e.windowing <> EXCLUDED.windowing THEN 1
-                        WHEN (SELECT count(*) FROM jsonb_object_keys(e.parts)) > e.kept_at_stop THEN 0
-                        ELSE e.stalled + 1 END,
-    kept_at_stop = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing
-                        THEN (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) ELSE 0 END,
-    parts        = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.parts ELSE '{}'::jsonb END,
-    windows      = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.windows ELSE NULL END,
-    fingerprint  = EXCLUDED.fingerprint,
-    windowing    = EXCLUDED.windowing,
-    updated_at   = now();
+    stops   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.stops + 1 ELSE 1 END,
+    stalled = CASE WHEN e.fingerprint <> EXCLUDED.fingerprint OR e.windowing <> EXCLUDED.windowing THEN 1
+                   WHEN e.gained > 0 THEN 0
+                   ELSE e.stalled + 1 END,
+    gained  = 0,
+    parts   = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.parts ELSE '{}'::jsonb END,
+    windows = CASE WHEN e.fingerprint = EXCLUDED.fingerprint AND e.windowing = EXCLUDED.windowing THEN e.windows ELSE NULL END,
+    fingerprint = EXCLUDED.fingerprint,
+    windowing   = EXCLUDED.windowing,
+    updated_at  = now();
   RETURN true;
 END;
 $$;
 
 COMMENT ON FUNCTION note_extraction_stop(uuid, text, text, text, text) IS
-  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1, and stalled reset when a window was kept since the last stop, else + 1. Migration 089 / SMD-2694.';
+  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1; gained back to 0. Migration 089 / SMD-2694.';
