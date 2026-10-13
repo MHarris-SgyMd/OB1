@@ -100,10 +100,10 @@ async function mcp(name: string, args: Record<string, unknown>, key: string = KE
   return { text: (body.result.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n"), sc: body.result.structuredContent ?? {}, isError: body.result.isError === true };
 }
 type Answer = { status: number; body: Record<string, unknown>; headers: Headers };
-async function rest(method: string, path: string, body?: unknown, key: string = KEYS.writer): Promise<Answer> {
+async function rest(method: string, path: string, body?: unknown, key: string = KEYS.writer, carrier?: string): Promise<Answer> {
   const r = await fetch(`${API}${path}`, {
     method,
-    headers: { ...(key ? { "x-brain-key": key } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    headers: { ...(key ? { "x-brain-key": key } : {}), ...(carrier ? { "x-brain-forwarder": carrier } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: r.status, body: await r.json() as Record<string, unknown>, headers: r.headers };
@@ -356,6 +356,37 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     assert(r.status === REFUSAL_STATUS[code as keyof typeof REFUSAL_STATUS], `…at its status (${r.status})`);
   }
   assert(codes.size >= 12, `${codes.size} distinct codes compared`);
+
+  // Carried by the forwarder (SMD-2287): the REST answer holds the refusal
+  // whole beside its facts, and render.ts makes of it exactly the MCP reply,
+  // text and structuredContent — the words the facts leave out included (the
+  // filter's message, the value quoted back, the key's kind) — so the MCP
+  // server as a REST client says every refusal as server-portable does.
+  const renderOf: Record<string, (o: never) => say.Reply> = {
+    fetch: say.renderFetch, thought_changes: say.renderThoughtChanges, list_thought_ids: say.renderThoughtIds, list_logged_searches: say.renderLoggedSearches,
+    search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
+    reset_capture_stamp: say.renderResetCaptureStamp, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
+  };
+  // A capture-only key's refusals too (review pass 1), the words its facts
+  // leave out included — the value quoted back, a malformed key named — as
+  // the MCP reply says them to that key. (Its missing `derived_from` ids are
+  // trimmed before the write, not refused: the existence-oracle rule.)
+  const hookCases: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, key: string][] = [
+    ["capture_thought", { content: "lambda", supersedes: "not-an-id" }, "POST", "/v1/thoughts", { content: "lambda", supersedes: "not-an-id" }, KEYS.hook],
+    ["capture_thought", { content: "lambda", metadata: { "Bad Key": 1 } }, "POST", "/v1/thoughts", { content: "lambda", metadata: { "Bad Key": 1 } }, KEYS.hook],
+    ["capture_thought", { content: "lambda", metadata: { status: "done" } }, "POST", "/v1/thoughts", { content: "lambda", metadata: { status: "done" } }, KEYS.hook],
+  ];
+  for (const [tool, args, method, path, body, key] of [...cases.map((c) => [...c, KEYS.writer] as const), ...withFacts.map(([t, a, m, p, b]) => [t, a, m, p, b, KEYS.writer] as const), ...hookCases]) {
+    const r = await rest(method, path, body, key, KEYS.forwarder);
+    const m = await mcp(tool, args, key);
+    const { refusal, ...facts } = r.body;
+    const out = rendered(renderOf[tool], { ok: false, refusal });
+    const { text: _text, ...mcpFacts } = m.sc;
+    const who = key === KEYS.hook ? " (a capture-only key)" : "";
+    assert(refusal !== undefined && same(facts, mcpFacts), `${tool} ${r.body.code}${who}, forwarded: its facts as before, the refusal whole beside them (${JSON.stringify(refusal)?.slice(0, 100)})`);
+    assert(out.content[0].text === m.text && same(out.structuredContent, m.sc) && out.isError === m.isError,
+      `…and render.ts makes of it the MCP reply (${out.content[0].text === m.text ? "same text" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 80)}`}; first difference: ${firstDiff(out.structuredContent, m.sc)})`);
+  }
 }
 
 console.log("\n[6] test-auth's cases against REST: a read key cannot write, a capture key cannot read, a wrong or revoked key is a 401");

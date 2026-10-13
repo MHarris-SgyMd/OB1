@@ -155,7 +155,8 @@ function inputFromQueryShape(shape: Record<string, z.ZodType>, params: URLSearch
     if (type === "array") { input[key] = values; continue; }
     if (values.length > 1) return { problem: `${labelPart(key)} is given more than once` };
     const v = values[0];
-    if ((type === "number" || type === "integer") && /^-?\d+(?:\.\d+)?$/.test(v)) input[key] = Number(v);
+    // A number as JavaScript prints one too (`1e-7`, `1e+21`), so a client's String(n) reads back as n.
+    if ((type === "number" || type === "integer") && /^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(v)) input[key] = Number(v);
     else if (type === "boolean" && (v === "true" || v === "false")) input[key] = v === "true";
     else input[key] = v;
   }
@@ -382,7 +383,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (head) return head;
     const id = c.req.param("job_id");
     const stream = await subscribeJob(p, id);
-    if (!stream) return answerError(c, refusalValue({ code: "NOT_FOUND", retryable: false, id }), 404);
+    if (!stream) {
+      const r: Refusal = { code: "NOT_FOUND", retryable: false, id };
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, 404);
+    }
     const response = new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
     // Its line is written where the stream ends — the job's end, the client
     // gone, the keepalive's ceiling — not as it opens (telemetry.ts
@@ -464,9 +468,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // Saved, but its vector did not attach (the PostgREST two-step): the row
       // is there, so the answer is the creation, flagged — a client that read a
       // refusal as "not written" would capture again.
-      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
+      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false, ...wholeFor(p, r) }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
-      return answerError(c, refusalValue(r), status, status === 503 ? RETRY_AFTER : {});
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 ? RETRY_AFTER : {});
     });
   }
 
@@ -618,6 +622,19 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   });
   return app;
 }
+
+/**
+ * A refusal whole, for a request a forwarder carried (SMD-2287): the MCP
+ * server words it as it always has — the caller's input quoted back, the
+ * store's or the egress gate's words — and those are what the facts leave out
+ * (refusalValue). It is the refusal as the operation made it for this caller,
+ * the existence-oracle rule applied, which render.ts has always been handed in
+ * process: the carrier is the renderer, and it bounds and picks from it as
+ * before (a citing statement cut at 120 characters; a write key's own registry
+ * kind, or its name, not said in full). A caller with no carrier gets the
+ * facts alone.
+ */
+const wholeFor = (p: Principal, r: Refusal): { refusal?: Refusal } => (p.act ? { refusal: r } : {});
 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool
