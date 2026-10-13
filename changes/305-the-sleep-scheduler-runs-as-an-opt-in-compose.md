@@ -1,0 +1,127 @@
+# 305. The sleep scheduler runs as an opt-in compose service, beside which the workers profile may not run, with its own preflight row and an opt-in grant for the query log it wakes on (SMD-2678)
+
+**What changed.**
+- **The service.** `deploy/compose.yaml` gains `sleep` under its own `sleep` profile, shaped like the workers' `extract`:
+  - the image, the two read-only checkout mounts, the server's environment by anchor (no plugin knobs), the host alias and the schema dependency;
+  - the `OB1_WORKER_KEY` guard (exit 2), then `exec bun db/sleep.ts --follow --quiet … --poll … --workers …`, from `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS`, digits only;
+  - `init: true` (SMD-2666), extract's 120 s grace, `restart: on-failure:3`, and the workers' networks, `[data, egress]` (SMD-2583).
+
+  Check 28 allows its two checkout mounts and holds its networks, check 32 (SMD-2760) its restart policy, and `deploy/.env.example` documents the three settings, as check 14 requires.
+- **Beside the workers.** `db/sleep.ts` refuses a run (exit 2) while a claim follower's heartbeat is fresh, since a follower does not yield to a live call. It checks at its start and at every awake and asleep poll, so a follower that stamps only after its start probe (both profiles brought up at once) ends the run: asleep within a poll, its passes hard-stopped first; awake within a minute (the awake wait's longest), and always before a sleep begins. A stop that lands as one is found wins, as on any other path. `--dry-run` names them and exits 0. Under `--follow` a refusal at the start ends `heartbeat:sleep` on a failure, as one found later does, so preflight can name what keeps it down. A cleanly stopped follower's row is ended, so it does not count; one killed past its grace stays fresh for up to three intervals. Only keys of pass-stamp's alphabet count, newest first, so a row planted with a quote never reaches the `DELETE` the refusal prints, and stale rows never hide a fresh one past the 20-row bound.
+- **A database not answering at the start.** The scheduler's start reads (the `query_log` probe, its 24 h check, and the follower check) now wait out a database outage, as the sleep's own reads did, through one `readThrough()` the two share. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI, whose handlers come after the start reads, ends at once on a signal (143 under compose). The service started beside a restarting Postgres spends none of its three restarts.
+- **Its last sleep, and what wakes it, on the heartbeat.** `db/pass-stamp.ts` gains two optional fields only the scheduler sets: `slept`, `{ from, to }` on the database's clock, set as a sleep begins and ends; and `reads`, whether its role read `query_log` at its start (`yes`, `denied`, `missing`). `brain-info.ts` parses both for the `sleep` row alone, leaving off one not of the shape, so keyed `/health` carries them too. Readers before this ignore the fields.
+- **Preflight.**
+  - The `workers` row no longer reads `heartbeat:sleep`. A new `sleep` row does: asleep, its passes running, for how long; or awake, with when the last sleep ended and how long it lasted. A stale or ended scheduler warns with the service's restart, and a failed last pass with the scheduler's remedy.
+  - The row also says what wakes it: "a search or a write", or "writes alone" with why — no query log, `OB1_QUERY_LOG` off here, or the scheduler's role unable to read the log. The role is judged by the scheduler's own `reads` word, since preflight's role may be another; a row without one falls back to this connection's privilege and says so. Each lesser case warns with its fix, the grant's naming the restart the scheduler needs to see it. A brain the scheduler never ran on is a skip.
+  - `restartCommand("sleep")` names `--profile sleep up -d --no-deps sleep`.
+  - The two rows know each other. A scheduler stopped or ended while a claim follower runs is told to choose one profile, naming the followers and both ways out, not to start again, which would only refuse again. A follower stopped while the scheduler runs is told to retire its row, not to start again. A scheduler that is down says what would wake it "when it runs".
+- **The opt-in grant.**
+  - `ROLE_GRANTS` gains a `sleep` group: SELECT on `query_log`.
+  - `OPT_IN_GRANT_GROUPS` lists it, and a plain `migrate.ts --grant` issues `DEFAULT_GRANT_GROUPS`, every group but the opt-in ones, so the log's search text reaches only a role named with `--groups …,sleep`.
+  - `grantStatements` and `mergedGrants` default to `DEFAULT_GRANT_GROUPS` too, what a plain `--grant` issues; the catalogue helpers (`grantedObjects`, `grantRows`, …) keep every group. `--groups` now names the groups to issue, so it can add the opt-in one, and an `--exact` without it takes an earlier `sleep` grant away (db/README.md says so, and that the scheduler reads the privilege once at its start).
+  - `config.d.mts`'s `RoleGrantGroup` gains `sleep`, and `jobs` and `pages` too, which it lacked.
+- **Docs.**
+  - `deploy/README.md`: a choice of profile, and "The `sleep` profile instead", covering what wakes it, a first start, the move from `workers`, the settings and changing the model.
+  - `db/README.md`: the Sleep section, the grants table and its prose, and the heartbeat section.
+  - `sleep.ts`'s header.
+- **CI.**
+  - A `--profile sleep config` jq check holds the service's ports, init, key list, settings, plugin knobs, mounts, networks (`data` and `egress`, since the merge with SMD-2583), restart, host alias, schema dependency, grace, key guard and exec line.
+  - "The sleep profile refuses before it sleeps" runs the service against the job's stack: a missing key, each setting not digits only, `--poll 61`, and a fresh follower's heartbeat inserted into the stack's database, after which `heartbeat:sleep` must read ended on a failure; the row is then deleted.
+
+**Why.** SMD-1794 merged the scheduler as a command an operator starts from a checkout's shell, and nothing ran it unattended. Preflight read its heartbeat inside the `workers` row, which said nothing of what wakes it. SMD-1794's review passes deferred the service, the row and the follower question here.
+
+**Decisions.**
+- **Who may read `query_log`:** a grant, the maintainer's choice over owner-only. Grants here are `ROLE_GRANTS` entries, not migrations, so no migration number is used. The group is opt-in, because the log holds every search's text and a plain `--grant` must not widen to it.
+- **Sleep or workers:** both of the ticket's options. The scheduler refuses beside fresh followers, and the docs call the two alternatives.
+- **"Passes completed":** dropped. #327 (SMD-2261) cut the heartbeat's `passes` count, and nothing else records one. "Stopped on budget" comes with SMD-2679.
+- **Split out to SMD-2752 at the plan stage**, from this ticket's comments:
+  - banners and summaries once per process;
+  - configuration checks at the start;
+  - outage waits inside a pass's start;
+  - a word for a pass waiting on its provider;
+  - typed refusals.
+
+  The per-sleep re-check of outside followers was split there too, and came back here in review pass 1: without it, both profiles brought up at once got past the start's check.
+
+**Held.**
+- *Verify, on a scratch stack with the real local model* (project `ob1-2678v`, this branch's compose):
+  - **Setup:** qwen2.5:7b and qwen3-embedding:4b on the host's Ollama, reached through a relay container standing in as `ollama`, so stopping it was an outage for this stack alone. `OB1_SLEEP_QUIET=30` and `OB1_SLEEP_POLL=2`, and every capture and search went through the server's MCP endpoint.
+  - **A sleep after a burst:** a burst of captures kept it awake. 30 s after the last, a sleep began, extraction drained in 24 s, and consolidation joined beside it.
+  - **Preflight's `sleep` row** read "asleep, its passes running — for 34 s; a search or a write wakes it", and after a search "awake … the last sleep ended 10 s ago, after 46 s".
+  - **The wake:** a search woke it 1.3 s after its `query_log` row. Another, with an extraction claim in flight, woke it 1.8 s after its row, with 0 claims left in flight and 5 pending.
+  - **A Postgres restart mid-claim** (SMD-2599's wait under the scheduler): the scheduler logged "not answering", then "answers again" 5 s later. The extract worker stopped without recording the thought in hand, and the pass resumed and drained.
+  - **A provider outage mid-claim** (the relay stopped for 22 s): the worker paused twice on "provider unavailable", then extracted once it answered.
+  - **After both:** a restart count of 0 and no failed row, and all 15 thoughts succeeded in both passes.
+  - **A stop while asleep** took 0.3 s, exit 0. The row then read stopped, with its last sleep and the service's restart.
+  - **Earlier, a relay the model refused (403)** made the extract pass refuse at its first start. The service exited 2, compose restarted it three times, and it stayed down: the refusal rule, under the service.
+- *Review pass 3, on a scratch stack from the committed branch:*
+  - **Both profiles brought up at once:** `sleep` refused 11 s after its start, before any sleep, naming both followers. Podman restarted it three times at once, each start refused, and it stayed down at exit 2 with restarts=3. The followers extracted 6/6 and judged 5 meanwhile.
+  - **After the workers were stopped cleanly:** their rows read ended, and `sleep` ran at once.
+  - **A follower started while it slept** ended it 1.1 s later, the passes hard-stopped, all 15 claims succeeded and none left claimed.
+  - **The `DELETE` the refusal prints,** pasted into psql, removed exactly the two rows it named.
+  - **Keyed `/health`** carried `slept` and `reads`.
+  - **Wakes:** a write woke it in 0.74 s, and a search in 2.02 s (poll 2).
+  - **Stops:** 0.24 s awake and 2.1 s asleep, finishing the thought in hand. A stop during the start's outage wait took 0.25 s, exit 143, with no row.
+- *The CI refusal cases, run against the same stack:*
+  - each case refused with its message and exit 2: the missing key, a settings value that is not digits, `--poll 61`, and the follower's fresh heartbeat inserted into the database;
+  - one case's message differed only in the setting the scratch env set (`OB1_SLEEP_POLL=2`), which CI's env leaves unset.
+- *The CI config jq:* passes on the compose file. Thirteen mutants of the service each fail it: init dropped, the grace at 60 s, `OB1_SLEEP_POLL` not handed in, the key guard dropped, `--poll` dropped from the exec, a flag riding along, the host alias dropped, `unless-stopped`, a writable mount, a published port, and on the merge its networks deleted, `data` alone, or `mesh` added (review pass 6).
+- *test-preflight:*
+  - The `sleep` row:
+    - a brain the scheduler never ran on is a skip;
+    - asleep, with how long it has slept;
+    - awake, with when the last sleep ended and how long it lasted, or "no sleep yet";
+    - the log off warns with the switch;
+    - a role that can't read the log warns with the opt-in group, and granted SELECT it reads "a search or a write";
+    - the scheduler's own `reads` wins both ways: `yes` reads ok under a preflight role that cannot read the log, and `denied` warns under the owner's, its fix naming the restart;
+    - `missing` beside a log applied since warns, its fix the restart;
+    - a scheduler ended on a failure beside a fresh follower is told to choose a profile, naming the follower and both `DELETE`s, never "start it again"; a follower stopped beside a running scheduler is told to retire its row;
+    - a scheduler that is down says what would wake it "when it runs";
+    - beside board-sync's heartbeat, the `workers` row names board-sync alone;
+    - a failed last pass warns with the scheduler's remedy;
+    - stale, it names `--profile sleep up -d --no-deps sleep`, with the last sleep's end, or its start for a sleep cut off.
+  - The `workers` row leaves the scheduler's heartbeat to its own row.
+  - A plain `--grant` issues no SELECT on `query_log`, and `--groups sleep` does.
+- *test-live [38]:*
+  - **Beside a follower:** a fresh follower heartbeat refuses a run (2, no sleep), its row ended on a failure with `reads`, the last sleep it had before kept. The dry run names it and exits 0, and an ended one counts for nothing. A row planted under the prefix with a quote in its key is not named, nor pasted into the `DELETE`. A fresh follower behind twenty stale rows that sort first by key is still named.
+  - **A stop during a start read** that waits on no outage gives 130 and no row, and wins over a follower those reads found.
+  - **A follower appearing later:** one stamping after the start ends an awake `--follow` with 2, never having slept, its row ended failed. One found asleep stops the passes first, returning the lease, then ends with 2. Each run is bounded at 20 s, so a regression fails instead of hanging the suite.
+  - **The database starting up at the start** (57P03, injected through a Proxy over the suite's client) is waited out, said once, and the dry run goes on. A stop during that wait ends it with 130 and no row.
+  - **The mark:** after a `--follow`, the heartbeat carries `slept` with both instants, the end past the start, and `reads: "yes"` for the suite's owner role.
+- *test-server:* a `slept` mark is carried only when of the shape (eight marks, two carried, all eight rows counted), and `reads` only when one of its three words; neither is ever read off another worker's row.
+
+- *Mutants of the code:* 26, each run on its own copy of the tree under a 15-minute watchdog, each failing a test.
+  - `sleep.ts` (the [38] harness): no refusal beside followers; the start probe outside the outage wait; no end on the sleep's mark; no awake re-check; no asleep re-check; planted keys counted; ordered by key again; no stop before the stamper; a start refusal leaving no row; a refusal's stamp dropping the last sleep; a refusal before the stop.
+  - `pass-stamp.ts`: `slept` never written; `reads` never written.
+  - preflight: an unreadable log counted as read; the log off counted as on; the scheduler's `reads` ignored; a log applied since ignored; the `workers` row keeping the scheduler's heartbeat; the followers keeping a scheduler down ignored; the `workers` row ignoring a running scheduler; a down scheduler's wakes unqualified; a retire fix without `COMPOSE_PROFILES`.
+  - `migrate.ts`: a plain `--grant` issuing the opt-in group.
+  - `brain-info.ts`: `slept` not validated; `slept` read off any worker; `reads` not checked.
+
+  The first run of the first mutant hung the harness for 5 h 48 m (review pass 1). The `workers`-row mutant survived until review pass 2's mixed-heartbeat case.
+
+**Measured after**, on the merge with main e62d42ed. test-preflight 705/705; test-server 922/922; test-cli 432/432; test-schema 2712/2712; test-live 1238/1238 (ten new [38] assertions; db/README.md's total updated); [38] alone 32/32; check-fork-consistency PASS; tsc clean in db/ and server-portable/; actionlint 1.7.7, CI's pin, with shellcheck, clean.
+
+**Review passes.**
+
+| Pass | Finding | Caught |
+|---|---|---|
+| 1 | No high-severity finding. The follower check ran only at the start, so both profiles brought up at once got past it: a follower stamps only after its start probe. It now runs at every awake and asleep poll too, the per-sleep re-check taken back from SMD-2752. Preflight's `sleep` row judged what wakes the scheduler by its own role and environment, giving a false ok to an owner's preflight beside a `--grant` scheduler and a false warning the other way; the scheduler now records `reads` on its row, and the row says `OB1_QUERY_LOG` is read "here". Text still said a plain `--grant` issues every group, and an `--exact` without `--groups` silently took an earlier `sleep` grant away; the helpers' defaults, `lonelyGrantFlag`'s message and the docs now say otherwise. "A stop during the start's wait ends it with 130" held only in-process. Two in `sleep.ts` from before this ticket: a signal aborted during the start's reads was never heard, so `--follow` ran on; and heartbeat keys under the prefix were pasted unchecked into the `DELETE` the refusal prints, a quote in one a statement for the operator to paste, while `ORDER BY key LIMIT 20` could hide a fresh follower. The services table had no `sleep` row. The mutant runner's first mutant hung the [38] harness for 5 h 48 m, blocking another session's podman restart, because the refusal case's run was unbounded; it and the new cases are now bounded, and the runner has a watchdog. | cold read |
+| 2 | No high-severity finding. A scheduler whose start found no query log, 034 applied since, read ✓ "no query log" with no fix; it now warns with the restart. A signal aborted during a start read that waited on no outage ran on into an ended "stopped" row, where the same stop in an outage wait gave 130 and no row; it is now 130 and no row either way. A stop and a found follower racing asleep ended 2, awake 0; a stop now wins both. "Within a poll" was true asleep only — awake the check runs at most a minute apart, and always before a sleep begins — and "three refusals use up the restarts" was four. The key filter ran in JS after the 20-row bound, so non-alphabet rows could still crowd it; the query matches the pattern now. A comment and the liveness section still described the old `reads`-less reading. The mutant run found the `workers` row's filter untested beside another worker's heartbeat; a case covers it. | cold read |
+| 3 | No high-severity finding, on a scratch stack from the committed branch. Brought up together, the two profiles behaved as recorded: `sleep` refused before its first sleep, four times, and stayed down while the followers did the work; it ran once they were stopped cleanly; a follower started while it slept ended it in 1.1 s, nothing left claimed. But preflight then said "start it again" to a scheduler the followers kept down, which would only refuse again, and — a refusal at the start stamping nothing — would have read a never-run scheduler as no row at all; the reverse too, a follower stopped for the scheduler told to start again. A refusal under `--follow` now ends the row on a failure, and each row names the other's way out. A down scheduler said a search "wakes it"; now "when it runs". The heartbeat's failure line said "the passes go on" even at its end, and the refusal's stop command lacked the `-p` hint. | run-it |
+| 4 | No high-severity finding, CI checked step by step: the refusal step's follower case left an ended `heartbeat:sleep` in the job's database, harmless to every later step; it now asserts the row ended on a failure and deletes it. The two "retire" fixes deleted a row without taking its profile out of `COMPOSE_PROFILES`, so the next `up` brought the conflict back; both now say so. A start refusal's stamp wrote the whole value without the last sleep, so a scheduler that had slept for days read "no sleep recorded" once refusing; it keeps the mark now. An in-process stop landing during the follower read gave 2 and a failed row, not the 130 every other early stop gives; the stop is checked first. A follower ended on a failure was called "stopped" in the retire line, and the header and the deploy README did not say a start refusal stamps the row. | cold read |
+| 5 | High, from the merge with main alone: SMD-2583 put Postgres on the internal `data` network and every service on networks of its own, and `sleep`, merged cleanly but naming none, landed on compose's default network, where its start's outage wait would wait for a database it could not reach, for ever, never exiting for a restart — run on a stack from the merge, it hung there. It now names `[data, egress]`, as the workers do; checks 28 and 32 (SMD-2760) hold its networks and its `on-failure:3`, and the CI config jq its networks too. Five files conflicted, resolved keeping both sides (test-preflight's catalog-only skips 26). The branch as committed was sound: CI's refusal step, run verbatim on a stack, held every case and read `failed:true`, leaving no heartbeat row. | run-it |
+| 6 | No high- or medium-severity finding, on a stack from the merge with the real model: `sleep` joined `data` and `egress` alone, slept 30 s after a burst, drained extraction through a relay on `egress`, and woke on searches 0.16 s and 1.27 s after their log rows. Main's 084 relation facets, 7 stored in a sleep, wrote no audit row and did not wake it. Every conflict resolution kept both sides. Four record gaps: deploy/README's network bullets and the ADR's `data` list did not name the scheduler, the Sleep section's group list lacked `structure` (relation facets since 084), and the fragment's CI line and jq-mutant count predated the networks. | run-it |
+| 7 | No high-severity finding, the deploy docs followed literally on a stack: the first start, the move from `workers`, the refusal and its recovery, wakes, the settings and a model change all went as written, and every fix preflight printed worked pasted. The docs said a model switch's backlog under `sleep` is extracted while the brain is quiet; the switch run extracts it in the foreground, and only consolidation's new pool waits for quiet. A plain `down` left `sleep` waiting for ever on a removed Postgres, and the section never said to name the profile on `down`; "recreate the service" gave no command, and a `restart` keeps the old settings; the move's block lacked the rows' `DELETE`; preflight's query-log fix did not say to recreate the server. | walkthrough |
+| CI | The PR's first run: the loopback step's SMD-2583 render, every profile at once, lists each network's members exactly, and `sleep` was not in `data`'s or `egress`'s. Pass 5 had updated the sleep profile's own jq for the networks but not this one, and its stack runs never ran the step. Both lists now name it; the step's network checks onward pass locally. | automated |
+| — | Tidy, after the passes. In `sleep.ts`, `refuseOutside` was rebuilt on every loop and is now built once beside `outsideNow`, and the start's reads take one wake signal, not a fresh one a call. test-live [38]'s three inline 20-second races and its late `bounded` are one `bounded` beside `sleepRun`, and its three `Proxy` wrappers over the suite's client one `around`. No behaviour changed. One race in SMD-1794's [38] case, which the tidy's two full runs lost (1199/1200): "a sleep that ran resets the wait" flipped the model off before the capture had woken the recovered sleep, so consolidation, joining it, could meet the 404 at its own start, a retried refusal that kept the backoff at 20 s. It now flips once the wake is logged. | — |
+
+**Not taken.**
+- *A [38] case under a role without the `sleep` group.* The scheduler's `reads` is checked only as the suite's owner (`yes`), so a scheduler that stamped `yes` whatever its probe found would pass [38]. Preflight's reading of `reads` is held both ways, and `readsQueryLog`'s `denied` branch predates this ticket. A role carrying the worker, extraction and capture groups for a live sleep is a fixture of its own (review pass 2).
+- *Moving a found follower's thoughts in hand to the back of the queue, as a wake does.* The run ends on it, and the next start refuses beside the same follower, so the order of that pool is the follower's (review pass 2).
+- *A refusal per kind of start failure, and the banners and summaries once per process:* SMD-2752.
+- *"Passes completed" on the row:* dropped (Decisions, above).
+- *Budgets, and "passes stopped on budget":* SMD-2679.
+- *`slept.to` at the passes' end rather than the sleep's last poll.* It can be up to a poll plus the thought in hand early, which a row read in minutes does not show (review pass 3).
+- *Rewording the "stopping: the passes after the thought in hand" line when no pass is running.* It predates this ticket (review pass 3).
+- *Advice when both sides are down at once* (a follower's row ended, and the scheduler ended for another reason). Each row then names its own restart, and following both brings the conflict back. The docs say to retire the losing profile's rows and take it out of `COMPOSE_PROFILES`, which removes the case (review pass 4).
+- *Refusing a second scheduler beside a running one* (the compose service and a `--follow` by hand). Leases keep the two from taking the same thought, and they share `heartbeat:sleep`. It runs twice the workers, not a wrong result (review pass 4).
