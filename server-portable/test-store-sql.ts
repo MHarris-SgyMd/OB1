@@ -860,7 +860,7 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
   await capture("[8d] the hook's outside text the writer re-sends as agent", writer, "agent");
   assert((await stamp(between.id)) === "operator/writer-8d/agent", `…and one between the two moves the stamp at the declared trust (${await stamp(between.id)})`);
 
-  // 089: the store reads what the weighing did to the label (SMD-2898) — a
+  // 090: the store reads what the weighing did to the label (SMD-2898) — a
   // move, and the settle a second key then finds; a 'keep' re-capture and a
   // new text are weighed for nothing and carry no label.
   const toldText = "[8d] the hook's outside text the writer is told it lifted";
@@ -871,7 +871,7 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
   assert(told.label?.outcome === "moved" && JSON.stringify(told.label) === JSON.stringify({ outcome: "moved", stamp: { actorKind: "operator", actorName: "writer-8d", trust: "operator" }, before: { actorKind: "agent", actorName: "hook-8d", trust: "ingested" } })
       && JSON.stringify(toldAgain.label) === JSON.stringify({ outcome: "settled", by: "restamp", stamp: { actorKind: "operator", actorName: "writer-8d", trust: "operator" }, mine: true })
       && fresh.label === undefined && hookAgain.label === undefined,
-    `the store reads 089's answer: moved, then settled and the writer's own; the hook's capture and its 'keep' re-capture carry none (${JSON.stringify([told.label, toldAgain.label])})`);
+    `the store reads 090's answer: moved, then settled and the writer's own; the hook's capture and its 'keep' re-capture carry none (${JSON.stringify([told.label, toldAgain.label])})`);
 
   /**
    * Run `body` with both functions set aside and the stand-ins given (a body
@@ -900,11 +900,11 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
   };
   const ANSWERS_FALSE = "LANGUAGE sql AS $$ SELECT false $$";
 
-  // A database at 085–088: no weighing that answers — 085's function moves
+  // A database at 085–089: no weighing that answers — 085's function moves
   // the label, as it did then, and the store says nothing of it.
-  const pre089 = await withStandIns(null, "LANGUAGE sql AS $$ SELECT COALESCE(ob1_weigh_recapture_real(p_id, p_fingerprint, p_actor, p_declared)->>'outcome' = 'moved', false) $$", "[8d] the hook's text the writer re-captures before 089");
-  assert(pre089.thrown === "" && pre089.landed?.existed === true && pre089.landed.label === undefined && (await stamp(pre089.landed.id)) === "operator/writer-8d/operator",
-    `a database at 085–088: the store falls back to 085's function, which moves the label, and carries no label (${pre089.thrown.slice(0, 80) || (pre089.landed ? await stamp(pre089.landed.id) : "")})`);
+  const pre090 = await withStandIns(null, "LANGUAGE sql AS $$ SELECT COALESCE(ob1_weigh_recapture_real(p_id, p_fingerprint, p_actor, p_declared)->>'outcome' = 'moved', false) $$", "[8d] the hook's text the writer re-captures before 090");
+  assert(pre090.thrown === "" && pre090.landed?.existed === true && pre090.landed.label === undefined && (await stamp(pre090.landed.id)) === "operator/writer-8d/operator",
+    `a database at 085–089: the store falls back to 085's function, which moves the label, and carries no label (${pre090.thrown.slice(0, 80) || (pre090.landed ? await stamp(pre090.landed.id) : "")})`);
 
   // A database before 085: neither function, and the capture stands. A
   // weighing that fails throws, so the caller's retry makes it.
@@ -917,14 +917,14 @@ console.log("\n[8d] A capture-only key's stamp yields to a re-capture by a key t
      WHERE t.content = '[8d] the hook''s text the writer re-captures while the restamp fails' AND a.action = 'update' AND a.diff ? 'recaptured'`;
   assert(/the restamp failed/.test(failed) && noted?.n === 1, `a restamp that fails throws, so the caller's retry makes it — and the note before it is made (${failed.slice(0, 80)}; ${noted?.n})`);
   // A 42883 from inside the weighing — a helper it calls gone — is a broken
-  // schema, thrown, not read as a database before 089 (review pass 2: only
+  // schema, thrown, not read as a database before 090 (review pass 2: only
   // the function's own absence falls back).
   const broken = (await withStandIns("LANGUAGE plpgsql AS $$ BEGIN RETURN ob1_helper_gone_8d(p_id); END $$", ANSWERS_FALSE, "[8d] the hook's text the writer re-captures while a helper is gone")).thrown;
   assert(/ob1_helper_gone_8d/.test(broken), `a missing function inside the weighing throws, not a fallback (${broken.slice(0, 100)})`);
-  // On a database at 085–088 (no weighing that answers), a fault in 085's
+  // On a database at 085–089 (no weighing that answers), a fault in 085's
   // function is thrown as before (review pass 3).
   const oldFault = (await withStandIns(null, "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the 085 restamp failed for [8d]'; END $$", "[8d] the hook's text the writer re-captures while 085's restamp fails")).thrown;
-  assert(/the 085 restamp failed/.test(oldFault), `a database at 085–088: a fault in 085's function throws, as it did (${oldFault.slice(0, 100)})`);
+  assert(/the 085 restamp failed/.test(oldFault), `a database at 085–089: a fault in 085's function throws, as it did (${oldFault.slice(0, 100)})`);
   await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
   await sql.close();
 }

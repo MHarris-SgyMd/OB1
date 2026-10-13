@@ -2187,11 +2187,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       `the operator's own row is refused NOT_CAPTURE_STAMP, a missing id NOT_FOUND (${notCapture.sc.code}, ${missing.sc.code})`);
   }
 
-  // [13h] SMD-2898 (migration 089): capture_thought's reply says what a
+  // [13h] SMD-2898 (migration 090): capture_thought's reply says what a
   // re-capture did to a capture-only key's label — moved to the caller, kept
   // and settled, settled before (the caller's own, or another key's), or not
   // weighed — and a new text, the capture key's own re-capture and a database
-  // before 089 say nothing of it.
+  // before 090 say nothing of it.
   {
     const K = captureAs(CAPTURE_KEY);
     const say = async (args: Record<string, unknown>, key: string) => {
@@ -2226,20 +2226,20 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const hookAgain = await K({ content: KEPT, trust: "ingested" });
     assert(!NOTE.test(fresh.text) && fresh.label === undefined && !NOTE.test(again.text) && again.label === undefined && !NOTE.test(textOf(hookAgain)),
       "a new text, a re-capture of a row no capture-only key captured, and the capture key's own re-capture say nothing of a label");
-    // A database before 089: 086's restamp, and no weighing that answers —
+    // A database before 090: 086's restamp, and no weighing that answers —
     // the label still moves, and the reply is as it was.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("086_") });
     await sql`ALTER FUNCTION ob1_weigh_recapture(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture_hidden`;
     try {
-      const OLD = "[13h] smd2898probe a page the hook labels outside text before 089";
+      const OLD = "[13h] smd2898probe a page the hook labels outside text before 090";
       await K({ content: OLD, trust: "ingested" });
       const old = await say({ content: OLD }, "op-raw");
       const [m] = await sql`SELECT metadata->>'actor_name' AS name FROM thoughts WHERE content = ${OLD}`;
       assert(!NOTE.test(old.text) && old.label === undefined && m?.name === "op-key",
-        `a database before 089: the operator's re-capture still moves the label (086's restamp), and the reply says nothing of it (${m?.name})`);
+        `a database before 090: the operator's re-capture still moves the label (086's restamp), and the reply says nothing of it (${m?.name})`);
     } finally {
       await sql`ALTER FUNCTION ob1_weigh_recapture_hidden(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture`;
-      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("089_") });
+      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("090_") });
     }
   }
 

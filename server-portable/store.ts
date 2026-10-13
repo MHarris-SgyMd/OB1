@@ -648,10 +648,10 @@ export type CaptureResult = {
    */
   supersedes?: string | null;
   /**
-   * Migration 089 (SMD-2898): what the re-capture did to a capture-only key's
+   * Migration 090 (SMD-2898): what the re-capture did to a capture-only key's
    * label, as ob1_weigh_recapture answered it under the row lock. Absent for a
    * new text, a key that cannot read, a row that is not a capture-only key's
-   * to weigh (`none`), and a database before 089.
+   * to weigh (`none`), and a database before 090.
    */
   label?: RecaptureLabel;
 };
@@ -946,7 +946,7 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
 }
 
 /**
- * What a re-capture did to a capture-only key's label (migration 089,
+ * What a re-capture did to a capture-only key's label (migration 090,
  * SMD-2898). `moved`: the label moved to the caller — `stamp` the caller's,
  * `before` the capture-only key's. `kept`: weighed now and not higher, the row
  * settled — `weighed` the trust the caller was weighed at, `own` whether the
@@ -966,9 +966,9 @@ export type RecaptureLabel =
   | { outcome: "unweighed"; stamp: ActorStamp };
 
 /**
- * ob1_weigh_recapture's jsonb (migration 089) as the store's label — one
+ * ob1_weigh_recapture's jsonb (migration 090) as the store's label — one
  * reading for both stores. `none`, an outcome this server does not know, or
- * a body that is no envelope (085's boolean, from the function before 089)
+ * a body that is no envelope (085's boolean, from the function before 090)
  * is no label: the capture landed, and the reply says what it said before.
  */
 export function normaliseRecaptureLabel(r: unknown): RecaptureLabel | undefined {

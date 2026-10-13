@@ -115,7 +115,7 @@ export type Captured = {
   headWindow: HeadWindow | null;
   /** A re-capture that named pointers it could not write (035): what was named, and what stands. Reader only. */
   recapture: { derivedNamed: boolean; given?: string; current: string | null } | null;
-  /** What the re-capture did to a capture-only key's label (089, SMD-2898). Reader only, on a re-capture; absent before 089. */
+  /** What the re-capture did to a capture-only key's label (090, SMD-2898). Reader only, on a re-capture; absent before 090. */
   label?: RecaptureLabel;
 };
 
@@ -401,7 +401,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       contextFailures,
       headWindow: headWindowOf(embedded),
       recapture,
-      // 089 (SMD-2898): the label's fate, under the existence-oracle rule —
+      // 090 (SMD-2898): the label's fate, under the existence-oracle rule —
       // the stores weigh only a reader's re-capture, and `existed` above is
       // a reader's alone.
       ...(existed === true && captured.label ? { label: captured.label } : {}),

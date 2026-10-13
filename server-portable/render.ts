@@ -825,12 +825,12 @@ export const renderJobHandle = (o: Outcome<JobHandle>): Reply => render(o, (v) =
 // ── The write tools (SMD-2283 PR 2) ──────────────────────────────────────────
 
 /**
- * What a re-capture did to a capture-only key's label (089, SMD-2898): that the
+ * What a re-capture did to a capture-only key's label (090, SMD-2898): that the
  * text landed on an existing thought, whether its label moved to the caller or
  * was kept, and whether the row is now settled — what only thought_changes
  * said before. Where a label moved or was kept, the operator's reset is named
  * as the way to weigh it afresh. No label (a new text, a key that cannot read, a row that is
- * not a capture-only key's, a database before 089) says nothing.
+ * not a capture-only key's, a database before 090) says nothing.
  */
 function explainRecaptureLabel(v: Captured): string {
   const l = v.label;

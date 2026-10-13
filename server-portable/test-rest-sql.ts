@@ -242,7 +242,7 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   // against itself, which a swapped entry passes (review pass 1).
   const ownRow = await rest("POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {});
   const noRow = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a4/reset-capture-stamp", {});
-  // What a re-capture did to the hook's label (089, SMD-2898), while the
+  // What a re-capture did to the hook's label (090, SMD-2898), while the
   // writer is the operator: REST's body carries the label, the MCP tool's
   // structured content its outcome and its text the note.
   const liftRest = "omega: the hook's outside text the writer lifts through REST", liftMcp = "omega: the hook's outside text the writer lifts through MCP";

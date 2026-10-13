@@ -529,8 +529,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // capture-only key's stamp yields to the first classified key that can read
   // at a higher trust, SMD-2664), 086 (the operator resets such a label,
   // SMD-2744), 087 (what the findings step posted to the board,
-  // SMD-2681), 088 (update_thought answers what it did, SMD-2744) and 089
-  // (a re-capture says what it did to a capture-only key's label, SMD-2898)
+  // SMD-2681), 088 (update_thought answers what it did, SMD-2744), 089 (the
+  // 1.8.0 cut's schema_version, SMD-1804) and 090 (a re-capture says what it
+  // did to a capture-only key's label, SMD-2898)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -642,7 +643,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // redefines 085's restamp and backfill on their own bodies, refusing by
   // name without 046 or 085 ([20ah]); 087 adds a table and
   // needs nothing ([20ai]); 088 redefines 073's update_thought on
-  // its own body, refusing by name without 073 ([20aj]); 089 adds the
+  // its own body, refusing by name without 073 ([20aj]); 089 upserts
+  // ob1_config.schema_version for the 1.8.0 cut, needing only 006's table; 090 adds the
   // weighing that answers and redefines 086's restamp as a call of it,
   // refusing by name without 085 or 086 ([20ak]) — all
   // recorded by the
@@ -650,7 +652,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 60, `030 is among the last sixty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 61, `030 is among the last sixty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3944,32 +3946,32 @@ console.log("\n[20aj] Migration 088: refused by name without 073; onto a populat
   await sql.close();
 }
 
-console.log("\n[20ak] Migration 089: refused by name without 086; onto a populated brain at the file before it — the weighing that answers, no row and no audit row moved; after it, a row 086's body settled answers settled, a fresh one moved, and 085's function still answers whether it moved; a re-apply a no-op (SMD-2898)");
+console.log("\n[20ak] Migration 090: refused by name without 086; onto a populated brain at the file before it — the weighing that answers, no row and no audit row moved; after it, a row 086's body settled answers settled, a fresh one moved, and 085's function still answers whether it moved; a re-apply a no-op (SMD-2898)");
 {
-  const the089 = MIGRATIONS.find((f) => f.endsWith("_recapture_says_what_it_did.sql"))!;  // by name: renumbered when main takes its number
+  const the090 = MIGRATIONS.find((f) => f.endsWith("_recapture_says_what_it_did.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "086" });
-  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 089 needs 085 and 086 (ob1_restamp_recapture, ob1_reset_capture_stamp); this schema lacks it",
-    `089 on a schema stopped before 086 is refused up front, naming what it needs (${refused})`);
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the090 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 090 needs 085 and 086 (ob1_restamp_recapture, ob1_reset_capture_stamp); this schema lacks it",
+    `090 on a schema stopped before 086 is refused up front, naming what it needs (${refused})`);
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the089 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the090 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   for (const [k, kind] of [["hook-key", "agent"], ["op-key", "operator"], ["bot-key", "agent"]]) await sql`SELECT set_agent_kind(${k}, ${kind})`;
   const HOOK = { name: "hook-key", via: "open-brain", scope: "capture" }, OP = { name: "op-key", via: "open-brain" }, BOT = { name: "bot-key", via: "open-brain" };
   const hookCapture = async (content: string) =>
     (await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor: HOOK, event: { trust: "ingested" }, recapture: "keep" }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
-  const settled = await hookCapture("upgrade 089: the hook's outside text an agent keeps");
+  const settled = await hookCapture("upgrade 090: the hook's outside text an agent keeps");
   const [{ kept }] = await sql`SELECT ob1_restamp_recapture(${settled.id}::uuid, ${settled.fingerprint}::text, ${BOT}::jsonb, 'ingested') AS kept`;
   assert(kept === false && (await sql`SELECT to_regprocedure('ob1_weigh_recapture(uuid, text, jsonb, text)') AS f`)[0].f === null,
-    "[20ak] setup: before 089 an agent key's equal re-capture declines through 085's function, and nothing answers more");
-  const fresh = await hookCapture("upgrade 089: the hook's outside text the operator lifts");
+    "[20ak] setup: before 090 an agent key's equal re-capture declines through 085's function, and nothing answers more");
+  const fresh = await hookCapture("upgrade 090: the hook's outside text the operator lifts");
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const before = await rows(), auditBefore = await audits();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the090 });
   const [made] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'ob1_weigh_recapture'`;
   assert(made?.fns === 1 && /ob1:recapture-weighed-once/.test(String(made.body)), `one ob1_weigh_recapture, carrying 086's body (${made?.fns})`);
   assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
@@ -3983,8 +3985,8 @@ console.log("\n[20ak] Migration 089: refused by name without 086; onto a populat
     `…085's function still moves a fresh row and answers true, and the operator's next re-capture finds the label its own (${JSON.stringify(onMoved)})`);
   // A re-apply moves nothing.
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 });
-  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 089 is a no-op: no row or audit row moved");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the090 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 090 is a no-op: no row or audit row moved");
   await sql.close();
 }
 

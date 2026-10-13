@@ -410,8 +410,8 @@ export class PostgrestStore implements ThoughtStore {
       }
       // 085: and when the row's stamp is still a capture-only key's, at a trust
       // above it, the stamp moves to this key (SMD-2664), after the note, as
-      // the SQL store moves it. 089: through ob1_weigh_recapture, which says
-      // what it did to the label (SMD-2898); a database at 085–088 has only
+      // the SQL store moves it. 090: through ob1_weigh_recapture, which says
+      // what it did to the label (SMD-2898); a database at 085–089 has only
       // ob1_restamp_recapture, which says nothing, and one before 085 neither.
       let label;
       if (r?.existed === true && opts.recapture !== "keep") {

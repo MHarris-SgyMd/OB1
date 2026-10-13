@@ -4633,7 +4633,7 @@ console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, n
   assert(importers.length > 10 && packages.length === 0, `spans.ts, embed.ts, store.ts and jobs.ts — and every one of the ${importers.length} db/ and evals/ files that import server-portable/ — reach no package through server-portable/'s files, so a worker with no server-portable/ install still runs (${JSON.stringify(packages)})`);
 }
 
-console.log("\n[29] capture_thought's reply says what a re-capture did to a capture-only key's label — moved, kept, settled (by whom, and whose), unweighed — from 089's answer, and nothing from none, a body before 089, or no label (SMD-2898)");
+console.log("\n[29] capture_thought's reply says what a re-capture did to a capture-only key's label — moved, kept, settled (by whom, and whose), unweighed — from 090's answer, and nothing from none, a body before 090, or no label (SMD-2898)");
 {
   const { normaliseRecaptureLabel } = await import("./store.ts");
   const { renderCapture } = await import("./render.ts");
@@ -4664,12 +4664,12 @@ console.log("\n[29] capture_thought's reply says what a re-capture did to a capt
       && unsaid?.outcome === "settled" && unsaid.by === "restamp" && unsaid.mine === false && declined?.outcome === "settled" && declined.by === "decline" && !("mine" in declined) && declined.decliner === "bot-key" && declined.declinerWeighed === false
       && declinedWeighed?.outcome === "settled" && declinedWeighed.by === "decline" && declinedWeighed.declinerWeighed === true && declinedUnsaid?.outcome === "settled" && declinedUnsaid.by === "decline" && declinedUnsaid.declinerWeighed === false && declinedNameless?.outcome === "settled"
       && unweighed?.outcome === "unweighed" && nothing.every((n) => n === undefined),
-    `089's answer as the store's label; none, 085's boolean, a body with no stamp (a move with no before), a settle by no one it names, an outcome this server does not know, and an array are no label (${JSON.stringify(nothing)})`);
+    `090's answer as the store's label; none, 085's boolean, a body with no stamp (a move with no before), a settle by no one it names, an outcome this server does not know, and an array are no label (${JSON.stringify(nothing)})`);
   const base = { id: ID, existed: true, reader: true, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null };
   const reply = (label: unknown) => renderCapture({ ok: true, value: { ...base, ...(label === undefined ? {} : { label }) } } as never);
   const text = (label: unknown) => reply(label).content[0].text;
   const plain = text(undefined);
-  assert(plain === `Captured as observation — id ${ID}` && !("label" in (reply(undefined).structuredContent ?? {})), `no label: the reply as before 089, its structured content with no label (${plain})`);
+  assert(plain === `Captured as observation — id ${ID}` && !("label" in (reply(undefined).structuredContent ?? {})), `no label: the reply as before 090, its structured content with no label (${plain})`);
   const t = Object.fromEntries(Object.entries(labels).map(([k, v]) => [k, text(v)]));
   const PUT_BACK = "An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands.";
   const REOPEN = "An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands.";

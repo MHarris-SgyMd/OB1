@@ -680,8 +680,8 @@ export class SqlStore implements ThoughtStore {
     // above it, the stamp moves to this key (SMD-2664) — the trust this write
     // declares, checked against the text it captured. Made the way the note
     // is made, and after it, so a restamp that fails never holds up the note.
-    // 089: through ob1_weigh_recapture, which says what it did to the label
-    // (SMD-2898); a database at 085–088 has only ob1_restamp_recapture, which
+    // 090: through ob1_weigh_recapture, which says what it did to the label
+    // (SMD-2898); a database at 085–089 has only ob1_restamp_recapture, which
     // moves it and says nothing, and one before 085 neither.
     let label;
     if (r?.existed === true && opts.recapture !== "keep") {

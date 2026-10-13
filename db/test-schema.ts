@@ -7658,7 +7658,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 7 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("089") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 7 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -12713,13 +12713,13 @@ console.log("\n[75] Migration 085: a capture-only key's stamp yields to the firs
   const OP = { name: "op-key", via: "test-door" }, BOT = { name: "bot-key", via: "test-door" }, BOT2 = { name: "bot2-key", via: "test-door" };
   const IMP = { name: "imp-key", via: "test-door" }, NOBODY = { name: "unclassified-key", via: "test-door" };
 
-  // The shape. Since 089 the body is ob1_weigh_recapture's, and 085's
+  // The shape. Since 090 the body is ob1_weigh_recapture's, and 085's
   // function answers whether it moved the label (SMD-2898).
   const [shape] = await q<{ fns: number; body: string }>(`SELECT count(*)::int AS fns, (SELECT max(prosrc) FROM pg_proc WHERE proname = 'ob1_weigh_recapture') AS body FROM pg_proc WHERE proname = 'ob1_restamp_recapture'`);
   const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
   assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /085/.test(c) && /SMD-2664/.test(c) && /085 \/ SMD-2664/.test(bc),
-    "085's one function, its sentinel in the body that carries it (089's ob1_weigh_recapture); it and the backfill's comment name 085 and the ticket");
+    "085's one function, its sentinel in the body that carries it (090's ob1_weigh_recapture); it and the backfill's comment name 085 and the ticket");
   const bfSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'backfill_thought_actors(integer)'::regprocedure`)).s);
   assert(/\(a\.action = 'update' AND a\.diff \? 'restamped'\) AS restamped/.test(bfSrc) && /\(\(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\)\s+OR/.test(bfSrc)
       && /ORDER BY \(a\.restamped AND COALESCE\(bool_and\(a\.restamped\) OVER newer, true\)\) DESC,/.test(bfSrc),
@@ -13183,12 +13183,12 @@ console.log("\n[77] Migration 086: the operator resets a capture-only key's sett
   const rc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const bc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["backfill_thought_actors(integer)"])).c ?? "";
   assert(shape.fns === 1 && /ob1:reset-is-the-operators/.test(shape.body) && /086 \/ SMD-2744/.test(c) && /086 \/ SMD-2744/.test(rc) && /086 \/ SMD-2744/.test(bc)
-      && lastDefinerOf("ob1_reset_capture_stamp").startsWith("086") && lastDefinerOf("ob1_restamp_recapture").startsWith("089") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
-    "086's one function, its sentinel in its body; it, the restamp and the backfill name 086 and the ticket, 086 the last definer of the reset and the backfill (089 the restamp's, SMD-2898)");
-  // Since 089 the restamp's body is ob1_weigh_recapture's (SMD-2898).
+      && lastDefinerOf("ob1_reset_capture_stamp").startsWith("086") && lastDefinerOf("ob1_restamp_recapture").startsWith("090") && lastDefinerOf("backfill_thought_actors").startsWith("086"),
+    "086's one function, its sentinel in its body; it, the restamp and the backfill name 086 and the ticket, 086 the last definer of the reset and the backfill (090 the restamp's, SMD-2898)");
+  // Since 090 the restamp's body is ob1_weigh_recapture's (SMD-2898).
   const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_weigh_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
   assert((rsSrc.match(/AND \(v_since IS NULL OR [a-z]\.seq > v_since\)/g) ?? []).length === 4 && /diff \? 'restamp_reset'/.test(rsSrc),
-    "the restamp reads the row's restamp, the other agents' declines and its own — and, since 089, the fingerprint moves on a settled row — since the latest reset, each bounded");
+    "the restamp reads the row's restamp, the other agents' declines and its own — and, since 090, the fingerprint moves on a settled row — since the latest reset, each bounded");
 
   // Keys as the server sees them: agent ids from the registry.
   const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
@@ -13678,7 +13678,7 @@ console.log("\n[79] Migration 088: update_thought answers what it did — the ro
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[80] Migration 089: a re-capture over a capture-only key's label says what it did — moved, kept, settled (and whose), unweighed, or none — and the row's stamp after, read under the row lock; 085's function answers whether it moved, over the same body (SMD-2898)");
+console.log("\n[80] Migration 090: a re-capture over a capture-only key's label says what it did — moved, kept, settled (and whose), unweighed, or none — and the row's stamp after, read under the row lock; 085's function answers whether it moved, over the same body (SMD-2898)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -13693,9 +13693,9 @@ console.log("\n[80] Migration 089: a re-capture over a capture-only key's label 
   const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_weigh_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const rc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_restamp_recapture(uuid, text, jsonb, text)"])).c ?? "";
   const rsSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_restamp_recapture(uuid, text, jsonb, text)'::regprocedure`)).s);
-  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /ob1:recapture-weighed-once/.test(shape.body) && /089 \/ SMD-2898/.test(c) && /089 \/ SMD-2898/.test(rc)
-      && lastDefinerOf("ob1_weigh_recapture").startsWith("089") && lastDefinerOf("ob1_restamp_recapture").startsWith("089") && /ob1_weigh_recapture\(/.test(rsSrc) && !/thought_audit/.test(rsSrc),
-    "089's one ob1_weigh_recapture, 085's two sentinels in its body, both comments naming 089 and the ticket; 085's function a call of it");
+  assert(shape.fns === 1 && /ob1:recapture-restamps-capture-key/.test(shape.body) && /ob1:recapture-weighed-once/.test(shape.body) && /090 \/ SMD-2898/.test(c) && /090 \/ SMD-2898/.test(rc)
+      && lastDefinerOf("ob1_weigh_recapture").startsWith("090") && lastDefinerOf("ob1_restamp_recapture").startsWith("090") && /ob1_weigh_recapture\(/.test(rsSrc) && !/thought_audit/.test(rsSrc),
+    "090's one ob1_weigh_recapture, 085's two sentinels in its body, both comments naming 090 and the ticket; 085's function a call of it");
 
   const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
   const HOOK = { name: "hook-80", agent_id: await agent("a", "hook-80", "capture"), via: "test-door", scope: "capture" };
@@ -13709,7 +13709,7 @@ console.log("\n[80] Migration 089: a re-capture over a capture-only key's label 
     (await one<{ r: { id: string; fingerprint: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(80)])).r;
   const weigh = async (id: string, fp: string | null, actor: Meta | null, trust: string | null = null) =>
     (await one<{ r: Answer }>(`SELECT ob1_weigh_recapture($1::uuid, $2::text, $3::jsonb, $4::text) AS r`, [id, fp, actor === null ? null : JSON.stringify(actor), trust])).r;
-  /** A capture as the stores make it since 089: upsert_thought, then — landing on a row, without 'keep' — 082's note and the weighing. */
+  /** A capture as the stores make it since 090: upsert_thought, then — landing on a row, without 'keep' — 082's note and the weighing. */
   const capture = async (content: string, actor: Meta, trust: string | null = null) => {
     const keep = actor.scope === "capture";
     const r = await cap(content, { metadata: { source: "mcp" }, actor, ...(trust ? { event: { trust } } : {}), ...(keep ? { recapture: "keep" } : {}) });
@@ -13906,10 +13906,10 @@ console.log("\n[80] Migration 089: a re-capture over a capture-only key's label 
 
   // A re-apply moves nothing.
   const rows = JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`));
-  await reapply("089");
+  await reapply("090");
   assert(JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`)) === rows
       && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('ob1_weigh_recapture', 'ob1_restamp_recapture')`)).n === 2,
-    "089 re-applied: one of each function, and no row moved");
+    "090 re-applied: one of each function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
 }
