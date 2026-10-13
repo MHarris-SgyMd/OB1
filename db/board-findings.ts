@@ -14,6 +14,8 @@
  *   bun db/board-findings.ts --url postgres://… --dry-run   # what would be posted (the board unread); no request, no row
  *   bun db/board-findings.ts --url …                        # post, up to the cap
  *   bun db/board-findings.ts --url … --cap 2                # the 24-hour ceiling this run applies, over OB1_FINDINGS_POST_CAP
+ *   bun db/board-findings.ts --url … --report               # what became of each finding posted, and the acceptance rate (reads only)
+ *   bun db/board-findings.ts --url … --report --days 14     # …with an open finding unanswered after 14 days, not 30
  *
  * board-sync runs the same step after each pass (not --audit, not --only)
  * when LINEAR_COMMENT_API_KEY is set (db/sync-linear.ts), so "not linked"
@@ -80,6 +82,20 @@
  * The two thoughts are not gated themselves: both are the board's own rows,
  * and what leaves is a remark about them, to that board.
  *
+ * ── Measured ─────────────────────────────────────────────────────────────────
+ * --report reads what became of each (pair, word) recorded: accepted (its
+ * proposal accepted, or the board linking the pair since), rejected (a
+ * person rejected one of its proposals), withdrawn (its proposals gone, or
+ * settled by the pass's re-judge, or a relation the judge stopped saying,
+ * within the window), open (a proposal pending, or stale and waiting on a
+ * re-judge, or a relation standing), or unanswered (open past --days, 30 by
+ * default). The acceptance rate is accepted over accepted, rejected and
+ * unanswered — the number SMD-2682 is done on. It reads the brain alone,
+ * never Linear, from the read brain_info's Findings row reads
+ * (server-portable/brain-info.ts, FINDING_OUTCOMES_SQL), so the two cannot
+ * disagree. A link reaches the brain with board-sync's pass, so a link made
+ * since the last pass is not read until the next.
+ *
  * The key is LINEAR_COMMENT_API_KEY — a key that can comment, never
  * board-sync's LINEAR_API_KEY, which only reads and is someone's whole
  * account. It is read from the environment (or the .env files db/env.ts
@@ -93,6 +109,7 @@ import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 import { stripAutolinks } from "./ingest-linear.ts";
 import { egressRefusal } from "./worker-bootstrap.ts";
+import { ago, FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, UNANSWERED_AFTER_DAYS, type FindingRow } from "../server-portable/brain-info.ts";
 import { mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressEnv, type EgressPolicy, type EgressSubject, type EgressTerm, type EgressUnit } from "../server-portable/egress.ts";
 
 export const DEFAULT_CAP = 5;
@@ -704,14 +721,84 @@ export async function findingsStep(sql: SQL, env: Record<string, string | undefi
   };
 }
 
+// ── What became of them (SMD-2682) ──────────────────────────────────────────
+
+/**
+ * What keeps --report from reading, in words, or null: 087's table absent or
+ * out of this role's reach, or a grant the read needs (review pass 1: a role
+ * without one ended in a stack trace, and a table off the search path was
+ * called unapplied).
+ */
+export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
+  const [r] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS resolves,
+                               EXISTS (SELECT 1 FROM pg_class c WHERE c.relname = 'board_findings_posted' AND c.relkind IN ('r', 'p')) AS anywhere`;
+  if (!r.resolves) {
+    return r.anywhere
+      ? "board_findings_posted exists but does not resolve for this role — not on its search_path, or no USAGE on its schema"
+      : "migration 087 is not applied, so nothing posted was recorded (cd db && bun migrate.ts --url …)";
+  }
+  const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted,
+                               has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
+                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read`;
+  const missing = [
+    ...(g.posted ? [] : ["SELECT on board_findings_posted (the server or structure group)"]),
+    ...(g.proposals ? [] : ["SELECT on supersession_proposals (the server or structure group)"]),
+    ...(g.read ? [] : ["SELECT on thoughts and thought_facets (the capture group)"]),
+  ];
+  return missing.length ? `this role lacks ${missing.join("; ")} — cd db && bun migrate.ts --url <owner's url> --grant <role> --groups capture,server` : null;
+}
+
+/** One recorded (pair, word) as --report prints it: the pair, the word, where and when posted, and its outcome. */
+export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string {
+  const v = findingOutcome(r, days);
+  const after = v.answeredS === null ? "" : ` ${ago(v.answeredS)} after`;
+  const what =
+    v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
+    : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
+    : v.outcome === "withdrawn"
+      ? r.proposals
+        ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
+        : r.withdrawnS === null ? "withdrawn: its relation is gone with a thought" : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
+    : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
+    // A found row is never in the rate, so it has no window to count down (review pass 4).
+    : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;
+  return `    ${`${r.a} ~ ${r.b}`.padEnd(22)} ${r.word.padEnd(9)} posted ${ago(r.ageS)} ago on ${r.postedOn} — ${what}`;
+}
+
+/** --report's lines: the summary, then each row this brain posted, newest first, then the rows another poster's marker settled. */
+export async function findingsReport(sql: SQL, days = UNANSWERED_AFTER_DAYS): Promise<string[]> {
+  const rows = findingRows((await FINDING_OUTCOMES_SQL(sql)) as Record<string, unknown>[]);
+  const posted = rows.filter((r) => r.origin === "posted");
+  const found = rows.filter((r) => r.origin === "found");
+  return [
+    `  findings on the board: ${findingsLine({ findings: findingsValue(rows, days), unread: {} })}`,
+    ...(posted.length ? ["  posted by this brain, newest first:", ...posted.map((r) => reportLine(r, days))] : []),
+    ...(found.length ? ["  found on the board (another poster's comment; not in the rate):", ...found.map((r) => reportLine(r, days))] : []),
+  ];
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<never> {
-  const cli = commandLine("board-findings.ts", { url: "one", "dry-run": "none", cap: "one" },
-    { hints: { url: "<postgres://…>", cap: `<comments a day> (OB1_FINDINGS_POST_CAP, else ${DEFAULT_CAP})` } });
+  const cli = commandLine("board-findings.ts", { url: "one", "dry-run": "none", cap: "one", report: "none", days: "one" },
+    { hints: { url: "<postgres://…>", cap: `<comments a day> (OB1_FINDINGS_POST_CAP, else ${DEFAULT_CAP})`, report: "(reads only)", days: `<days> (with --report; else ${UNANSWERED_AFTER_DAYS})` } });
   const envSources = loadEnv();
   const url = databaseUrl(cli.value("url"));
   const dryRun = cli.has("dry-run");
+  if (cli.has("report") ? dryRun || cli.has("cap") : cli.has("days")) {
+    console.error("--report reads what became of the findings posted and posts nothing: it takes --url and --days, never --dry-run or --cap; --days is --report's.");
+    process.exit(2);
+  }
+  if (cli.has("report")) {
+    const days = cli.int("days", { absent: UNANSWERED_AFTER_DAYS, min: 1, max: 365 });
+    const sql = openSql(url, { max: 1 });
+    return closeThenExit(sql, async () => {
+      const problem = await reportSchemaProblem(sql);
+      if (problem) { console.error(`  Nothing to report: ${problem}.`); return 2; }
+      for (const line of await findingsReport(sql, days)) console.log(line);
+      return 0;
+    });
+  }
   const capRead = readCap(cli.value("cap") ?? process.env.OB1_FINDINGS_POST_CAP);
   if (typeof capRead !== "number") { console.error(capRead.error); process.exit(2); }
   const cap = capRead;
