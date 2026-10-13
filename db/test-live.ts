@@ -11858,7 +11858,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
    * sleeps it took, and its exit code once stopped — bounded, so a scheduler
    * that never gets there fails its assertion rather than hanging the suite.
    */
-  const wokenEvery = async (done: () => Promise<boolean>, cap: number): Promise<{ sleeps: number; code: number; reached: boolean }> => {
+  const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
     lines.length = 0;
     const ac = new AbortController();
     const run = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
@@ -11877,6 +11877,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     }
     // The sleeps begun when it got there, read from its lines: one may have begun since the last count.
     const begun = asleep();
+    if (reached && whileRunning) await whileRunning();
     ac.abort();
     const code = await Promise.race([run, Bun.sleep(30_000).then(() => -1)]);
     return { sleeps: begun, code, reached };
@@ -11930,13 +11931,22 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       dryHeld = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => dryLines.push(l), err: (l) => dryLines.push(l) } });
       return true;
     };
-    const b = await wokenEvery(joinedPast, 7);
-    assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more wakes in a row stopped with no window gained — consolidating beside it/.test(l)),
+    // Then no more wakes: the thought finishes in this sleep, and the row stops
+    // naming it within a stamp or two, not at the next live call (review pass 1).
+    let heldAfter: unknown = "unread";
+    const finishes = async () => {
+      await pollUntil(async () => (await status(stuck)) === "succeeded", 20_000);
+      await pollUntil(async () => (heldAfter = (await beat())?.held) === undefined, 10_000);
+    };
+    const b = await wokenEvery(joinedPast, 7, finishes);
+    assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more hard stops in a row took with no window gained — consolidating beside it/.test(l)),
       `a single window longer than every sleep: consolidation joins past it while it is still pending (reached ${b.reached} in ${b.sleeps} sleep(s), the thought ${stuckStatus}, ${judged.length} judgement(s))`);
     assert(Number(prog?.stalled) >= 3 && Number(prog?.stops) >= 3 && b.sleeps >= 4,
       `…after three stalled stops at least, the fourth sleep the first it could join in (stops ${prog?.stops}, stalled ${prog?.stalled}, ${b.sleeps} sleep(s))`);
     assert(heldSeen?.held?.total === 1 && heldSeen.held.thoughts[0].id === stuck && heldSeen.held.thoughts[0].stalled >= 3 && heldSeen.held.thoughts[0].kept === 0,
       `…and heartbeat:sleep names it, stalled, no window kept (${JSON.stringify(heldSeen?.held)})`);
+    assert((await status(stuck)) === "succeeded" && heldAfter === undefined,
+      `…and once it finishes in a sleep with no wake, the row stops naming it before any live call (${JSON.stringify(heldAfter)})`);
 
     // A kept row speaks for the thought only at its text and windowing now:
     // one of other text (an edit since) or another windowing is not counted
@@ -11948,23 +11958,59 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     const planted = await capture("The stuckdoc note, planted.", 0, 8);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted}::uuid])`;
     const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${planted}::uuid`;
-    const gate = async (fingerprint: string, windowing: string) => {
-      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${planted}::uuid, ${EX}, ${fingerprint}, ${windowing}, 3, 3)
-                ON CONFLICT (thought_id, work_type) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, windowing = EXCLUDED.windowing`;
+    const gate = async (fingerprint: string, windowing: string, gained = 0) => {
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled, gained) VALUES (${planted}::uuid, ${EX}, ${fingerprint}, ${windowing}, 3, 3, ${gained})
+                ON CONFLICT (thought_id, work_type) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, windowing = EXCLUDED.windowing, gained = EXCLUDED.gained`;
       const out: string[] = [];
       await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => out.push(l), err: (l) => out.push(l) } });
-      return { joins: out.some((l) => /which consolidation would join past/.test(l)), named: out.some((l) => /held back across wakes/.test(l)) };
+      return { joins: out.some((l) => /which consolidation would join past/.test(l)), named: out.some((l) => /held back across wakes/.test(l)), text: out.join("\n") };
     };
     const current = await gate(fp, sig), edited = await gate("another text", sig), rewindowed = await gate(fp, "another windowing");
     assert(current.joins && current.named && !edited.joins && !edited.named && !rewindowed.joins && !rewindowed.named,
-      `a stalled row is counted and named at the thought's text and windowing, and not under another of either (${JSON.stringify({ current, edited, rewindowed })})`);
+      `a stalled row is counted and named at the thought's text and windowing, and not under another of either (${JSON.stringify({ current: current.joins, edited: edited.joins, rewindowed: rewindowed.joins })})`);
+    // A window saved since its last stop: gaining now, whatever stalled said
+    // then — named with no stall, and not joined past (review pass 1).
+    const gaining = await gate(fp, sig, 1);
+    assert(gaining.named && !gaining.joins && new RegExp(`${planted}, no window kept over 3 stop\\(s\\)(;|$)`, "m").test(gaining.text),
+      `a stalled row that has saved a window since is gaining now: named with no stall, not joined past (${gaining.text.split("\n").filter((l) => /held|stalled/.test(l)).join(" | ").trim()})`);
     // Beside a thought extraction can still finish, a stalled one is named but
     // not joined past: the other's entities come first.
     const beside = await capture("A short note beside the stalled one.", 0, 9);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${beside}::uuid])`;
     const mixed = await gate(fp, sig);
     await sql`DELETE FROM thoughts WHERE id = ${beside}::uuid`;
-    assert(mixed.named && !mixed.joins, `beside a thought not stalled, a stalled one is named and not joined past (${JSON.stringify(mixed)})`);
+    assert(mixed.named && !mixed.joins, `beside a thought not stalled, a stalled one is named and not joined past (${JSON.stringify({ joins: mixed.joins, named: mixed.named })})`);
+    // …nor beside a thought not yet in the pool.
+    // The key recorded by the runs above enqueues a capture at once: its claim
+    // row goes, so the thought is one extraction would add to the pool.
+    const unpooled = await capture("A note extraction has not pooled yet.", 0, 11);
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${unpooled}::uuid AND work_type = ${EX}`;
+    const beforePool = await gate(fp, sig);
+    await sql`DELETE FROM thoughts WHERE id = ${unpooled}::uuid`;
+    assert(beforePool.named && !beforePool.joins && /1 not yet in the pool/.test(beforePool.text), `beside a thought not yet in the pool, a stalled one is not joined past (${JSON.stringify({ joins: beforePool.joins, named: beforePool.named })})`);
+    // Two held: the more stalled first.
+    const planted2 = await capture("The stuckdoc note, planted twice.", 0, 12);
+    await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted2}::uuid])`;
+    const [{ fp2 }] = await sql`SELECT content_fingerprint AS fp2 FROM thoughts WHERE id = ${planted2}::uuid`;
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${planted2}::uuid, ${EX}, ${fp2}, ${sig}, 5, 5)`;
+    const two = await gate(fp, sig);
+    assert(two.joins && new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 5 stop\\(s\\), the last 5 with none gained; ${planted}`).test(two.text),
+      `two held: the more stalled named first (${two.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // A scheduler started while thoughts are held names them before its first sleep.
+    const acHeld = new AbortController();
+    const heldRun = runSleep({ url: URL_!, env, quiet: 300, poll: 1, follow: true, minStampEveryS: 1, signal: acHeld.signal, writer: { out: () => {}, err: () => {} } });
+    let startHeld = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (startHeld = await beat())?.held !== undefined, 10_000);
+    // Awake, it reads them again at its stamps: one finished meanwhile (a hand run) leaves the row.
+    await sql`DELETE FROM extraction_progress WHERE thought_id = ${planted2}::uuid`;
+    let awakeHeld = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (awakeHeld = await beat())?.held?.total === 1, 10_000);
+    acHeld.abort();
+    await Promise.race([heldRun, Bun.sleep(15_000)]);
+    assert(startHeld?.held?.total === 2 && awakeHeld?.held?.total === 1,
+      `a scheduler started while thoughts are held names them on its row before any sleep, and awake reads them again at its stamps (${JSON.stringify(startHeld?.held?.total)} → ${JSON.stringify(awakeHeld?.held?.total)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${planted2}::uuid`;
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
 
     // A brain without 089's table (a role without its grant reads the same):
     // the start says so, and the dry run reads the pools as before.

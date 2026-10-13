@@ -48,14 +48,19 @@
  * then joins it, beside it as the workers profile runs the two (SMD-2424):
  * safe for what arrives from then on, as a candidate was captured on an
  * earlier UTC date. It joins as well once extraction holds nothing but
- * thoughts that SLEEP_STALLED_JOIN (3) or more wakes in a row stopped with
- * no window gained (migration 089's `stalled`, SMD-2694): a single window
- * longer than every sleep, which would otherwise hold consolidation back for
- * as long as the brain keeps waking. A pair whose older side is such a
- * thought is judged without its entities, as consolidate.ts's header names for
- * an unextracted neighbour; the thought is still tried at every sleep, and
- * finished by the first long enough. A brain before 089, or a role that cannot
- * read it, joins once extraction is drained alone, and the start says so.
+ * thoughts that SLEEP_STALLED_JOIN (3) or more hard stops in a row took with
+ * no window saved between, and none saved since (migration 089's `stalled`
+ * and `gained`, SMD-2694): a single window longer than every sleep — or a stop
+ * that keeps landing past the last window, in the decider's call or the
+ * write — which would otherwise hold consolidation back for as long as the
+ * brain keeps waking. The cost is consolidate.ts's for an unextracted
+ * neighbour: a newer thought judged meanwhile misses its pair with such a
+ * thought, which is reached from its newer side only and not revisited. The
+ * decision is the sleep's: a sleep long enough to finish the thought still
+ * judges beside it from its start. The thought is still tried at every sleep,
+ * and finished by the first long enough. A brain before 089, or a role that
+ * cannot read it, joins once extraction is drained alone, and the start says
+ * so; granted later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
  * Followers, not one-shot runs: a follower waits out a database restart or a
  * provider outage mid-sleep (SMD-2599), where a one-shot run fails the
@@ -262,7 +267,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
     ? await sql`
         SELECT count(*)::int AS s FROM thought_work_claims c
           JOIN extraction_progress e USING (thought_id, work_type) JOIN thoughts t ON t.id = c.thought_id
-         WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stalled >= ${SLEEP_STALLED_JOIN} AND ${currentProgress(sql, stalledUnder)}`
+         WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stalled >= ${SLEEP_STALLED_JOIN} AND e.gained = 0 AND ${currentProgress(sql, stalledUnder)}`
     : [{ s: 0 }];
   return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, failed: by.failed ?? 0, unpooled: Number(n), stalled: Number(s) };
 }
@@ -274,10 +279,10 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
  */
 async function heldBack(sql: SQL, job: string, sig: string): Promise<SleepHeld> {
   const rows = (await sql`
-    SELECT e.thought_id::text AS id, e.stops, e.stalled, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.windows, count(*) OVER ()::int AS total
+    SELECT e.thought_id::text AS id, e.stops, CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END AS stalled, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.windows, count(*) OVER ()::int AS total
       FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type) JOIN thoughts t ON t.id = c.thought_id
      WHERE e.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stops > 0 AND ${currentProgress(sql, sig)}
-     ORDER BY e.stalled DESC, e.stops DESC, e.thought_id LIMIT ${SLEEP_HELD_NAMED}`) as { id: string; stops: number; stalled: number; kept: number; windows: number | null; total: number }[];
+     ORDER BY 3 DESC, e.stops DESC, e.thought_id LIMIT ${SLEEP_HELD_NAMED}`) as { id: string; stops: number; stalled: number; kept: number; windows: number | null; total: number }[];
   return { total: rows[0]?.total ?? 0, thoughts: rows.map(({ total: _t, ...r }) => ({ ...r, windows: r.windows ?? null })) };
 }
 
@@ -517,7 +522,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   if (progressState === null) { err(STOPPED_EARLY); return 130; }
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
-  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 089 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed`);
+  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 089 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; restart the scheduler once it can`);
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -614,13 +619,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   }
   /**
    * The thoughts extraction holds back across the wakes, on the row for
-   * preflight's `sleep` row (SMD-2694): read at the start and after each wake,
-   * carried by the next write. A courtesy, as the tail move is: a read that
-   * fails is said once and leaves the row's last word on them.
+   * preflight's `sleep` row (SMD-2694): read at the first stamp awake or the
+   * first poll asleep, after each wake, at least every minute after — a thought held back is most
+   * often finished in a long sleep, which ends at the next live call, hours
+   * later (review pass 1) — and before the row ends; carried by the next
+   * write. A courtesy, as the tail move is: a read that fails is said once and
+   * leaves the row's last word on them.
    */
   let saidHeld = false;
+  let heldAt = 0;
   const sayHeld = async (): Promise<void> => {
     if (SIG === undefined || !FOLLOW) return;
+    heldAt = Date.now();
     try {
       stamper.held?.(await heldBack(sql, JOBS.extract, SIG));
     } catch (e) {
@@ -628,7 +638,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       saidHeld = true;
     }
   };
-  await sayHeld();
+  // No read here: the first awake stamp reads them, as does the first asleep poll.
+  /** The row's end, the held thoughts read first: an operator's hand run since may have finished one. */
+  const endRow = async (o: "stopped" | "failed", m?: MalformedBlock): Promise<void> => {
+    await sayHeld();
+    await stamper.end(o, m);
+  };
   const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
   /** Each pass's last word in this sleep, and extraction's last judged block. */
   const words: Partial<Record<PassName, PassOutcome>> = {};
@@ -695,7 +710,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       err("\n  second signal — the passes stop now, their leases returned");
       // The row ends before the CLI exits on the release (stopOnSignals), so
       // it reads stopped rather than running until it goes stale.
-      return Promise.all(running.map(hardStop)).then(() => stamper.end("stopped", malformed ?? undefined));
+      return Promise.all(running.map(hardStop)).then(() => endRow("stopped", malformed ?? undefined));
     }
     stopping = true;
     onStop.abort();
@@ -824,7 +839,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (r === null) return null;
       const newest = newer(r.read, r.write);
       if (newest === null) return r.now;
-      if (Date.now() - stampedAt >= everyMs) { await stamper.alive(); stampedAt = Date.now(); }
+      if (Date.now() - stampedAt >= everyMs) { await sayHeld(); await stamper.alive(); stampedAt = Date.now(); }
       const left = QUIET * 1000 - (r.now.getTime() - newest.getTime());
       await sleepUnless(Math.min(everyMs, Math.max(POLL * 1000, left)), onStop.signal);
     }
@@ -864,6 +879,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       const live = await reading(() => newestLive(sql, from, readsLog));
       if (live === null) return stopped();
       sleptUntil = live.now;
+      // A thought held back finished in this sleep is not named until the next wake otherwise.
+      if (Date.now() - heldAt >= everyMs) await sayHeld();
       if (await outsideNow()) {
         // A soft stop that landed during the reads keeps its own: the thought
         // in hand finished, not abandoned (review pass 2).
@@ -913,12 +930,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           start("consolidate");
           consolidating = true;
         } else if (!consolidating && joinsPast(pools.extract)) {
-          // Only thoughts whose single window outlasts every sleep are left:
+          // Only thoughts no stop has gained a window on lately are left:
           // waiting for them would hold consolidation back for as long as the
-          // brain keeps waking (SMD-2694). A pair whose older side is one of
-          // them is judged without its entities, as consolidate.ts's header
-          // names for an unextracted neighbour; extraction goes on beside it.
-          out(`  extraction holds only ${pools.extract.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more wakes in a row stopped with no window gained — consolidating beside it`);
+          // brain keeps waking (SMD-2694). A newer thought judged meanwhile
+          // misses its pair with one of them, as consolidate.ts's header says
+          // of an unextracted neighbour; extraction goes on beside it.
+          out(`  extraction holds only ${pools.extract.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more hard stops in a row took with no window gained — consolidating beside it`);
           start("consolidate");
           consolidating = true;
         } else if (!FOLLOW && pools.consolidate && drained(pools.extract) && drained(pools.consolidate)) {
@@ -934,7 +951,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   /** A follower found outside, awake or asleep: the start's refusal, now, the row ended on a failure. */
   const refuseOutside = async (): Promise<number> => {
     err(outsideLine(foreign, false));
-    await stamper.end("failed", malformed ?? undefined);
+    await endRow("failed", malformed ?? undefined);
     return 2;
   };
 
@@ -954,11 +971,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       // A stop that landed while the follower was found wins, as it does awake (review pass 2).
       if (r === "outside" && !stopping) return refuseOutside();
       if (r === "outside") {
-        await stamper.end("stopped", malformed ?? undefined);
+        await endRow("stopped", malformed ?? undefined);
         return FOLLOW && !hardStopped ? 0 : 130;
       }
       if (r === "stopped") {
-        await stamper.end("stopped", malformed ?? undefined);
+        await endRow("stopped", malformed ?? undefined);
         return FOLLOW && !hardStopped ? 0 : 130;
       }
       if (typeof r === "object") {
@@ -986,7 +1003,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // A start refusal that ends it is said on the row by its kind, so
           // preflight gives its remedy, not "start it again" (SMD-2752).
           if (r.code === 2 && !r.started && r.refused) stamper.refused?.(r.refused);
-          await stamper.end("failed", malformed ?? undefined);
+          await endRow("failed", malformed ?? undefined);
           return r.code;
         }
         words[r.pass] = "failed";
@@ -1011,11 +1028,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       else await stamper.alive();
       if (!FOLLOW) return r === "done" ? 0 : 1;
     }
-    await stamper.end("stopped", malformed ?? undefined);
+    await endRow("stopped", malformed ?? undefined);
     return FOLLOW && !hardStopped ? 0 : 130;
   } catch (e) {
     await stopPasses(true).catch(() => {});
-    await stamper.end("failed", malformed ?? undefined);
+    await endRow("failed", malformed ?? undefined);
     throw e;
   } finally {
     finished = true;

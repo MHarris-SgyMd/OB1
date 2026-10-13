@@ -193,10 +193,11 @@ export type HeldThought = { id: string; stops: number; stalled: number; kept: nu
 export type SleepHeld = { total: number; thoughts: HeldThought[] };
 
 /**
- * The stops in a row with no window gained after which the sleep scheduler
- * lets consolidation join past a thought extraction still holds (db/sleep.ts,
- * SMD-2694): its single window outlasts every sleep. Here, as preflight's
- * `sleep` row names such a thought by the same number.
+ * The hard stops in a row with no window saved between, and none since,
+ * after which the sleep scheduler lets consolidation join past a thought
+ * extraction still holds (db/sleep.ts, SMD-2694): a window that outlasts
+ * every sleep, or stops landing past its last. Here, as preflight's `sleep`
+ * row names such a thought by the same number.
  */
 export const SLEEP_STALLED_JOIN = 3;
 /** The most held thoughts the scheduler's row names. */

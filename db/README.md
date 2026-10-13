@@ -2907,15 +2907,20 @@ hand aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (089, [Long thoughts
 resume](#extract-entitiests)), so one longer than every sleep advances by the
 windows each sleep finishes, and is done once its last is. Consolidation also
-joins once extraction holds nothing but thoughts that three or more wakes in a
-row stopped with no window gained (089's `stalled`, SMD-2694) — a single
-window longer than every sleep, which would otherwise hold it back for as long
-as the brain keeps waking. A pair whose older side is such a thought is judged
-without its entities, as an unextracted neighbour is; the thought is tried at
-every sleep and finished by the first long enough. A brain before 089, or a
-role that cannot read its table (the extraction group's), joins once
-extraction drains alone, and the start says so. `--dry-run` names the held
-thoughts. A failed row stays failed: `--retry-failed` is the operator's.
+joins once extraction holds nothing but thoughts that three or more hard stops
+in a row took with no window saved between, and none saved since (089's
+`stalled` and `gained`, SMD-2694) — a single window longer than every sleep,
+or a stop that keeps landing past the last window, in the decider's call or
+the write — which would otherwise hold it back for as long as the brain keeps
+waking. The cost is an unextracted neighbour's: a newer thought judged
+meanwhile misses its pair with such a thought, which consolidation reaches
+from its newer side only and does not revisit. The decision is the sleep's,
+made at its start: a night long enough to finish the thought still judges
+beside it. The thought is tried at every sleep and finished by the first long
+enough. A brain before 089, or a role that cannot read its table (the
+extraction group's), joins once extraction drains alone, and the start says
+so; granted later, the scheduler takes it up once restarted. `--dry-run`
+names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -2961,12 +2966,17 @@ words, and the `sleep` row says each:
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 089): how many, and the three most
-stalled with their stops and windows kept, read at its start and after each
-wake. The `sleep` row names them — "1 thought(s) held back across its wakes —
-<id>, 7 of 24 window(s) kept over 3 stop(s)" passes, a document on its way —
-and warns on a stalled one, naming it, that consolidation joins past it and
-what finishes it: the first sleep longer than its window, or extraction run by
-hand with the scheduler stopped.
+stalled with their stops and windows kept — stalled as the scheduler reads it,
+0 once a window is saved since the last stop — read at its start, after each
+wake, at least every minute and before the row ends, so a thought finished in
+a long sleep leaves the row then, not at the next live call. The `sleep` row
+names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
+window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
+stalled one, naming it: consolidation joins past it once extraction holds
+nothing else, and the first sleep long enough finishes it, or extraction run
+by hand with the scheduler stopped. One whose windows are all kept is told
+apart: its stops land past the last window. A scheduler stopped or stale
+names what it held at its last word, and warns of none.
 
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there
@@ -4154,7 +4164,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2761 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1298 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1303 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
