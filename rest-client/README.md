@@ -50,13 +50,18 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
 - **Every status is an answer** (`{ status, ok, headers, body, sent }`); an error with
   an empty body has `body: null`. Only a request that never got one throws: the core
   away, the timeout, the caller's signal. A write that threw may still have landed,
-  because the server finishes what it started.
+  because the server finishes what it started. That holds for an input of JSON values,
+  as the MCP server and a typed caller send. A value JSON cannot carry (a bigint, a
+  cycle, a symbol) throws as `JSON.stringify` does, and so does a `headers()` value no
+  header can carry.
 - **`baseUrl`** is an http or https origin, or an origin and a path. `createRestClient`
   refuses any other with a `TypeError`. That covers another scheme, credentials in the
   URL (fetch would send them as an `Authorization` header), a query or a fragment (a
-  bare `?` or `#` included), a space or a control character, and a path the URL parser
-  rewrites (a dot segment, encoded or not). It also refuses a `forwarderKey` that no
-  header carries as written.
+  bare `?` or `#` included), a space or a control character anywhere (the parser drops
+  a tab or a line break even from a host), and a path the URL parser rewrites (a dot
+  segment, encoded or not). It also refuses a `forwarderKey` that no header carries as
+  written, and a `timeoutMs` that is not a whole number of milliseconds from 1 to
+  2^31 - 1, the longest a timer holds.
 - **A redirect is an answer**, not followed: fetch carries custom headers to the next
   origin, and the key and the forwarder key ride them.
 - **An input a URL cannot carry** is answered without sending anything (`sent: false`),
@@ -67,6 +72,8 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   - text with a lone surrogate in the path or the query. A JSON body carries one.
   - an object, or a list holding one, in a GET's or a DELETE's input, which a query
     string has no form for.
+  - a query field name that is not letters, digits, `_`, `.` or `-`. A name rides the
+    URL as it is, so a `#` in one would make the rest a fragment.
 
   A GET's input rides the URL, so it is held to the server's header limit. Measured on
   Bun 1.4, a 16,000-character field passes and a 64,000-character one is a bodyless 431.
@@ -77,7 +84,9 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
 - **The key** goes in `x-brain-key`. A key no header carries as presented gets the REST
   core's own answer to a key that matches none, a 401 `UNAUTHORIZED`, given here with
   nothing sent. A key is sent only if it rides the header byte for byte: tab,
-  printable ASCII, DEL and U+0080–U+00FF, with no space or tab at either end. HTTP
+  printable ASCII and U+0080–U+00FF, with no space or tab at either end. DEL is left
+  out, because a Go server, Traefik on the `/api` route, refuses it. A `null` key is no
+  key. HTTP
   strips those, and `Headers` strips a CR or LF there, so ` k ` or `\rk` would arrive
   as `k`, which is another key. The other control characters are refused too: Bun's
   server answers them with a bare 400. A key holding `é`, or a tab inside, is sent. A legacy raw
@@ -120,5 +129,5 @@ bumps, so the generated files carry `snapshot` in its place.
 ## Test
 
 ```bash
-bun test-client.ts   # 115 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query
+bun test-client.ts   # 128 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query, a timeout a timer holds, a query name a URL carries
 ```

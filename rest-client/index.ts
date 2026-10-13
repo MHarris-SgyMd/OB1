@@ -81,6 +81,9 @@ function unfitForPath(value: unknown): string | null {
 
 const LONE_SURROGATE = "holds a lone surrogate, which a URL cannot carry";
 
+/** The longest delay a timer holds: setTimeout fires at once past it. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /**
  * Why a query value cannot ride a URL, or null when it can: text with a lone
  * surrogate, which percent-encoding throws on, and an object, or a list
@@ -104,7 +107,9 @@ const OBJECT_IN_QUERY = "is an object, which a query string cannot carry";
 
 /**
  * Whether a value rides a header byte for byte as presented: tab, printable
- * ASCII, DEL and U+0080–U+00FF (a header's latin1 bytes), with no space or tab
+ * ASCII and U+0080–U+00FF (a header's latin1 bytes; RFC 9110's field-vchar and
+ * obs-text, DEL left out as a Go server — Traefik, on the /api route — refuses
+ * it, review pass 5), with no space or tab
  * at either end, which HTTP strips — so a key ` k ` would arrive as `k`, read
  * as another key than the one presented (review pass 2). Not visible ASCII
  * alone: `é` or a tab inside a key rides a header and the core takes it
@@ -112,7 +117,7 @@ const OBJECT_IN_QUERY = "is an object, which a query string cannot carry";
  * end, so `\rk` arrived as `k`, and it passes the other control characters,
  * which Bun's server answers with a bare 400 (review pass 4).
  */
-const headerSafe = (value: string): boolean => /^[\t\x20-\xff]+$/.test(value) && !/^[ \t]|[ \t]$/.test(value);
+const headerSafe = (value: string): boolean => /^[\t\x20-\x7e\x80-\xff]+$/.test(value) && !/^[ \t]|[ \t]$/.test(value);
 
 /** The headers a caller's key or this client's forwarder key ride: the call's and the client's own, never an extra header's (review pass 3). */
 const CREDENTIAL_HEADERS = new Set(["x-brain-key", "x-access-key", "authorization", FORWARDER_HEADER]);
@@ -133,7 +138,7 @@ const refusedHere = (field: string, message: string): Answer => ({
  * The answer for a key no header can carry as presented (headerSafe), given
  * here, nothing sent: the REST core's own answer to a key that matches none
  * (401 UNAUTHORIZED) — the core reads keys from headers alone, so no key it
- * could match is such a value. A legacy raw key past U+00FF, which `?key=`
+ * could match is such a value (`health` reads none, and is answered so too). A legacy raw key past U+00FF, which `?key=`
  * carries to server-portable today, cannot reach the REST core at all.
  */
 const unauthorizedHere = (): Answer => ({
@@ -151,13 +156,15 @@ const unauthorizedHere = (): Answer => ({
  * a dot segment, an encoded one, a space or a tab — so the requests would go
  * elsewhere than the base as written (review pass 4).
  */
-function unfitBase(base: string): string | null {
+function unfitBase(base: unknown): string | null {
+  if (typeof base !== "string") return `is ${typeof base}, not a string`;
+  // A tab or a line break the parser drops from a host as from a path (review pass 5: `http://ev\til.com` reached evil.com).
+  if (/[\x00-\x20\x7f]/.test(base)) return "holds a space or a control character";
   const at = URL.parse(base);
   if (!at) return "does not parse";
   if (at.protocol !== "http:" && at.protocol !== "https:") return `has the scheme ${at.protocol}`;
   if (at.username || at.password) return "carries credentials";
   if (/[?#]/.test(base)) return "has a query or a fragment";
-  // A space, a tab or a control character in it is a path the parser rewrites too: trimmed, dropped or encoded.
   const written = base.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").replace(/\/+$/, "");
   if (written !== at.pathname.replace(/\/+$/, "")) return "has a path the URL parser rewrites";
   return null;
@@ -221,7 +228,10 @@ export type RestClient = {
    * string carries text, so a null or undefined there is left out. Any status
    * is an answer, and so is an input a URL cannot carry (refusedHere); only a
    * request that never got one throws — the core away, the timeout, the
-   * caller's signal — and a write that threw may still have landed.
+   * caller's signal — and a write that threw may still have landed. That holds
+   * for an input of JSON values, as the MCP server and a typed caller send: a
+   * value JSON cannot carry (a bigint, a cycle, a symbol) throws as
+   * JSON.stringify does, and so does an extra header no header can carry.
    */
   call<K extends CallableOperation>(name: K, input: InputOf<K>, init?: CallInit): Promise<Answer>;
   /**
@@ -237,8 +247,10 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   // with a query or a fragment puts every path after it, and a forwarder key
   // no header carries as written would throw on every call (review pass 2).
   const why = unfitBase(opts.baseUrl);
-  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(opts.baseUrl)} ${why}`);
-  if (opts.forwarderKey !== undefined && !headerSafe(opts.forwarderKey)) throw new TypeError("forwarderKey is no value a header carries as written (tab, printable ASCII, DEL and U+0080–U+00FF alone, no space or tab at either end)");
+  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(String(opts.baseUrl))} ${why}`);
+  // The timeout a whole number of milliseconds a timer can hold: setTimeout fires at once past 2^31 - 1, and AbortSignal.timeout throws on Infinity (review pass 5).
+  if (opts.timeoutMs != null && !(Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0 && opts.timeoutMs <= MAX_TIMER_MS)) throw new TypeError(`timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}, or none: ${String(opts.timeoutMs)}`);
+  if (opts.forwarderKey != null && (typeof opts.forwarderKey !== "string" || !headerSafe(opts.forwarderKey))) throw new TypeError("forwarderKey is no value a header carries as written (tab, printable ASCII and U+0080–U+00FF alone, no space or tab at either end)");
   // Every trailing slash dropped, so openapi-fetch (which drops one more if it finds one) and stream() build under one root.
   const base = opts.baseUrl.replace(/\/+$/, "");
   const send = heeding(opts.fetch ?? ((request: Request) => globalThis.fetch(request)));
@@ -248,7 +260,7 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   const raw = createClient<paths>({ baseUrl: base, fetch: send, redirect: "manual" });
   /** The headers every request carries beside its own: the forwarder slot, and the extra headers as they are now — never a key's. */
   const carry = (headers: Headers): void => {
-    if (opts.forwarderKey !== undefined) headers.set(FORWARDER_HEADER, opts.forwarderKey);
+    if (opts.forwarderKey != null) headers.set(FORWARDER_HEADER, opts.forwarderKey);
     for (const [name, value] of Object.entries(opts.headers?.() ?? {})) if (!CREDENTIAL_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   };
   raw.use({
@@ -257,12 +269,12 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       return request;
     },
   });
-  const keyed = (init: CallInit): Record<string, string> => (init.key === undefined ? {} : { "x-brain-key": init.key });
+  const keyed = (init: CallInit): Record<string, string> => (init.key == null ? {} : { "x-brain-key": init.key });
 
   return {
     raw,
     async call(name, input, init = {}) {
-      if (init.key !== undefined && !headerSafe(init.key)) return unauthorizedHere();
+      if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return unauthorizedHere();
       const { method, path } = OPERATIONS[name];
       const rest: Record<string, unknown> = { ...(input as Record<string, unknown>) };
       const pathParams: Record<string, string> = {};
@@ -275,6 +287,8 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       const readsQuery = method === "GET" || method === "DELETE";
       if (readsQuery) {
         for (const [field, value] of Object.entries(rest)) {
+          // A name rides the URL as it is: a `#` in one made the rest a fragment, a `&` or `=` split it (review pass 5).
+          if (!/^[A-Za-z0-9_.-]+$/.test(field)) return refusedHere(field, "is no name a query string carries");
           const unfit = unfitForQuery(value);
           if (unfit) return refusedHere(field, unfit);
         }
@@ -292,7 +306,7 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       return { status: response.status, ok: response.ok, sent: true, headers: response.headers, body: response.ok ? parsed(data as string | undefined) : error === "" ? null : error ?? null };
     },
     async stream(jobId, init = {}) {
-      if (init.key !== undefined && !headerSafe(init.key)) return asResponse(unauthorizedHere());
+      if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return asResponse(unauthorizedHere());
       const unfit = unfitForPath(jobId);
       if (unfit) return asResponse(refusedHere("job_id", unfit));
       // Sent here, not through openapi-fetch, which reads a refusal's body

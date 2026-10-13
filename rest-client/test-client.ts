@@ -409,8 +409,12 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
     assert(r.status === 401 && !r.sent && seen.length === 0, `a key with ${label}: 401, sent nowhere — never another key's 200 (${r.status}, ${seen.length} sent)`);
   }
   seen.length = 0;
+  const latin = await client.call("thought_stats", {}, { key: "wr\xa0it\xffe" });
+  assert(latin.sent && seen[0]?.headers.get("x-brain-key") === "wr\xa0it\xffe", `a key with U+00A0 and U+00FF inside rides the header byte for byte, the core's to judge (${latin.status}, sent ${latin.sent})`);
+  // DEL is no field-vchar: a Go server (Traefik, on the /api route) refuses it with a bare 400 (review pass 5).
+  seen.length = 0;
   const del = await client.call("thought_stats", {}, { key: "wr\x7fite" });
-  assert(del.sent && seen[0]?.headers.get("x-brain-key") === "wr\x7fite", `a DEL inside a key rides the header byte for byte, the core's to judge (${del.status}, sent ${del.sent})`);
+  assert(del.status === 401 && !del.sent && seen.length === 0, `a DEL inside a key is the core's 401, sent nowhere (${del.status}, sent ${del.sent})`);
   const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
   assert(["\rfwd-raw", "fwd-raw\n", "fwd\x01raw"].every((forwarderKey) => refuses({ baseUrl: "http://x", forwarderKey })?.name === "TypeError"), "a forwarder key with a CR, an LF or a control character is refused at the start, not a bare 400 on every call");
   const badBases = ["http://u:p@x", "http://write-raw@x", "file:///tmp/x", "data:text/plain,hi", "api.ob1.internal:8000", "http://x/api/..", "http://x/api/%2e%2e", " http://x/x", "http://x/x ", "http://x/a\tb"];
@@ -431,6 +435,39 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
     const issue = (r.body as { issues?: { path: string }[] }).issues?.[0];
     assert(r.status === 400 && !r.sent && issue?.path === field && seen.length === 0, `${label}: 400 REFUSED_INPUT naming ${field}, sent nowhere (${r.status} ${JSON.stringify(r.body)})`);
   }
+}
+
+console.log("\n[11] A timeout a timer can hold, a query name a URL carries, a null key no key, a base with no control character anywhere");
+{
+  const refuses = (o: Parameters<typeof createRestClient>[0]) => { try { createRestClient(o); return null; } catch (e) { return e as Error; } };
+  // setTimeout fires at once past 2^31 - 1 and AbortSignal.timeout throws on Infinity (review pass 5): refused at the start.
+  const badTimeouts = [3_000_000_000, 2 ** 31, Infinity, NaN, -1, 0, 1.5];
+  const slipped = badTimeouts.filter((timeoutMs) => refuses({ baseUrl: "http://x", timeoutMs })?.name !== "TypeError");
+  assert(slipped.length === 0, `a timeout no timer holds is refused at the start (let through: ${slipped.map(String).join(", ")})`);
+  assert([1, 2 ** 31 - 1, undefined].every((timeoutMs) => refuses({ baseUrl: "http://x", timeoutMs }) === null) && refuses({ baseUrl: "http://x", timeoutMs: null as never }) === null, "…and 1 ms, the longest a timer holds, or none, is taken");
+  // A query name rides the URL as it is: a `#` made the rest a fragment, and the core ran without it (review pass 5).
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
+  for (const name of ["#", "a&b", "a=b", "\uD800", "a b"]) {
+    seen.length = 0;
+    const r = await client.call("list_thoughts", { [name]: "x", limit: 5 } as never, { key: "write-raw" });
+    const issue = (r.body as { issues?: { path: string }[] }).issues?.[0];
+    assert(r.status === 400 && !r.sent && issue?.path === name && seen.length === 0, `a query field named ${JSON.stringify(name)}: 400 REFUSED_INPUT naming it, sent nowhere (${r.status}, ${seen.length} sent)`);
+  }
+  // A null key is no key: stream() sent the text "null" (review pass 5).
+  seen.length = 0;
+  await client.call("thought_stats", {}, { key: null as never });
+  await client.stream("j", { key: null as never });
+  assert(seen.length === 2 && seen.every((q) => !q.headers.has("x-brain-key")), "a null key sends no key, from call and stream");
+  seen.length = 0;
+  const unforwarded = createRestClient({ baseUrl: "http://api", fetch: viaApp, forwarderKey: null as never });
+  await unforwarded.call("thought_stats", {}, { key: "write-raw" });
+  assert(seen.length === 1 && !seen[0].headers.has(FORWARDER_HEADER), "a null forwarder key is none: no forwarder slot");
+  assert(refuses({ baseUrl: "http://x", forwarderKey: 5 as never })?.name === "TypeError", "a forwarder key that is not text is refused at the start");
+  // The parser drops a tab or a line break from a host silently: `http://ev\til.com` reached evil.com (review pass 5).
+  const hostBases = ["http://x\t/api", "http://ev\til.com/api", "http://x\n/api", "http://x:80\t80/api"];
+  assert(hostBases.every((baseUrl) => refuses({ baseUrl })?.name === "TypeError"), "a base with a tab or a line break in its host is refused");
+  const asUrl = refuses({ baseUrl: new URL("http://x") as never });
+  assert(asUrl?.name === "TypeError" && /not a string/.test(asUrl.message), `a URL object for the base is refused in words (${asUrl?.message})`);
 }
 
 // Compile-time only: the generated types hold a call to its operation's input.
