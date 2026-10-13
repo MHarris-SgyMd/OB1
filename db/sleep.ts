@@ -111,32 +111,35 @@
  * into the next sleep until one of its passes stamps — ended when the
  * scheduler stops, a second signal included; `slept` carries the current or
  * last sleep's start and, once it is over, its end, on the database's clock
- * (SMD-2678). A pass waiting at its start for
- * a provider that does not answer stamps nothing: the row reads running with
- * the last word until the wait ends. The passes stamp through it, not their
- * own rows, so a wake does not end a follower's row for preflight to warn
- * about, and preflight's consolidate pass row reads it as the scheduler at
- * work. Only --follow stamps: one sleep leaves no row to go stale, as a
- * one-shot pass does not. Followers run outside sleep (the workers profile)
- * do not yield, so the two profiles are alternatives: a run refuses (2) while
- * any of their heartbeats is fresh — at its start, and at every awake and
- * asleep poll, since a follower brought up beside it stamps only past its own
- * start probe — and --dry-run names them, each with how to stop them and
- * retire their rows (SMD-2678). Under --follow a refusal, at the start too,
- * ends the row on a failure, its last sleep kept, so preflight names the
- * followers keeping it down. Preflight's `sleep` row reads this heartbeat,
- * with its `slept` mark and its `reads` word on the query log, and the compose
- * service (`--profile sleep`) runs `--follow`. The start's reads, like the
- * sleep's, wait out a database not answering yet, and so does each pass's
- * start at every sleep, up to its first claim (SMD-2752).
+ * (SMD-2678); `waiting` names the passes waiting at their start for a
+ * provider that does not answer, while one is, and `refused` the start
+ * refusal that ended it, so preflight's `sleep` row says each — not "its
+ * passes running", nor "start it again", which would only refuse again
+ * (SMD-2752). The passes stamp through it, not their own rows, so a wake does
+ * not end a follower's row for preflight to warn about, and preflight's
+ * consolidate pass row reads it as the scheduler at work. Only --follow
+ * stamps: one sleep leaves no row to go stale, as a one-shot pass does not.
+ * Followers run outside sleep (the workers profile) do not yield, so the two
+ * profiles are alternatives: a run refuses (2) while any of their heartbeats
+ * is fresh — at its start, and at every awake and asleep poll, since a
+ * follower brought up beside it stamps only past its own start probe — and
+ * --dry-run names them, each with how to stop them and retire their rows
+ * (SMD-2678). Under --follow a refusal, at the start too, ends the row on a
+ * failure, its last sleep kept, so preflight names the followers keeping it
+ * down. Preflight's `sleep` row reads this heartbeat, with its `slept` mark
+ * and its `reads` word on the query log, and the compose service
+ * (`--profile sleep`) runs `--follow`. The start's reads, like the sleep's,
+ * wait out a database not answering yet, and so does each pass's start at
+ * every sleep, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
- * A word for a pass waiting on its provider (SMD-2752); a budget per pass
- * (statement_timeout, work_mem) and per sleep (a wall clock), and the
- * re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). The frozen-belief
- * scan, decay relabelling and an HNSW heal are their own tickets' passes
- * (SMD-1722, SMD-1736, SMD-1632), as is the awake latency under a sleep at 1M
- * and 10M rows (SMD-1500's harness).
+ * A budget per pass (statement_timeout, work_mem) and per sleep (a wall
+ * clock), and the re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). A
+ * pass waiting mid-pass for the provider, after its workers' pauses, reads
+ * "running a pass" on the row — the `waiting` word is its start's alone
+ * (SMD-2905). The frozen-belief scan, decay relabelling and an HNSW heal are
+ * their own tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
+ * latency under a sleep at 1M and 10M rows (SMD-1500's harness).
  */
 
 import type { SQL } from "bun";
@@ -150,6 +153,7 @@ import { run as runConsolidate } from "./consolidate.ts";
 import { outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
+import { startRefusalRemedy } from "./config.mjs";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
@@ -278,11 +282,17 @@ async function followersOutside(sql: SQL): Promise<string[]> {
 
 /** The `slept` mark heartbeat:sleep carries now, when of the shape: what a refusal's stamp keeps (review pass 4). */
 async function lastSlept(sql: SQL): Promise<SleepMark | null> {
-  const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`) as { value: string }[];
+  const [r] = (await sql`SELECT value, updated_at FROM ob1_config WHERE key = 'heartbeat:sleep'`) as { value: string; updated_at: Date | string }[];
   if (!r) return null;
   try {
     const s = (JSON.parse(r.value) as { slept?: { from?: unknown; to?: unknown } }).slept;
-    return s && typeof s.from === "string" && (s.to === null || typeof s.to === "string") ? { from: s.from, to: s.to } : null;
+    if (!(s && typeof s.from === "string" && (s.to === null || typeof s.to === "string"))) return null;
+    // A sleep the last process never ended — killed mid-sleep, most likely,
+    // as it is asleep most of the time — ends at its row's last stamp, within
+    // a minute of the truth (it stamped at least that often asleep): a mark
+    // with no end reads "no sleep yet" to preflight's awake row (SMD-2752 PR 3,
+    // review pass 2).
+    return { from: s.from, to: s.to ?? new Date(r.updated_at).toISOString() };
   } catch {
     return null;
   }
@@ -303,17 +313,15 @@ const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.roun
 
 /**
  * The scheduler's line for a pass's start refusal that ends it — at the
- * check, or a permanent one at a later sleep — with what to do beyond the
- * pass's own words: those name the cause, but the key's name a --switch-key
- * this script does not take, and a revoked key's no way back (review pass 6,
- * an operator's walk through each refusal).
+ * check, a permanent one at a later sleep, or one at a pass's first start in
+ * this process — with what to do beyond the pass's own words: those name the
+ * cause, but the key's name a --switch-key this script does not take, and a
+ * revoked key's no way back (review pass 6, an operator's walk through each
+ * refusal).
  */
 function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: string): string {
-  const remedy = kind === "key"
-    ? "; the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or set OB1_METADATA_MODEL back to the recorded key's model"
-    : kind === "identity"
-      ? "; a revoked or unlisted worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service"
-      : "";
+  // The other kinds' own words name their fix; preflight's row gives every kind's (db/config.mjs, SMD-2752).
+  const remedy = kind === "key" || kind === "identity" ? `; ${startRefusalRemedy(kind)}` : "";
   return `  ${pass}'s start is refused${kind ? ` (${kind})` : ""} — ${ends}: fix what it names, then start the service again${remedy}`;
 }
 
@@ -424,12 +432,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * pass 3). The row's last sleep is carried over, since a stamp writes the
    * whole value (review pass 4).
    */
-  const endAtStart = async (): Promise<void> => {
+  const endAtStart = async (refused?: StartRefusal): Promise<void> => {
     if (!FOLLOW) return;
     const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
     once.watching?.(logState);
     const last = await lastSlept(sql).catch(() => null);
     if (last) once.slept?.(last);
+    // The start refusal that ended it, when a pass's start was the cause:
+    // preflight's row names it and its remedy (SMD-2752).
+    if (refused) once.refused?.(refused);
     await once.end("failed");
   };
   if (outside.length) {
@@ -498,8 +509,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // The engine said its own "stopped before the pass began".
     if (code === 130) return 130;
     if (code !== 0) {
-      err(refusedLine(pass, result && !result.ok ? result.refused : undefined, "the scheduler does not start"));
-      await endAtStart();
+      const kind = result && !result.ok ? result.refused : undefined;
+      err(refusedLine(pass, kind, "the scheduler does not start"));
+      await endAtStart(kind);
       return code;
     }
     if (result?.ok && result.provider === "up") begun.add(pass);
@@ -518,11 +530,32 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // What wakes it, on its own row: preflight's `sleep` row reads this, not its
   // own role's privileges (SMD-2678, review pass 1).
   stamper.watching?.(logState);
+  // The last process's sleep, carried until this one sleeps: a stamp writes
+  // the whole value, and a restarted scheduler's first row read "no sleep
+  // yet" in preflight (review pass 1 of SMD-2752 PR 3; SMD-2678's mark).
+  if (FOLLOW) {
+    // Through the start's outage wait, as the other start reads: a blip here
+    // would drop the mark (review pass 2). A stop during the wait, or another
+    // error, leaves it to the first sleep.
+    const last = await atStart(() => lastSlept(sql)).catch(() => null);
+    if (last) stamper.slept?.(last);
+  }
   const everyMs = Math.max(opts.minStampEveryS ?? MIN_STAMP_EVERY_S, POLL) * 1000;
   /** Each pass's last word in this sleep, and extraction's last judged block. */
   const words: Partial<Record<PassName, PassOutcome>> = {};
   let malformed: MalformedBlock | null | undefined;
   const sleepOutcome = (): "ok" | "failed" => (Object.values(words).includes("failed") ? "failed" : "ok");
+  /**
+   * The passes waiting at their start for a provider that does not answer,
+   * as each says through its stamper: heartbeat:sleep carries them, so
+   * preflight's row says the sleep waits on the provider rather than that its
+   * passes run (SMD-2752).
+   */
+  const waitingAtStart = new Set<PassName>();
+  const sayWaiting = async (): Promise<void> => {
+    stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
+    await stamper.alive();
+  };
   /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
     key: stamper.key,
@@ -537,6 +570,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     },
     during: (p) => p,
     alive: async () => {},
+    async startWait(on) {
+      if (on) waitingAtStart.add(pass);
+      else waitingAtStart.delete(pass);
+      await sayWaiting();
+    },
   });
 
   // ── The scheduler's stop ─────────────────────────────────────────────────
@@ -635,6 +673,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     else for (const p of running) softStop(p);
     const results = await Promise.allSettled(running.map((p) => p.done));
     running.length = 0;
+    // A stopped pass waits for nothing, and each says so as its wait ends (the
+    // engines' finally): defensive only, the set is empty here (review pass 1).
+    if (waitingAtStart.size) {
+      waitingAtStart.clear();
+      stamper.waiting?.([]);
+    }
     const thrown = results.find((r) => r.status === "rejected");
     if (thrown) throw (thrown as PromiseRejectedResult).reason;
   };
@@ -834,7 +878,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // (SMD-2752).
         const permanent = r.refused !== undefined && PERMANENT_REFUSALS.has(r.refused);
         if (FOLLOW && r.code === 2 && !r.started && permanent) err(refusedLine(r.pass, r.refused, "no retry mends that, so the scheduler ends"));
+        // One of the kinds a retry can mend, at a pass's first start in this
+        // process: the configuration's, said as such (review pass 1 of PR 3 — the
+        // log had only the pass's own lines).
+        else if (FOLLOW && r.code === 2 && !r.started && r.refused && !begun.has(r.pass)) err(refusedLine(r.pass, r.refused, "it had not got through its start in this process, so the scheduler ends"));
         if (!FOLLOW || r.code !== 2 || r.started || permanent || !begun.has(r.pass)) {
+          // A start refusal that ends it is said on the row by its kind, so
+          // preflight gives its remedy, not "start it again" (SMD-2752).
+          if (r.code === 2 && !r.started && r.refused) stamper.refused?.(r.refused);
           await stamper.end("failed", malformed ?? undefined);
           return r.code;
         }
@@ -852,7 +903,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         continue;
       }
       refusals = 0;
-      await stamper.stamp(sleepOutcome(), malformed ?? undefined);
+      // A sleep none of whose passes stamped (each waited at its start for the
+      // provider until the wake) says nothing of how they went: the row keeps
+      // its last word — a retried refusal's failed included — rather than read
+      // ok (SMD-2752 PR 3, review pass 3).
+      if (Object.keys(words).length) await stamper.stamp(sleepOutcome(), malformed ?? undefined);
+      else await stamper.alive();
       if (!FOLLOW) return r === "done" ? 0 : 1;
     }
     await stamper.end("stopped", malformed ?? undefined);

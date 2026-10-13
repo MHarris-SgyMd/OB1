@@ -107,6 +107,29 @@ export interface PassStamper {
    * not what preflight's own role may read (SMD-2678, review pass 1).
    */
   watching?(reads: LogReads): void;
+  /**
+   * The sleep scheduler's mark of the passes waiting at their start for a
+   * provider that does not answer (`waiting` in the value, left out while
+   * none is), carried by the row's next write: preflight's `sleep` row says
+   * so, where "its passes running" was all it had (SMD-2752). Only the
+   * scheduler sets it.
+   */
+  waiting?(passes: readonly string[]): void;
+  /**
+   * Which start refusal ended the row (`refused` in the value): one of
+   * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so
+   * preflight names the cause and its remedy rather than "start it again",
+   * which would only refuse again (SMD-2752). Only the scheduler sets it.
+   */
+  refused?(kind: string): void;
+  /**
+   * A pass's word that it is waiting at its start for a provider that does
+   * not answer (true), or no longer is (false): the engines say it through a
+   * caller's stamper, which the scheduler's per-pass one records and stamps
+   * (SMD-2752). A follower's own stamper has none — it does not exist until
+   * its pass begins.
+   */
+  startWait?(on: boolean): Promise<void>;
 }
 
 /**
@@ -144,12 +167,14 @@ export function passStamper(opts: {
   let malformed: MalformedBlock | null = null;
   let slept: SleepMark | null = null;
   let reads: LogReads | null = null;
+  let waiting: readonly string[] = [];
+  let refused: string | null = null;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(refused ? { refused } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -182,6 +207,8 @@ export function passStamper(opts: {
     async end(o, m) {
       outcome = o;
       ended = true;
+      // An ended row waits on nothing (SMD-2752 PR 3, review pass 1).
+      waiting = [];
       if (m !== undefined) malformed = m;
       await write(false);
     },
@@ -211,6 +238,12 @@ export function passStamper(opts: {
     },
     watching(r) {
       reads = r;
+    },
+    waiting(passes) {
+      waiting = [...passes];
+    },
+    refused(kind) {
+      refused = kind;
     },
   };
 }

@@ -174,7 +174,19 @@ export interface WorkerHeartbeat {
   slept?: { from: string; to: string | null };
   /** Whether the sleep scheduler's role reads query_log, as its start found (SMD-2678); absent for the other workers and an older scheduler. */
   reads?: "yes" | "denied" | "missing";
+  /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
+  waiting?: ("extract" | "consolidate")[];
+  /** The start refusal that ended the sleep scheduler, one of db/worker-bootstrap.ts's START_REFUSALS (SMD-2752); absent otherwise, and for the other workers. */
+  refused?: SleepRefusal;
 }
+
+/**
+ * db/worker-bootstrap.ts's START_REFUSALS, which a sleep row's `refused`
+ * must be one of: kept here, as server-portable reads no db/ module, and
+ * held equal to it by test-live [38].
+ */
+export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
+export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 
 /** A heartbeat older than this many of its own intervals is stale. */
 export const STALE_AFTER_INTERVALS = 3;
@@ -241,6 +253,13 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ? { from: s.from, to: s.to as string | null }
       : undefined;
     const reads = worker === "sleep" && (v!.reads === "yes" || v!.reads === "denied" || v!.reads === "missing") ? v!.reads : undefined;
+    // Its waiting passes and its refusal (SMD-2752), each left off when not
+    // of the shape: the passes by name, each once; the refusal of the list.
+    const w = worker === "sleep" ? v!.waiting : undefined;
+    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "extract" || p === "consolidate")
+      ? (w as ("extract" | "consolidate")[])
+      : undefined;
+    const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -255,6 +274,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       malformed,
       ...(slept ? { slept } : {}),
       ...(reads ? { reads } : {}),
+      ...(waiting ? { waiting } : {}),
+      ...(refused ? { refused } : {}),
     });
   }
   return { heartbeats, ignored };
@@ -875,7 +896,10 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
-  return `${h.running ? "running a pass" : "alive"}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
+  // A pass the sleep scheduler started that waits at its start for the
+  // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3).
+  const state = h.running ? (h.waiting?.length ? "waiting for the provider at a pass's start" : "running a pass") : "alive";
+  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

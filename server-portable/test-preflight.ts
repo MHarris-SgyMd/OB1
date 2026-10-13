@@ -1816,6 +1816,12 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Asleep with its pass waiting for the provider at its start, the row says
+  // so, as the sleep row does — not "its passes running" (SMD-2752 PR 3, review pass 2).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", waiting: ["consolidate"] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptWaiting = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  assert(/the sleep scheduler runs this key \(stamped 20 s ago; asleep, consolidate waiting for the provider at its start\)/.test(row(consSleptWaiting.out, "consolidate pass")),
+         `the consolidate pass row says the scheduler's pass waits for the provider, as the sleep row does (${row(consSleptWaiting.out, "consolidate pass")})`);
   // Asleep, the scheduler's own claim holds a live lease beside the workers
   // profile's old ended row: not "start it again", a second worker (review
   // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
@@ -3766,6 +3772,30 @@ else {
       const sleepOut = await run(LOG_ON);
       assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
+      // Asleep with a pass waiting at its start for the provider (SMD-2752):
+      // the row says so, not that its passes run, and warns with the provider.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null } }), 10);
+      const waitOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
+        `a pass waiting at its start for the provider is said, a warning naming the provider (${row(waitOut.out, "sleep")} | ${fix(waitOut.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract", "consolidate"], slept: { from: await at(130), to: null } }), 10);
+      const bothOut = await run(LOG_ON);
+      assert(/asleep, extract and consolidate waiting for the provider at their start/.test(row(bothOut.out, "sleep")) && /the passes begin on their own once it answers\./.test(fix(bothOut.out, "sleep")),
+        `both passes waiting are named, at their start, and the fix says they begin on their own (${fix(bothOut.out, "sleep")})`);
+      // Ended by a pass's start refusal (SMD-2752): its kind and remedy, not "start it again" alone.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "key", slept: { from: await at(900), to: await at(700) } }), 30);
+      const refusedOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+ended on a failure .*, refused at a pass's start \(key\);/.test(row(refusedOut.out, "sleep")) && /→ sleep ended 30 s ago on a pass's start refusal \(key\): the extraction key is extract-entities\.ts's to switch \(bun db\/extract-entities\.ts --switch-key/.test(fix(refusedOut.out, "sleep")) && /started before that, it refuses again/.test(fix(refusedOut.out, "sleep")) && !/: start it again —/.test(fix(refusedOut.out, "sleep")),
+        `a scheduler ended by a start refusal names the kind and its remedy, not "start it again" alone (${row(refusedOut.out, "sleep")} | ${fix(refusedOut.out, "sleep")})`);
+      // A lookup that did not name the key may name it next time (too many
+      // connections, a lock): not told it refuses again (review pass 3 of PR 3).
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "lookup", slept: { from: await at(900), to: await at(700) } }), 30);
+      const lookupFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/start refusal \(lookup\): the worker key's lookup did not name the key/.test(lookupFix) && !/refuses again/.test(lookupFix),
+        `a lookup refusal's fix gives the cause, and does not say a restart refuses again (${lookupFix})`);
+      // Ended on a failure with no refusal named (an older scheduler, a thrown pass): "start it again", as before.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, slept: { from: await at(900), to: await at(700) } }), 30);
+      assert(/→ sleep ended on a failure 30 s ago — its log says why: start it again —/.test(fix((await run(LOG_ON)).out, "sleep")), "with no refusal on the row, an ended scheduler is told to start again, as before");
       // Killed while asleep: the sleep never ended, so the row says when it began.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(900), to: null } }), 600);
       assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep began 15 min ago;/.test(row((await run(LOG_ON)).out, "sleep")), "a scheduler gone stale mid-sleep says when that sleep began");
