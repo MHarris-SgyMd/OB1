@@ -3817,6 +3817,26 @@ else {
       assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
         `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+
+      // The thoughts its wakes hold back (SMD-2694): one gaining windows across
+      // them is named and passes; one stalled — a window longer than every
+      // sleep, which consolidation joins past — warns, naming it and what
+      // finishes it; a `held` not of the shape is left off.
+      const ID1 = "11111111-1111-4111-8111-111111111111", ID2 = "22222222-2222-4222-8222-222222222222";
+      const sleeping = (held: unknown) => beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: new Date(Date.now() - 60_000).toISOString().replace(/\d{3}Z$/, "000Z"), to: null }, held }), 10);
+      await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 2, kept: 7, windows: 24 }] });
+      const gaining = await run(LOG_ON);
+      assert(/✓\s+sleep\s+running a pass .*; a search or a write wakes it; 1 thought\(s\) held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
+        `a thought held back, two stops short of the three the scheduler joins past at, is named, and the row passes (${row(gaining.out, "sleep")})`);
+      await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
+      const stalledOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
+        && /→ 22222222-2222-4222-8222-222222222222 has been stopped by 3 or more wakes in a row with no window gained: a window of it outlasts the sleeps\. Consolidation joins past it, judging a pair with it unextracted, and the first sleep longer than that window — overnight, most likely — finishes it\. Sooner: stop the scheduler .*--profile sleep stop sleep.*bun extract-entities\.ts --url \$DATABASE_URL.*then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
+      await sleeping({ total: 1, thoughts: [{ id: "not-a-uuid", stops: 3, stalled: 3, kept: 0, windows: null }] });
+      const badHeld = await run(LOG_ON);
+      assert(/✓\s+sleep\s+running a pass/.test(row(badHeld.out, "sleep")) && !/held back/.test(row(badHeld.out, "sleep")), `a held word not of the shape is left off, and the row reads as it would without it (${row(badHeld.out, "sleep")})`);
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }
 
     // Each claim worker's restart, and a stale row with an alarm told its restart first.

@@ -2906,10 +2906,16 @@ of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (089, [Long thoughts
 resume](#extract-entitiests)), so one longer than every sleep advances by the
-windows each sleep finishes, and is done once its last is; until then
-consolidation does not join, and a thought whose single window outlasts every
-sleep still holds it back (SMD-2694). A failed
-row stays failed: `--retry-failed` is the operator's.
+windows each sleep finishes, and is done once its last is. Consolidation also
+joins once extraction holds nothing but thoughts that three or more wakes in a
+row stopped with no window gained (089's `stalled`, SMD-2694) — a single
+window longer than every sleep, which would otherwise hold it back for as long
+as the brain keeps waking. A pair whose older side is such a thought is judged
+without its entities, as an unextracted neighbour is; the thought is tried at
+every sleep and finished by the first long enough. A brain before 089, or a
+role that cannot read its table (the extraction group's), joins once
+extraction drains alone, and the start says so. `--dry-run` names the held
+thoughts. A failed row stays failed: `--retry-failed` is the operator's.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -2952,6 +2958,15 @@ words, and the `sleep` row says each:
 - `refused`, the start refusal that ended it — "refused at a pass's start
   (key)", with that kind's remedy before the restart, where "start it again"
   alone would only refuse again.
+
+Since SMD-2694 it carries `held`, the thoughts extraction holds back across
+the wakes (a hard stop counted on them, 089): how many, and the three most
+stalled with their stops and windows kept, read at its start and after each
+wake. The `sleep` row names them — "1 thought(s) held back across its wakes —
+<id>, 7 of 24 window(s) kept over 3 stop(s)" passes, a document on its way —
+and warns on a stalled one, naming it, that consolidation joins past it and
+what finishes it: the first sleep longer than its window, or extraction run by
+hand with the scheduler stopped.
 
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there
@@ -4139,7 +4154,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2761 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1288 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1298 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -29,7 +29,7 @@ import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
-import { ago, deniedObject, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, SLEEP_STALLED_JOIN } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -4682,7 +4682,13 @@ if (configFailed) {
               // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
               const refusedBy = h.ended && h.outcome === "failed" && h.refused ? h.refused : null;
               // A scheduler not running wakes for nothing: what would wake it is said as such.
-              const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
+              // The thoughts its wakes hold back, by its own word (SMD-2694): one
+              // gaining windows across them is on its way; one stalled has a
+              // window longer than every sleep, which consolidation joins past.
+              const held = h.held;
+              const stuck = held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
+              const heldDetail = held ? `; ${held.total} thought(s) held back across its wakes — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
+              const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${heldDetail}`;
               const fixes: string[] = [];
               // Followers running here keep a scheduler down: it refuses beside
               // them, so "start it again" alone would only refuse again (review pass 3).
@@ -4700,6 +4706,10 @@ if (configFailed) {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }
               if (wakeFix) fixes.push(wakeFix);
+              if (stuck.length) {
+                const one = stuck.length === 1;
+                fixes.push(`${one ? `${stuck[0].id} has` : `${stuck.length} thoughts (${stuck.map((t) => t.id).join(", ")}) have`} been stopped by ${SLEEP_STALLED_JOIN} or more wakes in a row with no window gained: a window of ${one ? "it" : "each"} outlasts the sleeps. Consolidation joins past ${one ? "it" : "them"}, judging a pair with ${one ? "it" : "one"} unextracted, and the first sleep longer than that window — overnight, most likely — finishes ${one ? "it" : "them"}. Sooner: stop the scheduler while the brain is quiet (podman compose -f deploy/compose.yaml --profile sleep stop sleep, with the -f files and -p the stack was started with), run extraction by hand, which no wake stops — cd db && bun extract-entities.ts --url $DATABASE_URL, whose --status lists ${one ? "it" : "them"} (db/README.md, "Long thoughts resume") — then start it again: ${restartCommand("sleep", null)}.`);
+              }
               add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
             }
           }
