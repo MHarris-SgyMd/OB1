@@ -191,7 +191,9 @@ console.log("\n[2] Runtime neutrality");
   // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
   const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
   const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
-  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc]]) {
+  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, is the Worker's as much as index.ts is.
+  const edgeSrc = await Bun.file(new URL("./mcp-edge.ts", import.meta.url)).text();
+  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc], ["mcp-edge.ts", edgeSrc]]) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
@@ -852,7 +854,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
   // /health is the probe target for platforms that can only GET and want 2xx:
   // it needs no key, and without one it says `ok` and nothing else. The match
-  // rule is the HEALTH_PATH comment in index.ts; these rows pin it. A key
+  // rule is the comment above index.ts's /health route (HEALTH_PATH is mcp-edge.ts's); these rows pin it. A key
   // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
