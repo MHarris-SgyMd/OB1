@@ -14,8 +14,8 @@
 // the log batch's (OTEL_BLRP_*) and the metric reader's are read here and held
 // to their bounds (batchOptions, metricTimes). The resource is the SDK's own
 // (telemetry.sdk.*), the service's name — OTEL_SERVICE_NAME, else the server's
-// own — its version, and whatever OTEL_RESOURCE_ATTRIBUTES adds or overrides
-// (a tier's name, PR 3).
+// own — its version, an instance id fresh at each start, and whatever
+// OTEL_RESOURCE_ATTRIBUTES adds or overrides (a tier's name, PR 3).
 //
 // What is not sent — an export that failed, or what a batch's full queue
 // dropped — is said on stderr at most once a minute per signal, by count and
@@ -430,7 +430,9 @@ type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Rec
  */
 export function setUpTelemetry(serviceName: string, mode: InMemory | Collector): Telemetry {
   const resource = defaultResource()
-    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION }))
+    // service.instance.id a fresh UUID per start (review pass 3 of PR 2d): the MCP server and the REST core under one
+    // OTEL_SERVICE_NAME, or two tiers, would otherwise be one series whose cumulative readings interleave. No host, no process.
+    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION, "service.instance.id": crypto.randomUUID() }))
     .merge(detectResources({ detectors: [envDetector] }));
   const collector = "report" in mode ? mode : undefined;
   // The suite's exporters, read only where the mode is a suite's: a Collector's own options never pass as an exporter (review pass 3).

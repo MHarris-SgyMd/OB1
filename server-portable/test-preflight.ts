@@ -4479,5 +4479,137 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   other.stop();
 }
 
+console.log("\n[11] --deep's provider probes are each a span and a point where a collector is named, sent before the report and said in a telemetry row; a plain preflight starts no telemetry (SMD-1849 PR 2d)");
+{
+  const posted: { path: string; body: string }[] = [];
+  let collectorStatus = 200;
+  const collector = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      posted.push({ path: new URL(req.url).pathname, body: await req.text() });
+      return new Response(collectorStatus === 200 ? "{}" : "down", { status: collectorStatus, headers: { "content-type": "application/json" } });
+    },
+  });
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }], usage: { prompt_tokens: 1 } });
+      return new Response("overloaded", { status: 503 });
+    },
+  });
+  const OTEL_UNSET = Object.fromEntries(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER"].map((k) => [k, undefined]));
+  const ENV = { ...DB_DOWN, ...NO_KEYS, ...OTEL_UNSET, OB1_LLM_BASE_URL: `http://user:s3cret-2d@127.0.0.1:${provider.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
+  const COLLECTOR = `http://127.0.0.1:${collector.port}`;
+
+  const sentAt = performance.now();
+  const sent = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR }, "--deep");
+  /** The provider duration's points in the metric exports posted: the last export's, since each sends the cumulative reading again. */
+  const pointsIn = (bodies: string) => {
+    const last = bodies.split("\n").filter((b) => b.includes("gen_ai.client.operation.duration")).at(-1) ?? "{}";
+    type Dp = { count: number | string; attributes: { key: string; value: { stringValue?: string } }[] };
+    const parsed = JSON.parse(last) as { resourceMetrics?: { scopeMetrics: { metrics: { name: string; histogram?: { dataPoints: Dp[] } }[] }[] }[] };
+    return (parsed.resourceMetrics ?? []).flatMap((r) => r.scopeMetrics).flatMap((sm) => sm.metrics).filter((m) => m.name === "gen_ai.client.operation.duration").flatMap((m) => m.histogram?.dataPoints ?? []);
+  };
+  const sentMs = performance.now() - sentAt;
+  const bodyOf = (path: string) => posted.filter((p) => p.path === path).map((p) => p.body).join("\n");
+  const metrics = bodyOf("/v1/metrics");
+  const traces = bodyOf("/v1/traces");
+  assert(new RegExp(String.raw`✓\s+telemetry\s+the provider probes' spans and points sent — open-brain-preflight's spans, metrics and log records go to ${rx(COLLECTOR)} over OTLP/HTTP`).test(sent.out),
+    `--deep with a collector named: the telemetry row says the probes' spans and points were sent, and where (${row(sent.out, "telemetry").trim()})`);
+  assert(metrics.includes('"gen_ai.client.operation.duration"') && traces.includes(`"embeddings ${EMBEDDING_MODEL}"`) && traces.includes('"chat meta-7b"')
+    && /"key":"error\.type","value":\{"stringValue":"503"\}/.test(metrics) && metrics.includes('"stringValue":"open-brain-preflight"')
+    && pointsIn(metrics).length === 2 && pointsIn(metrics).every((p) => Number(p.count) === 1 && p.attributes.some((a) => a.key === "ob1.probe" && a.value.stringValue === "preflight")),
+    `…the collector got a span and one point per probe, each marked a probe, the chat probe's 503 its error.type, as open-brain-preflight (${posted.map((p) => p.path).join(", ")})`);
+  assert(!JSON.stringify(posted).includes("s3cret-2d") && !JSON.stringify(posted).includes("Reply with only") && !JSON.stringify(posted).includes('"input"') && !sent.out.includes("s3cret-2d"),
+    "…and no base's userinfo, and no probe's text, in what was sent or printed");
+
+  posted.length = 0;
+  const plain = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR });
+  assert(row(plain.out, "telemetry") === "" && posted.length === 0, `a plain preflight, the one each container start runs, starts no telemetry and sends nothing (${posted.length} sent)`);
+
+  const nowhere = await run(ENV, "--deep");
+  assert(/·\s+telemetry\s+no collector named \(OTEL_EXPORTER_OTLP_ENDPOINT or a signal's own endpoint\): the probes' spans and points go nowhere/.test(nowhere.out),
+    `--deep with no collector named: the telemetry row skips, saying so (${row(nowhere.out, "telemetry").trim()})`);
+
+  collectorStatus = 503;
+  const refusedAt = performance.now();
+  const refused = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR }, "--deep");
+  const refusedMs = performance.now() - refusedAt;
+  assert(/!\s+telemetry\s+the provider probes' spans and points not all sent within 5 s/.test(refused.out) && /→ Fix what the row names, or check the collector is up and reachable from here/.test(refused.out) && refused.code === sent.code,
+    `a collector that refuses: a warning, not a failure (${row(refused.out, "telemetry").trim().slice(0, 200)})`);
+  // The exporter retries a 503 for its own 10 s: the send and the shutdown share one 5 s bound, not one each.
+  assert(refusedMs - sentMs < 8_000, `…and it costs the run the send's one bound, not the exporter's retries (${Math.round(refusedMs - sentMs)} ms more than a collector that answers)`);
+
+  // A collector that answers 400 (no retry): not all sent, and what the send said is in the row (review pass 1).
+  collectorStatus = 400;
+  const bad = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR }, "--deep");
+  const badParts = row(bad.out, "telemetry").split("; ");
+  assert(/!\s+telemetry\s+the provider probes' spans and points not all sent — /.test(bad.out) && /HTTP 400/.test(row(bad.out, "telemetry")) && new Set(badParts).size === badParts.length,
+    `a collector that answers 400: not all sent, the send's own words in the row, each once (${row(bad.out, "telemetry").trim().slice(0, 240)})`);
+  collectorStatus = 200;
+
+  // What the row says by the signals that go: spans alone; spans to a URL that is none and points that go; neither (review pass 1).
+  posted.length = 0;
+  // With no batch delay the probes' spans are sent as they end, so the flush may find none left: the row still says they went (review pass 2; every cell is test-server [26]'s).
+  const tracesOnly = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${COLLECTOR}/v1/traces`, OTEL_BSP_SCHEDULE_DELAY: "0" }, "--deep");
+  assert(/✓\s+telemetry\s+the provider probes' spans sent — /.test(tracesOnly.out) && posted.every((p) => p.path === "/v1/traces"),
+    `a traces endpoint alone: the row says spans, not points, and only spans went (${row(tracesOnly.out, "telemetry").trim().slice(0, 160)})`);
+  const halfWrong = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "not a url", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: `${COLLECTOR}/v1/metrics` }, "--deep");
+  assert(/!\s+telemetry\s+the provider probes' points sent — .*OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http\(s\) URL/.test(halfWrong.out),
+    `a traces endpoint that is no URL beside one for metrics: a warning that names it, points sent (${row(halfWrong.out, "telemetry").trim().slice(0, 200)})`);
+  const logsOnly = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_TRACES_EXPORTER: "none", OTEL_METRICS_EXPORTER: "none" }, "--deep");
+  assert(/·\s+telemetry\s+the probes' spans and points go nowhere — /.test(logsOnly.out) && !/no provider probe ran/.test(logsOnly.out),
+    `spans and points both off, log records on: the probes' go nowhere, a skip (${row(logsOnly.out, "telemetry").trim().slice(0, 200)})`);
+  const disabled = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_SDK_DISABLED: "true" }, "--deep");
+  const wrong = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: "not a url" }, "--deep");
+  assert(/·\s+telemetry\s+the probes' spans and points go nowhere — .*OTEL_SDK_DISABLED=true/.test(disabled.out) && /!\s+telemetry\s+the probes' spans and points go nowhere — .*is not an http\(s\) URL/.test(wrong.out),
+    `turned off on purpose, a skip; an endpoint that is no URL, a warning (${row(disabled.out, "telemetry").trim().slice(0, 120)} | ${row(wrong.out, "telemetry").trim().slice(0, 120)})`);
+  const noProbe = await run({ ...ENV, OB1_LLM_BASE_URL: "https://provider.invalid/v1", OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR }, "--deep");
+  assert(/·\s+telemetry\s+no provider probe ran, so nothing was sent/.test(noProbe.out),
+    `no credential, so no probe ran: nothing was checked, a skip (${row(noProbe.out, "telemetry").trim().slice(0, 160)})`);
+  // What is not read is said and is no fault; a signal off on purpose is none either; a wrong endpoint warns even when no probe ran (review pass 2).
+  const consoleToo = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_TRACES_EXPORTER: "console" }, "--deep");
+  const logsOff = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_LOGS_EXPORTER: "none" }, "--deep");
+  const wrongUnprobed = await run({ ...ENV, OB1_LLM_BASE_URL: "https://provider.invalid/v1", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "nope", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: `${COLLECTOR}/v1/metrics` }, "--deep");
+  assert(/✓\s+telemetry\s+the provider probes' spans and points sent — .*OTEL_TRACES_EXPORTER "console" is not read/.test(consoleToo.out)
+    && /✓\s+telemetry\s+the provider probes' spans and points sent — .*OTEL_LOGS_EXPORTER=none/.test(logsOff.out)
+    && /!\s+telemetry\s+no provider probe ran, so nothing was sent — .*OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http\(s\) URL/.test(wrongUnprobed.out),
+    `an exporter not read, said; log records off, no fault; a wrong endpoint a warning though no probe ran (${[consoleToo, logsOff, wrongUnprobed].map((r) => row(r.out, "telemetry").trim().slice(0, 90)).join(" | ")})`);
+  // A probe's status outside 300–599 is `_OTHER`, as providerCall's is: a raw stub answers the chat probe 999, which no
+  // Response can say (review pass 4).
+  {
+    const { createServer } = await import("node:net");
+    const raw = createServer((socket) => {
+      let got = "";
+      socket.on("data", (chunk) => {
+        got += chunk.toString();
+        const head = got.indexOf("\r\n\r\n");
+        if (head < 0) return;
+        const length = Number(/content-length: *(\d+)/i.exec(got.slice(0, head))?.[1] ?? 0);
+        if (got.length - head - 4 < length) return;
+        const line = got.slice(0, got.indexOf("\r\n"));
+        const body = line.startsWith("GET") ? JSON.stringify({ object: "list", data: [] })
+          : line.includes("/embeddings") ? JSON.stringify({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] }) : "no";
+        const status = line.includes("/chat/completions") ? "999 Odd" : "200 OK";
+        socket.end(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+      });
+    });
+    await new Promise<void>((done) => raw.listen(0, "127.0.0.1", () => done()));
+    posted.length = 0;
+    collectorStatus = 200;
+    try {
+      await run({ ...ENV, OB1_LLM_BASE_URL: `http://127.0.0.1:${(raw.address() as { port: number }).port}/v1`, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR }, "--deep");
+    } finally {
+      raw.close();
+    }
+    const chatPoint = pointsIn(bodyOf("/v1/metrics")).find((p) => p.attributes.some((a) => a.key === "gen_ai.operation.name" && a.value.stringValue === "chat"));
+    const chatType = chatPoint?.attributes.find((a) => a.key === "error.type")?.value.stringValue;
+    assert(chatType === "_OTHER", `a probe answered 999: its point's error.type \`_OTHER\`, as providerCall's would be (${chatType})`);
+  }
+  collector.stop(true);
+  provider.stop(true);
+}
+
 localStub.stop(true);
 report();

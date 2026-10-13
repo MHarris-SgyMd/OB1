@@ -15,6 +15,7 @@ import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
 import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { failure } from "./refusal.ts";
+import { withSpan } from "../spans.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -324,9 +325,11 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     // hold the sender's 2xx (review pass 1, measured on Bun 1.4.0). What the
     // socket takes at once is written by then; a large answer's tail may
     // still wait on work that spins (review pass 2).
+    // Work, which runs after the answer, starts a trace of its own linked to the delivery's request, as a job's body
+    // does; a discard runs before a failed delivery's 500, inside its request, so it stays that request's child (SMD-1849 PR 2d).
     const run = () =>
       new Promise<void>((resolve) => setImmediate(resolve))
-        .then(work)
+        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => work()))
         .then(
           () => undefined,
           (err) => {

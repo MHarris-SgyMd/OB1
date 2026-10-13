@@ -644,6 +644,15 @@ MCP tools do rather than a copy of it:
   own outcome and code, a fault its kind and code — the API's no-ops until
   `OTEL_EXPORTER_OTLP_ENDPOINT` (or a signal's own variable) names a collector
   (`deploy/README.md`, "Traces, metrics and log records").
+- **`spans.ts`** — the spans a provider call (`embed.ts`'s `providerCall`,
+  preflight's `--deep` probes), a store operation (`createStore`'s store), a
+  job's body (`startJob`) and a webhook's deferred work (each of the last two a
+  trace of its own, linked to what started it) run under, a provider call's
+  and a store operation's point on their histograms and a job's on its own, and
+  `faultOf`. It imports nothing — `embed.ts` and `store.ts` are imported by
+  `db/`'s workers and `evals/`, which install no package of this directory's —
+  so a span there is nothing until `telemetry.ts` installs **`tracing.ts`**, the
+  OpenTelemetry API's spans, as a server, or preflight under `--deep`, loads it.
 - **`otel-setup.ts`** — the OpenTelemetry SDK for traces, metrics and log
   records, loaded only then and only on Bun: an OTLP/HTTP exporter for each
   signal with a URL, spans and log records batched, the AsyncLocalStorage
@@ -802,10 +811,10 @@ those its own way.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1013 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record (SMD-1849)
+bun test-server.ts        # 1045 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
 bun test-rest.ts          # 351 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
-bun test-plugins.ts       # 258 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span and a webhook fault's
+bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
