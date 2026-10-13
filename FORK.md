@@ -644,6 +644,10 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 ```
 
 runs them all in CI's order against one shared database. Use it before pushing.
+It also runs the suites and self-checks of CI's jobs that have no database
+(with `DATABASE_URL` unset, as theirs is) and every typecheck. Check 35 holds
+it to the workflow, both ways: a script a step runs, from the same directory,
+with the same flags and environment, or an excuse with its reason (SMD-2903).
 
 **Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
 house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
@@ -690,8 +694,8 @@ step, each run's `N assertions: …` line, are the first thing to read. "No
 summary line" means the run died before its report, and its log says where;
 exit 124 means it hung past its 15-minute limit (137, that it ignored the stop
 and was killed, or ran out of memory). The self-checks after it run whether it
-passes or fails. To reproduce a 768-only failure locally (`db/ci-parity.sh`
-runs the default width only):
+passes or fails. `db/ci-parity.sh` runs both widths, one after the other; to
+reproduce a 768-only failure on its own:
 
 ```bash
 cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
