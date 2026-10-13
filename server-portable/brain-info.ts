@@ -610,16 +610,18 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
     -- (consolidate.ts), which this file may not import; test-board-findings
     -- holds the two equal.
     LEFT JOIN LATERAL (
-      SELECT count(*) FILTER (WHERE s.status = 'accepted')::int AS accepted,
-             count(*) FILTER (WHERE s.status = 'rejected' AND coalesce(s.review_note, '') NOT LIKE 'settled by the pass:%')::int AS rejected,
-             count(*) FILTER (WHERE s.status = 'rejected' AND s.review_note LIKE 'settled by the pass:%')::int AS settled,
-             count(*) FILTER (WHERE s.status = 'stale')::int AS stale,
-             count(*) FILTER (WHERE s.status = 'pending')::int AS pending,
-             min(s.reviewed_at) FILTER (WHERE s.status = 'accepted') AS accepted_at,
-             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected' AND coalesce(s.review_note, '') NOT LIKE 'settled by the pass:%') AS rejected_at,
-             max(s.reviewed_at) FILTER (WHERE s.status = 'rejected' AND s.review_note LIKE 'settled by the pass:%') AS settled_at
-        FROM supersession_proposals s
-       WHERE b.word = 'outdates' AND s.id = ANY (b.finding_ids)) p ON b.word = 'outdates'
+      SELECT count(*) FILTER (WHERE s.state = 'accepted')::int AS accepted,
+             count(*) FILTER (WHERE s.state = 'rejected')::int AS rejected,
+             count(*) FILTER (WHERE s.state = 'settled')::int AS settled,
+             count(*) FILTER (WHERE s.state = 'stale')::int AS stale,
+             count(*) FILTER (WHERE s.state = 'pending')::int AS pending,
+             min(s.reviewed_at) FILTER (WHERE s.state = 'accepted') AS accepted_at,
+             max(s.reviewed_at) FILTER (WHERE s.state = 'rejected') AS rejected_at,
+             max(s.reviewed_at) FILTER (WHERE s.state = 'settled') AS settled_at
+        FROM (SELECT x.reviewed_at,
+                     CASE WHEN x.status = 'rejected' AND x.review_note LIKE 'settled by the pass:%' THEN 'settled' ELSE x.status END AS state
+                FROM supersession_proposals x
+               WHERE b.word = 'outdates' AND x.id = ANY (b.finding_ids)) s) p ON b.word = 'outdates'
     -- A re-judge closes a relation and writes its successor on the same pair
     -- of thoughts (084's one active relation per pair), so the named facet's
     -- pair is where its word is looked for: standing now, or when the last

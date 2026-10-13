@@ -213,8 +213,8 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
 
   // The settle marker in the read is consolidate.ts's PASS_SETTLED_PREFIX, which brain-info.ts may not import (review pass 4).
   const readText = String((await FINDING_OUTCOMES_SQL(((parts: TemplateStringsArray) => Promise.resolve([parts.join("?")])) as never))[0]);
-  ok(readText.split(`'${PASS_SETTLED_PREFIX}%'`).length - 1 === 4 && !/'settled by[^']*'/.test(readText.split(`'${PASS_SETTLED_PREFIX}%'`).join("")),
-    "the read's settle marker is PASS_SETTLED_PREFIX, in all four places, and no other spelling of it");
+  const marked = readText.split(`'${PASS_SETTLED_PREFIX}%'`);
+  ok(marked.length === 2 && !/settled by/.test(marked.join("")), "the read's settle marker is PASS_SETTLED_PREFIX, once, and no other spelling of it");
   // --report's line: the pair, the word, where and when, and what became of it.
   const lines = [
     reportLine(row({ linkedS: 3 * D, ageS: 12 * D, a: "SMD-12", b: "SMD-40", postedOn: "SMD-40" })),
