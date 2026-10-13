@@ -405,7 +405,6 @@ export function partsOf(body: ParsedBody): RequestParts {
   return isCall(msg) && typeof msg.params?.name === "string" ? { rpc: msg.method, tool: msg.params.name, toolCalls } : { rpc: msg.method, toolCalls };
 }
 
-
 /**
  * The close sse.ts's abandonedRequestLine says, when the server's own stop
  * made it: the request was still running when the stop closed it — at the

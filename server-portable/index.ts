@@ -1,4 +1,3 @@
-
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
 import { agents, closeStore, db, env, initEnv, plugins, serveHere, type Env } from "./root.ts";
@@ -651,7 +650,6 @@ app.get("*", async (c, next) => {
   if (!job.ok) return c.json({ error: "not found" }, 404, corsHeaders);
   return c.json(job.value, 200, corsHeaders);
 });
-
 
 // requestLabel and abandonedRequestLine live in sse.ts, beside the keepalive,
 // so the vendored MCP servers' copies of it log a client that leaves the same
