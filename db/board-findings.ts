@@ -758,7 +758,7 @@ export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string 
     : v.outcome === "withdrawn"
       ? r.proposals
         ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
-        : `withdrawn: the judge stopped saying ${r.word}${r.withdrawnS === null ? "" : ` ${ago(r.withdrawnS)} after`}`
+        : `withdrawn: the judge stopped saying ${r.word}${r.withdrawnS === null ? "" : ` ${ago(Math.max(0, r.withdrawnS))} after`}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;
   return `    ${`${r.a} ~ ${r.b}`.padEnd(22)} ${r.word.padEnd(9)} posted ${ago(r.ageS)} ago on ${r.postedOn} — ${what}`;

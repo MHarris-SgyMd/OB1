@@ -219,6 +219,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1, settledS: 4 * D }) })),
     reportLine(row({ word: "evolves", stands: false })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: 2 * D })),
+    reportLine(row({ word: "evolves", stands: false, withdrawnS: -3 })),
     reportLine(row({ ageS: 31 * D })),
     reportLine(row({ ageS: 12 * D })),
   ];
@@ -230,6 +231,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 2 d after",
+    "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 0 s after",
     "    SMD-1 ~ SMD-2          related   posted 31 d ago on SMD-2 — unanswered: open past 30 d",
     "    SMD-1 ~ SMD-2          related   posted 12 d ago on SMD-2 — open: 18 d before it counts as unanswered",
   ].join("\n"), `--report's lines say each outcome (${lines.join(" / ")})`);

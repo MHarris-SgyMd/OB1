@@ -626,7 +626,10 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
     -- thought_facets the planner otherwise scanned it once per posted row,
     -- outdates rows included (review pass 1).
     LEFT JOIN LATERAL (
-      SELECT bool_or(n.valid_until IS NULL) IS TRUE AS stands, max(n.valid_until) AS gone_at
+      -- A close whose target is gone is 084's trigger answering a delete, not
+      -- the judge: no time, as when the holder's delete cascades (review pass 3).
+      SELECT bool_or(n.valid_until IS NULL) IS TRUE AS stands,
+             max(n.valid_until) FILTER (WHERE EXISTS (SELECT 1 FROM thoughts g WHERE g.id = (n.payload->>'target')::uuid)) AS gone_at
         FROM unnest(b.finding_ids) AS x(id)
         JOIN thought_facets o ON o.id = x.id AND o.kind = 'relation'
         JOIN thought_facets n ON n.thought_id = o.thought_id AND n.kind = 'relation' AND n.payload->>'target' = o.payload->>'target'
@@ -698,6 +701,15 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * proposal or a relation deleted with its thought leaves no time behind it:
  * the comment is still on the board, so withdrawn within the window,
  * unanswered past it.
+ *
+ * Read from the rows as they stand, not from a history: a settle that 067
+ * reopens on a later text move (stale, its reviewed_at cleared) is judged
+ * again by its current state, and a later settle's time replaces the first —
+ * so a finding taken back within the window can read unanswered past it. That
+ * can only understate the rate, never inflate it; recording each finding's
+ * first withdrawal is SMD-2913. A rejection whose note a person wrote
+ * beginning with 067's marker (by hand, in SQL: consolidate.ts --reject
+ * refuses it) reads as the pass's, as 067 itself reads it.
  */
 export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): FindingVerdict {
   const open = (): FindingVerdict => ({ outcome: r.ageS > days * 86_400 ? "unanswered" : "open", how: null, answeredS: null });

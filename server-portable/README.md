@@ -445,7 +445,11 @@ the consolidation pass's own re-judge, or a relation the judge stopped saying,
 within the window), open (a proposal pending, or stale and waiting on a
 re-judge), or unanswered once open past 30 days — a finding the judge takes
 back after that stays unanswered, and one deleted with its thought, which
-leaves no time, is unanswered once its comment is past the window. The rate is
+leaves no time, is unanswered once its comment is past the window. It is read
+from the rows as they stand: a settle that a later text move reopens (067) is
+judged by its current state, so a finding taken back within the window can read
+unanswered past it — the rate is understated by it, never inflated (SMD-2913
+records the first withdrawal). The rate is
 accepted over accepted, rejected and unanswered — withdrawn and open are not
 answers — and the median is from the post to the first link since or the
 review. A link Linear made before the comment but board-sync brought in after

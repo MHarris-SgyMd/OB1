@@ -11900,7 +11900,7 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
          VALUES (${`ZR-${a}`}, ${`ZR-${b}`}, ${word}, ${`ZR-${b}`}, ${origin}, ${origin === "posted" ? `c-zr-${a}` : null}, ${`{${ids.join(",")}}`}::uuid[], now() - make_interval(days => ${daysAgo}))`;
   try {
     // The ticket pairs sort as text, so each pair is (ZR-1n, ZR-1m) with n < m below 10.
-    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43].map(async (n) => [n, await ticket(n)] as const)));
+    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45].map(async (n) => [n, await ticket(n)] as const)));
     // accepted through the proposal; rejected with a link since; pending, linked from a section row, the other way; stale.
     const pA = await propose(t[10], t[11]); await review(pA, "accept"); await told(10, 11, "outdates", [pA], 6);
     const pB = await propose(t[12], t[13]); await review(pB, "reject"); await told(12, 13, "outdates", [pB], 6); await link(t[12], "relates_to", "ZR-13");
@@ -11943,6 +11943,10 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     // A relation posted 40 days ago and closed on its fifth day (a close may be dated back, 084): withdrawn by its close, not its age.
     const rQ = await relate(t[43], t[42], "related"); await told(42, 43, "related", [rQ.id!], 40);
     await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rQ.id!}::uuid`;
+    // The older thought deleted (084 closes the relation, it does not cascade): a delete, not the judge — no time, so the comment's age decides (review pass 3).
+    const rR = await relate(t[45], t[44], "related"); await told(44, 45, "related", [rR.id!], 40);
+    await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rR.id!}::uuid`;
+    await bsql`SELECT delete_thought(${t[44].id}::uuid, NULL::jsonb)`;
     assert(settledO.ok === true && settledP.ok === true, `the fixtures: the pass settles both stale proposals (${JSON.stringify([settledO, settledP])})`);
     const firstLinkS = Number(((await bsql`SELECT extract(epoch FROM min(f.created_at) - (SELECT posted_at FROM board_findings_posted WHERE ticket_a = 'ZR-36'))::float8 AS s
                                              FROM thought_facets f WHERE f.kind = 'link' AND f.thought_id = ${t[36].id}::uuid`)[0] as { s: number }).s);
@@ -11955,10 +11959,10 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
       "ZR-10~ZR-11": "accepted/proposal", "ZR-12~ZR-13": "rejected/proposal", "ZR-14~ZR-15": "accepted/linked", "ZR-16~ZR-17": "open/null",
       "ZR-18~ZR-19": "unanswered/null", "ZR-20~ZR-21": "open/null", "ZR-22~ZR-23": "withdrawn/null", "ZR-24~ZR-25": "accepted/linked", "ZR-26~ZR-27": "open/null", "ZR-28~ZR-29": "open/null", "ZR-30~ZR-31": "withdrawn/null",
       "ZR-32~ZR-33": "withdrawn/null", "ZR-34~ZR-35": "unanswered/null", "ZR-36~ZR-37": "accepted/linked",
-      "ZR-38~ZR-39": "accepted/linked", "ZR-40~ZR-41": "withdrawn/null", "ZR-42~ZR-43": "withdrawn/null",
+      "ZR-38~ZR-39": "accepted/linked", "ZR-40~ZR-41": "withdrawn/null", "ZR-42~ZR-43": "withdrawn/null", "ZR-44~ZR-45": "unanswered/null",
     };
     const closedLink = Number(((await bsql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[28].id}::uuid AND valid_until IS NOT NULL`)[0] as { n: number }).n);
-    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 17 && closedLink === 1,
+    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 18 && closedLink === 1,
       `each posted pair reads what became of it, from the database (${JSON.stringify(said)})`);
     const linked = zr.find((r) => r.a === "ZR-14")!;
     const relinked = zr.find((r) => r.a === "ZR-36")!;
@@ -11966,8 +11970,8 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
         && relinked.linkedS !== null && Math.abs(relinked.linkedS - firstLinkS) < 0.01,
       `the time to an answer is the first link's since the post, or the review's (${linked.linkedS}, ${relinked.linkedS} vs ${firstLinkS})`);
     const v = findingsValue(zr);
-    assert(v.posted === 16 && v.comments === 16 && v.found === 1 && v.accepted === 5 && v.rejected === 1 && v.withdrawn === 5 && v.open === 3 && v.unanswered === 2,
-      `the ZR pairs count 5 accepted, 1 rejected, 2 unanswered, 3 open, 5 withdrawn, 1 found (${JSON.stringify(v)})`);
+    assert(v.posted === 17 && v.comments === 17 && v.found === 1 && v.accepted === 5 && v.rejected === 1 && v.withdrawn === 5 && v.open === 3 && v.unanswered === 3,
+      `the ZR pairs count 5 accepted, 1 rejected, 3 unanswered, 3 open, 5 withdrawn, 1 found (${JSON.stringify(v)})`);
 
     // brain_info's read is the same read: its record is findingsValue over every row.
     const facts = await readDatabaseFacts(bsql);

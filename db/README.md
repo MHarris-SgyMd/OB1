@@ -4086,7 +4086,12 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   person made), or a relation the judge stopped saying at that word (one
   re-judged at the same word still stands); or its proposals or relation
   deleted with a thought, which leaves no time — the comment stays on the
-  board, so past the window that reads unanswered; **open** — a
+  board, so past the window that reads unanswered (it is read from the rows
+  as they stand: a settle a later text move reopens, 067, is judged by its
+  current state, and a later settle's time replaces the first, so a finding
+  taken back within the window can read unanswered past it — understating
+  the rate, never inflating it; SMD-2913 records the first withdrawal);
+  **open** — a
   proposal pending, or stale (a text moved) and waiting on a re-judge or a
   reviewer, or a relation standing; or **unanswered**, open past `--days`
   (30). The board has no "no" for a relation: left unlinked past the window
