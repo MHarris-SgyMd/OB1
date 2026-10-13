@@ -4538,7 +4538,10 @@ console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, n
     return [...bare];
   };
   const { readdirSync } = await import("node:fs");
-  const importers = ["db", "evals"].flatMap((dir) => readdirSync(resolve(import.meta.dir, "..", dir)).filter((f) => /\.(ts|mjs)$/.test(f) && readFileSync(resolve(import.meta.dir, "..", dir, f), "utf8").includes("../server-portable/")).map((f) => `../${dir}/${f}`));
+  // Every file under db/ and evals/ that names server-portable/, nested directories too (evals/orchestration/), installs aside.
+  const importers = ["db", "evals"].flatMap((dir) => (readdirSync(resolve(import.meta.dir, "..", dir), { recursive: true }) as string[])
+    .filter((f) => /\.(ts|mjs)$/.test(f) && !f.includes("node_modules") && readFileSync(resolve(import.meta.dir, "..", dir, f), "utf8").includes("/server-portable/"))
+    .map((f) => `../${dir}/${f}`));
   const entries = ["spans.ts", "embed.ts", "store.ts", "jobs.ts", ...importers];
   const packages = entries.map((e) => [e, reached(e)] as const).filter(([, p]) => p.length > 0);
   assert(importers.length > 10 && packages.length === 0, `spans.ts, embed.ts, store.ts and jobs.ts — and every one of the ${importers.length} db/ and evals/ files that import server-portable/ — reach no package through server-portable/'s files, so a worker with no server-portable/ install still runs (${JSON.stringify(packages)})`);
