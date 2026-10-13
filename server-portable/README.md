@@ -652,6 +652,18 @@ MCP tools do rather than a copy of it:
   two: validate (the SDK runs the spec's schema), call the operation, render. It
   builds no store and makes no egress or embedding call: it hands root.ts's readers to
   the core, says it serves (`serveHere()`) and closes the store at a stop.
+- **`mcp-edge.ts`** — what the MCP endpoint answers around the SDK's transport:
+  - the methods it serves and its CORS headers;
+  - the JSON-RPC refusal envelopes, and a notification's bare 202 or 503 (SMD-2106);
+  - the public origin's challenge and its 503 (SMD-2382);
+  - the bounded read of a refused body;
+  - a request's parts and its calls' record for its line;
+  - the stop's cut line, and the old root URL's line;
+  - the keyed mirrors' answer to a caller they show nothing.
+
+  It is HTTP alone, with no store, no provider and no environment. It was moved out of
+  `index.ts` as it was (SMD-2287 PR 2), so the MCP server as a REST client answers at
+  its edge as this one does.
 - **`root.ts`** — the process root a serving entry builds on (SMD-2284): `type Env`,
   the one list of what the container's process reads; `initEnv()` and `env()`; the
   store's wiring — `db()` builds it and wires the job sink, `closeStore()` closes it at a
@@ -684,9 +696,9 @@ MCP tools do rather than a copy of it:
   context manager and the W3C propagator. `wrangler.toml` aliases it to
   `shims/otel-unavailable.ts`, so the Worker carries the API alone.
 
-`scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts` and `root.ts`
-for what a move would leave behind: an import outside the file's list, a SQL call or
-`fetch`, the store named outside `root.ts`'s wiring.
+`scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts`, `mcp-edge.ts`
+and `root.ts` for what a move would leave behind: an import outside the file's list, a
+SQL call or `fetch`, the store named outside `root.ts`'s wiring.
 
 Every tool's reply carries a typed answer as `structuredContent` beside the text.
 Claude Code, VS Code and Codex show the model `structuredContent` alone when it is present, so:
@@ -846,7 +858,7 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1049 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
+bun test-server.ts        # 1052 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys
 bun test-rest.ts          # 357 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's

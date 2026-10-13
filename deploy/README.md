@@ -632,7 +632,8 @@ summary line counts them).
 Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 `http://127.0.0.1:8000/health` at the origin root or `…/mcp/health` under the
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
-is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
+is the comment above `server-portable/index.ts`'s `/health` route, whose test is
+`mcp-edge.ts`'s `HEALTH_PATH` (FORK.md change 75).
 The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
 through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
 platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
