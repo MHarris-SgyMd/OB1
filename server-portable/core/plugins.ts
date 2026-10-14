@@ -25,6 +25,10 @@ type Core = ReturnType<typeof createCore>;
 const PLUGIN_NAME = PLUGIN_NAME_RE;
 /** An operation's key: lower-case words joined by single underscores. */
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+/** A field name a query string carries as written (rest-client sends no other). */
+const QUERY_NAME = /^[A-Za-z0-9_.-]+$/;
+/** The types the REST core reads back from a query string's text (rest/app.ts inputFromQueryShape). */
+const QUERY_SCALARS = new Set(["string", "number", "integer", "boolean"]);
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
 /** A webhook's name: one path segment of lower-case words and hyphens. */
@@ -131,6 +135,35 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
         else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
         // A path segment is always there: a field that may be absent is one MCP could call without.
         else if (field.safeParse(undefined).success) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
+      }
+      // A GET's or a DELETE's input rides the query string, through the REST
+      // core and through the MCP server that calls it: each field one the REST
+      // core reads back as it was sent — text, a number, a boolean, or a list of
+      // text whose absence is the empty list, as a query carries no empty list
+      // and no null (SMD-2287 PR 4a review pass 1: a nullable number arrived as
+      // text, a list of numbers as strings, an empty list as none).
+      if (op.method === "GET" || op.method === "DELETE") {
+        for (const [f, field] of Object.entries(op.input ?? {})) {
+          if (fields.includes(f)) continue;
+          if (!QUERY_NAME.test(f)) { problems.push(`${where}: its input field ${JSON.stringify(f)} is no name a query string carries`); continue; }
+          let js: { type?: string; items?: { type?: string } } = {};
+          try { js = z.toJSONSchema(field, { io: "input" }) as typeof js; } catch { /* a schema JSON cannot state: refused below as no type */ }
+          if (js.type === "array") {
+            const absent = field.safeParse(undefined);
+            if (js.items?.type !== "string") problems.push(`${where}: its query field ${f} is a list of other than text, which a query string carries as text`);
+            else if (!(absent.success && Array.isArray(absent.data) && absent.data.length === 0)) problems.push(`${where}: its query field ${f} is a list with no default of []: a query string carries no empty list`);
+          } else if (!QUERY_SCALARS.has(js.type ?? "")) {
+            problems.push(`${where}: its query field ${f} is not text, a number or a boolean (nullable, a union or an object), which a query string cannot carry as it was given`);
+          }
+        }
+      }
+      // An input is parsed twice through the MCP server as a REST client — by
+      // its SDK, then by the REST core it sends the parsed input to — so a
+      // transform would run twice (review pass 1: n + 1 arrived as n + 2).
+      try {
+        z.toJSONSchema(z.object(op.input ?? {}), { io: "output" });
+      } catch {
+        problems.push(`${where}: its input schema transforms, which the MCP server and the REST core would each run`);
       }
       // The output is held to its schema once, here, and the MCP SDK holds the
       // held value to it again: a transform would answer REST and fail MCP.

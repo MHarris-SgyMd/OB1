@@ -460,7 +460,8 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   });
   const sentPaths: string[] = [];
   const pluginRest = createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { sentPaths.push(`${req.method} ${new URL(req.url).pathname}`); return restWithPlugins.fetch(req); } });
-  const withPlugins = createMcpApp({ rest: pluginRest, plugins: () => loadPlugins("probe-kit", [probe]), edge: () => ({ configured: false, origin: null }), warn: () => {} });
+  const pluginWarned: string[] = [];
+  const withPlugins = createMcpApp({ rest: pluginRest, plugins: () => loadPlugins("probe-kit", [probe]), edge: () => ({ configured: false, origin: null }), warn: (l) => pluginWarned.push(l) });
   const ask = async (method: string, params: unknown, key: string) => {
     const r = await withPlugins.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }));
     const text = await r.text();
@@ -479,6 +480,8 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const item = read.find((t) => t.name === "probe_kit_item");
   assert(item?.annotations?.readOnlyHint === true && item.outputSchema?.properties !== undefined && "item_id" in item.outputSchema.properties, "…with the manifest's read-only hint and output schema");
   assert(!names.includes("other_kit_look"), "a plugin the REST core runs and this server was not given: no tool here");
+  await listOf("read-raw");
+  assert(pluginWarned.length === 1 && pluginWarned[0].includes("other_kit_look") && pluginWarned[0].includes("OB1_PLUGINS"), `…said once in the log, naming the operation and OB1_PLUGINS (${pluginWarned.join(" | ")})`);
   assert((await listOf("write-raw")).some((t) => t.name === "probe_kit_pin") && !names.includes("probe_kit_pin"), "a write operation: a write key's tool, not a read key's");
   assert(!(await listOf("cap-raw")).some((t) => t.name.startsWith("probe_kit_")), "a capture key: no plugin tool");
 
@@ -498,7 +501,8 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   assert(expectReply(got, await inProcess("item", { item_id: "gone" })) && got.isError,
     `a refusal: renderPlugin's, from the refusal the forwarder slot carried whole (${got.text})`);
   got = await callTool("probe_kit_item", { item_id: "boom" });
-  assert(thrown && got.isError && got.text.startsWith("Error: ") && got.text.includes("the plugin's own fault") && got.sc.code === "FAILED", `a throw: the tool's fault, FAILED, its message (${got.text.slice(0, 80)})`);
+  // index.ts says a plugin's throw as say.failed of the error it caught.
+  assert(thrown && expectReply(got, say.failed(new Error("the plugin's own fault"))), `a throw: the tool's fault as index.ts says it (${got.text.slice(0, 80)})`);
   got = await callTool("probe_kit_pin", { text: "hello" }, "write-raw");
   assert(expectReply(got, await inProcess("pin", { text: "hello" }, "write")) && sentPaths.includes("POST /v1/plugins/probe-kit/pins"), `a write: its body sent, its value said (${got.text})`);
   const refusedCall = await ask("tools/call", { name: "probe_kit_pin", arguments: { text: "x" } }, "read-raw");
@@ -523,7 +527,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   let entryTools: string[] = [];
   try {
     for (let i = 0; i < 100 && entryTools.length === 0; i++) {
-      const r = await fetch(`http://127.0.0.1:${entryPort}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).catch(() => null);
+      const r = await fetch(`http://127.0.0.1:${entryPort}/mcp`, { method: "POST", signal: AbortSignal.timeout(2_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).catch(() => null);
       if (r?.ok) {
         const text = await r.text();
         entryTools = ((JSON.parse(text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6)).result?.tools ?? []) as { name: string }[]).map((t) => t.name);
@@ -534,6 +538,8 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
     await entry.exited;
     restServer.stop(true);
   }
+  // What the entry said, when it served no list (review pass 1: a failed start read only "none of 0").
+  if (entryTools.length === 0) console.log((await new Response(entry.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
   assert(entryTools.includes("example_recent") && entryTools.includes("search"), `bun index.ts with OB1_PLUGINS=example: a read key's tools/list holds example_recent (${entryTools.filter((n) => n.startsWith("example")).join() || "none"} of ${entryTools.length})`);
   // The entry: a name that is no plugin stops it in words, as it stops the REST core (PR 4a).
   const noPlugin = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, OB1_FORWARDER_KEY: "x".repeat(64), OB1_PLUGINS: "no-such-plugin" }, stdout: "pipe", stderr: "pipe" });

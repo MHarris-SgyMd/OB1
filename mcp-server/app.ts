@@ -221,6 +221,19 @@ export function createMcpApp(deps: McpDeps): Hono {
   const edgeHere = (): EdgeSettings => (edge ??= deps.edge());
   let pluginOps: readonly LoadedOp[] | null = null;
   const opsHere = (): readonly LoadedOp[] => (pluginOps ??= (deps.plugins?.() ?? []).flatMap((p) => p.operations));
+  /**
+   * Each operation whoami names that this server has no tool for — a plugin
+   * the REST core runs and this server was not given — said once: the caller
+   * sees no tool, so the log is where the mismatch shows (review pass 1).
+   */
+  const untooled = new Set<string>();
+  const noteUntooled = (operations: ReadonlySet<string>) => {
+    for (const name of operations) {
+      if (untooled.has(name) || name in WORDS || opsHere().some((op) => op.tool === name)) continue;
+      untooled.add(name);
+      warn(`mcp-server: the REST core runs ${name}, which is no tool here: give this server the REST core's OB1_PLUGINS`);
+    }
+  };
 
   // CORS preflight — required for browser/Electron-based clients (Claude Desktop, claude.ai).
   app.options("*", (c) => c.text("ok", 200, corsHeaders));
@@ -438,6 +451,7 @@ export function createMcpApp(deps: McpDeps): Hono {
           : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS });
       }
       noteLegacyRoute(c.req.raw, standing.name);
+      noteUntooled(standing.operations);
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);
       label = requestLabel(rawBody);

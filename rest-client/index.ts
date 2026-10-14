@@ -255,7 +255,7 @@ export type RestClient = {
    * names — which plugins run is the operator's choice — by its method and its
    * manifest's route, `/v1/plugins/<name>/…` with `{field}` segments: its
    * input sent and its answer read as `call` sends and reads them. A route
-   * that is no plugin operation's shape throws, as a caller's mistake.
+   * that is no plugin operation's shape rejects, as a caller's mistake.
    */
   callPath(method: Method, path: string, input: Record<string, unknown>, init?: CallInit): Promise<Answer>;
   /**
@@ -331,11 +331,12 @@ export function createRestClient(opts: RestClientOptions): RestClient {
 
   return {
     raw,
-    call(name, input, init = {}) {
+    // Async, so a caller's mistake is a rejection as an answer's failure is (review pass 1: callPath's threw at once).
+    async call(name, input, init = {}) {
       const { method, path } = OPERATIONS[name];
       return invoke(method as Method, path, input as Record<string, unknown>, init);
     },
-    callPath(method, path, input, init = {}) {
+    async callPath(method, path, input, init = {}) {
       if (!["GET", "POST", "PATCH", "DELETE"].includes(method)) throw new TypeError(`callPath's method must be GET, POST, PATCH or DELETE: ${JSON.stringify(method)}`);
       if (typeof path !== "string" || !PLUGIN_PATH.test(path)) throw new TypeError(`callPath's route must be a plugin operation's, /v1/plugins/<name>/… with {field} segments: ${JSON.stringify(path)}`);
       return invoke(method, path, input ?? {}, init);

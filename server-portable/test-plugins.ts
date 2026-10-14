@@ -114,6 +114,23 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
   const transformed = withOp("crm", "len", { output: { len: z.string().transform((s) => s.length) } });
   assert(/its output schema transforms/.test(manifestProblems([transformed]).join()), "an output schema that transforms is refused: MCP holds the answer to it again");
   assert(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().uuid() }, output: { at: z.string().default("now") } })]).length === 0, "a string path field with a format, and an output default, are sound");
+  // Review pass 1 of SMD-2287 PR 4a: what the MCP server, calling the REST core, would answer otherwise than index.ts.
+  const plusOne = withOp("crm", "bump", { method: "POST", input: { n: z.number().transform((x) => x + 1) } });
+  assert(/its input schema transforms/.test(manifestProblems([plusOne]).join()), "an input schema that transforms is refused: parsed by the MCP server and again by the REST core, it would run twice");
+  for (const [label, input, want] of [
+    ["a nullable number", { n: z.number().nullable().optional() }, /its query field n is not text, a number or a boolean/],
+    ["a union", { u: z.union([z.number(), z.string()]) }, /its query field u is not text, a number or a boolean/],
+    ["an object", { o: z.object({ a: z.string() }) }, /its query field o is not text, a number or a boolean/],
+    ["a list of numbers", { ids: z.array(z.number()).default([]) }, /its query field ids is a list of other than text/],
+    ["a list of text with no default", { tags: z.array(z.string()).optional() }, /its query field tags is a list with no default of \[\]/],
+    ["a name no query carries", { "a b": z.string() }, /its input field "a b" is no name a query string carries/],
+  ] as const) {
+    assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: a query string cannot carry it as given (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
+  }
+  assert(manifestProblems([withOp("crm", "find", { method: "DELETE", input: { n: z.number().nullable() } })]).some((p) => /query field n/.test(p)), "…a DELETE's too");
+  const queryable = withOp("crm", "find", { input: { q: z.string().trim(), n: z.number().int().optional(), on: z.boolean().default(false), kind: z.enum(["a", "b"]), tags: z.array(z.string()).default([]) } });
+  assert(manifestProblems([queryable]).length === 0, `a GET's text, number, boolean, enum and defaulted list of text are sound, and an idempotent trim (${manifestProblems([queryable]).join()})`);
+  assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { n: z.number().nullable(), ids: z.array(z.number()), o: z.object({ a: z.string() }) } })]).length === 0, "a POST's body carries a nullable, a list of numbers and an object as JSON: sound");
   assert(toolNameOf("meal-planning", "add_recipe") === "meal_planning_add_recipe", "a tool name reads the plugin's hyphens as underscores");
 }
 
@@ -448,7 +465,7 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
     // The MCP server writes no line of its own yet (SMD-2287 PR 4b): the lines are the REST core's — the call's
     // whoami, then the operation's route, the tool named on it, as it ended.
     const op = lines.find((l) => l.route === "/v1/plugins/example/recent");
-    assert(lines.length === 2 && lines.every((l) => l.door === "api") && op?.tool === "example_recent" && op.outcome === "error" && op.code === "FAILED",
+    assert(lines.length === 2 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 1 && op?.tool === "example_recent" && op.outcome === "error" && op.code === "FAILED",
       `a plugin tool's call is on the REST core's line as it ended: \`error\` FAILED (${said.join(" / ")})`);
   } else {
     const line = lines[0] ?? {};

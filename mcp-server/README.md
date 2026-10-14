@@ -65,8 +65,10 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   the call goes to its route through `rest-client`'s `callPath`, and its answer is
   said by `render.ts`'s `renderPlugin`: a value, the refusal the forwarder slot
   carries whole, or a fault. Give this server and the REST core the same
-  `OB1_PLUGINS`: a plugin the REST core runs and this server was not given is no tool
-  here, and a name that is no plugin stops the entry, exit 2.
+  `OB1_PLUGINS` and the same build of each plugin: a plugin the REST core runs and
+  this server was not given is no tool here (said once in the log, by operation), and
+  one whose route or schema differs between the two builds answers a fault. A name
+  that is no plugin stops the entry, exit 2 in words, as it stops the REST core.
 - **`/health`** is plain `ok` without a key. With a key, the first key the REST core
   knows decides, as `index.ts` authenticates the first, and the route shows the REST
   core's keyed `/health`: the brain's record on the health surface, for a key that may read it and

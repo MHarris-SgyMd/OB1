@@ -36,7 +36,7 @@ function restClient() {
 const rest = restClient();
 
 // The enabled plugins (SMD-2310), as the REST core reads OB1_PLUGINS: their operations' schemas and routes, read at
-// the start so a name that is no plugin stops the server there, as it stops the REST core.
+// the start so a name that is no plugin stops the server there — exit 2 in words, where the REST core stops on its throw.
 function enabledPlugins(): LoadedPlugin[] {
   try {
     return loadPlugins(env.OB1_PLUGINS);

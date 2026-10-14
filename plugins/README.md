@@ -58,7 +58,9 @@ Checked when the server starts, so a malformed manifest stops it:
 - No two operations share a tool name, and none takes a core tool's name.
 - A hook's name is one path segment of lower-case words and hyphens, with a description and a handler.
 - No two operations of a plugin have routes that one request could match (`/items/{id}` beside `/items/latest`).
-- A path field is a string field.
+- A path field is a string field. A URL cannot carry `""`, `.` or `..` there, so the REST core and the MCP server that calls it refuse those before the operation runs; a schema that needs them is a body field's.
+- A GET's or a DELETE's other input fields ride the query string: each is text, a number, a boolean (an enum or a format of one is fine), or a list of text defaulted to `[]`, with a name of letters, digits, `_`, `.` and `-`. A query string carries no null, no empty list and no object, and reads back text, so a nullable, a union, a list of numbers or an object is a POST's or a PATCH's body field.
+- An input schema does not transform: the MCP server parses the input and the REST core it calls parses it again, so a transform would run twice. A step that gives the same value run twice (`trim`, a default) is fine.
 - An output schema does not transform: MCP holds the answer to it a second time.
 - A refusal is 400, 403, 404, 409 or 422 with an `UPPER_CASE` code, and is never retryable.
 

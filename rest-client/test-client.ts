@@ -474,7 +474,7 @@ console.log("\n[11] A timeout a timer can hold, a query name a URL carries, a nu
   assert(asUrl?.name === "TypeError" && /not a string/.test(asUrl.message), `a URL object for the base is refused in words (${asUrl?.message})`);
 }
 
-console.log("\n[10] A plugin's operation by its route (callPath): its path filled, the rest in the query or the body, its answer as call's");
+console.log("\n[12] A plugin's operation by its route (callPath): its path filled, the rest in the query or the body, its answer as call's");
 {
   // A plugin of the suite's own, served by the real REST app: what each operation was handed is kept.
   const handed: { key: string; input: unknown }[] = [];
@@ -539,8 +539,9 @@ console.log("\n[10] A plugin's operation by its route (callPath): its path fille
   assert(a.status === 401 && !a.sent && sent.length === before, "a key no header carries: answered here, nothing sent");
   for (const [method, path] of [["GET", "/v1/thoughts"], ["GET", "/v1/plugins/probe-kit/../../v1/thoughts"], ["GET", "/v1/plugins/Probe/items"], ["GET", "http://elsewhere/v1/plugins/p/x"], ["PUT", "/v1/plugins/probe-kit/items/{item_id}"]] as const) {
     let threw = "";
-    try { await client.callPath(method as never, path, {}, { key: "write-raw" }); } catch (e) { threw = (e as Error).message; }
-    assert(/callPath's (route|method)/.test(threw) && sent.length === before, `${method} ${path}: no plugin operation's route or method — thrown, nothing sent`);
+    const pending = client.callPath(method as never, path, {}, { key: "write-raw" });
+    await pending.catch((e: Error) => { threw = e.message; });
+    assert(/callPath's (route|method)/.test(threw) && sent.length === before, `${method} ${path}: no plugin operation's route or method — a rejection, not a throw, nothing sent`);
   }
 }
 
