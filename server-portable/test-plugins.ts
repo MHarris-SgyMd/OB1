@@ -21,6 +21,7 @@ import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
+import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
@@ -387,7 +388,9 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
 
 console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for the keys whose scope reaches it");
 {
-  const worker = (await import("./index.ts")).default as { fetch: (req: Request) => Response | Promise<Response> };
+  // index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287 PR 4a).
+  const worker = await mcpUnderTest();
+  assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
   const H = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   const rpc = async (key: string, method: string, params: Record<string, unknown>) => {
     const r = await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }));
@@ -440,8 +443,17 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   } finally {
     useRequestLog(before);
   }
-  const line = JSON.parse(said[0] ?? "{}") as Record<string, unknown>;
-  assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
+  const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
+  if (mcpTarget() === "client") {
+    // The MCP server writes no line of its own yet (SMD-2287 PR 4b): the lines are the REST core's — the call's
+    // whoami, then the operation's route, the tool named on it, as it ended.
+    const op = lines.find((l) => l.route === "/v1/plugins/example/recent");
+    assert(lines.length === 2 && lines.every((l) => l.door === "api") && op?.tool === "example_recent" && op.outcome === "error" && op.code === "FAILED",
+      `a plugin tool's call is on the REST core's line as it ended: \`error\` FAILED (${said.join(" / ")})`);
+  } else {
+    const line = lines[0] ?? {};
+    assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
+  }
   const bad = await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 50 } });
   assert(JSON.stringify(bad).includes("limit") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument past its schema is refused before the operation runs");
 }

@@ -147,7 +147,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
         forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in, so it is the MCP server's alone. Read only inside the stack: the public /api route deletes it." },
       },
       schemas: {
-        Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" }, refusal: { type: "object", description: "Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's), so the MCP server says it as it always has (SMD-2287)." } }, additionalProperties: true },
+        Refusal: { type: "object", required: ["code"], properties: { code: { type: "string" }, retryable: { type: "boolean" }, refusal: { type: "object", description: "Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's) — a plugin's with its status in it — so the MCP server says it as it always has (SMD-2287)." } }, additionalProperties: true },
       },
     },
   };

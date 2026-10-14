@@ -3,10 +3,12 @@
 // SMD-2287 PR 5 gives it a compose service (server-portable's is there now).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
 // forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --scope forward`) —
-// beside each caller's key. It reads no store and holds no key list: what a
+// beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
+// the enabled plugins' tools. It reads no store and holds no key list: what a
 // key may do is the REST core's to say.
 
 import { createRestClient } from "../rest-client/index.ts";
+import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
 import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
@@ -32,7 +34,20 @@ function restClient() {
   }
 }
 const rest = restClient();
-const app = createMcpApp({ rest, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
+
+// The enabled plugins (SMD-2310), as the REST core reads OB1_PLUGINS: their operations' schemas and routes, read at
+// the start so a name that is no plugin stops the server there, as it stops the REST core.
+function enabledPlugins(): LoadedPlugin[] {
+  try {
+    return loadPlugins(env.OB1_PLUGINS);
+  } catch (err) {
+    if (!import.meta.main) throw err;
+    console.error(`OB1_PLUGINS will not serve: ${(err as Error).message}`);
+    process.exit(2);
+  }
+}
+const plugins = enabledPlugins();
+const app = createMcpApp({ rest, plugins: () => plugins, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
 
 /** The requests in flight, counted for the stop (SMD-2250): it waits for them within OB1_STOP_GRACE. */
 const calls = createCallCount();

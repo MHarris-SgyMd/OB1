@@ -16,6 +16,7 @@ import { SPECS, type Input } from "../server-portable/core/schemas.ts";
 import type { ToolName } from "../server-portable/tools.ts";
 import { HEALTH_DEADLINE_MS } from "../server-portable/deadlines.ts";
 import type { Refusal } from "../server-portable/core/refusal.ts";
+import type { LoadedOp, LoadedPlugin } from "../server-portable/core/plugins.ts";
 import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
@@ -51,6 +52,13 @@ export interface McpDeps {
   warn?: (line: string) => void;
   /** Where the REST core answers, for this server's fault lines (credentials blanked by the entry); none named unless given. */
   restUrl?: string;
+  /**
+   * The enabled plugins (SMD-2310), for their operations' names, schemas and
+   * routes — the REST core runs them — read at the first request that needs
+   * them; none unless given. A plugin the REST core runs and this server was
+   * not given is no tool here.
+   */
+  plugins?: () => readonly LoadedPlugin[];
 }
 
 /** Who a request's key is, as the REST core's whoami says: its name, its scope and the operations it may call — or why not. */
@@ -107,6 +115,16 @@ export function outcomeOf(a: Answer): Outcome {
 }
 
 /**
+ * A plugin operation's answer from the REST core as runOperation's outcome:
+ * a success's value whatever its fields — a plugin may name one `refusal` —
+ * else as a core operation's (outcomeOf): its refusal the forwarder slot
+ * carried whole, a fault, or a fault naming the code.
+ */
+export function pluginOutcomeOf(a: Answer): Outcome {
+  return a.ok ? { ok: true, value: a.body } : outcomeOf(a);
+}
+
+/**
  * How each tool says its answer (render.ts), and its fault — server-portable
  * index.ts's registrations, the call made over REST — in index.ts's order,
  * which tools/list keeps.
@@ -151,7 +169,7 @@ const WORDS: Record<ToolName, Words> = {
  * render.ts. `endpoint`: the path the request came to, no trailing slash —
  * a scan's job links go under it, as server-portable's do.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string): McpServer {
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[]): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
   const register = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never) => Promise<say.Reply>) => unknown;
   for (const name of Object.keys(WORDS) as ToolName[]) {
@@ -176,6 +194,22 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
       }
     });
   }
+  // The enabled plugins' operations (SMD-2310), after the core's as index.ts
+  // registers them: each a tool named `<plugin>_<operation>` where whoami
+  // names it among the caller's operations, the SDK holding its input and its
+  // answer to the manifest's schemas, called on the REST core by its route and
+  // said by render.ts's renderPlugin — a fault as index.ts says a plugin's.
+  for (const op of ops) {
+    if (!caller.operations.has(op.tool)) continue;
+    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input: never) => {
+      try {
+        const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, input as Record<string, unknown>, { key: caller.key }));
+        return "fault" in outcome ? say.failed(outcome.fault) : say.renderPlugin(outcome as never);
+      } catch (err) {
+        return say.failed(err);
+      }
+    });
+  }
   return server;
 }
 
@@ -185,6 +219,8 @@ export function createMcpApp(deps: McpDeps): Hono {
   const keepalive = deps.keepalive ?? { intervalMs: SSE_KEEPALIVE_MS, maxMs: SSE_KEEPALIVE_MAX_MS };
   let edge: EdgeSettings | null = null;
   const edgeHere = (): EdgeSettings => (edge ??= deps.edge());
+  let pluginOps: readonly LoadedOp[] | null = null;
+  const opsHere = (): readonly LoadedOp[] => (pluginOps ??= (deps.plugins?.() ?? []).flatMap((p) => p.operations));
 
   // CORS preflight — required for browser/Electron-based clients (Claude Desktop, claude.ai).
   app.options("*", (c) => c.text("ok", 200, corsHeaders));
@@ -405,7 +441,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);
       label = requestLabel(rawBody);
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""));
+      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere());
       const transport = new WebStandardStreamableHTTPServerTransport();
       await server.connect(transport);
       const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));

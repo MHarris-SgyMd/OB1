@@ -573,8 +573,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       return answerError(c, failure(err), 500);
     }
     if (outcome.ok) return c.json(outcome.value, 200);
+    // Forwarded, the refusal whole beside its facts, its status in it, as a core refusal's (SMD-2287): the carrier
+    // words it as server-portable does (render.ts renderPlugin), and tells it from a refusal of the key mid-call.
     const { status, ...facts } = outcome.refusal;
-    return answerError(c, facts, status);
+    return answerError(c, { ...facts, ...wholeFor(p, outcome.refusal) }, status);
   });
 
   // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
@@ -687,7 +689,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
  * kind, or its name, not said in full). A caller with no carrier gets the
  * facts alone.
  */
-const wholeFor = (p: Principal, r: Refusal): { refusal?: Refusal } => (p.act ? { refusal: r } : {});
+const wholeFor = <R = Refusal>(p: Principal, r: R): { refusal?: R } => (p.act ? { refusal: r } : {});
 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool

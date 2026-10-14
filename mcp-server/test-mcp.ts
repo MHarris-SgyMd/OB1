@@ -11,7 +11,9 @@
  * - a scan's links sit under the endpoint;
  * - the key refusals are the edge's envelopes (mcp-edge.ts), a refused
  *   notification's answer bare;
- * - /health, the worker mirrors and the job routes answer as index.ts's.
+ * - /health, the worker mirrors and the job routes answer as index.ts's;
+ * - an enabled plugin's operation is a tool where whoami names it, called by
+ *   its route and said by render.ts's renderPlugin (PR 4a).
  * test-auth.ts and (PR 3b) test-e2e-sql.ts run against it too, with
  * OB1_MCP_UNDER_TEST=client.
  *
@@ -29,6 +31,8 @@ import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/
 import type { AgentOutcome } from "../server-portable/agents.ts";
 import { createRestClient } from "../rest-client/index.ts";
 import { createMcpApp } from "./app.ts";
+import { loadPlugins, runOperation } from "../server-portable/core/plugins.ts";
+import { definePlugin, ok as pluginOk, operation, refuse as pluginRefuse, z } from "../server-portable/plugin-sdk.ts";
 
 const { assert, report } = createAssert();
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -416,6 +420,126 @@ console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy m
   const impCode = await imported.exited;
   const impSaid = await new Response(imported.stdout).text();
   assert(impCode === 0 && impSaid.startsWith("threw: "), `imported with a bad base: it throws to its importer (${impCode}: ${impSaid.trim()})`);
+}
+
+console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it, called on the REST core by its route, said as index.ts says it");
+{
+  // A plugin of the suite's own: a value, a value with a field named `refusal`, a refusal, a throw, and a write.
+  let thrown = false;
+  const probe = definePlugin({
+    name: "probe-kit", title: "Probe", description: "The suite's own plugin.",
+    operations: {
+      item: operation({
+        title: "An item", description: "Echoes its path field.", scope: "read", method: "GET", path: "/items/{item_id}",
+        input: { item_id: z.string(), verbose: z.boolean().default(false) }, output: { item_id: z.string(), verbose: z.boolean(), refusal: z.object({ note: z.string() }).optional() },
+        async handler(_ctx, input) {
+          if (input.item_id === "boom") { thrown = true; throw new Error("the plugin's own fault"); }
+          if (input.item_id === "gone") return pluginRefuse(404, "ITEM_GONE", { item_id: input.item_id, message: "no such item" });
+          return pluginOk({ item_id: input.item_id, verbose: input.verbose, ...(input.item_id === "odd" ? { refusal: { note: "a field of its own" } } : {}) });
+        },
+      }),
+      pin: operation({
+        title: "Pin", description: "A write.", scope: "write", method: "POST", path: "/pins",
+        input: { text: z.string() }, output: { pinned: z.string() },
+        async handler(_ctx, input) { return pluginOk({ pinned: input.text }); },
+      }),
+    },
+  });
+  const other = definePlugin({
+    name: "other-kit", title: "Other", description: "A plugin the REST core runs and the MCP server was not given.",
+    operations: { look: operation({ title: "Look", description: "d", scope: "read", method: "GET", path: "/look", input: {}, output: {}, async handler() { return pluginOk({}); } }) },
+  });
+  const restWithPlugins = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `chatgpt:read:${hashKey("read-raw")}`, `hook:capture:${hashKey("cap-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-1" }),
+    track: (run) => run(),
+    log: () => {},
+    plugins: () => loadPlugins("probe-kit, other-kit", [probe, other]),
+  });
+  const sentPaths: string[] = [];
+  const pluginRest = createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { sentPaths.push(`${req.method} ${new URL(req.url).pathname}`); return restWithPlugins.fetch(req); } });
+  const withPlugins = createMcpApp({ rest: pluginRest, plugins: () => loadPlugins("probe-kit", [probe]), edge: () => ({ configured: false, origin: null }), warn: () => {} });
+  const ask = async (method: string, params: unknown, key: string) => {
+    const r = await withPlugins.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }));
+    const text = await r.text();
+    return JSON.parse(text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6)) as { result?: Record<string, unknown>; error?: { message: string } };
+  };
+  const callTool = async (name: string, args: Record<string, unknown>, key = "read-raw"): Promise<Reply> => {
+    const result = ((await ask("tools/call", { name, arguments: args }, key)).result ?? {}) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+    return { text: (result.content ?? []).map((c) => c.text).join("\n"), sc: result.structuredContent ?? {}, isError: result.isError === true };
+  };
+
+  type Listed = { name: string; annotations?: { readOnlyHint?: boolean }; outputSchema?: { properties?: Record<string, unknown> } };
+  const listOf = async (key: string) => ((await ask("tools/list", {}, key)).result?.tools ?? []) as Listed[];
+  const read = await listOf("read-raw");
+  const names = read.map((t) => t.name);
+  assert(same(names, [...names.filter((n) => !n.startsWith("probe_kit_")), "probe_kit_item"]) && names.includes("search"), `a read key: the core's tools, then its plugin operation, as index.ts lists them (${names.slice(-2).join(", ")})`);
+  const item = read.find((t) => t.name === "probe_kit_item");
+  assert(item?.annotations?.readOnlyHint === true && item.outputSchema?.properties !== undefined && "item_id" in item.outputSchema.properties, "…with the manifest's read-only hint and output schema");
+  assert(!names.includes("other_kit_look"), "a plugin the REST core runs and this server was not given: no tool here");
+  assert((await listOf("write-raw")).some((t) => t.name === "probe_kit_pin") && !names.includes("probe_kit_pin"), "a write operation: a write key's tool, not a read key's");
+  assert(!(await listOf("cap-raw")).some((t) => t.name.startsWith("probe_kit_")), "a capture key: no plugin tool");
+
+  // The reply index.ts gives: renderPlugin over runOperation's own outcome, in process, the input as the SDK parses it.
+  const ops = loadPlugins("probe-kit", [probe])[0].operations;
+  const inProcess = async (key: string, input: Record<string, unknown>, scope: "read" | "write" = "read") => {
+    const op = ops.find((o) => o.key === key)!;
+    return say.renderPlugin(await runOperation(op, { core, principal: { name: "chatgpt", scope } as Principal }, op.input.parse(input)));
+  };
+  sentPaths.length = 0;
+  let got = await callTool("probe_kit_item", { item_id: "a b", verbose: true });
+  assert(expectReply(got, await inProcess("item", { item_id: "a b", verbose: true })) && sentPaths.includes("GET /v1/plugins/probe-kit/items/a%20b"),
+    `a value: renderPlugin's reply, the operation called by its route (${got.text} via ${sentPaths.join(", ")})`);
+  got = await callTool("probe_kit_item", { item_id: "odd" });
+  assert(expectReply(got, await inProcess("item", { item_id: "odd" })) && got.sc.refusal !== undefined && !got.isError, `a value with a field named refusal: a value still (${got.text.slice(0, 80)})`);
+  got = await callTool("probe_kit_item", { item_id: "gone" });
+  assert(expectReply(got, await inProcess("item", { item_id: "gone" })) && got.isError,
+    `a refusal: renderPlugin's, from the refusal the forwarder slot carried whole (${got.text})`);
+  got = await callTool("probe_kit_item", { item_id: "boom" });
+  assert(thrown && got.isError && got.text.startsWith("Error: ") && got.text.includes("the plugin's own fault") && got.sc.code === "FAILED", `a throw: the tool's fault, FAILED, its message (${got.text.slice(0, 80)})`);
+  got = await callTool("probe_kit_pin", { text: "hello" }, "write-raw");
+  assert(expectReply(got, await inProcess("pin", { text: "hello" }, "write")) && sentPaths.includes("POST /v1/plugins/probe-kit/pins"), `a write: its body sent, its value said (${got.text})`);
+  const refusedCall = await ask("tools/call", { name: "probe_kit_pin", arguments: { text: "x" } }, "read-raw");
+  assert(JSON.stringify(refusedCall).includes("probe_kit_pin") && (refusedCall.error !== undefined || (refusedCall.result as { isError?: boolean })?.isError === true), "a read key calling a write operation: not its tool, refused before any call");
+  const bad = await ask("tools/call", { name: "probe_kit_item", arguments: { item_id: 7 } }, "read-raw");
+  assert(JSON.stringify(bad).includes("item_id") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument its schema refuses: refused by the SDK, before any call");
+  // The entry: the plugins OB1_PLUGINS names are its tools, over a REST core that runs them (PR 4a).
+  const exampleRest = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`chatgpt:read:${hashKey("read-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-1" }),
+    track: (run) => run(),
+    log: () => {},
+    plugins: () => loadPlugins("example"),
+  });
+  const restServer = Bun.serve({ port: 0, fetch: (req) => exampleRest.fetch(req) });
+  const portHolder = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const entryPort = portHolder.port;
+  portHolder.stop(true);
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: String(entryPort), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "ignore", stderr: "pipe" });
+  let entryTools: string[] = [];
+  try {
+    for (let i = 0; i < 100 && entryTools.length === 0; i++) {
+      const r = await fetch(`http://127.0.0.1:${entryPort}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).catch(() => null);
+      if (r?.ok) {
+        const text = await r.text();
+        entryTools = ((JSON.parse(text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6)).result?.tools ?? []) as { name: string }[]).map((t) => t.name);
+      } else await Bun.sleep(50);
+    }
+  } finally {
+    entry.kill();
+    await entry.exited;
+    restServer.stop(true);
+  }
+  assert(entryTools.includes("example_recent") && entryTools.includes("search"), `bun index.ts with OB1_PLUGINS=example: a read key's tools/list holds example_recent (${entryTools.filter((n) => n.startsWith("example")).join() || "none"} of ${entryTools.length})`);
+  // The entry: a name that is no plugin stops it in words, as it stops the REST core (PR 4a).
+  const noPlugin = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, OB1_FORWARDER_KEY: "x".repeat(64), OB1_PLUGINS: "no-such-plugin" }, stdout: "pipe", stderr: "pipe" });
+  const npCode = await noPlugin.exited;
+  const npSaid = await new Response(noPlugin.stderr).text();
+  assert(npCode === 2 && /OB1_PLUGINS/.test(npSaid) && /no-such-plugin/.test(npSaid) && !/\n\s+at /.test(npSaid), `OB1_PLUGINS naming no plugin: exit 2, in words (${npCode}: ${npSaid.trim().slice(0, 90)})`);
 }
 
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");

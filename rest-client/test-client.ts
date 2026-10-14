@@ -11,14 +11,15 @@
  *   bun test-client.ts
  */
 
-// server-portable's zod, the one its schemas are built with (this package does not install it).
-import { z } from "../server-portable/plugin-sdk.ts";
+// server-portable's zod, the one its schemas are built with (this package does not install it), and the plugin SDK beside it.
+import { definePlugin, ok as pluginOk, operation, refuse as pluginRefuse, z } from "../server-portable/plugin-sdk.ts";
 import { createAssert } from "../db/test-support.ts";
 import { hashKey, type Principal } from "../server-portable/auth.ts";
 import { SPECS, type Core } from "../server-portable/core/index.ts";
 import { ok, refuse } from "../server-portable/core/refusal.ts";
 import { ROUTES } from "../server-portable/rest/routes.ts";
 import { createRestApp } from "../server-portable/rest/app.ts";
+import { loadPlugins } from "../server-portable/core/plugins.ts";
 import { TOOL_NAMES, type ToolName } from "../server-portable/tools.ts";
 import { renderAll } from "./generate.ts";
 import { createRestClient, FORWARDER_HEADER, OPERATIONS, type Answer, type InputOf } from "./index.ts";
@@ -471,6 +472,76 @@ console.log("\n[11] A timeout a timer can hold, a query name a URL carries, a nu
   assert(hostBases.every((baseUrl) => refuses({ baseUrl })?.name === "TypeError"), "a base with a tab or a line break in its host is refused");
   const asUrl = refuses({ baseUrl: new URL("http://x") as never });
   assert(asUrl?.name === "TypeError" && /not a string/.test(asUrl.message), `a URL object for the base is refused in words (${asUrl?.message})`);
+}
+
+console.log("\n[10] A plugin's operation by its route (callPath): its path filled, the rest in the query or the body, its answer as call's");
+{
+  // A plugin of the suite's own, served by the real REST app: what each operation was handed is kept.
+  const handed: { key: string; input: unknown }[] = [];
+  const probe = definePlugin({
+    name: "probe-kit", title: "Probe", description: "The suite's own plugin.",
+    operations: {
+      item: operation({
+        title: "An item", description: "Echoes its fields.", scope: "read", method: "GET", path: "/items/{item_id}",
+        input: { item_id: z.string(), verbose: z.boolean().default(false), limit: z.number().optional() }, output: { item_id: z.string(), verbose: z.boolean() },
+        async handler(_ctx, input) { handed.push({ key: "item", input }); return input.item_id === "gone" ? pluginRefuse(404, "ITEM_GONE", { item_id: input.item_id }) : pluginOk({ item_id: input.item_id, verbose: input.verbose }); },
+      }),
+      note: operation({
+        title: "Note", description: "Takes a body.", scope: "write", method: "POST", path: "/notes/{note_id}",
+        input: { note_id: z.string(), text: z.string(), tags: z.array(z.string()).default([]) }, output: { saved: z.boolean() },
+        async handler(_ctx, input) { handed.push({ key: "note", input }); return pluginOk({ saved: true }); },
+      }),
+    },
+  });
+  const pluginApp = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")},f:forward:${hashKey("fwd-raw")}` }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-w" }),
+    track: (run) => run(),
+    log: () => {},
+    plugins: () => loadPlugins("probe-kit", [probe]),
+  });
+  const sent: Request[] = [];
+  const viaPlugins = async (req: Request) => { sent.push(req.clone()); return pluginApp.fetch(req); };
+  const client = createRestClient({ baseUrl: "http://api", fetch: viaPlugins });
+  const forwarded = createRestClient({ baseUrl: "http://api", fetch: viaPlugins, forwarderKey: "fwd-raw" });
+
+  let a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "a b/c", verbose: true, limit: 3 }, { key: "write-raw" });
+  const url = new URL(sent.at(-1)!.url);
+  assert(a.status === 200 && same(a.body, { item_id: "a b/c", verbose: true }) && same(handed.at(-1), { key: "item", input: { item_id: "a b/c", verbose: true, limit: 3 } }),
+    `a GET: the path field filled and decoded, the rest read from the query by the operation's schema (${a.status} ${JSON.stringify(a.body)})`);
+  assert(url.pathname === "/v1/plugins/probe-kit/items/a%20b%2Fc" && url.searchParams.get("verbose") === "true" && url.searchParams.get("limit") === "3" && !url.searchParams.has("item_id"),
+    `…sent as the route with the field encoded, the rest as the query (${url.pathname}${url.search})`);
+  a = await client.callPath("POST", "/v1/plugins/probe-kit/notes/{note_id}", { note_id: "n1", text: "hello", tags: ["x"] }, { key: "write-raw" });
+  const body = await sent.at(-1)!.text();
+  assert(a.status === 200 && same(a.body, { saved: true }) && same(JSON.parse(body), { text: "hello", tags: ["x"] }) && new URL(sent.at(-1)!.url).pathname === "/v1/plugins/probe-kit/notes/n1",
+    `a POST: the path field filled, the rest a JSON body (${a.status} ${body})`);
+  a = await forwarded.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x" }, { key: "write-raw" });
+  assert(sent.at(-1)!.headers.get("x-brain-key") === "write-raw" && sent.at(-1)!.headers.get("x-brain-forwarder") === "fwd-raw", "the caller's key and the forwarder slot ride it, as on call");
+
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "gone" }, { key: "write-raw" });
+  assert(a.status === 404 && same(a.body, { item_id: "gone", code: "ITEM_GONE", retryable: false }), `a plugin's refusal: its status, its code and facts (${a.status} ${JSON.stringify(a.body)})`);
+  a = await forwarded.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "gone" }, { key: "write-raw" });
+  assert(a.status === 404 && same((a.body as { refusal?: unknown }).refusal, { item_id: "gone", status: 404, code: "ITEM_GONE", retryable: false }),
+    `…forwarded, it carries itself whole, as a core refusal does (${JSON.stringify(a.body)})`);
+  a = await client.callPath("POST", "/v1/plugins/probe-kit/notes/{note_id}", { note_id: "n1", text: "hello" }, { key: "nobody" });
+  assert(a.status === 401 && a.sent, `a key the core does not know: its 401, sent (${a.status})`);
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/nothing/{x}", { x: "1" }, { key: "write-raw" });
+  assert(a.status === 404 && (a.body as { code?: string }).code === "NO_ROUTE", `a route no operation takes: the core's 404 (${JSON.stringify(a.body)})`);
+
+  const before = sent.length;
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: ".." }, { key: "write-raw" });
+  assert(a.status === 400 && !a.sent && (a.body as { issues?: { path: string }[] }).issues?.[0]?.path === "item_id" && sent.length === before, `a path field a URL cannot carry: answered here, nothing sent (${JSON.stringify(a.body)})`);
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x", nested: { a: 1 } }, { key: "write-raw" });
+  assert(a.status === 400 && !a.sent && sent.length === before, "an object in a GET's query: answered here, nothing sent");
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x" }, { key: "k\nbad" });
+  assert(a.status === 401 && !a.sent && sent.length === before, "a key no header carries: answered here, nothing sent");
+  for (const [method, path] of [["GET", "/v1/thoughts"], ["GET", "/v1/plugins/probe-kit/../../v1/thoughts"], ["GET", "/v1/plugins/Probe/items"], ["GET", "http://elsewhere/v1/plugins/p/x"], ["PUT", "/v1/plugins/probe-kit/items/{item_id}"]] as const) {
+    let threw = "";
+    try { await client.callPath(method as never, path, {}, { key: "write-raw" }); } catch (e) { threw = (e as Error).message; }
+    assert(/callPath's (route|method)/.test(threw) && sent.length === before, `${method} ${path}: no plugin operation's route or method — thrown, nothing sent`);
+  }
 }
 
 // Compile-time only: the generated types hold a call to its operation's input.
