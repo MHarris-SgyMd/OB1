@@ -375,6 +375,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     if (carrier) {
+      // After the caller's, not beside it: a lookup started for the carrier
+      // while the registry is locked holds one more connection waiting on the
+      // lock, and the forwarder's answer is the agent cache's for its TTL in
+      // any case (SMD-2287 PR 3a review pass 2, not taken).
       const carried = await deps.resolve(carrier);
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
       if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);

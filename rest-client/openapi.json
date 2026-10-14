@@ -4070,7 +4070,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-brain-forwarder",
-        "description": "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing. Read only inside the stack: the public /api route deletes it."
+        "description": "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in, so it is the MCP server's alone. Read only inside the stack: the public /api route deletes it."
       }
     },
     "schemas": {

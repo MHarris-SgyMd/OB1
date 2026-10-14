@@ -68,8 +68,11 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   REST core's operations, with the same gates, inputs and words as server-portable's
   (`mcp-edge.ts`'s `MIRROR_INPUT` and `MIRROR_WORDS`). Their key check, like
   `/health`'s, is held to `HEALTH_DEADLINE_MS` (`server-portable/deadlines.ts`): a
-  registry that does not answer by then is shown `ok`. A job poll whose read faults
-  is a 500.
+  registry that does not answer by then is shown `ok`, the lookup aborted. On
+  `/health` one deadline covers the key's standing and the record together. A job
+  poll or stream whose read faults is a 500, and a stream the registry is busy on
+  `ok`. A fault finding the caller (this server's forwarder refused, the REST core
+  away) is shown `ok` there and said once in the log.
 
 **Known differences from `index.ts` (the parity runs below):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
@@ -95,7 +98,7 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 ## Test
 
 ```bash
-bun test-mcp.ts                                                  # 57 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; the method guard
+bun test-mcp.ts                                                  # 62 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the method guard
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 190 — test-auth's assertions, held to this server with the REST core behind it
 ```
 

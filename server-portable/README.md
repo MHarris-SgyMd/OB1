@@ -801,7 +801,10 @@ stripped (`X-Forwarded-Prefix`).
   that header, an empty one or two of them included, is a 401 `UNAUTHORIZED`
   with `credential: "forwarder"`, checked before either key reaches the
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
-  same — so a client holding two keys cannot stamp one as the other's carrier.
+  same — so a client holding two keys cannot stamp one as the other's carrier. A
+  request it carries is answered its refusals and its captures whole (SMD-2287), the
+  words the MCP server says them in, which the caller's key alone is not told over
+  REST: a forwarder key is the MCP server's alone, never an integration's.
   The public `/api` route deletes the header, so it is read only inside the
   stack (`rest-client/` sends it, and nothing in the stack does until the MCP
   server forwards, SMD-2287). Mint a forwarder under a name never used before —

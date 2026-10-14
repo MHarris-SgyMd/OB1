@@ -45,6 +45,8 @@ const core = new Proxy({}, {
 let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
 /** Set to hold the registry's word on a caller's key until it resolves: its tables locked. */
 let resolveGate: Promise<void> | null = null;
+/** How long each lookup of a caller's key takes: a slow registry, which answers. */
+let resolveDelayMs = 0;
 const restApp = createRestApp({
   core,
   init: () => {},
@@ -52,6 +54,7 @@ const restApp = createRestApp({
   resolve: async (p) => {
     if (p.scope === "forward") return { status: "ok", agentId: "agent-f" };
     if (resolveGate) await resolveGate;
+    if (resolveDelayMs) await Bun.sleep(resolveDelayMs);
     return identity;
   },
   track: (run) => run(),
@@ -302,6 +305,45 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   const poll = await app.fetch(new Request("http://mcp/mcp/jobs/job-7", { headers: { "x-brain-key": "read-raw" } }));
   assert(poll.status === 500, `a job poll whose read faults: 500, not 404 (${poll.status})`);
   answer = () => ok({});
+}
+
+console.log("\n[8c] Review pass 2: /health's one deadline, a job stream's answers, a misconfigured forwarder said once");
+{
+  // A registry that answers each lookup in 1.5 s: the key's standing and the record's own check, one after the other,
+  // would be 3 s; one deadline over both answers `ok` at it, as index.ts's one race does.
+  answer = () => ({ version: "1.0.0" });
+  resolveDelayMs = 1_500;
+  const t0 = performance.now();
+  const slow = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+  const took = performance.now() - t0;
+  const slowText = await slow.text();
+  resolveDelayMs = 0;
+  answer = () => ok({});
+  assert(slowText === "ok" && took < 2_900, `a slow registry: /health answers ok within its one deadline (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  // A job stream's answers from the REST core, each as index.ts answers it.
+  const streamApp = (status: number) => createMcpApp({
+    rest: createRestClient({
+      baseUrl: "http://api.ob1.internal",
+      forwarderKey: "fwd-raw",
+      fetch: async (req) => new URL(req.url).pathname.endsWith("/whoami")
+        ? Response.json({ name: "chatgpt", scope: "read", operations: ["job_status"] })
+        : new Response(JSON.stringify({ code: status === 404 ? "NOT_FOUND" : status === 503 ? "BUSY" : "FAILED" }), { status, headers: { "content-type": "application/json" } }),
+    }),
+    edge: () => ({ configured: false, origin: null }),
+  });
+  const streamed = async (status: number) => {
+    const r = await streamApp(status).fetch(new Request("http://mcp/mcp/jobs/job-7/stream", { headers: { "x-brain-key": "read-raw" } }));
+    return { status: r.status, text: await r.text() };
+  };
+  const [missing, fault, busy] = [await streamed(404), await streamed(500), await streamed(503)];
+  assert(missing.status === 404 && JSON.parse(missing.text).error === "not found", "a job not there: its stream 404, not found");
+  assert(fault.status === 500, `a job stream the REST core faults on: 500, not "not found" (${fault.status})`);
+  assert(busy.status === 200 && busy.text === "ok", `a stream the registry is busy on: ok, as index.ts's busy key is shown (${busy.status} ${busy.text})`);
+  // This server's forwarder refused: /health and the mirrors show ok, and the log says why, once.
+  const lines: string[] = [];
+  const misconfigured = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: (req) => Promise.resolve(restApp.fetch(req)), forwarderKey: "not-a-forwarder" }), edge: () => ({ configured: false, origin: null }), warn: (l) => lines.push(l) });
+  for (const path of ["/mcp/health", "/worker-status", "/mcp/health"]) await (await misconfigured.fetch(new Request(`http://mcp${path}`, { headers: { "x-brain-key": "read-raw" } }))).text();
+  assert(lines.length === 1 && /forwarder/.test(lines[0]), `a forwarder the REST core refuses: one line, naming it, however often asked (${lines.length}: ${lines[0]?.slice(0, 80)})`);
 }
 
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");
