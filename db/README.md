@@ -3633,9 +3633,12 @@ out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then r
 `migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
 guards the target five ways.
 
-- **It is not the `--from` database.** The source session is looked up in the
-  target's `pg_stat_activity`. Two names for one server are still one server,
-  and a copy that shares the source's `system_identifier` is still another.
+- **It is not the `--from` database.** Each half reads where its database is,
+  as the server says (`system_identifier`, the postmaster's start, the
+  database's name), and the target half compares the source's reading with its
+  own (SMD-2875). Two names for one server are still one server, and a copy
+  that shares the source's `system_identifier` started at another time, so it
+  is still another.
 - **It is a tier, or empty** (`targetRefusal`). A target is allowed when:
   - an earlier refresh marked it. Before its reset, each refresh sets
     `ALTER DATABASE … SET ob1.refresh_target`, which neither the reset nor the
@@ -3682,9 +3685,17 @@ servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
-stack server's major) and runs this checkout's `tier.ts` in it on the stack's
-network, so a refresh migrates forward with the tree it was run from —
-`deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
+stack server's major) as `<project>-tier` and runs this checkout's `tier.ts` in
+it, so a refresh migrates forward with the tree it was run from —
+`deploy/README.md` has the commands. Each verb runs as two halves that share a
+directory (`--handoff <dir>`), and tier.sh runs each in a container of its own
+on one brain's network with that brain's password (SMD-2875): the source half
+reads the source's facts and dumps it, as `pg_read_all_data` where the login
+may take that role; the target half runs every guard on `--to`, then the
+restore, the settings, the migration and the stamps. A promote's source half
+reads the canary, and its target half stamps stable. Given `--from` and `--to`,
+`tier.ts` runs both halves itself, the target's guards before anything is
+dumped. A host with Bun and `postgresql-client >=` the
 server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
@@ -4213,7 +4224,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2783 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1263 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1276 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

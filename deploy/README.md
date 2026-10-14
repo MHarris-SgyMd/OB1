@@ -239,9 +239,9 @@ take the brain the same way:
   project is `ob1b-canary`, its connector `ob1b-canary`, and its env file
   `.env.ob1b-canary.local`. `--stable-project` overrides the project the env
   file names.
-- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data`.
-  `--project` overrides the project, and `--network` names the network
-  outright.
+- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data` and
+  builds its image as `ob1b-tier`. `--project` overrides the project, and
+  `--network` names the network outright.
 
 **Local models.** An instance on `--profile local-models` runs its own Ollama
 and `ollama` volume, so both models are pulled, and held in memory, once per
@@ -1828,10 +1828,23 @@ progress lines (`pool:`, `before:`) still come with each sleep's work.
 `--to` too, to show it reaches it before the reset), and no image here
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
 (`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
-service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
-in it, mounted read-only, on the stack's `data` network, where Postgres is.
-`--replay` and `--diff` need no container: they reach each brain over HTTP
-(SMD-2875).
+service) as `<project>-tier:latest`, the `--to` side's project, and runs this
+checkout's `tier.ts` in it, mounted read-only, as two halves, each in a
+container of its own (SMD-2875):
+- **the source half**, on the `--from` side's `data` network alone, with
+  `--from`'s password alone: a refresh's facts and its dump, or a promote's
+  read of the canary;
+- **the target half**, on the `--to` side's `data` network alone, with `--to`'s
+  password and the settings `migrate.ts` reads: the guards, the restore, the
+  settings, the migration and the stamps, or a promote's stamp on stable.
+
+The source half's hand-off (the facts and the dump) passes to the target's
+container through the runtime's CLI, `cp` piped to `cp`, and is never a file
+on the host. No container joins both brains' networks or holds both their
+passwords. Each half is still the superuser of its own brain, inside its own
+project. The dump runs as `pg_read_all_data` when the login may take that role,
+so it reads every table and sequence and can write nothing. `--replay` and
+`--diff` need no container: they reach each brain over HTTP.
 
 ```bash
 # stable (this stack's postgres) into a working copy, a scratch database on the
@@ -1848,7 +1861,13 @@ deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postg
 bun --no-env-file db/tier.ts --diff --from open-brain --to open-brain-canary --since 2026-01-01
 OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff \
   --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8000/canary/mcp
-# the three-tier stack's own database network and services
+# stable into the canary deploy/canary.sh stood up (canary.sh runs this itself):
+# each side a `postgres` on its own network, --env-file the canary's file and
+# --from-env-file stable's
+deploy/tier.sh --env-file ~/OB1/deploy/.env.canary.local --from-env-file ~/OB1/deploy/.env \
+  --refresh --from postgres --to postgres --tier canary
+# the three-tier stack's own database network and services: one project, so
+# both halves on its network
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
 ```
 
@@ -1933,25 +1952,35 @@ that synced one stale ticket of fifty moves the watermark as far as all fifty
 would. It moves when the board does, so it says nothing of whether a sync is
 alive.
 
-`--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
+`--from` and `--to` name a database on its side's network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
-the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
-as given. `--network` defaults to the stack's `<project>_data`
-(`open-brain_data` for the default project; a stack from before SMD-2583 has
-one network, `<project>_default`). The project is the one
-`--env-file` names, `COMPOSE_PROJECT_NAME` as compose reads it, else
-`open-brain`, or `--project NAME` (SMD-2873; not with `--network`). `--runtime` is
-`docker` or `podman` (docker when it is on the PATH). `--from-env-file PATH`
-takes a short-form `--from`'s password from another env file, when `--from`
-is another stack's with a password of its own (the canary's refresh names
-stable's; SMD-2583); nothing else is read from it. Anything else goes to
-`tier.ts` as given, and a wrapper flag given twice is refused.
+the services here do, with that side's `POSTGRES_PASSWORD`. A full
+`postgres://` URL is used as given. Each side is a project:
+- **`--to`'s** is the one `--env-file` names, `COMPOSE_PROJECT_NAME` as compose
+  reads it, else `open-brain`, or `--project NAME` (SMD-2873). It names the
+  image, `<project>-tier`, so a second brain's or a scratch run never re-tags
+  the image another brain's runs use, and the network, `<project>_data`,
+  unless `--network NAME` names it (a stack from before SMD-2583 has one
+  network, `<project>_default`).
+- **`--from`'s** is `--from-env-file`'s, when `--from` is another stack's with a
+  password of its own (the canary's refresh names stable's; SMD-2583), or
+  `--from-project NAME`, and `--from-network NAME` names its network. With none
+  of these, `--from` is on the `--to` side's network. Only the password and
+  the project are read from `--from-env-file`.
+
+Each of `--network` and `--from-network` is one network: a list is refused,
+since a container on two would reach both brains. `--promote`'s `--from` is the
+canary and its `--to` stable, so there `--env-file` is stable's. `--runtime` is
+`docker` or `podman` (docker when it is on the PATH). The source half is handed
+the verb alone, and anything else goes to the target half's `tier.ts` as given.
+A wrapper flag given twice is refused.
 
 The env file (`--env-file`, default `deploy/.env`) is read by compose itself,
 through `compose config --environment`. So a quoted value, an inline comment,
 an `export` line, CRLF line endings or a byte-order mark read here as they do
 for the stack. A variable set in the shell wins over the file, as it does
-there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
+there. Only what `tier.ts` and `migrate.ts` read is handed to the target half,
+and the source half gets its URL alone:
 - the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` and `OB1_PLUGINS`
   on a refresh);
 - `POSTGRES_PASSWORD`.
@@ -1959,11 +1988,12 @@ there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
 Access keys, `OPENROUTER_API_KEY` (a replay's embed fell back to it until the
 replay moved onto HTTP, SMD-2875), `LINEAR_API_KEY`, `OLLAMA_BASE` and the
 authorization server's `OB1_AUTH_*` settings stay behind. The values travel in a temporary
-env file (mode 600, removed on exit), so they are not on the wrapper's command
-line or the runtime's. They are in the container's environment, which
-`inspect` shows while it runs, and the URLs are on the argument lists of bun,
-`pg_dump`, `pg_restore` and `migrate.ts` inside it, which a Linux host's `ps`
-shows (SMD-2119). The checkout's own `.env` files are mounted with the code and
+env file per half (mode 600, removed on exit), so they are not on the
+wrapper's command line or the runtime's. They are in each half's container
+environment, which `inspect` shows while it runs, and its URL is on the
+argument lists of bun and `migrate.ts` inside it, which a Linux host's `ps`
+shows (SMD-2119). The hand-off holds the source's whole dump: it is on the
+CLI's pipe, then in the target's container until the wrapper removes both. The checkout's own `.env` files are mounted with the code and
 switched off: `OB1_ENV_FILES=off` stops `db/env.ts` reading them, and
 `bun --no-env-file`, run from a working directory outside the checkout, stops
 Bun's auto-load. So only the stack's environment reaches `tier.ts`.
@@ -1973,11 +2003,13 @@ From a container every database is remote, so a short-form `--to` gets
 `OB1_ALLOW_REMOTE_DB=1` to reset one, as with `tier.ts` itself. In place of the
 loopback check, `tier.ts` guards `--to` two ways:
 
-- **It is not the `--from` database.** The source connection's own session is
-  looked up in the target's `pg_stat_activity`. Only the same cluster lists it,
-  and then the database names decide. So `postgres` and `open-brain-postgres-1`
-  are one database, and a canary copied from stable's volume, which shares its
-  `system_identifier`, is still another.
+- **It is not the `--from` database.** Each half reads where its database is,
+  as the server says: the cluster's `system_identifier`, when that cluster's
+  postmaster started, and the database's name. The source half hands its
+  reading over, and the target half compares it with its own, since neither
+  reaches the other's database. So `postgres` and `open-brain-postgres-1` are
+  one database, and a canary copied from stable's volume, which shares its
+  `system_identifier` but started at another time, is still another.
 - **It is a tier a refresh can own.** That means one of:
   - a database an earlier refresh marked. Before resetting, each refresh sets
     `ob1.refresh_target` on the database, where the reset and the restore
@@ -2012,16 +2044,21 @@ ALTER DATABASE openbrain RESET ob1.refresh_target;
 
 `--promote` refuses a marked `--to` and prints the `RESET` for it.
 
-The container runs with `--init`, so Ctrl-C stops a refresh, and `tier.sh`
-then exits with the container's status (130), so a script calling it stops
-too. It publishes nothing. The client's major has to be at least the source
+Each half's container runs with `--init`, so Ctrl-C stops a refresh, and
+`tier.sh` then exits with that container's status (130), so a script calling
+it stops too. A half that fails ends the run there: the target half never
+starts after a failed source half. Neither publishes anything. The client's major has to be at least the source
 server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
 runs through this script: a refresh, its refusal of a `--diff`, a retry over a
 copy left stamped `stable` (as a refresh that died after its restore leaves
-it), and both refusals. The canary step then diffs the canary against stable
+it), both refusals, a run for another project that builds that project's image
+and leaves `open-brain-tier:latest` where it was, and the refusal of a list of
+networks. Through the canary's first refresh, the canary step samples the
+tier halves' containers: none is on both brains' data networks, and neither
+holds the other side's password. The canary step then diffs the canary against stable
 over HTTP (`tier.ts --diff`, exit 0), and over a window after every search
 (exit 3). On a host with SELinux enforcing (Fedora and RHEL,
 where podman labels by default), the container can read the mounted checkout
@@ -2148,11 +2185,12 @@ share stable's `/mcp`, `/api` and `/auth`), and stable's proxy routes
 `/canary/mcp` to the first ("One origin", above). They stay off stable's
 `data` and `egress`, so they cannot reach stable's database, or a service a
 compose profile runs there; stable's Postgres is on stable's `data` alone, so
-the canary's `postgres` is its own (SMD-2583). The refresh joins each
-project's database network, read off its Postgres container: `data`, or
-`default` for a stable from before SMD-2583. It reads stable's password from
-stable's env file and the canary's from the canary's (`tier.sh
---from-env-file`). With no profiles the canary advertises no OAuth;
+the canary's `postgres` is its own (SMD-2583). The refresh runs one half on
+each project's database network (SMD-2875), stable's read off its Postgres
+container: `data`, or `default` for a stable from before SMD-2583. Stable's
+half takes stable's password from stable's env file, and the canary's half the
+canary's from the canary's (`tier.sh --from-env-file`); neither holds the
+other's. With no profiles the canary advertises no OAuth;
 on stable's mesh it could otherwise find stable's authorization server.
 On stable's origin the canary is reached wherever stable is, with stable's
 keys: on the LAN when stable's `SERVER_BIND` opens it, and through any tunnel
@@ -2219,8 +2257,8 @@ stable is redeployed:
 2. It writes the canary's env file if there is none (above), and starts the
    canary's Postgres. Once standing servers are stopped (3), it sets the
    canary database's password to that file's, then refreshes it from stable
-   through `tier.sh` on each project's database network: the dump, the
-   settings, a migration with this checkout, the stamp and the mark
+   through `tier.sh`, one half on each project's database network: the dump,
+   the settings, a migration with this checkout, the stamp and the mark
    ("Refreshing a tier", above). Stable's password comes from stable's env
    file alone and the canary's from its own: a password set only in the
    shell is not used, since canary.sh unsets it (compose would let it win
