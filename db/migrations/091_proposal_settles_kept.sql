@@ -2,7 +2,7 @@
 -- Migration 091: every time the consolidation pass settled a proposal since
 --                the judge last asserted it is kept on its row, across
 --                067's reopen — so a finding the pass took back reads taken
---                back, whatever the row says now (SMD-2913)
+--                back after a text move reopens it (SMD-2913)
 -- =============================================================================
 --
 -- WHY
@@ -30,8 +30,8 @@
 --     since.
 --   * supersession_proposals_keep_settles, BEFORE INSERT OR UPDATE: the one
 --     writer of the column — a value a caller writes is replaced. It empties
---     the column when judged_at moves (063's replace in place: a re-judge
---     found the conflict again), appends NEW.reviewed_at when the row
+--     the column when judged_at moves or a stale row turns pending (063's
+--     replace in place: a re-judge found the conflict again), appends NEW.reviewed_at when the row
 --     becomes settled (it was not before the write), and otherwise keeps it
 --     as it was — 067's reopen and a person's review alike. A row inserted
 --     settled starts with its time. The judge's assertion is read from the
@@ -100,9 +100,12 @@ BEGIN
     NEW.pass_settled_at := CASE WHEN v_settled THEN ARRAY[coalesce(NEW.reviewed_at, now())] ELSE '{}'::timestamptz[] END;
     RETURN NEW;
   END IF;
-  -- The judge asserted it again (063 moves judged_at): the settles before
-  -- were of the earlier verdict.
-  NEW.pass_settled_at := CASE WHEN NEW.judged_at IS DISTINCT FROM OLD.judged_at THEN '{}'::timestamptz[] ELSE OLD.pass_settled_at END;
+  -- The judge asserted it again (063's replace in place: judged_at moved, a
+  -- stale row back to pending): the settles before were of the earlier
+  -- verdict. The status too, since a replace in the transaction that last
+  -- wrote judged_at leaves it equal (review pass 3).
+  NEW.pass_settled_at := CASE WHEN NEW.judged_at IS DISTINCT FROM OLD.judged_at OR (OLD.status = 'stale' AND NEW.status = 'pending')
+                              THEN '{}'::timestamptz[] ELSE OLD.pass_settled_at END;
   IF v_settled AND NOT (OLD.status = 'rejected' AND coalesce(OLD.review_note LIKE 'settled by the pass:%', false)) THEN
     NEW.pass_settled_at := NEW.pass_settled_at || coalesce(NEW.reviewed_at, now());
   END IF;
@@ -111,7 +114,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_keep_proposal_settles() IS
-  'BEFORE INSERT OR UPDATE on supersession_proposals (supersession_proposals_keep_settles, 091): the one writer of pass_settled_at. Empties it when judged_at moves (063''s replace in place: the judge asserted the row again); appends NEW.reviewed_at (now() when it is null) when the row becomes settled by the pass — rejected with a review_note beginning ''settled by the pass:'' (067''s marker) where it was not before the write; otherwise keeps it as it was. A value a caller writes is replaced on every write; a row inserted settled starts with its time. Migration 091 / SMD-2913.';
+  'BEFORE INSERT OR UPDATE on supersession_proposals (supersession_proposals_keep_settles, 091): the one writer of pass_settled_at. Empties it when judged_at moves or a stale row turns pending (063''s replace in place: the judge asserted the row again); appends NEW.reviewed_at (now() when it is null) when the row becomes settled by the pass — rejected with a review_note beginning ''settled by the pass:'' (067''s marker) where it was not before the write; otherwise keeps it as it was. A value a caller writes is replaced on every write; a row inserted settled starts with its time. Migration 091 / SMD-2913.';
 
 CREATE TRIGGER supersession_proposals_keep_settles
   BEFORE INSERT OR UPDATE ON supersession_proposals

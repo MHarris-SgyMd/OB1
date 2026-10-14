@@ -439,8 +439,8 @@ answer and `no table` before its table's migration.
 (SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
 this brain posted: accepted (its proposal accepted, or the board linking the
 pair since — any active Linear link either way, `duplicate_of` included),
-rejected (a person rejected one of its proposals, none pending or stale — a
-link since does not undo that no), withdrawn (its proposals gone, or settled by
+rejected (a person rejected one of its proposals, none pending or waiting on a
+re-judge — a link since does not undo that no), withdrawn (its proposals gone, or settled by
 the consolidation pass's own re-judge, or a relation the judge stopped saying,
 within the window), open (a proposal pending, or stale and not settled since it
 was last asserted, or a relation standing), or unanswered once open past 30 days

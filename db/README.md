@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2782 assertions: 2782 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2783 assertions: 2783 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports ninety-one (91) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -4155,8 +4155,9 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   **accepted** — its proposal accepted, or the board linking the pair since
   (any active Linear link either way, `duplicate_of` included, timed from the
   first link made since the post); **rejected** — a person rejected one of
-  its proposals (`--reject`) and none is pending or stale, a link since
-  notwithstanding; **withdrawn** — within the window, its proposal settled by
+  its proposals (`--reject`) and none is pending or waiting on a re-judge
+  (a proposal the pass took back and a text move reopened does not wait), a
+  link since notwithstanding; **withdrawn** — within the window, its proposal settled by
   the pass's own re-judge (067's `settled by the pass:` note, a rejection no
   person made), or a relation the judge stopped saying at that word (one
   re-judged at the same word still stands); or its proposals or relation
@@ -4200,7 +4201,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2782 assertions, PGlite, no container
+bun test-schema.ts                          # 2783 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

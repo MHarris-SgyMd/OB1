@@ -13981,6 +13981,17 @@ console.log("\n[81] Migration 091: every time the consolidation pass settled a p
   assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp5)).ok === true, "the fixture: stale and settled after the re-assertion");
   const s4b = await row(pid);
   assert(s4b.settles.length === 1 && Date.parse(s4b.settles[0]) === Date.parse(s4b.reviewed!), `…and a settle after it starts the record again (${JSON.stringify(s4b)})`);
+  // In one transaction judged_at cannot move (now() is the transaction's): a stale row turning pending empties it too (review pass 3).
+  const C0 = await cap("091: a fourth note about Bea, judged in one transaction", 4);
+  const pid0 = (await propose(B.id, C0.id)).id!;
+  await db.exec(`BEGIN;
+    UPDATE supersession_proposals SET judged_at = now() WHERE id = '${pid0}';
+    UPDATE supersession_proposals SET status = 'rejected', reviewed_at = now(), review_note = '${PASS_SETTLED_PREFIX} in one transaction' WHERE id = '${pid0}';
+    UPDATE supersession_proposals SET status = 'stale', reviewed_at = NULL, review_note = NULL WHERE id = '${pid0}';
+    UPDATE supersession_proposals SET status = 'pending', judged_at = now() WHERE id = '${pid0}';
+    COMMIT;`);
+  const s0 = await row(pid0);
+  assert(s0.status === "pending" && JSON.stringify(s0.settles) === "[]", `a re-assertion in the transaction that last wrote judged_at empties it all the same (${JSON.stringify(s0)})`);
 
   // A write on a settled row that does not settle it, and a caller's own value: carried over unchanged.
   await db.query(`UPDATE supersession_proposals SET confidence = 0.5, reviewed_at = now() - interval '9 days', pass_settled_at = ARRAY[now() - interval '40 days'] WHERE id = $1::uuid`, [pid]);
