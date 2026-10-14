@@ -2917,9 +2917,17 @@ the write — which would otherwise hold it back for as long as the brain keeps
 waking. The cost is an unextracted neighbour's: a newer thought judged
 meanwhile misses its pair with such a thought, which consolidation reaches
 from its newer side only and does not revisit. Once taken, the decision
-holds for the rest of the sleep: a night long enough to finish the thought
-still judges beside it. The thought is tried at every sleep and finished by the first long
-enough. A brain before 089, or a role that cannot read its table (the
+holds for the rest of the sleep. Stalled thoughts go last: as each sleep
+begins, every thought a stop has taken moves behind new captures, so the
+awake period's captures are extracted first (a wake dated it at the wake, and
+they waited behind it all day); and when consolidation joins past, extraction
+is set aside — stopped, if in hand with a stalled thought — until
+consolidation's pool drains, then resumes, so on a one-slot model the judge
+does not wait behind the window, and a night still reaches the thought. It is
+tried at every sleep and finished by the first long enough. One limit stands:
+sleeps of about a minute, each under the stall floor, neither stall a slow
+window nor let it finish, and consolidation waits on it until a longer sleep.
+A brain before 089, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
@@ -4167,7 +4175,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2761 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1303 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1310 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
