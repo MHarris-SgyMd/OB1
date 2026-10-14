@@ -214,12 +214,12 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
       && outd({}, { withdrawnS: 3 * D, linkedS: 2 * D }) === `accepted/linked/${2 * D}` && outd({ rejected: 1, rejectedS: D }, { withdrawnS: 3 * D }) === `rejected/proposal/${D}`
       && outd({ stale: 1 }) === "open/null/null" && outd({}, { withdrawnS: 3 * D, ageS: 40 * D }) === "withdrawn/null/null",
     "the pass's settle is no reviewer's no: withdrawn within the window, unanswered after it, a link and a person's rejection before it, a stale one never settled since the post still open (review pass 2)");
-  ok(outd({ stale: 1 }, { withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null" && outd({ pending: 1 }, { withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null"
-      && outd({ stale: 1 }, { withdrawnS: 5 * D, linkedS: 6 * D }) === `accepted/linked/${6 * D}` && outd({ accepted: 1, acceptedS: 9 * D }, { withdrawnS: 5 * D }) === `accepted/proposal/${9 * D}`,
-    "the first take-back since the post decides: a settle reopened since (stale), or found in conflict again (pending), stays withdrawn; an acceptance or a link still answers (SMD-2913)");
-  ok(out({ stands: true, withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null" && out({ stands: true, withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
-      && out({ stands: true, withdrawnS: 5 * D, linkedS: 7 * D }) === `accepted/linked/${7 * D}`,
-    "…and a relation the judge stopped saying within the window and says again since is withdrawn, past it unanswered, linked accepted (SMD-2913)");
+  ok(outd({ stale: 1 }, { withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null" && outd({ stale: 1 }, { withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
+      && outd({ stale: 1 }, { withdrawnS: 5 * D, linkedS: 6 * D }) === `accepted/linked/${6 * D}` && outd({ accepted: 1, acceptedS: 9 * D }, { withdrawnS: 5 * D }) === `accepted/proposal/${9 * D}`
+      && outd({ stale: 1 }, { withdrawnS: -60 }) === "withdrawn/null/null",
+    "a settle a text move reopened since (stale) stays a take-back, withdrawn within the window and unanswered past it; an acceptance or a link still answers; one settled before its comment was posted is withdrawn (SMD-2913)");
+  ok(out({ stands: true, ageS: 40 * D }) === "unanswered/null/null" && out({ stands: true, ageS: 10 * D }) === "open/null/null",
+    "a relation the judge says again is its verdict once more: open, then unanswered — not a take-back (review pass 1)");
   ok(outd({}, { ageS: 31 * D }) === "unanswered/null/null" && out({ stands: false, ageS: 31 * D }) === "unanswered/null/null",
     "gone with its thought, no time left: the comment's age decides, past the window unanswered (review pass 2)");
   ok(outd({ stale: 2 }) === "open/null/null" && outd({ stale: 2 }, { ageS: 31 * D }) === "unanswered/null/null" && outd({}) === "withdrawn/null/null",
@@ -265,7 +265,6 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     reportLine(row({ origin: "found" })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: 2 * D })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: -3 })),
-    reportLine(row({ word: "related", stands: true, withdrawnS: 2 * D })),
     reportLine(row({ ageS: 31 * D })),
     reportLine(row({ ageS: 12 * D })),
   ];
@@ -280,7 +279,6 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     "    SMD-1 ~ SMD-2          related   posted 5 d ago on SMD-2 — open",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 2 d after",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 0 s after",
-    "    SMD-1 ~ SMD-2          related   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying related 2 d after (said again since)",
     "    SMD-1 ~ SMD-2          related   posted 31 d ago on SMD-2 — unanswered: open past 30 d",
     "    SMD-1 ~ SMD-2          related   posted 12 d ago on SMD-2 — open: 18 d before it counts as unanswered",
   ].join("\n"), `--report's lines say each outcome (${lines.join(" / ")})`);

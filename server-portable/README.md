@@ -445,11 +445,12 @@ the consolidation pass's own re-judge, or a relation the judge stopped saying,
 within the window), open (a proposal pending, or stale and waiting on a
 re-judge, or a relation standing), or unanswered once open past 30 days — a finding the judge takes
 back after that stays unanswered, and one deleted with its thought, which
-leaves no time, is unanswered once its comment is past the window. The first
-take-back since the post decides (SMD-2913): the pass's settles are kept across
-067's reopen (migration 091) and closed relations stay closed (084), so a
-finding taken back within the window stays withdrawn when a text move reopens
-it or the judge says it again. The rate is
+leaves no time, is unanswered once its comment is past the window. What the
+judge last asserted decides (SMD-2913): the pass's settles are kept across 067's
+reopen (migration 091), so a finding taken back within the window stays
+withdrawn when a text move reopens it; a re-judge that finds the conflict again,
+or a relation said again, makes it open once more. The row reads `? (migration
+091 is not applied)` on a brain without it. The rate is
 accepted over accepted, rejected and unanswered — an unanswered finding counts
 against it; withdrawn and open are left out — and the median is from the post to the first link since or the
 review. A link Linear made before the comment but board-sync brought in after

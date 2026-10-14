@@ -17,9 +17,11 @@
 --   acceptance rate understated. Ticket texts carry `Status:`, `Parent:` and
 --   `Labels:`, so they move often.
 --
---   The relation side needs nothing here: a relation facet is only ever
---   closed (084), never reopened or deleted while its thoughts stand, so the
---   first time no relation of the word stood is in the facets already.
+--   A reopen is the brain asking again, not the judge saying it again: a
+--   re-judge that finds the conflict again replaces the row in place (063),
+--   back to pending with judged_at moved, and that is the judge asserting
+--   the finding once more. The relation side needs nothing here: a relation
+--   has no reopen — said again, it is the judge's verdict again (084).
 --
 -- WHAT
 --   * supersession_proposals.pass_settled_at — every time the pass settled
@@ -36,14 +38,19 @@
 --     time behind; it is not recovered.
 --
 -- NOT HERE
---   * The read (server-portable/brain-info.ts FINDING_OUTCOMES_SQL): the
---     first settle since the finding was posted, of every proposal it named
---     — the server's change, beside this one.
+--   * The read (server-portable/brain-info.ts FINDING_OUTCOMES_SQL): each
+--     proposal's first settle since its judged_at, the latest of them over
+--     every proposal a finding named — the server's change, beside this one.
 --   * Grants: none. The trigger writes the row being written, so a role that
 --     may settle (UPDATE on the table, 029's) needs nothing more, and 087's
 --     table stays insert-only.
 --   * A bound on the array: one element per settle, and each settle after the
 --     first needs a text move under the pair and a pass to re-judge it.
+--   * A caller's value on INSERT: the trigger replaces it, so a data-only
+--     reload (pg_restore --data-only, COPY) of supersession_proposals with
+--     triggers enabled rebuilds each row's array from its status alone and
+--     loses settles a reopen had cleared — load it with the trigger disabled,
+--     as a full pg_restore does (triggers come after the data).
 --
 -- Idempotent: ADD COLUMN IF NOT EXISTS; the backfill touches only settled
 -- rows still empty, under no trigger (dropped first); CREATE OR REPLACE.

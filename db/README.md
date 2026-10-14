@@ -1414,8 +1414,8 @@ Migration 091 keeps every time the consolidation pass settled a proposal on
 its row (SMD-2913). 067's `rebuild_derived` reopens a settled row on a later
 text move — stale, `reviewed_at` and the note cleared — and the pass's next
 settle writes a new time, so SMD-2682's read of what became of a posted
-finding lost the first take-back: a finding the pass took back on its fifth
-day read open again after an unrelated ticket edit, and unanswered past the
+finding lost the take-back: a finding the pass took back on its fifth day
+read open again after an unrelated ticket edit, and unanswered past the
 window. `supersession_proposals.pass_settled_at` is each settle's
 `reviewed_at`, oldest first; its one writer is the BEFORE INSERT OR UPDATE
 trigger `supersession_proposals_keep_settles`, which appends when the row
@@ -1423,11 +1423,14 @@ becomes settled (rejected with the `settled by the pass:` note where it was
 not) and otherwise carries the column over — 067's reopen, 063's replace in
 place, a person's review and a caller's own value alike. Rows settled at the
 upgrade are backfilled with their `reviewed_at`; a settle reopened before it
-left no time. No grant: the trigger writes the row being written, and 087's
-table stays insert-only. A relation needs nothing here — its facets are only
-ever closed (084), so the first close no relation of the word outlived is in
-them already. It refuses to apply without 067. test-schema [81], test-upgrade
-[20al], test-live [42].
+left no time. The read takes each proposal's first settle since its
+`judged_at`, which only a re-judge finding the conflict again moves (063): a
+reopen is the brain asking again, a re-judge in conflict the judge saying it
+again. No grant: the trigger writes the row being written, and 087's table
+stays insert-only. A data-only reload with triggers enabled rebuilds the
+column from each row's status. A relation needs nothing — it has no reopen,
+and said again it is the judge's verdict again. It refuses to apply without
+067. test-schema [81], test-upgrade [20al], test-live [42].
 
 ## What changed relative to the guide
 
@@ -4157,15 +4160,17 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   person made), or a relation the judge stopped saying at that word (one
   re-judged at the same word still stands); or its proposals or relation
   deleted with a thought, which leaves no time — the comment stays on the
-  board, so past the window that reads unanswered. The first take-back since
-  the post decides (SMD-2913): the pass's settles are kept across 067's
-  reopen (migration 091) and a closed relation stays closed history (084),
-  so a finding taken back on its fifth day reads withdrawn after a ticket
-  edit reopens it, a re-judge finds the conflict again, or the judge says
-  the relation again — the line adds "(reopened since)" or "(said again
-  since)"; with two proposals named it is taken back once the pass has
-  settled both. A settle reopened before 091 left no time, and that finding
-  reads by its state now, which can only understate the rate;
+  board, so past the window that reads unanswered. What the judge last
+  asserted decides (SMD-2913): the pass's settles are kept across 067's
+  reopen (migration 091), so a finding taken back on its fifth day stays
+  withdrawn when a ticket edit reopens it and the pass settles it again —
+  the line adds "(reopened since)"; but a re-judge that finds the conflict
+  again (pending, its `judged_at` moved), or a relation said again, is the
+  judge asserting it once more, and it reads open, then unanswered. With two
+  proposals named it is taken back once the pass has settled both, each
+  since it was last asserted. A settle reopened before 091 left no time, and
+  that finding reads by its state now, which can only understate the rate;
+  `--report` names 091 on a brain without it;
   **open** — a proposal pending, or stale (a text moved) and waiting on a
   re-judge or a reviewer, or a relation standing; or **unanswered**, open past `--days`
   (30). The board has no "no" for a relation: left unlinked past the window
@@ -4193,7 +4198,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2779 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1277 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
