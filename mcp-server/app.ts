@@ -358,6 +358,9 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
   /** The registry busy on a key between its check and the call: shown `ok`, as index.ts shows a busy key at every keyed route (review pass 3). */
   const busyNow = (a: Answer) => a.status === 503 && (a.body as { code?: string } | null)?.code === "BUSY";
+  /** The registry's word on a key it turned between its check and the call — busy, or revoked — or none (review pass 3 of PR 4b: a revoked one read as a fault). */
+  const turned = (a: Answer): { status: "busy" | "revoked" } | null =>
+    busyNow(a) ? { status: "busy" } : a.status === 401 && (a.body as { code?: string } | null)?.code === "REVOKED" ? { status: "revoked" } : null;
   /**
    * The caller of a keyed mirror or /health, its key's standing within
    * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
@@ -440,23 +443,40 @@ export function createMcpApp(deps: McpDeps): Hono {
     // and the route answers `ok` (review pass 2: one after the other, a keyed
     // probe could wait twice the deadline).
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
+    // The record asked beside the key's standing, for the first key presented — the one that decides in all but a
+    // rare request — as index.ts starts its read with the registry's check: one after the other, a slow registry and a
+    // slow read each inside the deadline ran past it together (review pass 3 of PR 4b). The REST core's registry runs
+    // one lookup per key at a time (agents.ts), so the two share it. Let go when another key decides.
+    type Read = { a: Answer | null; fault: unknown };
+    const early = new AbortController();
+    const first = presentedKeys(c.req.raw)[0];
+    const read = (key: string, signal: AbortSignal): Promise<Read> =>
+      deps.rest.call("health" as never, {} as never, { key, signal }).then((a) => ({ a, fault: null }), (fault) => ({ a: null, fault }));
+    const firstRead = read(first, AbortSignal.any([budget, early.signal]));
     const caller = await keyedCaller(c, "/health", "brain_info", budget);
+    if (caller instanceof Response || caller.key !== first) early.abort();
     if (caller instanceof Response) return caller;
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    let fault: unknown = null;
-    const a = await deps.rest.call("health" as never, {} as never, { key: caller.key, signal: budget }).catch((err) => { fault = err; return null; });
+    const { a, fault } = caller.key === first ? await firstRead : await read(caller.key, budget);
     // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
     // or an answer that is no record and no liveness, is this server's fault: liveness all the same, its line `error`
     // FAILED (review pass 2 of PR 4b: the REST core gone between the two calls read as the key refused).
     if (budget.aborted) return notCleared(c, traceOf(c.req.raw), null);
     if (fault !== null || !a?.ok) {
       const err = fault ?? new Error(`the REST core answered /health ${a?.status}`);
-      sayOnce(err);
+      // The caller was found; its record was not (review pass 3: the default lead sent the operator after the key).
+      sayOnce(err, "/health's record could not be read");
       return faultedAt(c, err, true);
     }
     const body = a.body as Record<string, unknown> | null;
     // Liveness where the record was asked: the registry did not clear the key in time (index.ts's notCleared).
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
+    // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
+    if (typeof body !== "object" || Array.isArray(body)) {
+      const err = new Error("the REST core answered /health with no record");
+      sayOnce(err, "/health's record could not be read");
+      return faultedAt(c, err, true);
+    }
     noteLegacyRoute(c.req.raw, caller.name);
     return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
@@ -475,7 +495,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     noteLegacyRoute(c.req.raw, caller.name);
     try {
       const answered = await deps.rest.call("worker_status", {}, { key: caller.key });
-      if (busyNow(answered)) return notCleared(c, traceOf(c.req.raw), { status: "busy" });
+      const word = turned(answered);
+      if (word) return notCleared(c, traceOf(c.req.raw), word);
       const o = outcomeOf(answered);
       if ("fault" in o) return faultedAt(c, o.fault);
       // The operation answers an object (a tool result is one); this route has always answered the bare rows.
@@ -502,7 +523,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     try {
       const answered = await deps.rest.call(tool, MIRROR_INPUT[tool](args) as never, { key: caller.key });
-      if (busyNow(answered)) return notCleared(c, traceOf(c.req.raw), { status: "busy" });
+      const word = turned(answered);
+      if (word) return notCleared(c, traceOf(c.req.raw), word);
       const o = outcomeOf(answered);
       if ("fault" in o) return faultedAt(c, o.fault);
       if (o.ok) return c.json(o.value as object, 200, corsHeaders);
@@ -543,7 +565,7 @@ export function createMcpApp(deps: McpDeps): Hono {
         // "not found", which a poller gives up on).
         if (upstream.status === 404) return c.json({ error: "not found" }, 404, corsHeaders);
         if (upstream.status >= 500 && upstream.status !== 503) throw new Error(`the REST core answered the job stream ${upstream.status}`);
-        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : null);
+        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : upstream.status === 401 && (await upstream.clone().json().catch(() => null) as { code?: string } | null)?.code === "REVOKED" ? { status: "revoked" } : null);
       }
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
       // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
@@ -552,7 +574,8 @@ export function createMcpApp(deps: McpDeps): Hono {
       return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, ...ends });
     }
     const answered = await deps.rest.call("job_status", { job_id: id }, { key: caller.key });
-    if (busyNow(answered)) return notCleared(c, traceOf(c.req.raw), { status: "busy" });
+    const word = turned(answered);
+    if (word) return notCleared(c, traceOf(c.req.raw), word);
     const o = outcomeOf(answered);
     if ("fault" in o) throw o.fault;
     if (!o.ok) return c.json({ error: "not found" }, 404, corsHeaders);

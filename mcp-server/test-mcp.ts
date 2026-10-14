@@ -313,17 +313,24 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
 
 console.log("\n[8c] Review pass 2: /health's one deadline, a job stream's answers, a misconfigured forwarder said once");
 {
-  // A registry that answers each lookup in 1.5 s: the key's standing and the record's own check, one after the other,
-  // would be 3 s; one deadline over both answers `ok` at it, as index.ts's one race does.
+  // A registry that answers each lookup in 1.5 s: the key's standing and the record asked together, as index.ts starts
+  // its read with the registry's check, so the record comes at about 1.5 s, not 3 (PR 4b review pass 3: one after the
+  // other, they ran past the deadline together); past the deadline, one deadline over both answers `ok` at it.
   answer = () => ({ version: "1.0.0" });
   resolveDelayMs = 1_500;
-  const t0 = performance.now();
+  let t0 = performance.now();
   const slow = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
-  const took = performance.now() - t0;
+  let took = performance.now() - t0;
   const slowText = await slow.text();
+  assert(slowText.includes('"version":"1.0.0"') && took < 2_200, `a registry at 1.5 s: /health's record, the key's check and the read together (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  resolveDelayMs = 2_700;
+  t0 = performance.now();
+  const past = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+  took = performance.now() - t0;
+  const pastText = await past.text();
   resolveDelayMs = 0;
   answer = () => ok({});
-  assert(slowText === "ok" && took < 2_900, `a slow registry: /health answers ok within its one deadline (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  assert(pastText === "ok" && took < 2_900, `a registry past the deadline: /health answers ok within its one deadline (${Math.round(took)} ms, ${pastText.slice(0, 30)})`);
   // A job stream's answers from the REST core, each as index.ts answers it.
   const streamApp = (status: number) => createMcpApp({
     rest: createRestClient({
@@ -602,17 +609,22 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   assert(npCode === 2 && /OB1_PLUGINS/.test(npSaid) && /no-such-plugin/.test(npSaid) && !/\n\s+at /.test(npSaid), `OB1_PLUGINS naming no plugin: exit 2, in words (${npCode}: ${npSaid.trim().slice(0, 90)})`);
 }
 
-console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core away is `error` FAILED, not a key refused; a keyed HEAD at /health asks the REST core nothing");
+console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fault is `error` FAILED, not a key refused; a keyed HEAD asks the REST core nothing, a keyless one at a mirror is `refused`");
 {
   const { useRequestLog } = await import("../server-portable/telemetry.ts");
   const said: string[] = [];
   const before = useRequestLog((l) => said.push(l));
   let sent = 0;
   let healthDown = false;
+  let turnedAfterWhoami = false;
+  let healthBody: string | null = null;
   const counting = createMcpApp({
     rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => {
       sent++;
-      if (restDown || (healthDown && new URL(req.url).pathname === "/health")) throw new TypeError("fetch failed: connection refused");
+      const path = new URL(req.url).pathname;
+      if (restDown || (healthDown && path === "/health")) throw new TypeError("fetch failed: connection refused");
+      if (turnedAfterWhoami && path !== "/v1/whoami") return new Response(JSON.stringify({ code: "REVOKED" }), { status: 401, headers: { "content-type": "application/json" } });
+      if (healthBody !== null && path === "/health") return new Response(healthBody, { status: 200, headers: { "content-type": "application/json" } });
       return restApp.fetch(req);
     } }),
     edge: () => ({ configured: false, origin: null }),
@@ -638,6 +650,29 @@ console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core 
       const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
       assert(r.status === 200 && sent === 0 && l.outcome === "ok" && l.route === route, `a keyed HEAD at ${route}: liveness at once, nothing sent (${sent} sent; ${said.at(-1)})`);
     }
+    // A keyless HEAD at a mirror is a caller shown nothing, `refused`, as index.ts's (review pass 3: no test held it).
+    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"], ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream"]] as const) {
+      sent = 0;
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method: "HEAD" }));
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && sent === 0 && l.outcome === "refused" && l.route === route && !("agent" in l), `a keyless HEAD at ${route}: shown nothing, \`refused\`, no key named (${said.at(-1)})`);
+    }
+    // A key the registry revoked between its check and the call: `refused` REVOKED, shown `ok`, as index.ts reads it — never a fault, nor a poll's 500 (review pass 3).
+    turnedAfterWhoami = true;
+    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"]] as const) {
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { headers: { "x-brain-key": "read-raw" } }));
+      const text = await r.text();
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && text === "ok" && l.outcome === "refused" && l.code === "REVOKED" && l.route === route, `a key revoked after whoami at ${route}: \`refused\` REVOKED, shown \`ok\` (${r.status} ${said.at(-1)})`);
+    }
+    turnedAfterWhoami = false;
+    // /health answered with no record: `error` FAILED, not a string's characters served as fields (review pass 3).
+    healthBody = JSON.stringify("garbage");
+    const junk = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+    const junkText = await junk.text();
+    healthBody = null;
+    const junkLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(junkText === "ok" && junkLine.outcome === "error" && junkLine.code === "FAILED", `/health answered with no record: liveness, its line \`error\` FAILED (${junkText.slice(0, 30)}; ${said.at(-1)})`);
     // /health's record call after the key cleared: the REST core gone between the two is `error` FAILED, not the key refused (review pass 2).
     healthDown = true;
     const torn = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
@@ -649,6 +684,8 @@ console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core 
   } finally {
     restDown = false;
     healthDown = false;
+    turnedAfterWhoami = false;
+    healthBody = null;
     useRequestLog(before);
   }
 }
