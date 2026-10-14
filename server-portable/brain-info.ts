@@ -251,8 +251,10 @@ const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number
  * write ob1_config, so a row counts only in full: a key naming a known worker
  * (board-sync without a job, the claim workers with one, of a bounded token
  * alphabet), a value of the version db/pass-stamp.ts writes, numbers that are
- * counts, the enums as written, and the database's own instant. Anything else
- * is counted in `ignored`, and its text goes nowhere.
+ * counts, the enums as written, the database's own instant, and the sleep
+ * scheduler's held thought ids, each held to a uuid (parseHeld; read-scoped
+ * as brain_info is, as list_thought_ids is). Anything else is counted in
+ * `ignored`, and its text goes nowhere.
  */
 export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown; total?: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
   const heartbeats: WorkerHeartbeat[] = [];

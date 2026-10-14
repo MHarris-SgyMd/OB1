@@ -74,8 +74,6 @@ export type MalformedBlock = { answers: number; bad: number; alarm: boolean };
 
 /** The sleep scheduler's current or last sleep: when it began and, once it is over, when it ended — the database's instants, ISO strings (SMD-2678). */
 export type SleepMark = { from: string; to: string | null };
-/** The thoughts the sleep scheduler's wakes hold back, as brain-info.ts reads them (SMD-2694). */
-export type { SleepHeld } from "../server-portable/brain-info.ts";
 
 /** Whether the sleep scheduler's role reads query_log, as its start found: a search then wakes it; otherwise only writes do (SMD-2678). */
 export type LogReads = "yes" | "denied" | "missing";

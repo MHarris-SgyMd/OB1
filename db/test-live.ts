@@ -11861,8 +11861,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
     lines.length = 0;
     const ac = new AbortController();
-    // A 2 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in (the minute's floor is for the brain's real sleeps).
-    const run = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 2000, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    // A 1 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
+    const run = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 1000, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
     let sleeps = 0, reached = false;
     const asleep = () => lines.filter((l) => /asleep: no live call/.test(l)).length;
     const deadline = Date.now() + cap * 8000;

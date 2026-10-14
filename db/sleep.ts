@@ -135,7 +135,8 @@
  * passes running", nor "start it again", which would only refuse again
  * (SMD-2752); `held`, the thoughts extraction holds back across the wakes —
  * how many, and the three most stalled with their stops and windows kept,
- * read at the start and after each wake — so the row names a thought the
+ * read at the first stamp awake or poll asleep, after each wake, at least
+ * every minute and before the row ends — so the row names a thought the
  * sleeps cannot finish (SMD-2694). The passes stamp through it, not their
  * own rows, so a wake does not end a follower's row for preflight to warn
  * about, and preflight's
@@ -299,7 +300,6 @@ async function heldBack(sql: SQL, job: string, sig: string): Promise<SleepHeld> 
      ORDER BY 3 DESC, e.stops DESC, e.thought_id LIMIT ${SLEEP_HELD_NAMED}`) as { id: string; stops: number; stalled: number; kept: number; windows: number | null; total: number }[];
   return { total: rows[0]?.total ?? 0, thoughts: rows.map(({ total: _t, ...r }) => ({ ...r, windows: r.windows ?? null })) };
 }
-
 
 /**
  * The newest live event after `after` — a timestamp, or a number of seconds
@@ -536,7 +536,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   if (progressState === null) { err(STOPPED_EARLY); return 130; }
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
-  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 089 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; restart the scheduler once it can`);
+  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 089 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -770,13 +770,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // refusal is told apart.
     const common = {
       url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
-      banner: false, summary: false, stallFloorMs: opts.stallFloorMs,
+      banner: false, summary: false,
       onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
       writer: tagged(name, () => p.hushed),
     };
     const ended = passEnded;
-    p.done = (name === "extract" ? runExtract(common) : runConsolidate(common)).then((code) => {
+    // Extraction's stall floor is its own (consolidation counts no stall).
+    p.done = (name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs }) : runConsolidate(common)).then((code) => {
       p.settled = true;
       p.code = code;
       ended.abort();
@@ -1064,7 +1065,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     return FOLLOW && !hardStopped ? 0 : 130;
   } catch (e) {
     await stopPasses(true).catch(() => {});
-    await endRow("failed", malformed ?? undefined);
+    // Directly: the database may be what threw, and the held read would wait
+    // out its connect timeout before the end did again (review pass 4).
+    await stamper.end("failed", malformed ?? undefined);
     throw e;
   } finally {
     finished = true;
