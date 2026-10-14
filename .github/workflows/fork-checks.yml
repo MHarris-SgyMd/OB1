@@ -740,6 +740,27 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The same suite through the MCP server as a client of the REST core
+      # (SMD-2287 PR 3b), the REST core in process behind it: the same
+      # assertions, but a write records the REST core's door with the MCP
+      # server as its carrier, and the request lines are the REST core's
+      # until the MCP server writes its own (PR 4). Its imports resolve
+      # through each directory's own install.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: End-to-end over MCP, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
+
       # The REST core beside the MCP server on one database (SMD-2284): every
       # operation through both doors, the MCP reply what render.ts makes of the
       # REST answer, the same refusals, and test-auth's cases against REST.
