@@ -137,11 +137,13 @@ export type RawArguments = ReadonlyMap<string, Record<string, unknown> | typeof 
 export function argumentsById(body: string | null): RawArguments {
   const out = new Map<string, Record<string, unknown> | typeof AMBIGUOUS>();
   let parsed: unknown;
-  try { parsed = body ? JSON.parse(body) : null; } catch { return out; }
+  // Leading byte-order marks dropped, as the SDK's decoder drops them (review pass 4: two made this parse fail where the SDK's did not).
+  try { parsed = body ? JSON.parse(body.replace(/^\uFEFF+/, "")) : null; } catch { return out; }
   for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
     const msg = m as { id?: unknown; method?: unknown; params?: { arguments?: unknown } } | null;
     if (msg?.method !== "tools/call" || msg.id === undefined) continue;
-    const args = msg.params?.arguments ?? {};
+    // None given is {}, as the SDK reads it; a null the SDK refuses before any handler runs, so it is no call's.
+    const args = msg.params?.arguments === undefined ? {} : msg.params.arguments;
     if (typeof args !== "object" || Array.isArray(args)) continue;
     const key = JSON.stringify(msg.id);
     out.set(key, out.has(key) ? AMBIGUOUS : args as Record<string, unknown>);
@@ -225,17 +227,19 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   // answer to the manifest's schemas, called on the REST core by its route and
   // said by render.ts's renderPlugin — a fault as index.ts says a plugin's.
   // The input sent is the one the client sent, its fields the operation's, not
-  // the SDK's parse of it: the REST core parses it once, as index.ts's SDK does,
-  // so a step of the schema runs once (review pass 2: a preprocess, an
-  // overwrite or a codec ran twice, or refused its own output).
+  // the SDK's parse of it: its value is the REST core's one parse, as index.ts's
+  // is its SDK's (review pass 2: a preprocess, an overwrite or a codec ran on
+  // its own output, or refused it). The SDK's validation runs the steps too.
   for (const op of ops) {
     if (!caller.operations.has(op.tool)) continue;
-    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input: never, ctx) => {
+    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx) => {
       try {
         const id = JSON.stringify(ctx?.mcpReq?.id);
         const given = raw.get(id);
         if (given === AMBIGUOUS) return say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`));
-        const sent = given ? Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field))) : input as Record<string, unknown>;
+        // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
+        if (!given) return say.failed(new Error(`this server could not read the arguments of call ${id} from its request`));
+        const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
         const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
         return "fault" in outcome ? say.failed(outcome.fault) : say.renderPlugin(outcome as never);
       } catch (err) {

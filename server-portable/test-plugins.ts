@@ -123,7 +123,7 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     ["a union", { u: z.union([z.number(), z.string()]) }, /its query field u is not text, a number or a boolean/],
     ["an object", { o: z.object({ a: z.string() }) }, /its query field o is not text, a number or a boolean/],
     ["a list of numbers", { ids: z.array(z.number()).default([]) }, /its query field ids is a list of other than text/],
-    ["a list of text with no default", { tags: z.array(z.string()).optional() }, /its query field tags is a list with no default of \[\]/],
+    ["a list of text with no default", { tags: z.array(z.string()).optional() }, /its query field tags is a list whose absence is not \[\] as \[\] is/],
     ["a name no query carries", { "a b": z.string() }, /its input field "a b" is no name a query string carries/],
   ] as const) {
     assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: a query string cannot carry it as given (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
@@ -131,13 +131,21 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
   assert(manifestProblems([withOp("crm", "find", { method: "DELETE", input: { n: z.number().nullable() } })]).some((p) => /query field n/.test(p)), "…a DELETE's too");
   // Review pass 3: a URL field that takes a value of another type would get it back as another value.
   for (const [label, input, want] of [
-    ["a coerce", { on: z.coerce.boolean() }, /its query field on takes .* as well as its own type/],
-    ["a catch", { n: z.number().catch(-1) }, /its query field n takes .* as well as its own type/],
-    ["a list of text items that catch", { tags: z.array(z.string().catch("x")).default([]) }, /its query field tags takes .* as well as its own type/],
+    ["a coerce", { on: z.coerce.boolean() }, /its query field on has a coerce/],
+    ["a catch", { n: z.number().catch(-1) }, /its query field n has a catch/],
+    ["a list of text items that catch", { tags: z.array(z.string().catch("x")).default([]) }, /its query field tags has a catch/],
+    // Review pass 4: steps a sample of values missed, and a transform that gives absent and [] apart.
+    ["a preprocess keyed on one value", { on: z.preprocess((v) => (v === 1 ? true : v), z.boolean()) }, /its query field on has a preprocess/],
+    ["a preprocess keyed on a decimal's text", { n: z.preprocess((v) => (typeof v === "string" && /^\d+\.\d{2}$/.test(v) ? Math.round(parseFloat(v) * 100) : v), z.number().int()) }, /its query field n has a preprocess/],
+    ["a list of text items that preprocess", { tags: z.array(z.preprocess((v) => v ?? "none", z.string())).default([]) }, /its query field tags has a preprocess/],
+    ["a list whose transform runs past its default", { tags: z.array(z.string()).transform((a) => (a.length ? a : ["all"])).default([]) }, /its query field tags is a list whose absence is not \[\] as \[\] is/],
   ] as const) {
     assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: it takes another type, which the query string would carry as another value (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
   }
-  assert(/its path's \{id\} takes 0 as well as text/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (typeof v === "number" ? String(v) : v), z.string()) } })]).join()), "a path field that takes a number as well as text is refused");
+  assert(/its path's \{id\} has a preprocess/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (typeof v === "number" ? String(v) : v), z.string()) } })]).join()), "a path field with a preprocess is refused: it takes a value of any type");
+  const throwsOnAbsent = withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (v as string).trim(), z.string().min(1)) } });
+  assert(/its path's \{id\} has a preprocess/.test(manifestProblems([throwsOnAbsent]).join()), "a step that throws on the load's own probe is refused in words, never a throw out of the check (review pass 4)");
+  assert(manifestProblems([withOp("crm", "find", { input: { on: z.stringbool().default(false), q: z.string().trim().toLowerCase(), at: z.iso.datetime().optional() } })]).length === 0, "a GET's stringbool (a codec on text), trim and an ISO datetime: sound");
   assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { on: z.coerce.boolean(), n: z.number().catch(-1), s: z.preprocess((v) => String(v), z.string()) } })]).length === 0, "the same steps in a POST's body, which JSON carries as given: sound");
   const queryable = withOp("crm", "find", { input: { q: z.string().trim(), n: z.number().int().optional(), on: z.boolean().default(false), kind: z.enum(["a", "b"]), tags: z.array(z.string()).default([]) } });
   assert(manifestProblems([queryable]).length === 0, `a GET's text, number, boolean, enum and defaulted list of text are sound, and an idempotent trim (${manifestProblems([queryable]).join()})`);

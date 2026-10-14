@@ -30,7 +30,7 @@ import { visibleToolNames } from "../server-portable/tools.ts";
 import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/mcp-edge.ts";
 import type { AgentOutcome } from "../server-portable/agents.ts";
 import { createRestClient } from "../rest-client/index.ts";
-import { createMcpApp } from "./app.ts";
+import { argumentsById, createMcpApp } from "./app.ts";
 import { loadPlugins, runOperation } from "../server-portable/core/plugins.ts";
 import { definePlugin, ok as pluginOk, operation, refuse as pluginRefuse, z } from "../server-portable/plugin-sdk.ts";
 
@@ -524,6 +524,22 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   got = await callTool("probe_kit_item", { item_id: "boom" });
   // index.ts says a plugin's throw as say.failed of the error it caught.
   assert(thrown && expectReply(got, say.failed(new Error("the plugin's own fault"))), `a throw: the tool's fault as index.ts says it (${got.text.slice(0, 80)})`);
+  // A body behind two byte-order marks, over HTTP as a client sends it, which the SDK's decoder reads: its arguments
+  // read too, the steps' value once, never the SDK's parse in their place (review pass 4: it was parsed again).
+  const bomJson = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "probe_kit_shape", arguments: { n: 1, flag: "yes", word: "a" } } });
+  assert(argumentsById(`\uFEFF\uFEFF${bomJson}`).get("1") !== undefined && argumentsById(`\uFEFF${bomJson}`).get("1") !== undefined, "argumentsById reads a body behind one or two byte-order marks");
+  const served = Bun.serve({ port: 0, fetch: (req) => withPlugins.fetch(req) });
+  let bomText = "";
+  try {
+    const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf, ...new TextEncoder().encode(bomJson)]);
+    bomText = await (await fetch(`http://127.0.0.1:${served.port}/mcp`, { method: "POST", signal: AbortSignal.timeout(5_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: bytes })).text();
+  } finally {
+    served.stop(true);
+  }
+  const bomLine = bomText.startsWith("{") ? bomText : (bomText.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+  const bomResult = ((bomLine ? JSON.parse(bomLine) : {}).result ?? {}) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+  assert(!bomResult.content || expectReply({ text: bomResult.content.map((c) => c.text).join("\n"), sc: bomResult.structuredContent ?? {}, isError: bomResult.isError === true }, await inProcess("shape", { n: 1, flag: "yes", word: "a" })),
+    `over HTTP behind two byte-order marks: refused as a body, or the client's arguments with the steps' value once — never their value twice (${bomText.replace(/\s+/g, " ").slice(0, 160)})`);
   for (const [key, args] of [["shape", { n: 1, flag: "yes", word: "a", stray: "an argument the schema does not name" }], ["seek", { n: 1, flag: "true" }]] as const) {
     got = await callTool(`probe_kit_${key}`, args);
     assert(expectReply(got, await inProcess(key, args)) && !got.isError, `${key}: a preprocess, a codec and an overwrite run once, as in process; a stray argument dropped as the SDK drops it (${got.text})`);

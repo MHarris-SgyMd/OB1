@@ -29,29 +29,43 @@ const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const QUERY_NAME = /^[A-Za-z0-9_.-]+$/;
 /** The types the REST core reads back from a query string's text (rest/app.ts inputFromQueryShape). */
 const QUERY_SCALARS = new Set(["string", "number", "integer", "boolean"]);
-/** A JSON value of each type, for asking a field whether it takes one other than its own. */
-const PROBES: unknown[] = [true, 0, "", "0", "true", null, [], ["x"], [0], [true], {}];
-const jsonTypeOf = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+/** A field's parse of one value at load, never a throw: a step that throws on it (or awaits) is a value it refuses here. */
+function parses(field: z.ZodType, value: unknown): { ok: true; data: unknown } | { ok: false } {
+  try {
+    const r = field.safeParse(value);
+    return r.success ? { ok: true, data: r.data } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
 /**
- * The first JSON value of another type a URL field takes — a coerce, a catch
- * or a preprocess takes them — or none. The MCP server sends the value its
- * client sent, which a URL carries as text and the REST core reads back by
- * the field's own type, so a value of another type would arrive as another
- * value (review pass 3: a coerce.boolean's "false" arrived as false where
- * index.ts parsed true).
+ * A step in a URL field's schema that takes a value of any type — a
+ * preprocess (a pipe from a transform), a coerce, a catch — or none. The MCP
+ * server sends the value its client sent, which a URL carries as text and the
+ * REST core reads back by the field's own type, so such a step would see
+ * another value than index.ts's does (review pass 3: a coerce.boolean's
+ * "false" arrived as false where index.ts parsed true). Walked, not sampled
+ * (review pass 4: a preprocess keyed on "1.50" or on 1 passed every probe). A
+ * codec's input side is the field's own type, so a stringbool is fine.
  */
-function takesOtherType(field: z.ZodType, type: string): unknown {
-  const own = type === "integer" ? "number" : type;
-  for (const v of PROBES) {
-    const kind = jsonTypeOf(v);
-    if (kind === own && !(kind === "array" && (v as unknown[]).some((item) => typeof item !== "string"))) continue;
-    try {
-      if (field.safeParse(v).success) return v;
-    } catch {
-      return v; // an async step, which no URL value gets past synchronously: a body field's
+function anyTypeStep(schema: unknown, seen = new Set<unknown>()): string | null {
+  const def = (schema as { _zod?: { def?: Record<string, unknown> } } | null)?._zod?.def;
+  if (!def || seen.has(def)) return null;
+  seen.add(def);
+  if (def.coerce === true) return "a coerce";
+  if (def.type === "catch") return "a catch";
+  if (def.type === "pipe" && (def.in as { _zod?: { def?: { type?: string } } } | undefined)?._zod?.def?.type === "transform") return "a preprocess";
+  for (const key of ["innerType", "in", "out", "element"]) {
+    const found = anyTypeStep(def[key], seen);
+    if (found) return found;
+  }
+  for (const key of ["options", "items"]) {
+    for (const sub of Array.isArray(def[key]) ? (def[key] as unknown[]) : []) {
+      const found = anyTypeStep(sub, seen);
+      if (found) return found;
     }
   }
-  return undefined;
+  return null;
 }
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
@@ -158,8 +172,11 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
         // A path segment is text: a field of another type could never be reached over REST.
         else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
         // A path segment is always there: a field that may be absent is one MCP could call without.
-        else if (field.safeParse(undefined).success) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
-        else if (takesOtherType(field, "string") !== undefined) problems.push(`${where}: its path's {${f}} takes ${JSON.stringify(takesOtherType(field, "string"))} as well as text, which a path carries as text`);
+        else if (parses(field, undefined).ok) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
+        else {
+          const step = anyTypeStep(field);
+          if (step) problems.push(`${where}: its path's {${f}} has ${step}, which takes a value of any type, where a path carries text`);
+        }
       }
       // A GET's or a DELETE's input rides the query string, through the REST
       // core and through the MCP server that calls it: each field one the REST
@@ -174,15 +191,17 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
           let js: { type?: string; items?: { type?: string } } = {};
           try { js = z.toJSONSchema(field, { io: "input" }) as typeof js; } catch { /* a schema JSON cannot state: refused below as no type */ }
           if (js.type === "array") {
-            const absent = field.safeParse(undefined);
+            // Absent and [] the same value: a query string sends no empty list, so [] arrives as absent (review pass 4: a transform past the default gave them apart).
+            const absent = parses(field, undefined);
+            const empty = parses(field, []);
             if (js.items?.type !== "string") problems.push(`${where}: its query field ${f} is a list of other than text, which a query string carries as text`);
-            else if (!(absent.success && Array.isArray(absent.data) && absent.data.length === 0)) problems.push(`${where}: its query field ${f} is a list with no default of []: a query string carries no empty list`);
+            else if (!(absent.ok && Array.isArray(absent.data) && absent.data.length === 0 && (!empty.ok || JSON.stringify(empty.data) === "[]"))) problems.push(`${where}: its query field ${f} is a list whose absence is not [] as [] is: a query string carries no empty list`);
           } else if (!QUERY_SCALARS.has(js.type ?? "")) {
             problems.push(`${where}: its query field ${f} is not text, a number or a boolean (nullable, a union or an object), which a query string cannot carry as it was given`);
             continue;
           }
-          const other = takesOtherType(field, js.type ?? "");
-          if (other !== undefined) problems.push(`${where}: its query field ${f} takes ${JSON.stringify(other)} as well as its own type (a coerce, a catch, a preprocess), which a query string would carry as another value`);
+          const step = anyTypeStep(field);
+          if (step) problems.push(`${where}: its query field ${f} has ${step}, which takes a value of any type, where a query string carries text`);
         }
       }
       // tools/list states the input as JSON Schema: a type it cannot state (a
