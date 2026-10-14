@@ -4031,6 +4031,15 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   `brain_info`'s board counts can be higher than what is posted. A session
   note, or any thought that is not a Linear row, on either side is never
   posted.
+- **Not between two finished tickets.** A pair whose tickets are both closed
+  — status type `completed`, `canceled` or `duplicate` (Linear gives Duplicate
+  a type of its own), read from 068's `ob1_ticket_head` — is not posted until
+  one of them reopens: a comment asking to link two finished tickets is the
+  least useful kind, and it spends the cap open work could use. When one is
+  closed, the comment goes on the open one (SMD-2932). A ticket whose head
+  carries no status (a hand capture superseding its Linear row) reads its
+  newest Linear row's; one with no status anywhere counts as open. `brain_info`'s board counts are a different read and count
+  every board pair. The poster reads `ob1_ticket_head` (the capture group's).
 - **One comment per ticket pair.** Several proposals or relations between rows
   of the same two tickets are one comment. Each relation word is one line, in
   its best finding's direction and at its confidence, saying how many row
@@ -4112,7 +4121,8 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   so `heartbeat:board-sync` says `failed`; the next pass tries again.
 - **Grants.** The `structure` group holds `SELECT, INSERT` on
   `board_findings_posted` and `SELECT` on `supersession_proposals`; the step
-  also reads `thoughts` and `thought_facets` (the capture group's) and
+  also reads `thoughts`, `thought_facets` and `ob1_ticket_head` (the capture
+  group's) and
   executes 079's function — `--groups capture,structure`. A role that lacks
   any of them is said once at start and the step stays off; a dry run needs
   the reads alone. Compose's `board-sync` connects as the owner and
@@ -4160,7 +4170,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2766 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1272 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1275 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
