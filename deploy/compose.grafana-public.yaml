@@ -1,0 +1,70 @@
+# The observability profile's Grafana at the proxy's /grafana (SMD-1849 PR 3a):
+# an overlay, as compose.api-public.yaml is for /api. The base route table
+# answers /grafana with a bare 404 (compose.yaml's grafana-off), so nothing
+# under it falls to the legacy route and the MCP server; this file adds a
+# router of higher priority that takes /grafana and everything under it to
+# Grafana on the mesh as lgtm.ob1.internal, path kept (Grafana serves from that
+# sub-path).
+#
+#   docker compose -f compose.yaml -f compose.grafana-public.yaml up -d
+#
+# with `observability` in COMPOSE_PROFILES and the stack's other -f files (a
+# release's compose.release.yaml) on every command.
+#
+# Off by default; compose.grafana-port.yaml's loopback port gives Grafana an
+# origin of its own instead. Here Grafana shares the stack's origin with the
+# authorization server at /auth, so a script running in a Grafana page — a
+# flaw in Grafana, which this stack pins and which ages — runs as that origin:
+# while the operator's /auth session lasts it could open /auth's pages with
+# it and consent a client of its own, which would then read and write the
+# brain (review passes 1–2). Grafana's content security policy narrows which
+# scripts a page runs, not what one that runs can do. Naming this file is the
+# operator's choice of the origin over a tunnel or the loopback port
+# (deploy/README.md, "The observability profile"); over a tunnel, set
+# OB1_PUBLIC_ORIGIN to its https origin, so Grafana's cookie is Secure.
+#
+# Grafana signs its operator in itself, anonymous access off. With the profile
+# off, the container stopped or still starting, Traefik's 502 becomes a bare
+# 404 (`grafana-absent`, as compose.yaml's auth-absent), and that includes a
+# 502 Grafana answers itself (its data-source proxy, when a backend inside it
+# is down). No wait on lgtm: the proxy starts with the profile off. Dropping
+# the file and running `up -d` again recreates the proxy without it (the
+# label below changes, which is what makes compose recreate; an inline config
+# alone does not). The table holds no comment of its own: Traefik renders it
+# as a Go template first, so a comment line there is not inert, and check 28
+# (scripts/check-fork-consistency.ts, GRAFANA_ROUTE_TABLE) holds it byte for
+# byte (SMD-2658).
+
+x-grafana-route: &grafana-route |
+  http:
+    routers:
+      grafana-public:
+        rule: "Path(`/grafana`) || PathPrefix(`/grafana/`)"
+        priority: 36
+        entryPoints: [web]
+        middlewares: [grafana-absent]
+        service: grafana
+    middlewares:
+      grafana-absent:
+        errors:
+          status: ["502"]
+          service: noop@internal
+          statusRewrites:
+            "502": 404
+    services:
+      grafana:
+        loadBalancer:
+          servers:
+            - url: "http://lgtm.ob1.internal.:3000"
+
+services:
+  proxy:
+    configs:
+      - source: proxy-grafana-route
+        target: /etc/traefik/dynamic/grafana.yaml
+    labels:
+      ob1.proxy-grafana-route: *grafana-route
+
+configs:
+  proxy-grafana-route:
+    content: *grafana-route

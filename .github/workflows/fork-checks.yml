@@ -1374,6 +1374,10 @@ jobs:
           # rooted mesh name — and beside /api's, both routes on the proxy.
           docker compose -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-hooks-route"] == .configs["proxy-hooks-route"].content) and (.services.proxy.labels | has("ob1.proxy-api-route")) and (.configs["proxy-hooks-route"].content | test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-hooks-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
+          # /grafana's overlay (SMD-1849 PR 3a), the same way: no port, its route
+          # file its label, Grafana by its rooted mesh name, no wait on it.
+          docker compose -f compose.yaml -f compose.grafana-public.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-grafana-route"] == .configs["proxy-grafana-route"].content) and ([.configs["proxy-grafana-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://lgtm.ob1.internal.:3000"]) and (.services.proxy.depends_on | has("lgtm") | not)'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
           # REST core join stable's mesh under the canary's names alone, the
           # canary's own `mesh` stays its own, and it adds no port (the one the
@@ -1404,6 +1408,16 @@ jobs:
           # the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-1849 PR 3a: the observability profile's collector publishes
+          # nothing and joins the internal mesh alone (check 28 holds the rest of
+          # it, LGTM_SERVICE); with compose.grafana-port.yaml, Grafana's port on
+          # loopback, a network of its own and its origin that port. The two servers take the ten
+          # OpenTelemetry settings, each empty unless deploy/.env sets it, and no
+          # service name; no other service takes any, under every profile.
+          docker compose -f compose.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
+          docker compose -f compose.yaml -f compose.grafana-port.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
           # SMD-2583, the network move, as compose renders each stack with
           # every profile: no service on compose's default network (a service
           # that names none is put there); Postgres on the internal `data`
@@ -1419,16 +1433,19 @@ jobs:
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
           all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
           tiers=(); while IFS= read -r p; do tiers+=("$p"); done < <(profiles_of compose.tiers.yaml)
-          [ "${#all[@]}" -ge 6 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the six it had" >&2; exit 1; }
+          [ "${#all[@]}" -ge 8 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the eight it has" >&2; exit 1; }
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "proxy", "server"])'
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"])
+              and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
+          docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"])'
           docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
@@ -1594,8 +1611,9 @@ jobs:
           # port binds loopback"; the ports by it and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
+              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
@@ -1608,10 +1626,13 @@ jobs:
           rendered=()
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold. Labels are held on the substituted
-          # render alone: --no-interpolate leaves two files' labels a list.
+          # render alone: --no-interpolate leaves two files' labels a list,
+          # and their environment one too, which `env` reads as a mapping
+          # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           held='. as $r | .services.proxy as $p
-            | def rest: del(.services.proxy, .configs) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
+            | def env: if type == "array" then map(index("=") as $i | if $i then {(.[:$i]): .[$i + 1:]} else {(.): null} end) | add // {} else . end;
+            def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
             and (($r.configs // {}) | keys) == ([$want[].source, "forwarder"] | sort)
@@ -1668,6 +1689,7 @@ jobs:
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
+          grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
           tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
@@ -1675,6 +1697,11 @@ jobs:
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
           proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
           CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
           proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
@@ -1690,6 +1717,8 @@ jobs:
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
             proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -2231,7 +2260,9 @@ jobs:
           # dummies (nothing here runs board-sync), so the check below has a
           # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
           # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
-          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\n' >> .env
+          # SMD-1849 PR 3a: the observability profile's Grafana password too,
+          # a dummy (nothing here runs the profile).
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
           ./canary.sh up --connect 2>&1 | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
@@ -2250,7 +2281,8 @@ jobs:
           if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
           # SMD-2873: the file names the canary's own project, so compose given it
           # alone acts on the canary; one naming another is refused at an up.
@@ -2586,6 +2618,56 @@ jobs:
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY")
           [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
+
+      # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
+      # compose.grafana-public.yaml is named — never the legacy route and the
+      # MCP server, a keyed POST included — and with the overlay named while
+      # the observability profile is off (CI pulls no Grafana image), Traefik's
+      # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
+      # Check 28 holds both tables byte for byte; this holds what Traefik does
+      # with them.
+      - name: /grafana is a 404 unless its overlay is named, and with no Grafana behind it
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/grafana-body -w '%{http_code}' --max-time 15 "$@"; }
+          answers404() {
+            local p c
+            for p in /grafana /grafana/ /grafana/login /grafana/api/search; do
+              c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B$p")
+              [ "$c" = 404 ] || { echo "$1: GET $p answered $c: $(head -c 120 /tmp/grafana-body)" >&2; exit 1; }
+            done
+            c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$B/grafana/")
+            [ "$c" = 404 ] || { echo "$1: a keyed POST to /grafana/ answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          }
+          # Which router answered each, from the proxy's JSON access log: the
+          # overlay's grafana-public, whose 404 is grafana-absent's for the
+          # Grafana it cannot reach; the base's grafana-off answers through
+          # noop@internal, which Traefik does not log, so none — a 404 alone is
+          # also every route's absence, so /mcp/health answering after each
+          # recreate shows the tables loaded.
+          routers() {
+            sleep 1
+            docker compose -f compose.yaml logs --no-color --no-log-prefix --since "$1" proxy \
+              | jq -Rr 'fromjson? | objects | select((.RequestPath // "") as $p | $p == "/grafana" or ($p | startswith("/grafana/"))) | "\(.RouterName) \(.DownstreamStatus)"' | sort -u
+          }
+          loaded() { [ "$(code "$B/mcp/health")" = 200 ] || { echo "$1: /mcp/health did not answer, so the proxy's tables are not loaded" >&2; exit 1; }; }
+          loaded "with the overlay off"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay off"
+          seen=$(routers "$since")
+          [ -z "$seen" ] || { echo "with the overlay off, /grafana reached a router the access log names (grafana-off's noop@internal is not logged): $seen" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.grafana-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test -f /etc/traefik/dynamic/grafana.yaml || { echo "the overlay's route file is not on the proxy" >&2; exit 1; }
+          loaded "with the overlay on"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay on and no Grafana behind it"
+          seen=$(routers "$since")
+          [ "$seen" = "grafana-public@file 404" ] || { echo "with the overlay on, /grafana was answered by: ${seen:-nothing logged}" >&2; exit 1; }
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
+          loaded "with the overlay dropped"
+          answers404 "with the overlay dropped"
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
