@@ -812,7 +812,9 @@ stripped (`X-Forwarded-Prefix`).
   re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
   `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
   `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
-  egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
+  egress gate's reasons or the extractor's tags — unless a forwarder carried the
+  request, which is answered the whole value for the MCP server to word for that key,
+  as a refusal is (SMD-2287). A refusal is its code, `retryable` and the facts its code declares
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
@@ -865,7 +867,7 @@ word any refusal as this one does.
 ```bash
 bun test-server.ts        # 1061 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
 bun test-auth.ts          # 190 — scoped, hashed, named keys; the same 190 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 370 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 372 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)

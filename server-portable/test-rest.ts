@@ -218,6 +218,11 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   calls.length = 0;
   r = await json(await fwd("/v1/thoughts", "cap-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
   assert(r.status === 201 && calls[0]?.principal.scope === "capture" && calls[0]?.principal.act?.name === "f", `a capture key forwarded captures, act set (${r.status})`);
+  // Forwarded, the value is whole, as a refusal is: the MCP server renders what a capture key is told from it (SMD-2287 PR 3a review pass 1).
+  assert((r.body as { tags?: unknown }).tags !== undefined && (r.body as { embeddings?: unknown }).embeddings !== undefined && r.body.embeddingAttached === true,
+    `…and is answered the whole capture value for the MCP server to word (${Object.keys(r.body).sort().join(",")})`);
+  const direct = await json(await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(direct.status === 201 && !("tags" in direct.body) && !("embeddings" in direct.body), `…while not forwarded, a capture key is told the trimmed value alone (${Object.keys(direct.body).sort().join(",")})`);
   answer = async () => ok({});
   r = await json(await fwd("/v1/stats", "cap-raw", "fwd-raw"));
   assert(r.status === 403 && r.body.needs === "read", `…and still cannot read (${r.status})`);

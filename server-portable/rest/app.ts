@@ -720,8 +720,12 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // A refused call writes none: a new row has no vector, and a re-capture's
     // row keeps the one it had (073's upsert) — so false says what this
     // capture did, not what the row holds, which a key that cannot read may
-    // not learn (whether the text was already a thought).
-    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
+    // not learn (whether the text was already a thought). Carried by a
+    // forwarder, the value is whole whatever the key's scope, as a refusal is
+    // (wholeFor): the MCP server words it with render.ts, which picks from it
+    // what a key that cannot read is told — the trimmed value had no tags, so
+    // a capture key's capture threw there (SMD-2287 PR 3a review pass 1).
+    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };

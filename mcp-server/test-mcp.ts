@@ -43,11 +43,17 @@ const core = new Proxy({}, {
   },
 }) as unknown as Core;
 let identity: AgentOutcome = { status: "ok", agentId: "agent-1" };
+/** Set to hold the registry's word on a caller's key until it resolves: its tables locked. */
+let resolveGate: Promise<void> | null = null;
 const restApp = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `chatgpt:read:${hashKey("read-raw")}`, `hook:capture:${hashKey("cap-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
-  resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+  resolve: async (p) => {
+    if (p.scope === "forward") return { status: "ok", agentId: "agent-f" };
+    if (resolveGate) await resolveGate;
+    return identity;
+  },
   track: (run) => run(),
   log: () => {},
 });
@@ -218,8 +224,9 @@ console.log("\n[7] /health: liveness, and the brain's record for a key that may 
     h = await health(key);
     assert(h.text === "ok", `${key}: ok`);
   }
+  calls.length = 0;
   h = await health("read-raw", "HEAD");
-  assert(h.status === 200 && h.text === "", "a keyed HEAD: 200, no body");
+  assert(h.status === 200 && h.text === "" && !calls.some((c) => c.name === "brainInfo"), `a keyed HEAD: 200, no body, nothing read for it (${calls.map((c) => c.name).join(",") || "nothing"})`);
   answer = () => ok({});
 }
 
@@ -243,6 +250,57 @@ console.log("\n[8] The keyed mirrors and the job routes answer as index.ts's");
   assert(r.status === 404 && same(await r.json(), { error: "not found" }), "an unknown job: 404 not found");
   r = await app.fetch(new Request("http://mcp/mcp/jobs/job-8/stream", { headers: { "x-brain-key": "read-raw" } }));
   assert(r.status === 404, `an unknown job's stream: 404 (${r.status})`);
+  answer = () => ok({});
+}
+
+console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault");
+{
+  // The session hook's own path: a capture key's capture is said as in-process — the REST core hands the forwarder the whole value.
+  const captured = {
+    id: "00000000-0000-4000-8000-0000000000aa", reader: false, tags: { type: "idea", topics: ["rest"], people: ["Ann"], action_items: ["do x"] }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null,
+    embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://ollama:11434/v1" },
+  };
+  answer = (n) => (n === "capture" ? ok(captured) : ok({}));
+  for (const key of ["cap-raw", "write-raw"]) {
+    const got = await tool("capture_thought", { content: "Session summary", source: "claude-code" }, key);
+    const want = say.renderCapture(ok(captured) as never);
+    assert(!got.isError && expectReply(got, want), `${key}: the capture said as in-process (${got.text.slice(0, 70)})`);
+  }
+  // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
+  answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
+  const unsayable = await tool("thought_stats", {});
+  assert(unsayable.isError && unsayable.sc.code === "FAILED" && unsayable.text.startsWith("Error: "), `a value that does not render: FAILED, coded (${JSON.stringify(unsayable.sc).slice(0, 80)})`);
+  answer = () => ok({});
+  // tools/list in index.ts's registration order.
+  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "retry_failed", "release_stale_leases", "run_worker", "job_status", "scan_thoughts"];
+  const listed = (((await rpc("tools/list", {}, "write-raw")).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name);
+  assert(same(listed, order), `tools/list in index.ts's order (${listed.slice(0, 4).join(",")}…)`);
+  // /health decided by the first key the REST core knows, as index.ts authenticates the first.
+  const record = { version: "1.0.0", store: "sql" };
+  answer = () => record;
+  const health = async (headers: Record<string, string>, query = "") => (await app.fetch(new Request(`http://mcp/mcp/health${query}`, { headers }))).text();
+  assert((await health({ "x-brain-key": "cap-raw" }, "?key=read-raw")) === "ok", "a capture key before a read key: ok, as the first key decides");
+  assert(JSON.parse(await health({ "x-brain-key": "read-raw" }, "?key=cap-raw")).version === "1.0.0", "…and a read key first: the record");
+  assert(JSON.parse(await health({ "x-brain-key": "wrong" }, "?key=read-raw")).version === "1.0.0", "…and a key the core does not know passes to the next");
+  answer = () => ok({});
+  // A mirror's key check held to the health deadline: the registry silent, ok at it.
+  let release: () => void = () => {};
+  resolveGate = new Promise<void>((done) => { release = done; });
+  const t0 = performance.now();
+  // Raced against a deadline of its own, so a check with no bound fails here rather than hanging the suite.
+  const silent = await Promise.race([
+    Promise.resolve(app.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }))),
+    Bun.sleep(6_000).then(() => new Response("no answer within 6 s", { status: 599 })),
+  ]);
+  const took = performance.now() - t0;
+  const silentText = await silent.text();
+  release();
+  resolveGate = null;
+  assert(silent.status === 200 && silentText === "ok" && took >= 2_400 && took < 4_000, `a mirror with the registry silent: ok at the deadline (${Math.round(took)} ms)`);
+  // A job poll's fault is a fault, not "not found", which a poller gives up on.
+  answer = (n) => { if (n === "jobStatus") throw new Error("the durable job store is away"); return ok({}); };
+  const poll = await app.fetch(new Request("http://mcp/mcp/jobs/job-7", { headers: { "x-brain-key": "read-raw" } }));
+  assert(poll.status === 500, `a job poll whose read faults: 500, not 404 (${poll.status})`);
   answer = () => ok({});
 }
 

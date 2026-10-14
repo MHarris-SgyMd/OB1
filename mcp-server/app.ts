@@ -13,7 +13,8 @@ import { Hono, type Context } from "hono";
 import { presentedKeys } from "../server-portable/auth.ts";
 import { FORK_VERSION } from "../server-portable/version.ts";
 import { SPECS, type Input } from "../server-portable/core/schemas.ts";
-import { TOOL_NAMES, type ToolName } from "../server-portable/tools.ts";
+import type { ToolName } from "../server-portable/tools.ts";
+import { HEALTH_DEADLINE_MS } from "../server-portable/deadlines.ts";
 import type { Refusal } from "../server-portable/core/refusal.ts";
 import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
@@ -100,7 +101,11 @@ export function outcomeOf(a: Answer): Outcome {
   return { fault: new Error(`the REST core answered ${a.status}${body.code ? ` ${body.code}` : ""}`) };
 }
 
-/** How each tool says its answer (render.ts), and its fault — server-portable index.ts's registrations, the call made over REST. */
+/**
+ * How each tool says its answer (render.ts), and its fault — server-portable
+ * index.ts's registrations, the call made over REST — in index.ts's order,
+ * which tools/list keeps.
+ */
 type Words = {
   render: (o: never, input: never) => say.Reply;
   fault: (err: unknown, input: never) => say.Reply;
@@ -122,8 +127,6 @@ const WORDS: Record<ToolName, Words> = {
   worker_status: { render: (o) => say.renderWorkerStatus(o), fault: readFault() },
   // brain_info's record is never a refusal: the reply renders the value itself.
   brain_info: { render: (o) => say.renderBrainInfoReply((o as { value: never }).value), fault: readFault() },
-  job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
-  scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
   // capture's fault is STORE_UNAVAILABLE, the transient the session hook keeps and retries (SMD-1978).
   capture_thought: { render: (o) => say.renderCapture(o), fault: (err) => say.storeUnavailable(err) },
   update_thought: { render: (o) => say.renderUpdate(o), fault: writeFault("update_thought failed: ") },
@@ -132,6 +135,8 @@ const WORDS: Record<ToolName, Words> = {
   retry_failed: { render: (o) => say.renderRetryFailed(o), fault: writeFault("retry_failed failed: ") },
   release_stale_leases: { render: (o) => say.renderReleaseStaleLeases(o), fault: writeFault("release_stale_leases failed: ") },
   run_worker: { render: (o) => say.renderRunWorker(o), fault: writeFault("run_worker failed: ") },
+  job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
+  scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };
 
 /**
@@ -144,23 +149,26 @@ const WORDS: Record<ToolName, Words> = {
 function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
   const register = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never) => Promise<say.Reply>) => unknown;
-  for (const name of TOOL_NAMES) {
+  for (const name of Object.keys(WORDS) as ToolName[]) {
     if (!caller.operations.has(name)) continue;
     const words = WORDS[name];
     register(name, SPECS[name], async (input: never) => {
-      let outcome: Outcome;
+      // The call and its rendering under one catch, as index.ts's registerOp runs
+      // them: a reply that cannot be said is the tool's fault, its code the
+      // session hook reads (review pass 1: a throw past it reached the SDK as an
+      // uncoded error).
       try {
-        outcome = outcomeOf(await rest.call(name as never, input, { key: caller.key }));
+        let outcome = outcomeOf(await rest.call(name as never, input, { key: caller.key }));
+        if ("fault" in outcome) return words.fault(outcome.fault, input);
+        if (name === "scan_thoughts" && outcome.ok) {
+          // The handle's links under this server's endpoint, as atEndpoint puts them (jobs.ts): its /jobs routes, not the REST core's /v1/jobs.
+          const handle = outcome.value as { jobId: string };
+          outcome = { ok: true, value: { ...handle, poll: `${endpoint}/jobs/${handle.jobId}`, stream: `${endpoint}/jobs/${handle.jobId}/stream` } };
+        }
+        return words.render(outcome as never, input);
       } catch (err) {
         return words.fault(err, input);
       }
-      if ("fault" in outcome) return words.fault(outcome.fault, input);
-      if (name === "scan_thoughts" && outcome.ok) {
-        // The handle's links under this server's endpoint, as atEndpoint puts them (jobs.ts): its /jobs routes, not the REST core's /v1/jobs.
-        const handle = outcome.value as { jobId: string };
-        outcome = { ok: true, value: { ...handle, poll: `${endpoint}/jobs/${handle.jobId}`, stream: `${endpoint}/jobs/${handle.jobId}/stream` } };
-      }
-      return words.render(outcome as never, input);
     });
   }
   return server;
@@ -187,10 +195,25 @@ export function createMcpApp(deps: McpDeps): Hono {
   });
   app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
+  /**
+   * The caller of a keyed mirror or /health, its key's standing within
+   * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
+   * standing not had by then — the registry's tables locked — is none, and
+   * the route shows `ok` (review pass 1: it waited out the REST timeout).
+   */
+  const standingInTime = async (req: Request): Promise<Standing> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const standing = await Promise.race([
+      standingOf(deps.rest, req).catch((): Standing => ({ kind: "none" })),
+      new Promise<Standing>((resolve) => { timer = setTimeout(() => resolve({ kind: "none" }), HEALTH_DEADLINE_MS); }),
+    ]);
+    clearTimeout(timer);
+    return standing;
+  };
   // A keyed mirror's caller: one whose key the REST core knows, stands by,
   // and lets call the mirror's tool — else null, and the mirror shows `ok`.
   const mirrorCaller = async (c: Context, tool: ToolName) => {
-    const standing = await standingOf(deps.rest, c.req.raw);
+    const standing = await standingInTime(c.req.raw);
     return standing.kind === "caller" && standing.operations.has(tool) ? standing : null;
   };
 
@@ -202,18 +225,17 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!HEALTH_PATH.test(c.req.path)) return next();
     const keys = presentedKeys(c.req.raw);
     if (keys.length === 0 || c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+    // The first key the REST core knows decides, as index.ts authenticates the
+    // first that matches: a capture or revoked key before a read key is `ok`,
+    // not the record (review pass 1).
+    const caller = await mirrorCaller(c, "brain_info");
+    if (!caller) return c.text("ok", 200, corsHeaders);
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    for (const key of keys) {
-      const a = await deps.rest.call("health" as never, {} as never, { key }).catch(() => null);
-      const body = a?.ok ? (a.body as Record<string, unknown> | null) : null;
-      if (body && !(Object.keys(body).length === 1 && body.status === "ok")) {
-        // The root URL's line once its key has passed, as at every keyed route.
-        const named = await standingOf(deps.rest, new Request(c.req.raw.url, { headers: { "x-brain-key": key } })).catch(() => null);
-        if (named?.kind === "caller") noteLegacyRoute(c.req.raw, named.name);
-        return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
-      }
-    }
-    return c.text("ok", 200, corsHeaders);
+    const a = await deps.rest.call("health" as never, {} as never, { key: caller.key }).catch(() => null);
+    const body = a?.ok ? (a.body as Record<string, unknown> | null) : null;
+    if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return c.text("ok", 200, corsHeaders);
+    noteLegacyRoute(c.req.raw, caller.name);
+    return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
 
   // The worker-queue status as a keyed GET (SMD-2131), the worker_status tool's REST mirror.
@@ -281,7 +303,8 @@ export function createMcpApp(deps: McpDeps): Hono {
       return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
     }
     const o = outcomeOf(await deps.rest.call("job_status", { job_id: id }, { key: caller.key }));
-    if (!("ok" in o) || !o.ok) return c.json({ error: "not found" }, 404, corsHeaders);
+    if ("fault" in o) throw o.fault;
+    if (!o.ok) return c.json({ error: "not found" }, 404, corsHeaders);
     return c.json(o.value as object, 200, corsHeaders);
   });
 
@@ -304,7 +327,16 @@ export function createMcpApp(deps: McpDeps): Hono {
       abandoned();
       return c.body(null, 408);
     }
-    const standing = await standingOf(deps.rest, c.req.raw);
+    // The REST core away, or this server's forwarder refused: Hono's 500, the
+    // request settled first so a client gone after is no abandoned line
+    // (index.ts's catch; review pass 1).
+    let standing: Standing;
+    try {
+      standing = await standingOf(deps.rest, c.req.raw);
+    } catch (err) {
+      settled = true;
+      throw err;
+    }
     if (standing.kind === "none") {
       const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
       const target = refusalTarget(await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT));
