@@ -411,11 +411,11 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
     return shownNothing(c, trace);
   };
-  /** A mirror's action that faulted, a 200 {error} answer as index.ts's: its line `error` FAILED, its kind on the span. */
-  const faultedAt = (c: Context, err: unknown) => {
+  /** A route that faulted: its line `error` FAILED, its kind on the span; a mirror's 200 {error} answer as index.ts's, or (`shownOk`) liveness. */
+  const faultedAt = (c: Context, err: unknown, shownOk = false) => {
     const trace = traceOf(c.req.raw);
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(err); }
-    return c.json({ error: (err as Error).message }, 200, corsHeaders);
+    return shownOk ? c.text("ok", 200, corsHeaders) : c.json({ error: (err as Error).message }, 200, corsHeaders);
   };
 
   // /health: liveness, and with a key that may read it, what the brain is
@@ -443,8 +443,18 @@ export function createMcpApp(deps: McpDeps): Hono {
     const caller = await keyedCaller(c, "/health", "brain_info", budget);
     if (caller instanceof Response) return caller;
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    const a = await deps.rest.call("health" as never, {} as never, { key: caller.key, signal: budget }).catch(() => null);
-    const body = a?.ok ? (a.body as Record<string, unknown> | null) : null;
+    let fault: unknown = null;
+    const a = await deps.rest.call("health" as never, {} as never, { key: caller.key, signal: budget }).catch((err) => { fault = err; return null; });
+    // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
+    // or an answer that is no record and no liveness, is this server's fault: liveness all the same, its line `error`
+    // FAILED (review pass 2 of PR 4b: the REST core gone between the two calls read as the key refused).
+    if (budget.aborted) return notCleared(c, traceOf(c.req.raw), null);
+    if (fault !== null || !a?.ok) {
+      const err = fault ?? new Error(`the REST core answered /health ${a?.status}`);
+      sayOnce(err);
+      return faultedAt(c, err, true);
+    }
+    const body = a.body as Record<string, unknown> | null;
     // Liveness where the record was asked: the registry did not clear the key in time (index.ts's notCleared).
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     noteLegacyRoute(c.req.raw, caller.name);
@@ -455,9 +465,13 @@ export function createMcpApp(deps: McpDeps): Hono {
   const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
   app.get("*", async (c, next) => {
     if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
+    // A keyed HEAD: liveness at once, asking the REST core nothing, as at /health (review pass 2 of PR 4b).
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) {
+      nameRoute(c, "/worker-status", "worker_status");
+      return c.text("ok", 200, corsHeaders);
+    }
     const caller = await keyedCaller(c, "/worker-status", "worker_status");
     if (caller instanceof Response) return caller;
-    if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
     noteLegacyRoute(c.req.raw, caller.name);
     try {
       const answered = await deps.rest.call("worker_status", {}, { key: caller.key });
@@ -510,9 +524,14 @@ export function createMcpApp(deps: McpDeps): Hono {
     const pollMatch = streamMatch ? null : JOBS_PATH.exec(c.req.path);
     if (!streamMatch && !pollMatch) return next();
     const id = (streamMatch ?? pollMatch)![2];
-    const caller = await keyedCaller(c, streamMatch ? "/jobs/:id/stream" : "/jobs/:id", "job_status");
+    const route = streamMatch ? "/jobs/:id/stream" : "/jobs/:id";
+    // A keyed HEAD: liveness at once, asking the REST core nothing, as at /health (review pass 2 of PR 4b).
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) {
+      nameRoute(c, route, "job_status");
+      return c.text("ok", 200, corsHeaders);
+    }
+    const caller = await keyedCaller(c, route, "job_status");
     if (caller instanceof Response) return caller;
-    if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
     noteLegacyRoute(c.req.raw, caller.name);
     if (streamMatch) {
       const upstream = await deps.rest.stream(id, { key: caller.key, signal: c.req.raw.signal });

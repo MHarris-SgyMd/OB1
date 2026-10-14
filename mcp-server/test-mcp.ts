@@ -608,8 +608,13 @@ console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core 
   const said: string[] = [];
   const before = useRequestLog((l) => said.push(l));
   let sent = 0;
+  let healthDown = false;
   const counting = createMcpApp({
-    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { sent++; if (restDown) throw new TypeError("fetch failed: connection refused"); return restApp.fetch(req); } }),
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => {
+      sent++;
+      if (restDown || (healthDown && new URL(req.url).pathname === "/health")) throw new TypeError("fetch failed: connection refused");
+      return restApp.fetch(req);
+    } }),
     edge: () => ({ configured: false, origin: null }),
     warn: () => {},
   });
@@ -626,8 +631,24 @@ console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core 
     const headLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
     assert(head.status === 200 && sent === 0 && headLine.method === "HEAD" && headLine.outcome === "ok" && headLine.route === "/health",
       `a keyed HEAD at /health: liveness at once, nothing sent to the REST core, its line \`ok\` (${sent} sent; ${said.at(-1)})`);
+    // The mirrors' keyed HEADs the same, as index.ts answers them before the key's check (review pass 2).
+    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"], ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream"]] as const) {
+      sent = 0;
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method: "HEAD", headers: { "x-brain-key": "read-raw" } }));
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && sent === 0 && l.outcome === "ok" && l.route === route, `a keyed HEAD at ${route}: liveness at once, nothing sent (${sent} sent; ${said.at(-1)})`);
+    }
+    // /health's record call after the key cleared: the REST core gone between the two is `error` FAILED, not the key refused (review pass 2).
+    healthDown = true;
+    const torn = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+    const tornText = await torn.text();
+    healthDown = false;
+    const tornLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(torn.status === 200 && tornText === "ok" && tornLine.outcome === "error" && tornLine.code === "FAILED" && tornLine.agent === "chatgpt",
+      `/health's record call faulting after whoami cleared the key: liveness, its line \`error\` FAILED, the key named (${said.at(-1)})`);
   } finally {
     restDown = false;
+    healthDown = false;
     useRequestLog(before);
   }
 }
