@@ -36,8 +36,12 @@
  * never posted, nor is a session note.
  *
  * One comment per ticket pair, on the ticket of the thought the judge saw as
- * newer: several proposals or relations between rows of the same two
- * tickets are one comment. The record (migration 087, board_findings_posted)
+ * newer — or on the other, when that one is closed and the other is not:
+ * several proposals or relations between rows of the same two tickets are
+ * one comment. A pair of closed tickets (status type completed, canceled or
+ * duplicate, read from 068's ob1_ticket_head) is not posted until one
+ * reopens: a comment asking to link two finished tickets is the least useful
+ * kind, and it spends the cap open work could use (SMD-2932). The record (migration 087, board_findings_posted)
  * is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
  * pair posted as related is posted once more only when the judge says
@@ -147,13 +151,16 @@ export type Finding = {
   reason: string | null;
   /** When it was judged (a relation: when its facet was written). */
   at: string;
+  /** Whether each side's ticket is closed now: its head's status type completed, canceled or duplicate (068's ob1_ticket_head; SMD-2932). */
+  olderClosed: boolean;
+  newerClosed: boolean;
 };
 
 /** The findings of one ticket pair, ranked, with the ticket the comment goes on. */
 export type FindingGroup = {
   a: string;
   b: string;
-  /** The newer side of the pair's first-ranked finding. */
+  /** The newer side of the pair's first-ranked finding — the older when the newer is closed and the older is not (SMD-2932). */
   on: string;
   findings: Finding[];
 };
@@ -177,7 +184,9 @@ export function groupFindings(rows: readonly Finding[]): FindingGroup[] {
   const out: FindingGroup[] = [];
   for (const fs of groups.values()) {
     fs.sort(rankFindings);
-    out.push({ a: fs[0].a, b: fs[0].b, on: fs[0].newer, findings: fs });
+    // A closed ticket is less likely to be read than an open one (SMD-2932).
+    const best = fs[0];
+    out.push({ a: best.a, b: best.b, on: best.newerClosed && !best.olderClosed ? best.older : best.newer, findings: fs });
   }
   return out.sort((g, h) => rankFindings(g.findings[0], h.findings[0]));
 }
@@ -381,17 +390,26 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
   // 029's table precedes 087 in every tree, so it exists here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
-                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read,
+                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AND has_table_privilege('ob1_ticket_head', 'SELECT') AS read,
                                has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
                                has_function_privilege('consolidation_tickets_linked(jsonb, jsonb)', 'EXECUTE') AS linked`;
   const missing = [
     ...(g.posted_read && (g.posted_write || !write) ? [] : [`${write ? "SELECT and INSERT" : "SELECT"} on board_findings_posted (the structure group)`]),
-    ...(g.read ? [] : ["SELECT on thoughts and thought_facets (the capture group)"]),
+    ...(g.read ? [] : ["SELECT on thoughts, thought_facets and ob1_ticket_head (the capture group)"]),
     ...(g.proposals ? [] : ["SELECT on supersession_proposals (the structure group)"]),
     ...(g.linked ? [] : ["EXECUTE on consolidation_tickets_linked(jsonb, jsonb)"]),
   ];
   return missing.length ? `this role lacks ${missing.join("; ")} — cd db && bun migrate.ts --url <owner's url> --grant <role> --groups capture,structure` : null;
 }
+
+// A ticket is closed when its head's status type is completed, canceled or
+// duplicate (Done, Canceled, Duplicate — Linear gives Duplicate a type of its
+// own) — 068's ob1_ticket_head, by its key; one with
+// no head or no status is open. A pair of closed tickets is not posted: a
+// comment asking to link two finished tickets is the least useful kind, and
+// it spends the cap open work could use (SMD-2932). Reopened, it is again.
+const closed = (k: string) =>
+  `EXISTS (SELECT 1 FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IN ('completed', 'canceled', 'duplicate'))`;
 
 // Both sides are Linear rows (metadata.source = 'linear': board-sync's
 // tickets and their dated sections), and both identities are identifiers —
@@ -402,6 +420,7 @@ const PAIR_RULE = `
      os = 'linear' AND ns = 'linear'
  AND ko ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND kn ~ '^[A-Z][A-Z0-9]*-[0-9]+$'
  AND ko <> kn
+ AND NOT (${closed("ko")} AND ${closed("kn")})
  AND NOT consolidation_tickets_linked(om, nm)
  AND NOT EXISTS (SELECT 1 FROM thought_facets d JOIN thoughts dh ON dh.id = d.thought_id
                   WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
@@ -411,7 +430,7 @@ const PAIR_RULE = `
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       x.verdict, x.confidence, x.reason, x.at
+       x.verdict, x.confidence, x.reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT p.id, 'outdates'::text AS word, p.verdict, p.confidence::float8 AS confidence, p.reason, p.judged_at AS at,
                o.metadata AS om, n.metadata AS nm, o.metadata->>'source' AS os, n.metadata->>'source' AS ns,
                coalesce(o.metadata->>'ticket', o.metadata->>'issue') AS ko, coalesce(n.metadata->>'ticket', n.metadata->>'issue') AS kn
@@ -423,7 +442,7 @@ SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, l
 
 const RELATIONS = `
 SELECT 'relation' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at
+       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT f.id, f.payload->>'relation' AS word, (f.payload->>'confidence')::float8 AS confidence, f.created_at AS at,
                t.metadata AS om, h.metadata AS nm, t.metadata->>'source' AS os, h.metadata->>'source' AS ns,
                coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS ko, coalesce(h.metadata->>'ticket', h.metadata->>'issue') AS kn
@@ -456,6 +475,8 @@ export async function selectFindings(sql: SQL): Promise<Finding[]> {
     confidence: r.confidence === null || r.confidence === undefined ? null : Number(r.confidence),
     reason: (r.reason as string | null) ?? null,
     at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
+    olderClosed: r.older_closed === true,
+    newerClosed: r.newer_closed === true,
   }));
 }
 

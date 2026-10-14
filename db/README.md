@@ -4031,6 +4031,14 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   `brain_info`'s board counts can be higher than what is posted. A session
   note, or any thought that is not a Linear row, on either side is never
   posted.
+- **Not between two finished tickets.** A pair whose tickets are both closed
+  — status type `completed`, `canceled` or `duplicate` (Linear gives Duplicate
+  a type of its own), read from 068's `ob1_ticket_head` — is not posted until
+  one of them reopens: a comment asking to link two finished tickets is the
+  least useful kind, and it spends the cap open work could use. When one is
+  closed, the comment goes on the open one (SMD-2932). A ticket with no status
+  counts as open. `brain_info`'s board counts are a different read and count
+  every board pair. The poster reads `ob1_ticket_head` (the capture group's).
 - **One comment per ticket pair.** Several proposals or relations between rows
   of the same two tickets are one comment. Each relation word is one line, in
   its best finding's direction and at its confidence, saying how many row
@@ -4160,7 +4168,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2766 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1272 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1274 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
