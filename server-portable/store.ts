@@ -1040,6 +1040,15 @@ export type Actor = {
    * another key or board-sync takes that thought. Absent for any other key.
    */
   scope?: "capture";
+  /**
+   * Why a capture whose embedding call the gate allowed landed without its
+   * vector (SMD-2888): the provider did not answer — providerDown's word,
+   * `provider_unreachable`, `provider_timeout` or `provider_<status>`. Lands
+   * in thought_audit.actor_context as `vector_failed`, beside `egress`, so
+   * the audit row says which of the two left the row vectorless. Absent
+   * when the vector landed or the call was not made.
+   */
+  vectorFailed?: string;
 };
 
 /**
@@ -1062,6 +1071,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     // agent_id, not agentId — the trigger's spelling, as for the actor itself.
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
     ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
+    ...(actor.vectorFailed !== undefined ? { vector_failed: actor.vectorFailed } : {}),
   };
 }
 

@@ -386,6 +386,19 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   answer = async () => ok({ id: "bare-id", reader: true, embeddings: { allowed: false, reason: "refused: deny" } });
   const bare = await (await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
   assert(bare.embeddingAttached === false, `a capture whose embedding the gate refused is saved without a vector, and says so (${bare.embeddingAttached})`);
+  // The call allowed and made, and the provider did not answer it (SMD-2888):
+  // saved without a vector all the same — a reader told why and where, a
+  // capture key the word alone, never the endpoint.
+  const awayValue = { id: "away-id", reader: true, tags: { type: "observation" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null,
+    embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://ollama:11434/v1" },
+    vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" } };
+  answer = async () => ok(awayValue);
+  const away = await (await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
+  assert(away.embeddingAttached === false && JSON.stringify(away.vectorFailed) === JSON.stringify(awayValue.vectorFailed),
+    `a capture whose provider did not answer is saved without a vector: embeddingAttached false, and a reader is told why and where (${JSON.stringify(away)})`);
+  const awayHook = await (await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
+  assert(same(awayHook, { id: "away-id", embeddingCall: true, chunks: 0, contextFailures: 0, vectorFailed: "provider_unreachable", embeddingAttached: false }),
+    `…a capture key the word alone, no endpoint (${JSON.stringify(awayHook)})`);
   answer = async () => ok({ jobId: "j1", status: "accepted", poll: "/jobs/j1", stream: "/jobs/j1/stream" });
   r = await json(await hit("/v1/scans", { key: "read-raw", method: "POST", body: "{}" }));
   assert(r.status === 202 && r.body.poll === "/v1/jobs/j1" && r.body.stream === "/v1/jobs/j1/stream", `a job's handle points at this server's routes (${JSON.stringify(r.body)})`);

@@ -17,7 +17,7 @@
  * fallback with `metadata_extraction_failed` naming why.
  */
 
-import { providerCall, ProviderError, type EmbedConfig } from "./embed.ts";
+import { providerCall, providerDown, ProviderError, type EmbedConfig } from "./embed.ts";
 import type { EgressSubject } from "./egress.ts";
 import { normaliseType } from "./thoughts.ts";
 import { gatePeople } from "./entity-gate.ts";
@@ -120,6 +120,15 @@ export async function extractMetadata(text: string, subject: EgressSubject, cfg:
       console.error(`extractMetadata: ${e.message}`);
       if (e.kind === "egress") return metadataRefused();
       return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
+    }
+    // The runtime's own error for a provider that did not answer — Bun's
+    // fetch on a closed port or an unresolved name — is a fallback too: with
+    // the provider down, this call failed beside the embedding's, and the
+    // capture that lands without its vector must not throw here (SMD-2888).
+    const down = providerDown(e);
+    if (down) {
+      console.error(`extractMetadata: ${cfg.chat.base} did not answer: ${down.detail}`);
+      return fallback(down.reason);
     }
     throw e;
   }

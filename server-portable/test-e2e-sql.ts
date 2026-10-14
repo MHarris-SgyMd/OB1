@@ -66,9 +66,15 @@ const realFetch = globalThis.fetch;
 // Every request body the stub answered, so a refusal can be shown to come
 // before either model call ([13d]).
 const stubBodies: string[] = [];
+// The provider down, for [20] (SMD-2888): "refused" throws what Bun's fetch
+// throws for a closed port (a TypeError with code ECONNREFUSED, measured on
+// Bun 1.4.3); a status answers every call with it. Null: the stub answers.
+let stubDown: null | "refused" | number = null;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
+    if (stubDown === "refused") throw Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
+    if (typeof stubDown === "number") return new Response(`{"error":"stub answers ${stubDown}"}`, { status: stubDown, headers: { "Content-Type": "application/json" } });
     stubBodies.push(String(init?.body ?? ""));
     const body = JSON.parse(String(init?.body ?? "{}"));
     if (url.endsWith("/embeddings")) {
@@ -3287,6 +3293,76 @@ console.log("\n[19] A capture's request line names the tool, the key and the tim
   assert(lines.filter((l) => l.tool === "search_thoughts" && l.outcome === "ok").length === 1, "…and one for the search");
   const all = said.join("\n");
   for (const s of ["omega", "never reach", "planted-metadata-value", "planted-search-words", "e2e-key"]) assert(!all.includes(s), `no ${s} in any line`);
+}
+
+console.log("\n[20] A provider that does not answer leaves a capture saved without its vector, not lost; a misconfigured one still fails it; the same text sent again once it answers takes the vector (SMD-2888)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const rowOf = async (id: string) => (await sql`SELECT embedding IS NULL AS bare, embedding_model AS m, metadata->>'metadata_extraction_failed' AS failed,
+      (SELECT actor_context->>'vector_failed' FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture') AS audited FROM thoughts t WHERE id = ${id}::uuid`)[0];
+  const captureRaw = async (key: string, content: string) => {
+    const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "capture_thought", arguments: { content } } }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true, sc: b.result?.structuredContent as Record<string, unknown> | undefined, error: b.error };
+  };
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  try {
+    // Refused at the socket, a write key: saved, said, marked on the audit row.
+    stubDown = "refused";
+    const down = await captureRaw("e2e-key", "[20] a thought captured while the provider is down");
+    const id = idIn(down.text)!;
+    assert(!down.isError && !!id && /Note: saved WITHOUT a vector — the embedding provider at https:\/\/stub\.invalid\/v1 was unavailable \(the connection was refused\)\./.test(down.text),
+      `a refused connection: the capture succeeds and says the vector is missing, where and why (${down.text.replace(/\n+/g, " / ").slice(0, 240)})`);
+    assert(/findable by exact text \(search_thoughts_keyword\)/.test(down.text) && /re-capture the same text once the provider is back/.test(down.text), "…and how it is reachable meanwhile, and how it gets its vector");
+    assert(/automatic tagging failed \(provider_unreachable\)/.test(down.text), "…and that its tags are placeholders: the chat call met the same closed socket");
+    assert(down.sc?.embeddingCall === true && down.sc?.vectorFailed === "provider_unreachable",
+      `the typed result says the call was made, and the word for why no vector came of it (${JSON.stringify(down.sc)})`);
+    let row = await rowOf(id);
+    assert(row?.bare === true && row?.m === null && row?.failed === "provider_unreachable" && row?.audited === "provider_unreachable",
+      `the row: no vector, no model label, the tags' marker, and the audit row's vector_failed (${JSON.stringify(row)})`);
+    const kw = await call("search_thoughts_keyword", { query: "captured while the provider is down" });
+    assert(kw.includes(id), "search_thoughts_keyword finds it while the provider is still down");
+
+    // A capture key: saved too, its vector's note without the endpoint (the
+    // tagging note's "check the chat endpoint" is that note's own).
+    const hook = await captureRaw(CAPTURE_KEY, "[20] a session summary sent while the provider is down");
+    const hid = idIn(hook.text)!;
+    const vectorNote = hook.text.split("\n\n").find((p: string) => p.startsWith("Note: no vector was made")) ?? "";
+    assert(!hook.isError && !!hid && /the embedding provider was unavailable\./.test(vectorNote) && !vectorNote.includes("stub.invalid") && /This reply does not say which\./.test(vectorNote),
+      `a capture key's capture is saved, its note saying the provider was unavailable without its address, nor whether the text was new (${vectorNote.slice(0, 200)})`);
+    assert(hook.sc?.vectorFailed === "provider_unreachable", `…its typed result carries the word (${JSON.stringify(hook.sc)})`);
+    assert((await rowOf(hid))?.bare === true, "…and its row has no vector");
+
+    // A 5xx and a 429 are outages too.
+    for (const status of [503, 429]) {
+      stubDown = status;
+      const r = await captureRaw("e2e-key", `[20] a thought captured while the provider answers ${status}`);
+      const rid = idIn(r.text);
+      assert(!r.isError && !!rid && new RegExp(`was unavailable \\(it answered ${status}\\)`).test(r.text) && (await rowOf(rid!))?.audited === `provider_${status}`,
+        `a ${status}: saved without its vector, the audit row says provider_${status} (${r.text.replace(/\n+/g, " / ").slice(0, 160)})`);
+    }
+    // A 400 and a 401 say the request or the credential is wrong, not that the provider is away: the capture fails, as before, and nothing lands.
+    for (const status of [400, 401]) {
+      stubDown = status;
+      const content = `[20] a thought captured while the provider answers ${status}`;
+      const r = await captureRaw("e2e-key", content);
+      const [n] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${content}`;
+      assert((r.isError || !!r.error) && n.n === 0, `a ${status}: the capture fails and nothing is stored (${r.text.slice(0, 120) || JSON.stringify(r.error)})`);
+    }
+
+    // The provider back: the same text sent again lands on the same row and takes its vector.
+    stubDown = null;
+    const again = await captureRaw("e2e-key", "[20] a thought captured while the provider is down");
+    row = await rowOf(id);
+    assert(!again.isError && idIn(again.text) === id && row?.bare === false && !/WITHOUT a vector|was unavailable/.test(again.text),
+      `the provider back, the same text sent again takes its vector on the same id (${JSON.stringify(row)})`);
+    const hookAgain = await captureRaw(CAPTURE_KEY, "[20] a session summary sent while the provider is down");
+    assert(!hookAgain.isError && idIn(hookAgain.text) === hid && (await rowOf(hid))?.bare === false, "…and so does a capture key's, onto its own row");
+  } finally {
+    stubDown = null;
+    await sql.close();
+  }
 }
 
 server.stop();

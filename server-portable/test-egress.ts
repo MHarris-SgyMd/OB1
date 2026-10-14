@@ -14,7 +14,9 @@
  * lands without a vector and says why, costs zero requests, and records the
  * decision on its audit row; a search is refused by name while the keyword
  * tool finds the row; an edit stores the new text vectorless; the allowed
- * key's capture reaches the stub.
+ * key's capture reaches the stub. [9] stops the stub: a capture the gate
+ * allows is saved without its vector all the same, its audit row carrying
+ * both the gate's decision and `vector_failed` (SMD-2888).
  *
  * Mutants worth running: drop the gate from providerCall and [5] fails (the
  * stub sees the embedding request); make mayLeaveBox consult the second
@@ -50,9 +52,9 @@ const META_MODEL = "llama3.2";
 // ── A stand-in provider that counts what reaches it ─────────────────────────
 type Seen = { path: string; model: string; input?: string };
 const seen: Seen[] = [];
-const stub = Bun.serve({
-  port: 0,
-  async fetch(req) {
+// A named handler, so [9] can stop the stub and bring it back on its port.
+const stubOpts = {
+  async fetch(req: Request) {
     const url = new URL(req.url);
     const body = (await req.json()) as { model: string; input?: string };
     seen.push({ path: url.pathname, model: body.model, input: body.input });
@@ -65,7 +67,8 @@ const stub = Bun.serve({
       choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea", people: [], verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "", entities: [], relations: [] }) } }],
     });
   },
-});
+};
+let stub = Bun.serve({ port: 0, ...stubOpts });
 const STUB = `http://127.0.0.1:${stub.port}/v1`;
 const HOST = `127.0.0.1:${stub.port}`;
 
@@ -422,6 +425,34 @@ console.log("\n[8] capture_thought stamps the classifier's genre on the row (SMD
   const [lrow] = await sql`SELECT metadata FROM thoughts WHERE id = ${lid}::uuid`;
   assert(lrow.metadata.source === "linear" && lrow.metadata.genre === "project-issue",
          `the row carries the classifier's genre from the source:linear pre-signal, not undefined and not the other fallback (${JSON.stringify(lrow.metadata)})`);
+}
+
+console.log("\n[9] The provider away, a capture the gate allows is saved without its vector all the same; the audit row says both what the gate decided and why no vector came; the provider back, the same text takes its vector (SMD-2888)");
+{
+  // The stub stopped: its port refuses the connection, as a stopped Ollama's
+  // does — the runtime's own error, not a status, for both calls.
+  const port = stub.port;
+  stub.stop(true);
+  const content = "away-thought-marker: a note captured while the provider is away";
+  const cap = await call(OPEN_KEY, "capture_thought", { content });
+  const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
+  assert(!cap.isError && !!id && new RegExp(`Note: saved WITHOUT a vector — the embedding provider at http://127\\.0\\.0\\.1:${port}/v1 was unavailable \\(the connection was refused\\)\\.`).test(cap.text),
+    `the capture succeeds and says the provider was unavailable, where and why (${cap.text.replace(/\n+/g, " / ").slice(0, 220)})`);
+  assert(/automatic tagging failed \(provider_unreachable\)/.test(cap.text) && !/OB1_EGRESS_POLICY/.test(cap.text), "…its tags are placeholders for the same reason, and no note blames the gate, which allowed both calls");
+  const [row] = await sql`SELECT embedding IS NULL AS no_vector, embedding_model, metadata FROM thoughts WHERE id = ${id!}::uuid`;
+  assert(row.no_vector === true && row.embedding_model === null && row.metadata.metadata_extraction_failed === "provider_unreachable" && row.metadata.topics?.[0] === "uncategorized",
+    `the row: no vector, no model label, the placeholder tags under their marker (${JSON.stringify(row.metadata)})`);
+  const [audit] = await sql`SELECT actor_context FROM thought_audit WHERE thought_id = ${id!}::uuid AND action = 'capture'`;
+  const ctx = audit.actor_context;
+  assert(ctx?.vector_failed === "provider_unreachable" && ctx?.egress?.embeddings?.allowed === true && ctx.egress.embeddings.rule === "allow-term",
+    `the audit row: the gate allowed the call, and vector_failed says why no vector came of it (${JSON.stringify(ctx)})`);
+
+  // The stub back on its port: the same text sent again takes the vector on the same id.
+  stub = Bun.serve({ port, ...stubOpts });
+  const again = await call(OPEN_KEY, "capture_thought", { content });
+  const [after] = await sql`SELECT embedding IS NOT NULL AS has, embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
+  assert(!again.isError && again.text.includes(id!) && !/WITHOUT a vector|was unavailable/.test(again.text) && after.has === true && after.embedding_model === EMB_MODEL,
+    `the provider back, the same text sent again lands on the same id with its vector and label (${JSON.stringify(after)})`);
 }
 
 await sql.close();

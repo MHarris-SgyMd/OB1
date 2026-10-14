@@ -494,6 +494,8 @@ The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The
 
 `OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, run Step 4's command again (with `-d`; a `restart` keeps the old values), and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
 
+If the note says **the embedding provider was unavailable**, the model endpoint didn't answer — Ollama isn't running, the address in `OB1_LLM_BASE_URL` is wrong, or a hosted provider is down. The thought is saved and keyword search finds it; start the provider (`ollama serve`, or `ollama ps` to check) and capture the same text again to give it its vector.
+
 **❌ Search returns no results**
 
 Make sure you've captured at least one thought first (see Step 8). Try asking the AI to "search with threshold 0.3" for a wider net. If that still returns nothing, check the server's log for a model error.

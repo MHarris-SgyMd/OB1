@@ -954,6 +954,9 @@ function captureRefusal(r: Refusal): string {
 const safeCapture: Safe<Captured> = (v) => ({
   id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }),
   embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures,
+  // The call was made and the provider did not answer (SMD-2888): its word
+  // alone — not the endpoint, which a key that cannot read is not told.
+  ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}),
   // The outcome, and for a settle by a restamp whether the label is the
   // caller's — "settled" alone cannot say (review pass 1).
   ...(v.label ? { label: v.label.outcome, ...(v.label.outcome === "settled" && v.label.by === "restamp" ? { labelMine: v.label.mine } : {}) } : {}),
@@ -995,6 +998,22 @@ export function renderCapture(o: Outcome<Captured>): Reply {
             `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
             // A key that cannot read is not told which (SMD-1298); a database
             // from before 035 cannot say.
+            (reader ? `This database does not say which this was.` : `This reply does not say which.`);
+    }
+    // The call was allowed and made, and the provider did not answer
+    // (SMD-2888): saved all the same, as a refused call's capture is, with
+    // the endpoint and what happened there — to a reader. A key that cannot
+    // read is not told the provider's address (rest/app.ts capturedFor), nor
+    // whether the text was new.
+    if (v.vectorFailed) {
+      const { detail, base } = v.vectorFailed;
+      const where = reader ? `the embedding provider at ${base} was unavailable (${detail})` : `the embedding provider was unavailable`;
+      const later = `re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts)`;
+      confirmation += existed === true
+        ? `\n\nNote: no vector was made for this capture — ${where}. This text was already a thought, and it keeps the vector it had.`
+        : existed === false
+          ? `\n\nNote: saved WITHOUT a vector — ${where}. It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: ${later}.`
+          : `\n\nNote: no vector was made for this capture — ${where}. A new thought has no vector — findable by exact text (search_thoughts_keyword) until it is embedded: ${later}; text already captured keeps the vector it had. ` +
             (reader ? `This database does not say which this was.` : `This reply does not say which.`);
     }
 

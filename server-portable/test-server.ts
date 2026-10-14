@@ -2453,6 +2453,26 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. Check the chat endpoint/.test(failedHook) && !/was saved/.test(failedHook)
       && /Note: the thought was saved, but automatic tagging failed \(timeout\) — topics and people are placeholders\. Check the chat endpoint/.test(failedReader),
     `the tagging-failed note: a capture-only key hears the placeholders are a new thought's, an existing one keeping its tags (${failedHook.split("\n").filter((l) => /tagging failed/.test(l)).join(" ").slice(0, 220)})`);
+  // The provider did not answer the embedding call (SMD-2888): saved without
+  // a vector, said by what is known of the row — a reader on a fresh row, a
+  // reader's re-capture, a database that does not say, a capture-only key
+  // (who is not told the endpoint, nor whether the text was new).
+  const away = (reader: boolean, existed?: boolean) => {
+    const r = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ad", reader, ...(existed === undefined ? {} : { existed }), tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://embed-host:11434/v1" } } } as never);
+    return { text: r.content[0].text, note: r.content[0].text.split("\n\n").find((p) => p.startsWith("Note:")) ?? "", sc: r.structuredContent as Record<string, unknown> };
+  };
+  const fresh = away(true, false), recaptured = away(true, true), unsaid = away(true), hookAway = away(false);
+  assert(fresh.note === "Note: saved WITHOUT a vector — the embedding provider at http://embed-host:11434/v1 was unavailable (the connection was refused). It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts).",
+    `a fresh row: saved without a vector, where and why, and the two ways it is still reached (${fresh.note})`);
+  assert(/^Note: no vector was made for this capture — the embedding provider at http:\/\/embed-host:11434\/v1 was unavailable \(the connection was refused\)\. This text was already a thought, and it keeps the vector it had\.$/.test(recaptured.note) && !/WITHOUT/.test(recaptured.note),
+    `a reader's re-capture: the existing vector stands (${recaptured.note})`);
+  assert(/text already captured keeps the vector it had\. This database does not say which this was\.$/.test(unsaid.note), `a database that does not say: both readings, said as such (${unsaid.note})`);
+  assert(/^Note: no vector was made for this capture — the embedding provider was unavailable\. A new thought has no vector/.test(hookAway.note) && /This reply does not say which\.$/.test(hookAway.note) && !hookAway.note.includes("embed-host") && !/connection was refused/.test(hookAway.note),
+    `a capture-only key: no endpoint, no detail, and not told whether the text was new (${hookAway.note})`);
+  assert(hookAway.sc.vectorFailed === "provider_unreachable" && fresh.sc.vectorFailed === "provider_unreachable" && !JSON.stringify(hookAway.sc).replace(hookAway.text, "").includes("embed-host") && hookAway.sc.embeddingCall === true,
+    `the typed result: the call was made, and the word for why no vector came of it — never the endpoint (${JSON.stringify({ ...hookAway.sc, text: undefined })})`);
+  const vectored = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ae", reader: true, existed: false, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never);
+  assert(!/Note:/.test(vectored.content[0].text) && !("vectorFailed" in (vectored.structuredContent as object)), "a capture whose vector landed says nothing of it, and its typed result carries no vectorFailed");
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");

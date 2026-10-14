@@ -133,6 +133,48 @@ export class ProviderError extends Error {
   }
 }
 
+/** The runtime's codes for a provider that did not answer at all: refused, reset, no route, or the connection's own timeout. */
+const UNREACHABLE_CODES = new Set(["ECONNREFUSED", "ConnectionRefused", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT"]);
+/** Bun's codes for a name that did not resolve (it reports these with `syscall: "getaddrinfo"` too). */
+const UNRESOLVED_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ETIMEOUT"]);
+
+/**
+ * Whether a provider call failed because the provider did not answer — an
+ * outage, not a fault in the request or the configuration (SMD-2888): the
+ * deadline passed, the provider answered 5xx, 408 or 429, or the connection
+ * was refused, reset, unroutable, or its name did not resolve (Bun 1.4.3's
+ * fetch throws a TypeError with `code: "ECONNREFUSED"`, or `"ENOTFOUND"` and
+ * `syscall: "getaddrinfo"`). A capture lands without what the call would have
+ * made on these, since the same call will answer once the provider is back.
+ *
+ * Null for everything else, which still fails the call: an egress refusal
+ * (the gate's, judged before any request), any other 4xx (an input the model
+ * refuses, a credential, a model that is not there), a 2xx whose body is not
+ * JSON, and a plain Error such as the width mismatch — a misconfigured brain
+ * keeps failing visibly (SMD-1875's reason for the probe). `reason` is a
+ * marker's word (`metadata_extraction_failed`'s vocabulary, extractMetadata's
+ * `provider_timeout` and `provider_<status>` among it); `detail` says it in
+ * words — never the text, nor the base, which the caller names.
+ *
+ * A fourth "is this transient?" rule beside the three SMD-2461 means to merge;
+ * kept to the provider's own failures, in one place, so that ticket can take it.
+ */
+export function providerDown(e: unknown): { reason: string; detail: string } | null {
+  if (e instanceof ProviderError) {
+    // Not the message, which names the base: the reply names that itself.
+    if (e.kind === "timeout") return { reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)" };
+    const s = e.status;
+    if (e.kind === "http" && s !== undefined && (s >= 500 || s === 408 || s === 429)) return { reason: `provider_${s}`, detail: `it answered ${s}` };
+    return null;
+  }
+  // A runtime error (Bun's fetch), read by its fields, never its message.
+  const { code: raw, syscall } = typeof e === "object" && e !== null ? (e as { code?: unknown; syscall?: unknown }) : {};
+  const code = typeof raw === "string" ? raw : "";
+  if (syscall === "getaddrinfo" || UNRESOLVED_CODES.has(code)) return { reason: "provider_unreachable", detail: `its name does not resolve${code ? ` (${code})` : ""}` };
+  if (UNREACHABLE_CODES.has(code)) return { reason: "provider_unreachable", detail: code === "ECONNREFUSED" || code === "ConnectionRefused" ? "the connection was refused" : `the connection failed (${code})` };
+  return null;
+}
+
 /**
  * One call to the OpenAI-compatible provider, and the only place that makes
  * one: URL join, headers, the timeout and its name, the status attached, the

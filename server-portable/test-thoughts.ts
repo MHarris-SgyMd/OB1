@@ -16,7 +16,7 @@
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_LLM_TIMEOUT_S, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
@@ -834,6 +834,53 @@ console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides wit
 
   const outage = await classifyGenre("x", { source: "mcp" }, cfg, subj, { decide: boom });
   assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
+}
+
+console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, and extractMetadata falls back on Bun's own connection error instead of throwing");
+{
+  // Bun 1.4.3's own errors, by their fields (measured: a closed port, an unresolved name).
+  const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
+  const unresolved = Object.assign(new TypeError("getaddrinfo ENOTFOUND no-such-host.invalid"), { code: "ENOTFOUND", syscall: "getaddrinfo" });
+  const http = (status: number, body = "") => new ProviderError(`Embeddings request to http://x/v1 failed: ${status} ${body}`, "http", status, body);
+  const said = (e: unknown) => JSON.stringify(providerDown(e));
+  for (const [what, e, reason] of [
+    ["a refused connection", refused, "provider_unreachable"],
+    ["Bun's older spelling", Object.assign(new Error("x"), { code: "ConnectionRefused" }), "provider_unreachable"],
+    ["a reset", Object.assign(new Error("x"), { code: "ECONNRESET" }), "provider_unreachable"],
+    ["no route", Object.assign(new Error("x"), { code: "EHOSTUNREACH" }), "provider_unreachable"],
+    ["an unresolved name", unresolved, "provider_unreachable"],
+    ["a resolver that timed out", Object.assign(new Error("x"), { code: "EAI_AGAIN" }), "provider_unreachable"],
+    ["the deadline", new ProviderError("Embeddings request to http://x/v1 timed out after 30 s (OB1_LLM_TIMEOUT)", "timeout"), "provider_timeout"],
+    ["a 500", http(500), "provider_500"], ["a 503", http(503), "provider_503"], ["a 408", http(408), "provider_408"], ["a 429", http(429), "provider_429"],
+  ] as [string, unknown, string][])
+    assert(providerDown(e)?.reason === reason, `${what} is an outage, ${reason} (${said(e)})`);
+  assert(providerDown(refused)?.detail === "the connection was refused" && providerDown(unresolved)?.detail === "its name does not resolve (ENOTFOUND)" && providerDown(http(503))?.detail === "it answered 503",
+    "…each said in words");
+  assert(!providerDown(new ProviderError("Embeddings request to http://secret-host/v1 timed out after 30 s (OB1_LLM_TIMEOUT)", "timeout"))!.detail.includes("secret-host"), "the timeout's words do not repeat the base its message names: the reply names it once");
+  for (const [what, e] of [
+    ["a 400 that names the length", http(400, "input length exceeds the context length")], ["a 413", http(413)], ["a 401", http(401)], ["a 403", http(403)], ["a 404 (no such model)", http(404)],
+    ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200)],
+    ["an egress refusal", new ProviderError("refused by the egress gate", "egress")],
+    ["the width mismatch", new Error("Embedding width mismatch: model m returned 1536 dimensions but thoughts.embedding is vector(768).")],
+    ["a TypeError with no code", new TypeError("x is not a function")], ["a string", "ECONNREFUSED"], ["null", null], ["a code that is not a string", Object.assign(new Error("x"), { code: 111 })],
+  ] as [string, unknown][])
+    assert(providerDown(e) === null, `${what} is not an outage: it still fails the call (${said(e)})`);
+
+  // extractMetadata against a closed port: the fallback, not a throw.
+  const closed = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const port = closed.port;
+  closed.stop(true);
+  const down = await extractMetadata("a thought while the chat endpoint is away", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1" }));
+  assert(down.metadata_extraction_failed === "provider_unreachable" && JSON.stringify(down.topics) === JSON.stringify(["uncategorized"]) && down.type === "observation",
+    `a closed port: the placeholder tags under provider_unreachable (${JSON.stringify(down)})`);
+  // A status is still the ProviderError path it was; a runtime error that is no outage is still thrown.
+  const busy = Bun.serve({ port: 0, fetch: () => new Response("busy", { status: 503 }) });
+  try {
+    const meta = await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${busy.port}/v1`, OB1_LLM_LOCAL: "1" }));
+    assert(meta.metadata_extraction_failed === "provider_503", `a 503 is provider_503, as before (${JSON.stringify(meta)})`);
+  } finally {
+    busy.stop(true);
+  }
 }
 
 report();

@@ -181,8 +181,11 @@ stack's own `ollama` service are all remote to the gate until the flag says
 otherwise — which is why both blocks above carry the line. A refused capture is
 not lost: it lands with its text and fingerprint and no vector, the reply says
 so and names the rule, the decision sits on the row's audit entry, and a later
-`db/reembed.ts` pass against an endpoint the gate allows fills the vector in. A
-refused search says which tool works without a model call
+`db/reembed.ts` pass against an endpoint the gate allows fills the vector in.
+Nor is a capture whose provider is down (stopped, unreachable, timing out or
+answering 5xx): it lands the same way, the reply saying the provider was
+unavailable, and the same text sent again once it answers takes its vector
+(SMD-2888). A refused search says which tool works without a model call
 (`search_thoughts_keyword`). Terms are `unit:value`, comma-separated — `actor`
 (the access key's name), `source`, `type`, `topic` (a row's metadata, known to
 the passes and the re-embed, not at a first capture), `marker` (a literal in the

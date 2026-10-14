@@ -273,6 +273,15 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
     const want = say.renderCapture(ok(captured) as never);
     assert(!got.isError && expectReply(got, want), `${key}: the capture said as in-process (${got.text.slice(0, 70)})`);
   }
+  // A capture saved without its vector because the provider did not answer (SMD-2888): the forwarded value says it as in-process, for both keys.
+  const away = { ...captured, vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" } };
+  answer = (n) => (n === "capture" ? ok(away) : ok({}));
+  for (const key of ["cap-raw", "write-raw"]) {
+    const got = await tool("capture_thought", { content: "Session summary", source: "claude-code" }, key);
+    const want = say.renderCapture(ok(away) as never);
+    assert(!got.isError && expectReply(got, want) && /the embedding provider was unavailable/.test(got.text) && got.sc.vectorFailed === "provider_unreachable",
+      `${key}: a capture saved without its vector said as in-process (${got.text.split("\n\n").find((p) => /vector/.test(p))?.slice(0, 90)})`);
+  }
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
   answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
   const unsayable = await tool("thought_stats", {});

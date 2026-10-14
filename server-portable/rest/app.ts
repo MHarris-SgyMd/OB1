@@ -697,13 +697,14 @@ const wholeFor = <R = Refusal>(p: Principal, r: R): { refusal?: R } => (p.act ? 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool
  * gives it (render.ts's capture value) — the id, whether its embedding was
- * made, its chunks and context failures — and not the provider's address,
- * the egress gate's reasons or the extractor's tags (the maintainer's call,
- * SMD-2284 review pass 1). A reader is told the whole value.
+ * made, its chunks and context failures, and the word for a provider that did
+ * not answer it (SMD-2888) — and not the provider's address, the egress
+ * gate's reasons or the extractor's tags (the maintainer's call, SMD-2284
+ * review pass 1). A reader is told the whole value.
  */
 type Captured = Extract<Awaited<ReturnType<Core["capture"]>>, { ok: true }>["value"];
 const capturedFor = (p: Principal, v: Captured): object =>
-  canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
+  canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures, ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}) };
 
 /**
  * Where this server's routes sit in the URL its caller used: "" on the mesh,
@@ -734,7 +735,7 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // (wholeFor): the MCP server words it with render.ts, which picks from it
     // what a key that cannot read is told — the trimmed value had no tags, so
     // a capture key's capture threw there (SMD-2287 PR 3a review pass 1).
-    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
+    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed && !v.vectorFailed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };
