@@ -129,6 +129,14 @@ jobs:
       - name: The forwarder's address rule and how it closes
         run: bun deploy/forwarder.ts --self-check
 
+      # One env file is one brain (SMD-2873): deploy/instance.ts check reads
+      # each published port's setting from the house form, compose's render
+      # and a container list, and names who holds a port. Its parts on fixtures,
+      # and check() itself against stub runtimes; the deploy-stack job runs it
+      # beside a stack and a second brain.
+      - name: The host-port check's reading of settings and holders
+        run: bun deploy/instance.ts --self-check
+
   portable-server:
     name: Portable server (Bun + Workers)
     runs-on: ubuntu-24.04
@@ -1723,6 +1731,70 @@ jobs:
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
+
+      # SMD-2873. A second brain beside the stack, from its own env file: the
+      # host-port check refuses to run where Bun would load deploy/.env into
+      # it; says the stack's port is its own (the stack came up with no
+      # --env-file, so from its directory's .env); refuses, before any up, ob1b
+      # on the stack's port (naming SERVER_PORT and the stack's forwarder), a
+      # second env file in deploy/ naming no project (so the stack's project,
+      # made from .env), ob1b on a port a host process holds, ob1b on a port a
+      # created, never started container holds (Docker's ps prints no ports for
+      # it), and an env file's COMPOSE_FILE without the same files as -f; and
+      # passes ob1b on its own. ob1b comes up healthy on that port, and no
+      # container of either brain is on the other's networks. Then the check
+      # reads ob1b's port as ob1b's own, and ob1b goes, its volume with it (its
+      # logs first, when the step failed).
+      - name: A second brain beside the stack, from its own env file
+        working-directory: deploy
+        run: |
+          trap 'rc=$?; [ "$rc" = 0 ] || docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          # Run from deploy/, whose .env Bun would load into the check: refused without --no-env-file, naming it.
+          rc=0; bun instance.ts check > /tmp/instance-bunenv.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'Run it as: bun --no-env-file' /tmp/instance-bunenv.out; then cat /tmp/instance-bunenv.out >&2; echo "the check ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
+          bun --no-env-file instance.ts check | tee /tmp/instance-stack.out
+          grep -F "127.0.0.1:8010: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder" /tmp/instance-stack.out
+          (umask 077 && { grep -v -E '^(COMPOSE_PROJECT_NAME|SERVER_PORT|POSTGRES_PASSWORD)=' .env; echo COMPOSE_PROJECT_NAME=ob1b; echo SERVER_PORT=8040; echo "POSTGRES_PASSWORD=\"$(openssl rand -hex 24)\""; } > .env.ob1b.local)
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8010/' .env.ob1b.local > .env.ob1b-clash.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-clash.local > /tmp/instance-clash.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'SERVER_PORT' /tmp/instance-clash.out || ! grep -F 'published by open-brain-forwarder-1, of project open-brain' /tmp/instance-clash.out; then cat /tmp/instance-clash.out >&2; echo "ob1b on the stack's port was not refused before its up, naming SERVER_PORT and the stack's forwarder (exit $rc)" >&2; exit 1; fi
+          # A second env file naming no project is the stack's project, made from .env: refused, whatever its ports.
+          (umask 077 && grep -v -E '^(SERVER_PORT|COMPOSE_PROJECT_NAME)=' .env.ob1b.local > .env.noname.local && echo SERVER_PORT=8042 >> .env.noname.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.noname.local > /tmp/instance-noname.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'project open-brain was made from' /tmp/instance-noname.out; then cat /tmp/instance-noname.out >&2; echo "an env file naming no project was not refused as the stack's project from another file (exit $rc)" >&2; exit 1; fi
+          # A process on the host on ob1b's port, which no container list shows.
+          python3 -m http.server 8041 --bind 127.0.0.1 > /dev/null 2>&1 &
+          SQUAT=$!
+          for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/8041) 2>/dev/null && break; sleep 0.25; done
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8041/' .env.ob1b.local > .env.ob1b-squat.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-squat.local > /tmp/instance-squat.out 2>&1 || rc=$?
+          kill "$SQUAT"; SQUAT=""
+          if [ "$rc" != 2 ] || ! grep -F 'something on this host that is no container already listens there' /tmp/instance-squat.out; then cat /tmp/instance-squat.out >&2; echo "a host process on ob1b's port was not refused (exit $rc)" >&2; exit 1; fi
+          # A container Docker made and never started holds its port, which Docker's ps does not print.
+          docker create --name ob1-ci-port-held -p 127.0.0.1:8043:80 "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" > /dev/null
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8043/' .env.ob1b.local > .env.ob1b-held.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-held.local > /tmp/instance-held.out 2>&1 || rc=$?
+          docker rm -f ob1-ci-port-held > /dev/null
+          if [ "$rc" != 2 ] || ! grep -F 'published by ob1-ci-port-held, of project (none), created: it takes the port when it first starts' /tmp/instance-held.out; then cat /tmp/instance-held.out >&2; echo "a created container's port was not refused (exit $rc)" >&2; exit 1; fi
+          # An env file that sets COMPOSE_FILE picks the files an up reads: the check wants them with -f.
+          (umask 077 && { cat .env.ob1b.local; echo COMPOSE_FILE=compose.yaml:compose.host-ports.yaml; } > .env.ob1b-files.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-files.local > /tmp/instance-files.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'give the check the same files with -f' /tmp/instance-files.out; then cat /tmp/instance-files.out >&2; echo "an env file's COMPOSE_FILE was not refused without -f (exit $rc)" >&2; exit 1; fi
+          bun --no-env-file instance.ts check --env-file .env.ob1b-files.local -f compose.yaml -f compose.host-ports.yaml > /dev/null
+          bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — free"
+          docker compose --env-file .env.ob1b.local -f compose.yaml up -d --build --wait --wait-timeout 300
+          for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health)" = ok ] && break; sleep 2; done
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health)" = ok ] || { echo "ob1b does not answer on its own port" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] || { echo "the stack stopped answering on its port beside ob1b" >&2; exit 1; }
+          # Every container of each brain on its own project's networks alone. inspect ends each container's
+          # list with a newline of its own, a blank line grep -v would match (review pass 8): dropped.
+          nets() { for id in $(docker compose "$@" -f compose.yaml ps -aq); do docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$id"; done | sed '/^$/d' | sort -u; }
+          ob1b_nets="$(nets --env-file .env.ob1b.local)"
+          stack_nets="$(nets)"
+          if [ -z "$ob1b_nets" ] || [ -z "$stack_nets" ]; then echo "could not read either brain's networks" >&2; exit 1; fi
+          if grep -v '^ob1b_' <<<"$ob1b_nets"; then echo "an ob1b container is on a network not ob1b's" >&2; exit 1; fi
+          if grep -v '^open-brain_' <<<"$stack_nets"; then echo "a stack container is on a network not the stack's" >&2; exit 1; fi
+          bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder"
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
