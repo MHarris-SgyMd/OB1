@@ -193,7 +193,7 @@ export type HeldThought = { id: string; stops: number; stalled: number; kept: nu
 export type SleepHeld = { total: number; thoughts: HeldThought[] };
 
 /**
- * The hard stops in a row with no window saved between, and none since,
+ * The long hard stops in a row with no window saved between, and none since,
  * after which the sleep scheduler lets consolidation join past a thought
  * extraction still holds (db/sleep.ts, SMD-2694): a window that outlasts
  * every sleep, or stops landing past its last. Here, as preflight's `sleep`

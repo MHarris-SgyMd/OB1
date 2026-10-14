@@ -63,8 +63,8 @@
  * sleep begins, and when consolidation joins past, extraction is set aside —
  * stopped, if in hand with a stalled thought — until consolidation's pool
  * drains, then resumes, so on a one-slot model the judge is not left waiting
- * behind the window. The thought is still tried at every sleep, and
- * finished by the first long enough. A brain before 089, or a role that
+ * behind the window. The thought is tried in every sleep once consolidation's
+ * pool drains, and finished by the first sleep long enough for both. A brain before 089, or a role that
  * cannot read it, joins once extraction is drained alone, and the start says
  * so; granted later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
@@ -239,14 +239,15 @@ export interface SleepOptions {
 /**
  * A pass's pool: its claim rows by status, and the thoughts a pass would add
  * to it; for extraction, `stalled` — of its pending and in-flight rows, those
- * SLEEP_STALLED_JOIN or more hard stops in a row have taken with no window
- * gained (migration 089, SMD-2694), 0 where the scheduler cannot read them.
+ * SLEEP_STALLED_JOIN or more long hard stops in a row have taken with no
+ * window saved between, and none since (migration 089, SMD-2694), 0 where the scheduler cannot read them.
  */
 type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
 const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 /**
- * Extraction holds only thoughts whose single window outlasts every sleep:
+ * Extraction holds only thoughts whose single window outlasts every sleep,
+ * or whose stops land past their last window:
  * nothing to add, and every row pending or in flight stalled. Consolidation
  * joins past them (SMD-2694), as it would never join behind them.
  */
@@ -858,18 +859,23 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * a wake's tail move dates them at the wake, so every capture of the awake
    * period after it queued behind them — a stalled thought then held the one
    * worker each sleep until the next wake, those captures unextracted all day
-   * and the pool never all stalled. New work first, the long thoughts last. A
-   * courtesy, as the wake's tail move is: one that fails is said once.
+   * and the pool never all stalled. New work first, the long thoughts last,
+   * and among them the least stalled first, then the order they had: dated
+   * alike, claim_thoughts' tie fell the same way every sleep, so a stalled
+   * thought could hold the worker ahead of a document still gaining windows,
+   * or of one stall short of the join, and neither advanced (review pass 6).
+   * A courtesy, as the wake's tail move is: one that fails is said once.
    */
   let saidRetail = false;
   const stoppedLast = async (): Promise<void> => {
     if (SIG === undefined) return;
     try {
       await sql`
-        UPDATE thought_work_claims c SET enqueued_at = now()
-          FROM extraction_progress e JOIN thoughts t ON t.id = e.thought_id
-         WHERE c.thought_id = e.thought_id AND c.work_type = e.work_type AND c.work_type = ${JOBS.extract}
-           AND c.status = 'pending' AND e.stops > 0 AND ${currentProgress(sql, SIG)}`;
+        UPDATE thought_work_claims c SET enqueued_at = now() + o.rn * interval '1 microsecond'
+          FROM (SELECT c2.thought_id, row_number() OVER (ORDER BY CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END, c2.enqueued_at, c2.thought_id) AS rn
+                  FROM thought_work_claims c2 JOIN extraction_progress e USING (thought_id, work_type) JOIN thoughts t ON t.id = c2.thought_id
+                 WHERE c2.work_type = ${JOBS.extract} AND c2.status = 'pending' AND e.stops > 0 AND ${currentProgress(sql, SIG)}) o
+         WHERE c.thought_id = o.thought_id AND c.work_type = ${JOBS.extract}`;
     } catch (e) {
       if (!saidRetail) err(`  could not move the stopped thoughts behind new captures (${(e as Error).message}) — they are taken in queue order this sleep`);
       saidRetail = true;
@@ -1010,6 +1016,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         const co = await reading(() => poolOf(sql, "consolidate", JOBS.consolidate));
         if (co === null) return stopped();
         if (drained(co)) {
+          // Captures made while it was set aside (a sync write wakes nothing)
+          // go ahead of the stalled thoughts, as the sleep's own did (review
+          // pass 6: one waited out the stuck window first).
+          await stoppedLast();
           out("  consolidation drained — extracting beside it, the stalled thought(s) last");
           start("extract");
           parked = false;
@@ -1021,7 +1031,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           out("  extraction drained — consolidating beside it");
           start("consolidate");
           consolidating = true;
-        } else if (!consolidating && joinsPast(pools.extract)) {
+        } else if (!consolidating && joinsPast(pools.extract) && !running.some((r) => r.name === "extract" && r.settled)) {
+          // (An extraction that ended by itself during the reads is the next
+          // poll's to report, not the join's to swallow: review pass 6.)
           // Only thoughts no stop has gained a window on lately are left:
           // waiting for them would hold consolidation back for as long as the
           // brain keeps waking (SMD-2694). A newer thought judged meanwhile
@@ -1041,6 +1053,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
             // (review pass 5).
             passEnded = new AbortController();
             wake = AbortSignal.any([onStop.signal, passEnded.signal]);
+            // A stop that landed while it settled: no pass starts after it,
+            // nor stamps a row a second signal has ended (review pass 6).
+            if (stopping) return stopped();
           }
           start("consolidate");
           consolidating = true;

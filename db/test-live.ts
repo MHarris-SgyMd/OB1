@@ -11827,6 +11827,9 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const stuckCalls: [number, number][] = [];
   /** When each scheduler line was written. */
   const lineAt: { l: string; at: number }[] = [];
+  /** How long a judgement takes; and when each call for the note a sync writes while extraction is set aside began (review pass 6). */
+  let judgeHold38b = 300;
+  const noteStarts: number[] = [];
   /** When the scheduler read the logs for a wake: one read a poll, so a spinning poll shows (review pass 5). */
   const wakeReads: number[] = [];
   const counting = new Proxy(sql, {
@@ -11844,7 +11847,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/<thought_a>/.test(prompt)) {
         judged.push(Date.now());
-        await Bun.sleep(300);
+        await Bun.sleep(judgeHold38b);
         judgedEnd.push(Date.now());
         return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
       }
@@ -11858,6 +11861,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
         stuckCalls.push([t0, Date.now()]);
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
       }
+      if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
       // A window of the long document takes a second (the stuck thought's one window eight, above); the rest are quick.
       await Bun.sleep(marker === "long" ? 1000 : 100);
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
@@ -11978,7 +11982,18 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       await pollUntil(async () => (await status(stuck)) === "succeeded", 20_000);
       await pollUntil(async () => (heldAfter = (await beat())?.held) === undefined, 10_000);
     };
-    const b = await wokenEvery(joinedPast, 7, finishes);
+    // A sync write while extraction is set aside wakes nothing; it goes ahead
+    // of the stalled thought when extraction resumes, not behind its window
+    // (review pass 6). The judgement held 1.5 s, so it lands while parked.
+    judgeHold38b = 1500;
+    await sql`SELECT set_agent_kind('sync-long', 'ingested')`;
+    let parkedNote = "";
+    const parkedCapture = (async () => {
+      if (!(await pollUntil(async () => lineAt.some((x) => /consolidating first/.test(x.l)), 120_000))) return;
+      parkedNote = ((await sql`SELECT upsert_thought(${"The parkednote, written by a sync while extraction is set aside."}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(13)}::vector) AS r`)[0].r as { id: string }).id;
+    })();
+    const b = await wokenEvery(joinedPast, 7, finishes).finally(() => { judgeHold38b = 300; });
+    await parkedCapture;
     assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains/.test(l)),
       `a single window longer than every sleep: consolidation joins past it while it is still pending (reached ${b.reached} in ${b.sleeps} sleep(s), the thought ${stuckStatus}, ${judged.length} judgement(s))`);
     // Consolidation goes first: no call for the stuck window between the join
@@ -11991,8 +12006,12 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     const stuckBetween = stuckStarts.filter((t) => t > joinAt && t < lastJudged).length;
     assert(joinAt < lastJudged && stuckBetween === 0 && resumeAt >= lastJudged && stuckStarts.some((t) => t >= resumeAt),
       `consolidation goes first: no stuck call between the join and the judgement's answer, extraction resumed after it and took the stuck thought (${stuckBetween} between, resumed ${resumeAt === Infinity ? "never" : `${resumeAt - lastJudged} ms after the answer`})`);
+    const noteAt = noteStarts[0] ?? Infinity;
+    const stuckAfterResume = stuckStarts.find((t) => t >= resumeAt) ?? Infinity;
+    assert(parkedNote !== "" && noteAt < stuckAfterResume && (await status(parkedNote)) === "succeeded",
+      `a note a sync writes while extraction is set aside goes ahead of the stalled thought when it resumes (note +${noteAt - resumeAt} ms, stuck +${stuckAfterResume - resumeAt} ms after the resume; ${parkedNote ? await status(parkedNote) : "not written"})`);
     assert(Number(prog?.stalled) === 3 && Number(prog?.stops) === 3 && b.sleeps >= 4,
-      `…after three stalled stops, the fourth sleep the first it could join in, consolidating first with no stop of its own — extraction set aside before it claimed the stalled thought (review pass 5) (stops ${prog?.stops}, stalled ${prog?.stalled}, ${b.sleeps} sleep(s))`);
+      `…after three stalled stops, the fourth sleep the first it could join in, consolidating first with no stop of its own (review pass 5; the set-aside at the sleep's start is a surviving mutant: the mid-sleep join also stops extraction before it claims) (stops ${prog?.stops}, stalled ${prog?.stalled}, ${b.sleeps} sleep(s))`);
     assert(heldSeen?.held?.total === 1 && heldSeen.held.thoughts[0].id === stuck && heldSeen.held.thoughts[0].stalled >= 3 && heldSeen.held.thoughts[0].kept === 0,
       `…and heartbeat:sleep names it, stalled, no window kept (${JSON.stringify(heldSeen?.held)})`);
     assert((await status(stuck)) === "succeeded" && heldAfter === undefined,
@@ -12105,6 +12124,13 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await sql`DELETE FROM thoughts WHERE id = ${racing}::uuid`;
     const snapLine = snapOut.find((l) => /^\s*extract \(/.test(l)) ?? "";
     assert(raced && /1 not yet in the pool/.test(snapLine), `a pool is read in one snapshot: a thought enqueued as its claims are read is counted once (${snapLine.trim()})`);
+    // A failed row is the operator's: beside a stalled one it neither blocks
+    // the join nor counts pending (review pass 6).
+    const failedOne = await capture("A note whose extraction failed.", 0, 14);
+    await sql`UPDATE thought_work_claims SET status = 'failed' WHERE thought_id = ${failedOne}::uuid AND work_type = ${EX}`;
+    const besideFailed = await gate(fp, sig);
+    await sql`DELETE FROM thoughts WHERE id = ${failedOne}::uuid`;
+    assert(besideFailed.joins && /1 failed/.test(besideFailed.text), `beside a failed row a stalled one is still joined past, the failed row counted failed (${besideFailed.text.split("\n").find((l) => /^\s*extract \(/.test(l))?.trim()})`);
     // Two held: the more stalled first.
     const planted2 = await capture("The stuckdoc note, planted twice.", 0, 12);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted2}::uuid])`;
@@ -12113,6 +12139,25 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     const two = await gate(fp, sig);
     assert(two.joins && new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 5 stop\\(s\\), the last 5 with none gained; ${planted}`).test(two.text),
       `two held: the more stalled named first (${two.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // As a sleep begins the stopped thoughts go behind new captures, the least
+    // stalled first, then in the order they had: dated alike, claim_thoughts'
+    // tie fell the same way every sleep (review pass 6). The more stalled one
+    // is the older here, so its old place alone would put it first.
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    const orderLines: string[] = [];
+    // Stopped hard as soon as it is read: consolidation's pool here is empty, so
+    // extraction resumes at once, and a soft stop would let it finish a planted one.
+    let stopOrder: PassStop | null = null;
+    const orderRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopOrder = s; }, writer: { out: (l) => orderLines.push(l), err: (l) => orderLines.push(l) } });
+    await pollUntil(async () => orderLines.some((l) => /consolidating first/.test(l)), 15_000);
+    const [order] = (await sql`
+      SELECT array_agg(thought_id::text ORDER BY enqueued_at) AS ids, count(DISTINCT enqueued_at)::int AS n, bool_and(enqueued_at > now() - interval '1 minute') AS moved
+        FROM thought_work_claims WHERE work_type = ${EX} AND thought_id IN (${planted}::uuid, ${planted2}::uuid)`) as { ids: string[]; n: number; moved: boolean }[];
+    (stopOrder as PassStop | null)?.();
+    await (stopOrder as PassStop | null)?.();
+    await Promise.race([orderRun, Bun.sleep(15_000)]);
+    assert(order.moved && order.n === 2 && order.ids[0] === planted,
+      `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
     // A scheduler started while thoughts are held names them before its first sleep.
     // The row case C's scheduler ended names its own stuck thought: gone first.
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
