@@ -4998,6 +4998,20 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
   assert(!editedStatus.out.includes(sphere) && editedStatus.code === 0, `--status leaves out a row of the text before an edit, which the next claim replaces (${editedStatus.out.split("\n").filter((l) => l.includes(sphere)).join(" | ") || "not listed"})`);
   assert(sphereKept?.keys === "0,1" && edited.ok && afterEdit === 0 && sent.join(",") === "1,2,3,4,5,6",
     `a thought edited after two of its windows were kept is extracted afresh — every window sent, the first two unchanged among them (kept ${sphereKept?.keys}, sent ${sent.join(",")})`);
+  // A long text with two windows kept, edited to a one-window text that keeps
+  // none: its succeeded release takes the earlier text's row too, which a
+  // revert to that text would otherwise revive, stall and all (review pass 4).
+  const reverted = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "revert")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  hangPart = "3";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const [revertKept] = await sql`SELECT count(*)::int AS n FROM extraction_progress WHERE thought_id = ${reverted}::uuid`;
+  await sql`SELECT update_thought(${reverted}::uuid, ${"A one-window note now."})`;
+  hangPart = "none";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, writer: { out: () => {}, err: () => {} } });
+  const [revertLeft] = await sql`SELECT count(*)::int AS n FROM extraction_progress WHERE thought_id = ${reverted}::uuid`;
+  const [revertDone] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${reverted}::uuid AND work_type = ${KEY}`;
+  assert(revertKept.n === 1 && revertDone?.status === "succeeded" && revertLeft.n === 0,
+    `the succeeded release deletes the kept row of the earlier text too (kept ${revertKept.n}, ${revertDone?.status}, ${revertLeft.n} left)`);
   hanging.stop(true);
 
   // Two follower workers and one long thought, the second worker idle — the
@@ -5131,8 +5145,15 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
   await batchStop?.();
   await batchRun;
   slowMs = 0;
-  const [secondRow] = await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${secondOfTwo}::uuid AND work_type = ${KEY}`;
-  assert(secondRow?.stops === 1 && secondRow.stalled === 0, `the second of a batch stopped half a second into its call is a short stop, its clock its own (${JSON.stringify(secondRow)})`);
+  // The batch's order is the claim's, not the capture's: the thought still
+  // pending is the one the stop took (review pass 4 — the full suite's run
+  // took them the other way round, and the row read was the finished one's).
+  const batchRows = (await sql`
+    SELECT c.thought_id::text AS id, c.status, e.stops, e.stalled FROM thought_work_claims c LEFT JOIN extraction_progress e USING (thought_id, work_type)
+     WHERE c.work_type = ${KEY} AND c.thought_id IN (${firstOfTwo}::uuid, ${secondOfTwo}::uuid)`) as { id: string; status: string; stops: number | null; stalled: number | null }[];
+  const inHandRow = batchRows.find((r) => r.status === "pending");
+  assert(batchRows.filter((r) => r.status === "succeeded").length === 1 && inHandRow?.stops === 1 && inHandRow.stalled === 0,
+    `the second of a batch stopped half a second into its call is a short stop, its clock its own (${JSON.stringify(batchRows)})`);
   await sql`DELETE FROM thoughts WHERE id IN (${firstOfTwo}::uuid, ${secondOfTwo}::uuid)`;
 
   // A one-window thought stopped at once: a stop, not a stall, under the

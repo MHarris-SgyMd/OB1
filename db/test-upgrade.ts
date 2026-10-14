@@ -3947,6 +3947,11 @@ console.log("\n[20ak] Migration 089: onto a populated brain at the file before i
   await dropSchema(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the089 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;  // by name: renumbered when main takes its number
+  // Refused by name on a schema before 015, as 031 is (review pass 4).
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the089 }).then(() => "applied", (e: Error) => e.message);
+  assert(/^migration 0\d\d needs 015 \(thought_work_claims\); this schema lacks it$/.test(refused), `089 on a schema before 015 is refused up front, naming what it needs (${refused})`);
+  await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the089 });
   const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 089: a long document') RETURNING id`;
   await sql`SELECT enqueue_thoughts('extract:stub@p2', ARRAY[${id}::uuid])`;

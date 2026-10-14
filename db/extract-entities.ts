@@ -305,12 +305,12 @@ export interface ExtractOptions {
  * A hard stop that finds a thought in hand for less than this, no window
  * saved since the last, counts as a stop and not a stall (SMD-2694, review
  * pass 2): on a busy day the sleep scheduler's sleeps can be seconds long, and
- * three of them would mark a document advancing by its windows as stalled,
- * which the scheduler joins past. A minute is past the median single-window
+ * three of them would mark a document advancing by its windows as stalled —
+ * what the scheduler acts on (SMD-2694). A minute is past the median single-window
  * extraction on the stable brain (32 s, 2026-10-13), so a stop that long with
  * nothing saved is a slow window, not a short sleep.
  */
-export const STALL_FLOOR_MS = 60_000;
+const STALL_FLOOR_MS = 60_000;
 /** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 089's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
@@ -801,7 +801,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     let rows: { thought_id: string; status: string; windows: number | null; kept: number; stops: number; stalled: number; total: number }[];
     try {
       rows = (await sql`
-        SELECT e.thought_id, c.status, e.windows, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.stops, e.stalled, count(*) OVER ()::int AS total
+        SELECT e.thought_id, c.status, e.windows, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.stops, CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END AS stalled, count(*) OVER ()::int AS total
           FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type) JOIN thoughts t ON t.id = e.thought_id
          WHERE e.work_type = ${JOB} AND c.status IN ('pending', 'claimed', 'failed') AND e.windowing = ${JSON.stringify(WINDOWING)}
            AND e.fingerprint = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
@@ -1138,8 +1138,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const t = inHand.get(workerId);
     if (!t || !keeping) return;
     // Long: held at least the floor. Not the thought's slowest window, which
-    // took a kept 280 s window's document out of the stall for good, the case
-    // the scheduler joins past (review pass 3).
+    // took a kept 280 s window's document out of the stall for good (review
+    // pass 3).
     const long = Date.now() - t.since >= STALL_FLOOR;
     try {
       await sql`SELECT note_extraction_stop(${t.id}::uuid, ${JOB}, ${workerId}, ${t.fingerprint}, ${WINDOWING_SIG}, ${long})`;
@@ -1494,14 +1494,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             // A succeeded release spends the thought's kept windows (089), in
             // the same statement: a delete after it, failed or cut short by an
             // exit, left the row's stops beside a finished claim, which a later
-            // requeue of the same text revived (review pass 2). Of this text
-            // only. A failed release keeps them, so --retry-failed resumes.
-            const spend = keeping && outcome.outcome === "succeeded" && row?.fingerprint;
+            // requeue of the same text revived (review pass 2). Of any text: a
+            // release that went through proves the claim still this worker's,
+            // and a row of earlier text kept would revive as well on a revert
+            // (review pass 4). A failed release keeps them, so --retry-failed resumes.
+            const spend = keeping && outcome.outcome === "succeeded";
             if (spend) {
               try {
                 [{ ok }] = await sql`
                   WITH r AS (${release()}),
-                       d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND fingerprint = ${row.fingerprint} AND (SELECT ok FROM r))
+                       d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
                   SELECT ok FROM r`;
               } catch (e) {
                 // The table or its grant gone since the start: the release alone, said once.

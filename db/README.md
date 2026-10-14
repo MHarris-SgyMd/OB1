@@ -1382,7 +1382,9 @@ brain kept waking. One row per claim: the parsed windows by index, each with
 the hash of the request it answered, under the thought's fingerprint and the
 worker's windowing — a write under another replaces the row, and a window is
 reused only for the request it answered — and the stops that took the claim,
-`gained` the windows saved since the last, and `stalled` the latest long stops in a row with none saved between — long when the worker had held the thought a minute, provider pauses aside, so short sleeps stall nothing.
+`gained` the windows saved since the last, and `stalled` the latest long stops
+in a row with none saved between — long when the worker had held the thought
+a minute, provider pauses aside, so short sleeps stall nothing.
 `save_extraction_window` and `note_extraction_stop` write it for the claim's
 holder only, the claim row locked `FOR SHARE`, so a save after the lease went
 back keeps nothing. The row goes with its claim (`ON DELETE CASCADE`), and the
@@ -4132,7 +4134,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2761 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1285 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1286 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

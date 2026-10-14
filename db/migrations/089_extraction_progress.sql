@@ -27,22 +27,24 @@
 --     its windows are of — the thought's content fingerprint (003) and the
 --     worker's windowing, which decides where the windows fall and how each
 --     is asked — and a write under another fingerprint or windowing replaces
---     the row: an edit, or a change of window size, starts afresh; so does a
---     window saved under another window count (a chunker changed under the
---     same settings), whose old indexes are of other windows. Only parsed
---     windows are kept; a malformed one is asked again.
+--     the row: an edit, or a change of window size, starts afresh. A window
+--     saved under another window count (a chunker changed under the same
+--     settings) replaces the windows, whose old indexes are of other windows,
+--     and keeps the stops, which were this text's. Only parsed windows are
+--     kept; a malformed one is asked again.
 --   * stops counts the hard stops that took the claim from a worker with the
 --     row's text in hand; gained, the windows saved since the last of them;
 --     stalled, the latest LONG stops in a row with no window saved between —
 --     a stop is long when the worker had held the thought at least its
 --     floor (db/extract-entities.ts: a minute, provider pauses aside), so a
---     burst of short sleeps on a busy day stalls nothing: a single window longer than every long sleep, or a stop that
---     keeps landing after the last window, in the decider's call or the
---     write. A short stop with no window saved leaves stalled as it was. A thought
+--     burst of short sleeps on a busy day stalls nothing. What stalls is a
+--     single window longer than every long sleep, or a stop that keeps
+--     landing after the last window, in the decider's call or the write. A
+--     short stop with no window saved leaves stalled as it was. A thought
 --     saving a window in every sleep is not stalled, and while gained is
---     above 0 the row is gaining now, whatever stalled said at the last stop:
---     SMD-2694's second PR lets consolidation join past a thought only while
---     it is stalled and has gained nothing since.
+--     above 0 the row is gaining now, whatever stalled said at the last
+--     stop: the sleep scheduler (db/sleep.ts) reads both before it lets
+--     consolidation join past a thought extraction still holds (SMD-2694).
 --   * save_extraction_window(…) and note_extraction_stop(…) write it, and
 --     only for the claim's holder: each locks the claim row FOR SHARE and
 --     writes nothing (false) unless the row is claimed by the worker named.
@@ -53,7 +55,8 @@
 --     DELETE CASCADE — and so with the thought). The worker deletes it when
 --     it releases the claim succeeded; a failed release keeps it, so
 --     --retry-failed resumes a thought that timed out in a late window.
---     The worker's delete is one statement with its release, so a row is
+--     The worker's delete is one statement with its release — of any text,
+--     the release itself proving the claim still the worker's — so a row is
 --     not left beside a claim released succeeded while the worker can reach
 --     the table; one beside a failed claim stays for --retry-failed, which
 --     `--status` lists.
@@ -66,8 +69,20 @@
 --     as 015's are: the lock needs the worker group's UPDATE on
 --     thought_work_claims, which an extraction role holds.
 --
+-- Needs 015 (thought_work_claims), refused by name without it.
 -- Idempotent: the table IF NOT EXISTS; the functions and comments replaced.
 -- =============================================================================
+
+DO $rc$
+BEGIN
+  IF to_regclass('thought_work_claims') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 089 needs 015 (thought_work_claims); this schema lacks it',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
+END
+$rc$;
 
 CREATE TABLE IF NOT EXISTS extraction_progress (
   thought_id   uuid        NOT NULL,
@@ -95,7 +110,7 @@ COMMENT ON COLUMN extraction_progress.fingerprint IS
 COMMENT ON COLUMN extraction_progress.windowing IS
   'The worker''s windowing (entities.ts windowingFor, as JSON): where the windows fall and how each is asked; a write under another replaces the row.';
 COMMENT ON COLUMN extraction_progress.windows IS
-  'How many windows the thought is sent in (a prefix''s, over the bound); NULL until a window is kept. A window saved under another count replaces the row.';
+  'How many windows the thought is sent in (a prefix''s, over the bound); NULL until a window is kept. A window saved under another count replaces the windows and keeps the stops.';
 COMMENT ON COLUMN extraction_progress.parts IS
   'The windows answered and parsed, keyed by window index: each window''s answer as entities.ts returns it, with `h`, the hash of the request it answered.';
 COMMENT ON COLUMN extraction_progress.stops IS
@@ -110,10 +125,11 @@ COMMENT ON COLUMN extraction_progress.gained IS
 --
 -- Locks the claim row FOR SHARE, so a release in flight is waited for and then
 -- read, and writes nothing (false) unless the row is claimed by p_worker. A
--- row of another fingerprint, windowing or window count is replaced — its
--- windows, its stops and its stalled count are of other windows — and a
--- window already kept under the same index is replaced by this one. Every
--- save counts in gained, which the next stop reads.
+-- row of another fingerprint or windowing is replaced — its windows, its
+-- stops and its stalled count are of other text — one of another window
+-- count has its windows replaced and its stops kept, and a window already
+-- kept under the same index is replaced by this one. Every save counts in
+-- gained, which the next stop reads.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION save_extraction_window(
   p_thought_id  uuid,
@@ -160,7 +176,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION save_extraction_window(uuid, text, text, text, text, int, int, jsonb) IS
-  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint, windowing or window count, and a window kept under the same index; counts the save in gained. Migration 089 / SMD-2694.';
+  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, the windows of one of another window count (its stops kept), and a window kept under the same index; counts the save in gained. Migration 089 / SMD-2694.';
 
 -- ---------------------------------------------------------------------------
 -- note_extraction_stop — count a hard stop for the claim's holder
