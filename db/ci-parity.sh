@@ -107,7 +107,7 @@ typecheck() {
 main() {
   FAILED=0
   BASE_ENV=$(env | LC_ALL=C sort)
-  for dir in server-portable rest-client db evals jev deploy/auth extensions scripts compat/supabase-sql; do install "$dir"; done
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql; do install "$dir"; done
 
   # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
@@ -160,6 +160,8 @@ main() {
   nodb server-portable    test-thoughts.ts
   nodb server-portable    test-jobs.ts
   nodb rest-client        test-client.ts
+  nodb mcp-server         test-mcp.ts
+  OB1_MCP_UNDER_TEST=client nodb server-portable test-auth.ts
   nodb jev                test-jev.ts
   nodb evals              eval-thought-kinds.ts --self-check
   nodb evals              eval-calibration.ts --self-check
@@ -194,6 +196,7 @@ main() {
   typecheck scripts
   typecheck server-portable
   typecheck rest-client
+  typecheck mcp-server
   typecheck db
   typecheck evals
   typecheck jev

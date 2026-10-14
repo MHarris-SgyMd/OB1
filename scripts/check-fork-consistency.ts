@@ -65,11 +65,16 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the proxy, and n8n under its opt-in profile
+ *      compose.yaml publishes the forwarder (SMD-2583), and n8n under its opt-in profile
  *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
  *      publish through compose.host-ports.yaml, a second -f; and
  *      deploy/.env.example's live lines are exactly the keys an operator fills
- *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685).
+ *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685)
+ *      or any env file (a name that starts `.env`, ends `.env` or holds
+ *      `.env.`) but an .example, .sample or .template; and deploy/canary.sh and deploy/tier.sh
+ *      read the stack's project through a stub carrying compose.yaml's own
+ *      `name:` on one code line that reads an env file, and name it nowhere
+ *      else in code but a short list (SMD-2873).
  *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
@@ -2435,7 +2440,31 @@ function checkPublishedPorts() {
   let tracked: string[] | null = null;
   try { tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0"); } catch (e) { console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 13 cannot tell a committed .env from an operator's own, and skips that rule)`); }
   for (const f of tracked ?? []) if (/^\.env$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env — compose reads it with no --env-file, so what it sets (a COMPOSE_FILE naming a file no check reads, a port) reaches every stack run from here unrendered, and `git pull` writes it over an operator's own; untrack it (`git rm --cached`) and keep settings in .env.example (SMD-2685)");
-    else if (/^\.env\.canary([.-].*)?$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env.canary.local (or the temporary file deploy/canary.sh makes it in) — the canary runs on it, its database password and stable's keys included, and `git pull` writes it over the canary's own; untrack it (`git rm --cached`) (SMD-2583)");
+    else if (/^\.env.|\.env$|\.env\./i.test(f.split("/").at(-1) ?? "") && !/\.(example|sample|template)$/i.test(f)) fail(f, "is a tracked env file — one env file is one brain (SMD-2873): a brain's own (.env.<name>.local), a canary's (.env.canary.local, .env.<stable>-canary.local), the temporary file deploy/canary.sh makes one in, and any other env file hold a database password or keys, and `git pull` writes it over the operator's own; untrack it (`git rm --cached`) and name a brain's .env.<name>.local, which the root .gitignore ignores, or an example .example, .sample or .template (SMD-2583, SMD-2873)");
+  // One env file is one brain (SMD-2873): canary.sh and tier.sh read the project from it, through a stub
+  // carrying compose.yaml's own `name:`, on one code line that reads an env file; no other code line names
+  // open-brain but the few each script is allowed (a fixed default, in any of bash's forms, is one).
+  {
+    let name: string | undefined;
+    try { name = (Bun.YAML.parse(readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8")) as { name?: unknown }).name as string | undefined; } catch { name = undefined; }
+    if (typeof name !== "string" || !name) fail("deploy/compose.yaml", "has no top-level `name:` Bun.YAML reads, which deploy/canary.sh and deploy/tier.sh fall back to (SMD-2873)");
+    else {
+      const allowed: Record<string, RegExp[]> = {
+        "canary.sh": [/\[ "\$CANARY" = open-brain-canary \]/g, /compose\.yaml's default \(open-brain\)/g, /compose\.yaml's open-brain"/g],
+        "tier.sh": [/\bopen-brain-tier(-env)?\b/g, /compose\.yaml's open-brain"/g],
+      };
+      const composeName: string = name;
+      for (const [script, ok] of Object.entries(allowed)) {
+        // The code part of each line: a trailing ` # …` comment is no code, and must not carry an allowed word past the check.
+        const lines = readFileSync(join(ROOT, "deploy", script), "utf8").split("\n").map((l, i) => [i + 1, l.replace(/\s#.*$/, "")] as const).filter(([, l]) => !/^\s*(#|$)/.test(l));
+        const stub: string = `printf 'name: ${composeName}\\nservices: {}\\n'`;
+        const stubs = lines.filter(([, l]) => l.includes(stub));
+        if (stubs.length !== 1 || !/--env-file/.test(stubs[0][1])) fail(`deploy/${script}`, `reads the stack's project through compose with a stub carrying compose.yaml's \`name: ${name}\` (${stub}) on exactly one code line, which reads an env file (--env-file), so its fallback is the project compose.yaml names (found on ${stubs.length}) (SMD-2873)`);
+        // Each allowed text, and the stub, is taken out of the code; the name must then be gone.
+        for (const [n, l] of lines) if (ok.reduce((s, r) => s.replace(r, ""), l.split(stub).join("")).includes(name)) fail(`deploy/${script}:${n}`, `names ${name} outside the project read (${JSON.stringify(l.trim().slice(0, 80))}): the project follows the env file, and compose.yaml's name is the read's fallback alone (SMD-2873)`);
+      }
+    }
+  }
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
@@ -4016,7 +4045,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client", "mcp-server"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
@@ -5352,6 +5381,9 @@ const EDGE_ROLE: TransportRole = {
     ["./oauth-edge.ts", new Set(["challengeHeader", "UNREACHABLE_RETRY_AFTER_SECONDS"])],
     ["./telemetry.ts", new Set(["traceOf", "RequestOutcome", "RequestTrace"])],
     ["./tools.ts", new Set(["ToolName"])],
+    // The worker mirrors' inputs and the codes their words cover (SMD-2287): types alone.
+    ["./core/schemas.ts", new Set(["Input"])],
+    ["./core/workers.ts", new Set(["ReleaseLeasesCode", "RetryFailedCode", "RunWorkerCode"])],
   ]),
   wiring: false,
   mustImport: "./telemetry.ts",
