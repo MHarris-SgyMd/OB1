@@ -191,10 +191,12 @@ const WORDS: Record<ToolName, Words> = {
 
 /**
  * The MCP server for one request: the tools the caller's operations name,
- * each validated by the SDK against the tool's own schema (core/schemas.ts),
- * called on the REST core with the caller's key, and its answer said by
- * render.ts. `endpoint`: the path the request came to, no trailing slash —
- * a scan's job links go under it, as server-portable's do.
+ * each validated by the SDK against the tool's own schema (core/schemas.ts,
+ * or a plugin's manifest), called on the REST core with the caller's key, and
+ * its answer said by render.ts. `endpoint`: the path the request came to, no
+ * trailing slash — a scan's job links go under it, as server-portable's do.
+ * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
+ * client sent them (argumentsById), which a plugin tool sends on.
  */
 function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
@@ -222,14 +224,12 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
     });
   }
   // The enabled plugins' operations (SMD-2310), after the core's as index.ts
-  // registers them: each a tool named `<plugin>_<operation>` where whoami
-  // names it among the caller's operations, the SDK holding its input and its
-  // answer to the manifest's schemas, called on the REST core by its route and
-  // said by render.ts's renderPlugin — a fault as index.ts says a plugin's.
-  // The input sent is the one the client sent, its fields the operation's, not
-  // the SDK's parse of it: its value is the REST core's one parse, as index.ts's
-  // is its SDK's (review pass 2: a preprocess, an overwrite or a codec ran on
-  // its own output, or refused it). The SDK's validation runs the steps too.
+  // registers them: a tool `<plugin>_<operation>` where whoami names it, held
+  // by the SDK to the manifest's schemas, called on the REST core by its route
+  // and said by render.ts's renderPlugin. What it sends is its client's
+  // arguments, not the SDK's parse of them, so the value is the REST core's one
+  // parse as index.ts's is its SDK's (review pass 2: a preprocess, an overwrite
+  // or a codec ran on its own output); the SDK's validation runs the steps too.
   for (const op of ops) {
     if (!caller.operations.has(op.tool)) continue;
     register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx) => {
@@ -260,15 +260,15 @@ export function createMcpApp(deps: McpDeps): Hono {
   const opsHere = (): readonly LoadedOp[] => (pluginOps ??= (deps.plugins?.() ?? []).flatMap((p) => p.operations));
   /**
    * Each operation whoami names that this server has no tool for — a plugin
-   * the REST core runs and this server was not given — said once: the caller
-   * sees no tool, so the log is where the mismatch shows (review pass 1).
+   * the REST core runs and this server was not given, or a core tool of a
+   * newer REST core, which the name cannot tell apart — said once: the caller
+   * sees no tool, so the log is where the mismatch shows (review passes 1, 2).
    */
   const untooled = new Set<string>();
   const noteUntooled = (operations: ReadonlySet<string>) => {
     for (const name of operations) {
       if (untooled.has(name) || name in WORDS || opsHere().some((op) => op.tool === name)) continue;
       untooled.add(name);
-      // A plugin the REST core runs and this server was not given, or a core tool of a newer REST core: the name cannot say which.
       warn(`mcp-server: the REST core runs ${name}, which is no tool here: run this server from the REST core's build, with its OB1_PLUGINS`);
     }
   };
