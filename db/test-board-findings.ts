@@ -197,7 +197,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
 // ---------------------------------------------------------------------------
 {
   const D = 86_400;
-  const prop = (o: Partial<NonNullable<FindingRow["proposals"]>> = {}) => ({ accepted: 0, rejected: 0, settled: 0, stale: 0, pending: 0, acceptedS: null, rejectedS: null, settledS: null, ...o });
+  const prop = (o: Partial<NonNullable<FindingRow["proposals"]>> = {}) => ({ accepted: 0, rejected: 0, settled: 0, reopened: 0, stale: 0, pending: 0, acceptedS: null, rejectedS: null, ...o });
   const row = (o: Partial<FindingRow>): FindingRow => ({ a: "SMD-1", b: "SMD-2", word: "related", postedOn: "SMD-2", origin: "posted", postedAt: "2026-10-01T00:00:00.000Z", ageS: 5 * D, linkedS: null, proposals: null, stands: true, withdrawnS: null, ...o });
   const out = (o: Partial<FindingRow>, days?: number) => { const v = findingOutcome(row(o), days); return `${v.outcome}/${v.how}/${v.answeredS}`; };
   const outd = (p: Partial<NonNullable<FindingRow["proposals"]>>, o: Partial<FindingRow> = {}) => out({ word: "outdates", stands: null, proposals: prop(p), ...o });
@@ -210,10 +210,18 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(outd({ rejected: 1, pending: 1 }) === "open/null/null" && outd({ rejected: 1, pending: 1 }, { linkedS: D }) === `accepted/linked/${D}`,
     "a rejection beside a pending proposal is not yet an answer; the board linking the pair then is");
   ok(outd({ pending: 2 }, { linkedS: 0 }) === "accepted/linked/0" && outd({ stale: 1 }, { linkedS: D }) === `accepted/linked/${D}`, "a pending or stale proposal on a pair the board links is accepted by the link");
-  ok(outd({ settled: 1, settledS: 3 * D }) === "withdrawn/null/null" && outd({ settled: 1, settledS: 31 * D }, { ageS: 40 * D }) === "unanswered/null/null"
-      && outd({ settled: 1, settledS: 3 * D }, { linkedS: 2 * D }) === `accepted/linked/${2 * D}` && outd({ settled: 1, rejected: 1, rejectedS: D, settledS: 3 * D }) === `rejected/proposal/${D}`
-      && outd({ settled: 1, stale: 1 }) === "open/null/null" && outd({ settled: 1, settledS: 3 * D }, { ageS: 40 * D }) === "withdrawn/null/null",
-    "the pass's settle is no reviewer's no: withdrawn within the window, unanswered after it, a link and a person's rejection before it, a stale one still open (review pass 2)");
+  ok(outd({}, { withdrawnS: 3 * D }) === "withdrawn/null/null" && outd({}, { withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
+      && outd({}, { withdrawnS: 3 * D, linkedS: 2 * D }) === `accepted/linked/${2 * D}` && outd({ rejected: 1, rejectedS: D }, { withdrawnS: 3 * D }) === `rejected/proposal/${D}`
+      && outd({ stale: 1 }) === "open/null/null" && outd({}, { withdrawnS: 3 * D, ageS: 40 * D }) === "withdrawn/null/null",
+    "the pass's settle is no reviewer's no: withdrawn within the window, unanswered after it, a link and a person's rejection before it, a stale one never settled since the post still open (review pass 2)");
+  ok(outd({ reopened: 1 }, { withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null" && outd({ reopened: 1 }, { withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
+      && outd({ reopened: 1 }, { withdrawnS: 5 * D, linkedS: 6 * D }) === `accepted/linked/${6 * D}` && outd({ accepted: 1, acceptedS: 9 * D }, { withdrawnS: 5 * D }) === `accepted/proposal/${9 * D}`
+      && outd({ reopened: 1 }, { withdrawnS: -60 }) === "withdrawn/null/null",
+    "a settle a text move reopened since stays a take-back, withdrawn within the window and unanswered past it; an acceptance or a link still answers; one settled before its comment was posted is withdrawn (SMD-2913)");
+  ok(outd({ rejected: 1, rejectedS: 3 * D, reopened: 1 }) === `rejected/proposal/${3 * D}` && outd({ rejected: 1, reopened: 1, stale: 1 }) === "open/null/null",
+    "a proposal the pass took back and a text move reopened does not hold off a person's rejection beside it; one waiting on its re-judge does (review pass 2)");
+  ok(out({ stands: true, ageS: 40 * D }) === "unanswered/null/null" && out({ stands: true, ageS: 10 * D }) === "open/null/null",
+    "a relation the judge says again is its verdict once more: open, then unanswered — not a take-back (review pass 1)");
   ok(outd({}, { ageS: 31 * D }) === "unanswered/null/null" && out({ stands: false, ageS: 31 * D }) === "unanswered/null/null",
     "gone with its thought, no time left: the comment's age decides, past the window unanswered (review pass 2)");
   ok(outd({ stale: 2 }) === "open/null/null" && outd({ stale: 2 }, { ageS: 31 * D }) === "unanswered/null/null" && outd({}) === "withdrawn/null/null",
@@ -253,7 +261,10 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ accepted: 1, acceptedS: 2 * D }) })),
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ rejected: 1, rejectedS: null }) })),
     reportLine(row({ word: "outdates", stands: null, proposals: prop({}) })),
-    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1, settledS: 4 * D }) })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({}), withdrawnS: 4 * D })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ reopened: 1 }), withdrawnS: 4 * D })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1 }) })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1 }), withdrawnS: -600 })),
     reportLine(row({ word: "evolves", stands: false })),
     reportLine(row({ origin: "found" })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: 2 * D })),
@@ -267,6 +278,9 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — rejected: its proposal was rejected",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: its proposal is gone",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after (reopened since)",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 0 s after",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: its relation is gone with a thought",
     "    SMD-1 ~ SMD-2          related   posted 5 d ago on SMD-2 — open",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 2 d after",
