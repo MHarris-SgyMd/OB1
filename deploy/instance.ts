@@ -33,11 +33,11 @@ const HERE = import.meta.dir;
 const USAGE = "usage: bun --no-env-file deploy/instance.ts check [--env-file PATH …] [-f FILE …] [--profile NAME …] [-p NAME] [--runtime docker|podman]\n       bun deploy/instance.ts --self-check";
 
 /** A published port's setting, as a compose file's house-form mapping names it. */
-export type Knob = { service: string; target: number; port: string; bind: string; file: string };
+export type Knob = { service: string; target: number; port: string; bind: string };
 const HOUSE = /^\$\{([A-Z][A-Z0-9_]*):-[^}]*\}:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
 
 /** Each house-form mapping in a compose file's text, by service and container port. */
-export function knobsIn(text: string, file: string): Knob[] {
+export function knobsIn(text: string): Knob[] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch { return []; }
   const services = (doc as { services?: Record<string, { ports?: unknown }> } | null)?.services ?? {};
@@ -46,7 +46,7 @@ export function knobsIn(text: string, file: string): Knob[] {
     const ports = Array.isArray(def?.ports) ? def.ports : [];
     for (const p of ports) {
       const m = typeof p === "string" ? HOUSE.exec(p.trim()) : null;
-      if (m) out.push({ service, target: Number(m[3]), bind: m[1], port: m[2], file });
+      if (m) out.push({ service, target: Number(m[3]), bind: m[1], port: m[2] });
     }
   }
   return out;
@@ -131,6 +131,15 @@ export function sameEnvFiles(c: Pick<Container, "envFile" | "workingDir">, envFi
   return a.size === b.size && [...a].every((f) => b.has(f));
 }
 
+/** How a port is told: where it binds, the setting the compose files' house-form mapping names, and its fix. */
+export function portWords(p: Published, knobs: Knob[], shown: string): { setting: string; fix: string; where: string } {
+  const k = knobs.filter((x) => x.service === p.service && x.target === p.target).at(-1);
+  return {
+    setting: k ? `${k.port} (${p.service}'s port; ${k.bind} its address)` : `${p.service}'s port ${p.target}, a mapping in the compose files`,
+    fix: k ? `set ${k.port} in ${shown} to a free port` : `change ${p.service}'s mapping`,
+    where: `${p.hostIp.includes(":") ? `[${p.hostIp}]` : p.hostIp || "0.0.0.0"}:${p.port}${p.protocol === "tcp" ? "" : "/" + p.protocol}`,
+  };
+}
 /** A finding: its line, and whether it lets the up go. */
 export type Verdict = { ok: boolean; line: string };
 /** A port left to dial, and this brain's own stopped container that takes it when it starts, if one does. */
@@ -145,15 +154,11 @@ export function decide(o: { project: string; envFiles: string[]; published: Publ
   const mine = (c: Container) => c.project === o.project && sameEnvFiles(c, o.envFiles);
   const others = [...new Set(o.containers.filter((c) => c.project === o.project && !mine(c)).map((c) => envFilesOf(c).join(", ")))];
   for (const f of others) verdicts.push({ ok: false, line: `✗ project ${o.project} was made from ${f}, not ${shown}: an up from this file would recreate that brain's containers with this file's settings. If this is that brain's env file, moved or renamed, recreate it from here (up -d --force-recreate with this file, the same profiles and --remove-orphans); otherwise ${o.nameFrom ? `give this brain a project name of its own in place of ${o.nameFrom}'s` : "give this file a COMPOSE_PROJECT_NAME of its own"}.` });
-  const knobOf = (p: Published) => o.knobs.filter((k) => k.service === p.service && k.target === p.target).at(-1);
   // A holder holds the port now (running, paused, restarting), or takes it when it starts: back, or first.
   const now = (c: Container) => ["running", "paused", "restarting", ""].includes(c.state);
   const state = (c: Container) => now(c) ? " —" : c.state === "created" ? ", created: it takes the port when it first starts — remove it, or" : `, ${c.state}: it takes the port back when it starts (a restart policy, a reboot) — remove it, or`;
   for (const [i, p] of o.published.entries()) {
-    const k = knobOf(p);
-    const setting = k ? `${k.port} (${p.service}'s port; ${k.bind} its address)` : `${p.service}'s port ${p.target}, a mapping in the compose files`;
-    const fix = k ? `set ${k.port} in ${shown} to a free port` : `change ${p.service}'s mapping`;
-    const where = `${p.hostIp.includes(":") ? `[${p.hostIp}]` : p.hostIp || "0.0.0.0"}:${p.port}${p.protocol === "tcp" ? "" : "/" + p.protocol}`;
+    const { setting, fix, where } = portWords(p, o.knobs, shown);
     if (p.port === 0) { verdicts.push({ ok: true, line: `✓ ${where}: ${setting} — 0, so compose picks a free port` }); continue; }
     const twin = o.published.find((q, j) => j < i && q.port === p.port && q.protocol === p.protocol && overlaps(q.hostIp, p.hostIp));
     if (twin) { verdicts.push({ ok: false, line: `✗ ${where}: ${setting} — ${twin.service}'s mapping in this same brain asks for it too; ${fix}.` }); continue; }
@@ -276,7 +281,7 @@ export function openings(text: string): string[] {
  *  open, by key and line; a port or address that is none, which are no secrets) and the compose files' own words
  *  for a `${X:?…}`. Compose's words are never printed: they quote the env files' values, escaped, decoded or run on
  *  from a line before, past any cutting of them (review passes 10–12). */
-export function explain(err: string, ctx: { envs: string[]; envTexts: string[]; composeTexts: string[]; named: boolean; unparsed?: string[] }): string {
+export function explain(err: string, ctx: { envs: string[]; envTexts: string[]; composeTexts: string[]; fromFlag: boolean; unparsed?: string[] }): string {
   const s = err.replace(/\x1b\[[0-9;]*m/g, "");
   // A quote left open runs the next lines into a value, whatever compose then says of it.
   const opens = () => { const o = ctx.envTexts.flatMap((text, i) => openings(text).map((x) => (ctx.envs.length > 1 ? `${ctx.envs[i]}: ${x}` : x))).slice(0, 3); return o.length ? `; ${o.join("; ")}` : ""; };
@@ -286,8 +291,8 @@ export function explain(err: string, ctx: { envs: string[]; envTexts: string[]; 
     // Compose's line for a quote nothing closes is past the end of the file: the opener is named instead.
     const n = /unterminated quoted value/.test(s) ? undefined : /failed to read .*?: line (\d+):/.exec(s)?.[1];
     // A required variable's name is told only where it is a setting's or a compose file's: it is a value's text.
-    const named = /required variable ([A-Za-z0-9_]+) is missing/.exec(s)?.[1];
-    const name = named && ((at >= 0 && settingsIn(ctx.envTexts[at]).some((x) => x.key === named)) || ctx.composeTexts.some((c) => c.includes(`\${${named}`))) ? named : undefined;
+    const asked = /required variable ([A-Za-z0-9_]+) is missing/.exec(s)?.[1];
+    const name = asked && ((at >= 0 && settingsIn(ctx.envTexts[at]).some((x) => x.key === asked)) || ctx.composeTexts.some((c) => c.includes(`\${${asked}`))) ? asked : undefined;
     const kind = (PARSE_KINDS.find(([re]) => re.test(s))?.[1] ?? "a line compose could not read") + (name ? ` (${name})` : "");
     const open = at >= 0 ? openings(ctx.envTexts[at]).slice(0, 3) : [];
     return `${at >= 0 ? ctx.envs[at] : "an env file"}${n ? `, line ${n}` : ""}: ${kind}${open.length ? `; ${open.join("; ")}` : ""}`;
@@ -308,7 +313,7 @@ export function explain(err: string, ctx: { envs: string[]; envTexts: string[]; 
     }));
     return (bad.length ? bad.join("; ") : "a port or an address in this brain's mappings is not one compose can read") + opens();
   }
-  if (/invalid project name/i.test(s)) return `the project name${ctx.named ? " given with -p" : " (COMPOSE_PROJECT_NAME, or the compose file's name:)"} must be lowercase letters, digits, - and _, from a letter or digit${opens()}`;
+  if (/invalid project name/i.test(s)) return `the project name${ctx.fromFlag ? " given with -p" : " (COMPOSE_PROJECT_NAME, or the compose file's name:)"} must be lowercase letters, digits, - and _, from a letter or digit${opens()}`;
   return `compose could not render this brain${ctx.unparsed?.length ? `: ${ctx.unparsed.join(", ")} ${ctx.unparsed.length > 1 ? "are" : "is"} not YAML` : ""}${opens()}`;
 }
 
@@ -364,13 +369,12 @@ async function check(args: string[]) {
   // A compose failure, told without compose's words (explain), of the first runtime whose compose ran, and the
   // command that prints compose's own words for the operator who would read them.
   const fail = (errs: string[], fs: string[], what: string): never => {
-    // The first runtime whose compose ran, and its command (review pass 13: the first runtime's, whose compose may not).
     const i = Math.max(0, errs.findIndex((e) => !NO_COMPOSE.test(e)));
     const read = fs.map((f) => { try { return readFileSync(f, "utf8"); } catch { return null; } });
     const composeTexts = read.filter((x): x is string => x !== null);
     // A compose file that is no YAML is named: its text is the compose file's, no env file's.
     const unparsed = fs.filter((_, k) => { try { Bun.YAML.parse(read[k] ?? ""); return false; } catch { return true; } });
-    console.error(`${explain(errs[i] ?? "", { envs, envTexts, composeTexts, named: Boolean(projectName), unparsed })}\n${what} Its own words are left out, since they can quote the env files' values; they are printed by: ${compose(["config", "--quiet"], fs, runtimes[i]).map(shellQuote).join(" ")}`);
+    console.error(`${explain(errs[i] ?? "", { envs, envTexts, composeTexts, fromFlag: Boolean(projectName), unparsed })}\n${what} Its own words are left out, since they can quote the env files' values; they are printed by: ${compose(["config", "--quiet"], fs, runtimes[i]).map(shellQuote).join(" ")}`);
     process.exit(2);
   };
   if (!given.length) {
@@ -383,12 +387,12 @@ async function check(args: string[]) {
     for (const rt of runtimes.slice(1)) if (tried.at(-1)!.exitCode !== 0) tried.push(probe(rt));
     const stub = tried.at(-1)!;
     if (stub.exitCode !== 0) fail(tried.map((s) => s.stderr.toString()), [join(HERE, "compose.yaml")], "compose could not read this brain's settings.");
-    let named: string | undefined;
-    try { named = (JSON.parse(stub.stdout.toString()) as { services?: { s?: { labels?: { f?: string } } } }).services?.s?.labels?.f; } catch { /* left undefined */ }
-    if (named === undefined) { console.error("compose's render of a stub said nothing of COMPOSE_FILE: give the check its files with -f."); process.exit(2); }
+    let picked: string | undefined;
+    try { picked = (JSON.parse(stub.stdout.toString()) as { services?: { s?: { labels?: { f?: string } } } }).services?.s?.labels?.f; } catch { /* left undefined */ }
+    if (picked === undefined) { console.error("compose's render of a stub said nothing of COMPOSE_FILE: give the check its files with -f."); process.exit(2); }
     // Any value, blank too, is one an up reads (compose refuses a blank one itself). Not printed: a quote left open
     // above it runs other settings into it, or it interpolates one (review pass 12).
-    if (named !== "") { console.error(`COMPOSE_FILE is set${process.env.COMPOSE_FILE !== undefined ? " in the shell" : ` in ${envs.join(", ")}`} and names the files an up of this brain reads: give the check the same files with -f.`); process.exit(2); }
+    if (picked !== "") { console.error(`COMPOSE_FILE is set${process.env.COMPOSE_FILE !== undefined ? " in the shell" : ` in ${envs.join(", ")}`} and names the files an up of this brain reads: give the check the same files with -f.`); process.exit(2); }
     files.push(join(HERE, "compose.yaml"));
   }
   for (const f of files) if (!existsSync(f)) { console.error(`no file at ${f}`); process.exit(2); }
@@ -400,7 +404,7 @@ async function check(args: string[]) {
   if (!r.ok) fail(renders.map((x) => x.err), files, `compose could not render the brain from ${envs.join(", ")}.`);
   const rendered = JSON.parse(r.out) as { name: string } & Parameters<typeof publishedIn>[0];
   const project = rendered.name;
-  const knobs = files.flatMap((f) => knobsIn(readFileSync(f, "utf8"), resolve(f)));
+  const knobs = files.flatMap((f) => knobsIn(readFileSync(f, "utf8")));
 
   const seen = new Set<string>();
   const containers: Container[] = [];
@@ -448,12 +452,10 @@ async function check(args: string[]) {
   // With unread holders, a port no container read holds is not known to be free: refused, unknown.
   if (published.length) for (const u of unreadable) verdicts.push({ ok: false, line: `✗ ${u}: a port they take back when they start may be one of these. Rerun the check.` });
   for (const p of undecided) {
-    const k = knobs.filter((x) => x.service === p.service && x.target === p.target).at(-1);
-    const setting = k ? `${k.port} (${p.service}'s port; ${k.bind} its address)` : `${p.service}'s port ${p.target}, a mapping in the compose files`;
-    const where = `${p.hostIp.includes(":") ? `[${p.hostIp}]` : p.hostIp || "0.0.0.0"}:${p.port}${p.protocol === "tcp" ? "" : "/" + p.protocol}`;
+    const { setting, fix, where } = portWords(p, knobs, envs.join(", "));
     // A process no container list shows answers a connection; a wildcard bind meets one on loopback. UDP is not dialled.
     if (p.protocol === "tcp" && await listens(WILDCARD.has(p.hostIp) ? "127.0.0.1" : p.hostIp, p.port)) {
-      verdicts.push({ ok: false, line: `✗ ${where}: ${setting} — something on this host that is no container already listens there. Stop it, or ${k ? `set ${k.port} in ${envs.join(", ")} to a free port` : `change ${p.service}'s mapping`}.` });
+      verdicts.push({ ok: false, line: `✗ ${where}: ${setting} — something on this host that is no container already listens there. Stop it, or ${fix}.` });
     } else if (unreadable.length) verdicts.push({ ok: false, line: `? ${where}: ${setting} — unknown: some stopped containers could not be read, and may take it when they start` });
     else verdicts.push({ ok: true, line: `✓ ${where}: ${setting} — free${p.own ? `, for this brain's ${p.own.service} (${p.own.name}, ${p.own.state}) to take when it starts` : ""}` });
   }
@@ -474,7 +476,7 @@ async function selfCheck() {
     ports:
       - "9000:9000"
 `;
-  const knobs = knobsIn(compose, "compose.yaml");
+  const knobs = knobsIn(compose);
   const env = "/srv/ob1/deploy/.env.ob1b.local";
   const c = (name: string, ports: string, project: string, service: string, state = "running", envFile = env, workingDir = "/srv/ob1/deploy"): Container => ({ id: name, fullId: name, name, ports, project, service, state, envFile, workingDir });
   const cs = [
@@ -483,9 +485,6 @@ async function selfCheck() {
     c("ob1b-n8n-1", "127.0.0.1:5678->5678/tcp", "ob1b", "n8n"),
     c("squat", "0.0.0.0:8080->80/tcp, [::]:8080->80/tcp", "", ""),
     c("old", "127.0.0.1:8090->8000/tcp", "oldbrain", "forwarder", "exited", "/x/.env"),
-    c("dns", "127.0.0.1:8095->53/udp", "", ""),
-    c("lan", "192.168.1.5:8096->80/tcp", "", ""),
-    c("range", "127.0.0.1:18700-18702->80-82/tcp", "", ""),
   ];
   const pub = (port: number, service = "forwarder", hostIp = "127.0.0.1", protocol = "tcp", target = 8000): Published => ({ service, target, hostIp, port, protocol });
   const one = (project: string, published: Published[], containers = cs, envFiles = [env]) => decide({ project, envFiles, published, containers, knobs });
@@ -495,7 +494,7 @@ async function selfCheck() {
     const doc = Bun.YAML.parse(readFileSync(f, "utf8")) as { services?: Record<string, { ports?: unknown[] }> };
     return Object.values(doc.services ?? {}).flatMap((s) => (Array.isArray(s?.ports) ? s.ports : []));
   });
-  const realKnobs = realFiles.flatMap((f) => knobsIn(readFileSync(f, "utf8"), f));
+  const realKnobs = realFiles.flatMap((f) => knobsIn(readFileSync(f, "utf8")));
   // A real file and a symlink to it, for the env-file identity read through realpath.
   const { mkdtempSync, writeFileSync, symlinkSync, rmSync, mkdirSync, chmodSync } = await import("node:fs");
   const tmp = mkdtempSync(join((await import("node:os")).tmpdir(), "ob1-instance-"));
@@ -524,7 +523,7 @@ async function selfCheck() {
   const badArgRun = runCheck(["--no-env-file", import.meta.path, "check", "--nope"], elsewhereDir);
   const notDisabled = runCheck(["--no-env-file", import.meta.path, "check", "-f", join(elsewhereDir, "compose.yaml")], elsewhereDir, { ...clean, COMPOSE_DISABLE_ENV_FILE: "false" });
   // check() against a stub docker and podman (shell builtins alone, PATH only theirs): which compose runs, what
-  // inspect prints, whether a fresh list can be read. One exited container, `gone` removed since `ps`, `mig` portless.
+  // inspect prints, whether a fresh list can be read. Three exited containers: `mig` portless, and `gone` the one some runs remove since `ps`.
   const stubBin = join(elsewhereDir, "bin");
   mkdirSync(stubBin);
   const stubScript = `#!/bin/sh
@@ -599,6 +598,13 @@ echo "stub $rt: $*" >&2; exit 1
   const listening = await listens("127.0.0.1", port);
   await new Promise((r) => server.close(r));
   const closed = await listens("127.0.0.1", port);
+  // explain() against one env file holding a ${ left open and a quote run on: nothing of a value in what it says.
+  const exCtx = { envs: ["/x/a.env"], envTexts: ['A=1\nT=x${OPEN\nSERVER_PORT=80x0\nSERVER_BIND=127.0.0.1\nB="pw-FAKE\n# note "x\n'], composeTexts: ["x: ${MCP_ACCESS_KEYS:?set it in deploy/.env}"], fromFlag: false };
+  const exTail = "; line 2 (T) holds a ${ with no }; line 5 (B) opens a quote that only line 6 closes, with more after it, and compose reads on from there";
+  const exSaid: string[] = [];
+  const ex = (e: string, ctx = exCtx) => { const s = explain(e, ctx); exSaid.push(s); return s; };
+  const u = (n: number) => String.fromCharCode(n);
+  const keysOf = (x: string) => settingsIn(x).map((s) => s.key).join();
   const cases: [string, boolean][] = [
     ["a house-form mapping names its port and address settings", knobs.some((k) => k.service === "forwarder" && k.target === 8000 && k.port === "SERVER_PORT" && k.bind === "SERVER_BIND")],
     ["a mapping not in the house form names no setting", knobs.length === 2 && !knobs.some((k) => k.service === "odd")],
@@ -636,9 +642,13 @@ echo "stub $rt: $*" >&2; exit 1
     ["check() on a stub runtime: docker's compose missing, podman's both says COMPOSE_FILE is unset and renders", fellBack.code === 0 && fellBack.out.includes(`127.0.0.1:${freePort}: SERVER_PORT`) && fellBack.out.includes("— free")],
     ["check() on a stub runtime: no compose that runs is said so, with what to install", noCompose.code === 2 && noCompose.err.includes("no compose ran: install Docker Compose v2.23.1 or later")],
     ["check() on a stub runtime: an env file's parse error told by file, line, kind and the key that opens a quote, its value not", leakQuote.code === 2 && leakQuote.err.includes(`${join(elsewhereDir, "secret.env")}: an unterminated quoted value; line 2 (API_KEY) opens a quote`) && leakValue.code === 2 && leakValue.err.includes("not one compose can read") && !(leakQuote.err + leakValue.err).includes("FAKE-MARKER")],
-    ["a failure told from what holds no value: a parse error escaped and run on, a template, a suffix split over lines, an unknown network, a bad port", (() => { const ctx = { envs: ["/x/a.env"], envTexts: ['A=1\nT=x${OPEN\nSERVER_PORT=80x0\nSERVER_BIND=127.0.0.1\nB="pw-FAKE\n# note "x\n'], composeTexts: ["x: ${MCP_ACCESS_KEYS:?set it in deploy/.env}"], named: false }; const tail = "; line 2 (T) holds a ${ with no }; line 5 (B) opens a quote that only line 6 closes, with more after it, and compose reads on from there"; const run = [String.raw`failed to read /x/a.env: line 6: unexpected character "\"" in variable name "pw-FAKE\" # note"`, 'failed to read /x/a.env: Invalid template: "FAKE\\SEC${"', "services[postgres].shm_size: invalid suffix: '\"1g\nB=FAKE-pre'", 'service "s" refers to undefined network FAKE hotline 42: invalid', 'invalid project name "FAKE": must be lowercase', "invalid hostPort: FAKE", 'failed to read /x/a.env: line 9: a wording compose has not used "FAKE"', "required variable FAKE-X is missing a value: y", "failed to read /x/a.env: line 1: required variable MCP_ACCESS_KEYS is missing a value", "failed to read /x/a.env: line 1: required variable FAKE_NAME is missing a value"].map((e) => explain(e, ctx)); return !run.join("|").includes("FAKE") && run[0] === "/x/a.env, line 6: an unexpected character in a variable name" + tail && run[1] === "/x/a.env: an invalid template (a ${ that does not close)" + tail && run[2] === "compose could not render this brain" + tail && run[3] === run[2] && run[4].startsWith("the project name (COMPOSE_PROJECT_NAME") && run[5] === "SERVER_PORT is not a port number" + tail && run[6] === "/x/a.env, line 9: a line compose could not read" + tail && run[7] === run[2] && run[8].startsWith("/x/a.env, line 1: a required variable with no value (MCP_ACCESS_KEYS)") && run[9].startsWith("/x/a.env, line 1: a required variable with no value;") && explain("required variable MCP_ACCESS_KEYS is missing a value: FAKE", ctx) === "MCP_ACCESS_KEYS is not set: set it in deploy/.env" && explain("docker: unknown command: docker compose", ctx).startsWith("no compose ran") && explain("Error: looking up compose provider failed\n* exec: x", ctx).startsWith("no compose ran") && explain("failed to read /x/a.env.local: line 2: unterminated quoted value", { ...ctx, envs: ["/x/a.env", "/x/a.env.local"], envTexts: ["A=1\n", 'B="FAKE\n'] }).startsWith("/x/a.env.local: an unterminated quoted value"); })()],
-    ["the env file read by compose's grammar: a single-quoted escape, keys in any script, brackets, an empty key, a lone CR, U+2028 and NEL, a statement after a close, a comment only at a space and #", (() => { const k = (x: string) => settingsIn(x).map((s) => s.key).join(); const u = (n: number) => String.fromCharCode(n); return k("P=1\nW='C:\\temp\\'\nS_PORT=8010\n") === "P,W" && k("N='it\\'s\nX_PORT=zz\n'\nP=1\n") === "N,P" && k("CL" + u(0xc9) + "=\"x\nF_PORT=abc\n\"\nP=1\n") === "CL" + u(0xc9) + ",P" && k("C[0]='b\nM=${t\n'\nP=1\n") === "C[0],P" && k("='b\nM=${t\n'\nP=1\n") === ",P" && k("A=\"x\ry\nF_PORT=abc\n\"\nP=1\n") === "A,P" && k("A=\"x" + u(0x2028) + "y\nF_PORT=abc\n\"\nP=1\n") === "A,P" && k("C=" + u(0x85) + "'b\nM=${t\n'\nP=1\n") === "C,P" && k("A='x' C='b\nM=${t\n'\nP=1\n") === "A,C,P" && k("A=\"x\" B_PORT=9\n") === "A,B_PORT" && settingsIn("X_PORT=#8010\nY_PORT=8010\t# c\n").map((s) => s.value).join("|") === "#8010|8010\t# c" && openings("C[0]=\"x${y\n").join() === "line 1 (a setting) opens a quote nothing closes, and compose reads on from there" && openings("M=\"qwen\nPW=\"FAKE\" # c\n").join() === "line 1 (M) opens a quote that only line 2 closes, with more after it, and compose reads on from there" && openings("T='x${y'\n").length === 0 && explain("invalid hostPort: x", { envs: ["/x/a.env"], envTexts: ["P=8010\nX_PORT=$P\nZ_PORT=abc\nZ_PORT=18000\nW_PORT=#8010\na.b_PORT=zz\n"], composeTexts: [], named: false }) === "X_PORT, set from another setting,; W_PORT is not a port number" && explain("invalid hostPort: x", { envs: ["/x/a.env"], envTexts: ["S_PORT=18735" + u(0xfeff) + "\n"], composeTexts: [], named: false }) === "S_PORT is not a port number"; })()],
-    ["the env file read as compose reads it: a value spanning lines no setting, no hint, a port's comment, brackets, quotes, export and colon read, names alone", (() => { const tls = 'TLS="MIIB\nFAKEaGVsbG8="\nP=1\n'; const ports = 'SERVER_PORT=64220 # pw FAKE\nSERVER_BIND=[::1]\nX_BIND=999.1.1.1x\nQ_PORT="8010"\nexport E_PORT=80x0\nC_PORT: 99999\nI_BIND=::1\nS_PORT=${OTHER}\n'; const said = explain("invalid IP address: x", { envs: ["/x/a.env"], envTexts: [ports], composeTexts: [], named: false }); return openings(tls).length === 0 && settingsIn(tls).map((s) => s.key).join() === "TLS,P" && openings('NOTE="first\ntoken_FAKE="x\nFAKE.part=\'y\nend"\n').join() === "line 1 (NOTE) opens a quote that only line 2 closes, with more after it, and compose reads on from there" && openings('A="x\\"\n').join() === "line 1 (A) opens a quote nothing closes, and compose reads on from there" && openings("A='it\nB=1\n").join() === "line 1 (A) opens a quote nothing closes, and compose reads on from there" && said === "X_BIND is not an IP address; E_PORT is not a port number; C_PORT is not a port number; S_PORT, set from another setting," && !said.includes("FAKE"); })()],
+    ["an env file's parse error told by file, line, kind and where a quote or ${ stays open, no value of it", ex(String.raw`failed to read /x/a.env: line 6: unexpected character "\"" in variable name "pw-FAKE\" # note"`) === "/x/a.env, line 6: an unexpected character in a variable name" + exTail && ex('failed to read /x/a.env: Invalid template: "FAKE\\SEC${"') === "/x/a.env: an invalid template (a ${ that does not close)" + exTail && ex('failed to read /x/a.env: line 9: a wording compose has not used "FAKE"') === "/x/a.env, line 9: a line compose could not read" + exTail && ex("failed to read /x/a.env: line 1: required variable MCP_ACCESS_KEYS is missing a value").startsWith("/x/a.env, line 1: a required variable with no value (MCP_ACCESS_KEYS)") && ex("failed to read /x/a.env: line 1: required variable FAKE_NAME is missing a value").startsWith("/x/a.env, line 1: a required variable with no value;") && ex("failed to read /x/a.env.local: line 2: unterminated quoted value", { ...exCtx, envs: ["/x/a.env", "/x/a.env.local"], envTexts: ["A=1\n", 'B="FAKE\n'] }).startsWith("/x/a.env.local: an unterminated quoted value")],
+    ["any other failure told without compose's words: a suffix split over lines, an unknown network, a name compose refuses, a project name, a bad port", ex("services[postgres].shm_size: invalid suffix: '\"1g\nB=FAKE-pre'") === "compose could not render this brain" + exTail && ex('service "s" refers to undefined network FAKE hotline 42: invalid') === "compose could not render this brain" + exTail && ex("required variable FAKE-X is missing a value: y") === "compose could not render this brain" + exTail && ex('invalid project name "FAKE": must be lowercase').startsWith("the project name (COMPOSE_PROJECT_NAME") && ex("invalid hostPort: FAKE") === "SERVER_PORT is not a port number" + exTail],
+    ["an unset variable told by the compose file's words; a runtime with no compose, by docker's words or podman's, said so", ex("required variable MCP_ACCESS_KEYS is missing a value: FAKE") === "MCP_ACCESS_KEYS is not set: set it in deploy/.env" && ex("docker: unknown command: docker compose").startsWith("no compose ran") && ex("Error: looking up compose provider failed\n* exec: x").startsWith("no compose ran")],
+    ["nothing explain() said of these failures holds a value of the env file's", exSaid.length === 14 && !exSaid.join("|").includes("FAKE")],
+    ["the env file read by compose's grammar: a single-quoted escape, keys in any script, brackets, an empty key, a lone CR, U+2028 and NEL, a statement after a close", keysOf("P=1\nW='C:\\temp\\'\nS_PORT=8010\n") === "P,W" && keysOf("N='it\\'s\nX_PORT=zz\n'\nP=1\n") === "N,P" && keysOf("CL" + u(0xc9) + "=\"x\nF_PORT=abc\n\"\nP=1\n") === "CL" + u(0xc9) + ",P" && keysOf("C[0]='b\nM=${t\n'\nP=1\n") === "C[0],P" && keysOf("='b\nM=${t\n'\nP=1\n") === ",P" && keysOf("A=\"x\ry\nF_PORT=abc\n\"\nP=1\n") === "A,P" && keysOf("A=\"x" + u(0x2028) + "y\nF_PORT=abc\n\"\nP=1\n") === "A,P" && keysOf("C=" + u(0x85) + "'b\nM=${t\n'\nP=1\n") === "C,P" && keysOf("A='x' C='b\nM=${t\n'\nP=1\n") === "A,C,P" && keysOf("A=\"x\" B_PORT=9\n") === "A,B_PORT"],
+    ["what the grammar reads told: a comment only at a space and #, an odd key as a setting, a quote run on at a failure, a single-quoted ${ none, ports by last setting, reference and U+FEFF", settingsIn("X_PORT=#8010\nY_PORT=8010\t# c\n").map((s) => s.value).join("|") === "#8010|8010\t# c" && openings("C[0]=\"x${y\n").join() === "line 1 (a setting) opens a quote nothing closes, and compose reads on from there" && openings("M=\"qwen\nPW=\"FAKE\" # c\n").join() === "line 1 (M) opens a quote that only line 2 closes, with more after it, and compose reads on from there" && openings("T='x${y'\n").length === 0 && explain("invalid hostPort: x", { envs: ["/x/a.env"], envTexts: ["P=8010\nX_PORT=$P\nZ_PORT=abc\nZ_PORT=18000\nW_PORT=#8010\na.b_PORT=zz\n"], composeTexts: [], fromFlag: false }) === "X_PORT, set from another setting,; W_PORT is not a port number" && explain("invalid hostPort: x", { envs: ["/x/a.env"], envTexts: ["S_PORT=18735" + u(0xfeff) + "\n"], composeTexts: [], fromFlag: false }) === "S_PORT is not a port number"],
+    ["the env file read as compose reads it: a value spanning lines no setting, no hint, a port's comment, brackets, quotes, export and colon read, names alone", (() => { const tls = 'TLS="MIIB\nFAKEaGVsbG8="\nP=1\n'; const ports = 'SERVER_PORT=64220 # pw FAKE\nSERVER_BIND=[::1]\nX_BIND=999.1.1.1x\nQ_PORT="8010"\nexport E_PORT=80x0\nC_PORT: 99999\nI_BIND=::1\nS_PORT=${OTHER}\n'; const said = explain("invalid IP address: x", { envs: ["/x/a.env"], envTexts: [ports], composeTexts: [], fromFlag: false }); return openings(tls).length === 0 && settingsIn(tls).map((s) => s.key).join() === "TLS,P" && openings('NOTE="first\ntoken_FAKE="x\nFAKE.part=\'y\nend"\n').join() === "line 1 (NOTE) opens a quote that only line 2 closes, with more after it, and compose reads on from there" && openings('A="x\\"\n').join() === "line 1 (A) opens a quote nothing closes, and compose reads on from there" && openings("A='it\nB=1\n").join() === "line 1 (A) opens a quote nothing closes, and compose reads on from there" && said === "X_BIND is not an IP address; E_PORT is not a port number; C_PORT is not a port number; S_PORT, set from another setting," && !said.includes("FAKE"); })()],
     ["check() on a stub runtime: a bad port named by its setting, an unset variable by the compose file's words, compose's own command given, no value", badPort.code === 2 && badPort.err.includes("SERVER_PORT is not a port number") && !badPort.err.includes("80x0") && unset.err.includes("MCP_ACCESS_KEYS is not set: set MCP_ACCESS_KEYS in deploy/.env") && unset.err.includes(`config --quiet`) && unset.err.includes(`--env-file ${join(elsewhereDir, "secret.env")}`) && !(badPort.err + unset.err).includes("FAKE-MARKER") && notYaml.err.includes(`compose could not render this brain: ${join(elsewhereDir, "bad.yaml")} is not YAML`) && notYamlDir.err.includes(`compose could not render this brain: ${join(elsewhereDir, "bad.yaml")} is not YAML`)],
     ["check() on a stub runtime: no value printed from a second env file, nor from podman's probe when docker has no compose", twoEnvs.code === 2 && twoEnvs.err.includes("compose could not render this brain") && probePodman.code === 2 && probePodman.err.includes("the project name (COMPOSE_PROJECT_NAME") && !(twoEnvs.err + probePodman.err).includes("FAKE-MARKER")],
     ["check() on a stub runtime: an env file that cannot be read is refused, plainly; a blank COMPOSE_FILE too", dirEnv.code === 2 && dirEnv.err.startsWith(`cannot read ${join(elsewhereDir, "dir.env")}: EISDIR`) && filesBlank.code === 2 && filesBlank.err.includes("COMPOSE_FILE is set")],

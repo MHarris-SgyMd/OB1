@@ -131,8 +131,9 @@ jobs:
 
       # One env file is one brain (SMD-2873): deploy/instance.ts check reads
       # each published port's setting from the house form, compose's render
-      # and a container list, and names who holds a port. Its pure parts, on
-      # fixtures; the deploy-stack job runs it beside a stack and a second brain.
+      # and a container list, and names who holds a port. Its parts on fixtures,
+      # and check() itself against stub runtimes; the deploy-stack job runs it
+      # beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
 
