@@ -121,6 +121,7 @@ main() {
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
+  OB1_MCP_UNDER_TEST=client run server-portable test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
   run server-portable    test-plugins-sql.ts
   run server-portable    test-local-provider.ts

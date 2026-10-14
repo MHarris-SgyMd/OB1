@@ -9,10 +9,11 @@
 import { randomBytes } from "node:crypto";
 import { hashKey, routable } from "../server-portable/auth.ts";
 import { createRestClient } from "../rest-client/index.ts";
+import { SUITE_CARRIER } from "../server-portable/test-support.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 
 const forwarderKey = randomBytes(32).toString("hex");
-process.env.MCP_ACCESS_KEYS = [process.env.MCP_ACCESS_KEYS, `mcp-server-suite:forward:${hashKey(forwarderKey)}`].filter(Boolean).join(",");
+process.env.MCP_ACCESS_KEYS = [process.env.MCP_ACCESS_KEYS, `${SUITE_CARRIER}:forward:${hashKey(forwarderKey)}`].filter(Boolean).join(",");
 
 const api = (await import("../server-portable/api.ts")).default;
 const rest = createRestClient({
