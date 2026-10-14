@@ -11736,6 +11736,14 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     const rc2 = await run();
     assert(rc2.posted.length === 1 && rc2.posted[0].on === "ZQ-72" && (await rowsOf("ZQ-72", "ZQ-73"))[0]?.posted_on === "ZQ-72",
       `…and once one of them reopens, the pair is posted, on the reopened one (${summaryLine(rc2, 10, false).trim()})`);
+    // A hand capture carrying the issue and superseding a closed ticket's Linear row becomes its head, with no status: the ticket is still closed, read from its newest Linear row (SMD-2932 review pass 1).
+    const z76 = await ticketAs(76, "done, then a hand note over it", "completed"), z77 = await ticketAs(77, "done too", "completed");
+    await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint, supersedes) VALUES ('ZQ-76 — a hand note (board-findings fixture)', ${{ source: "manual", issue: "ZQ-76" }}::jsonb, content_fingerprint_of('ZQ-76 — a hand note (board-findings fixture)'), ${z76.id}::uuid)`;
+    const head76 = ((await bsql`SELECT status_type FROM ob1_ticket_head WHERE issue = 'ZQ-76'`)[0] as { status_type: string | null } | undefined)?.status_type;
+    await relate(z77, z76, "related", 0.86);
+    const rc3 = await run();
+    assert(head76 === null && rc3.posted.every((p) => p.on !== "ZQ-76" && p.on !== "ZQ-77") && (await rowsOf("ZQ-76", "ZQ-77")).length === 0 && !(await selectFindings(bsql)).some((f) => f.a === "ZQ-76"),
+      `a ticket whose head is a hand capture with no status is still closed, read from its newest Linear row, so two closed tickets stay unposted (head ${head76}; ${summaryLine(rc3, 10, false).trim()})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");

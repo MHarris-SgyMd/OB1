@@ -41,8 +41,11 @@
  * one comment. A pair of closed tickets (status type completed, canceled or
  * duplicate, read from 068's ob1_ticket_head) is not posted until one
  * reopens: a comment asking to link two finished tickets is the least useful
- * kind, and it spends the cap open work could use (SMD-2932). The record (migration 087, board_findings_posted)
- * is per pair and WORD — outdates, related, evolves, duplicate — so a
+ * kind, and it spends the cap open work could use (SMD-2932). A ticket whose
+ * head carries no status (a hand capture over a superseded Linear row) reads
+ * its newest Linear row's; one with no status at all counts as open. The
+ * record (migration 087,
+ * board_findings_posted) is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
  * pair posted as related is posted once more only when the judge says
  * something else about it. The comment carries the two identifiers, the word
@@ -387,7 +390,7 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
                                to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
-  // 029's table precedes 087 in every tree, so it exists here.
+  // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
                                has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AND has_table_privilege('ob1_ticket_head', 'SELECT') AS read,
@@ -402,14 +405,24 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
   return missing.length ? `this role lacks ${missing.join("; ")} — cd db && bun migrate.ts --url <owner's url> --grant <role> --groups capture,structure` : null;
 }
 
-// A ticket is closed when its head's status type is completed, canceled or
+// A ticket is closed when its status type is completed, canceled or
 // duplicate (Done, Canceled, Duplicate — Linear gives Duplicate a type of its
-// own) — 068's ob1_ticket_head, by its key; one with
-// no head or no status is open. A pair of closed tickets is not posted: a
-// comment asking to link two finished tickets is the least useful kind, and
-// it spends the cap open work could use (SMD-2932). Reopened, it is again.
-const closed = (k: string) =>
-  `EXISTS (SELECT 1 FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IN ('completed', 'canceled', 'duplicate'))`;
+// own): its head's, from 068's ob1_ticket_head by its key, or — when the head
+// carries none, as a hand capture superseding the Linear row does — its
+// newest Linear row's, through 068's issue-key index (review pass 1). A ticket
+// with neither is open, and an unknown never reads as NULL, which would drop
+// the pair. A pair of closed tickets is not posted: a comment asking to link
+// two finished tickets is the least useful kind, and it spends the cap open
+// work could use (SMD-2932). Reopened, it is again. 058's
+// node_settled_types() lacks duplicate, so this set is its own until
+// SMD-2935 adds it there and this reads it.
+const closed = (k: string) => `coalesce(coalesce(
+    (SELECT th.status_type FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IS NOT NULL),
+    (SELECT t.metadata->>'status_type' FROM thoughts t
+      WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(${k})::uuid
+        AND t.metadata->>'source' = 'linear' AND t.metadata->>'status_type' IS NOT NULL
+      ORDER BY t.metadata->>'linear_updated_at' DESC NULLS LAST, t.created_at DESC, t.id DESC LIMIT 1)
+  ) IN ('completed', 'canceled', 'duplicate'), false)`;
 
 // Both sides are Linear rows (metadata.source = 'linear': board-sync's
 // tickets and their dated sections), and both identities are identifiers —
