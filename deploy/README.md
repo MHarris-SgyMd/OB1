@@ -36,8 +36,47 @@ now ordinary environment variables your platform's secret store supplies.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+# the check first: up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
+
+`instance.ts check` renders the stack as compose will: the same env files, `-f`
+files, profiles and project name (`--env-file`, `-f`, `--profile` and `-p` as
+for compose). With no `--env-file`, it reads `COMPOSE_ENV_FILES`, else the
+`.env` beside the first compose file, as compose does; a `COMPOSE_FILE` in the
+env file or the shell needs the same files given with `-f`. It runs only under
+`bun --no-env-file`, and never beside a Bun `--env-file`, since Bun would load a
+`.env` in the working directory into the check, where compose reads it as the
+shell's; otherwise it refuses, naming the command.
+
+It refuses an env file whose project was made from other env files (the ones
+compose records for `--env-file` or `COMPOSE_ENV_FILES`, or the project
+directory's `.env` where none was given), since that `up` would recreate the
+other brain's containers with this file's settings; an env file that only moved
+is recreated from with `up -d --force-recreate`. Then, for each host port the
+brain would publish, it says whether the port is free, already the same
+service's own, or held: by another brain's container (a stopped one included,
+which takes its port back when it starts; Docker's read from its port bindings),
+by another of this brain's services, by a second mapping of this brain's, or by
+a process on the host. A port this brain's service holds now is its own (a
+stopped container that also asks for it is named); a port its stopped service
+will take back is tried first, in case a process took it meanwhile. A refusal
+names the setting to change (`SERVER_PORT`, and the others "One env file is one
+brain" lists).
+
+It only reads, so it is safe beside a running brain: run it before every `up`.
+Each line is `✓` (free, or this brain's own), `✗` (a refusal, naming what to
+change), `?` (unknown: a stopped container's ports could not be read) or `·` (a
+note). Any exit but 0 means do not `up`: 2 is a refusal, a usage error or
+compose's own. It never prints compose's words, which can quote an env file's
+values: it says what failed from a line number, a setting's name and its own
+reading of the files (a quote left open, a port that is none), and names the
+`compose … config --quiet` command that prints them.
+
+It reads every container runtime on the PATH, docker and podman both
+(`--runtime` names one). Where compose's own bind failure, at the end of an
+`up`, names no setting, its refusal names the one to change (SMD-2873).
 
 The profile is the stack's own Ollama, where the server's model endpoint
 defaults; drop it when `deploy/.env` names another provider (an Ollama on the
@@ -165,8 +204,11 @@ on one machine, each from its own file, all from the one `compose.yaml`:
   - `POSTGRES_PORT`, `OLLAMA_PORT` and `JEV_PORT` for `compose.host-ports.yaml`,
     each with its `_BIND`.
 
-  Set each one in the second instance's file. Otherwise its `up` fails to bind,
-  in compose's words, which do not name the setting.
+  Set each one in the second instance's file. `bun --no-env-file
+  deploy/instance.ts check --env-file deploy/.env.<name>.local -f
+  deploy/compose.yaml`, with the same `-f` files and `--profile`s as its `up`,
+  says before that `up` which one is still taken, and by what; compose's own
+  bind failure names no setting.
 
 A second brain beside the first:
 
@@ -175,7 +217,8 @@ cp deploy/.env.example deploy/.env.ob1b.local   # .env.*.local: the root .gitign
 # deploy/.env.ob1b.local: its own POSTGRES_PASSWORD and MCP_ACCESS_KEYS, as in step 1, and
 #   COMPOSE_PROJECT_NAME=ob1b
 #   SERVER_PORT=8040
-docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
+bun --no-env-file deploy/instance.ts check --env-file deploy/.env.ob1b.local -f deploy/compose.yaml &&
+  docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
 OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 

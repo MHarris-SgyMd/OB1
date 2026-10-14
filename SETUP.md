@@ -128,7 +128,9 @@ OB1_LLM_LOCAL=1                             # the endpoint is on this box — de
 ```
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+# deploy/instance.ts check first (deploy/README.md, step 2): up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 That profile adds an `ollama` service and a one-shot job that pulls both models
@@ -458,10 +460,13 @@ below.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
+# deploy/instance.ts check first (deploy/README.md, step 2): up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml &&
+  podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
 
 # …or, for the fully local path:
-podman compose -f deploy/compose.yaml --profile local-models up --build
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 Five services in order (seven with `local-models`): Postgres with pgvector, a migration job that applies the
