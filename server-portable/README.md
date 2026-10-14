@@ -442,14 +442,16 @@ pair since — any active Linear link either way, `duplicate_of` included),
 rejected (a person rejected one of its proposals, none pending or stale — a
 link since does not undo that no), withdrawn (its proposals gone, or settled by
 the consolidation pass's own re-judge, or a relation the judge stopped saying,
-within the window), open (a proposal pending, or stale and waiting on a
-re-judge, or a relation standing), or unanswered once open past 30 days — a finding the judge takes
+within the window), open (a proposal pending, or stale and not settled since it
+was last asserted, or a relation standing), or unanswered once open past 30 days
+from the post — a finding the judge takes
 back after that stays unanswered, and one deleted with its thought, which
 leaves no time, is unanswered once its comment is past the window. What the
 judge last asserted decides (SMD-2913): the pass's settles are kept across 067's
 reopen (migration 091), so a finding taken back within the window stays
 withdrawn when a text move reopens it; a re-judge that finds the conflict again,
-or a relation said again, makes it open once more. The row reads `? (migration
+or a relation said again, makes it open once more — unanswered at once when the
+post is past the window. The row reads `? (migration
 091 is not applied)` on a brain without it. The rate is
 accepted over accepted, rejected and unanswered — an unanswered finding counts
 against it; withdrawn and open are left out — and the median is from the post to the first link since or the

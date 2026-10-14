@@ -544,8 +544,14 @@ export interface FindingRow {
   ageS: number;
   /** While a link between the pair is active: seconds from posting to the first link made since, closed ones included (0 when none was made since); null when none is active. */
   linkedS: number | null;
-  /** An outdates finding's proposals among those it named, by status — a person's rejection only, the pass's settle (067) left to `withdrawnS` — and when the first acceptance and the last rejection were made; null for a relation. */
-  proposals: { accepted: number; rejected: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
+  /**
+   * An outdates finding's proposals among those it named and still present, by
+   * state — accepted; rejected by a person; settled by the pass (067); reopened,
+   * stale again after a settle since the judge last asserted it (091); stale,
+   * waiting on its re-judge; pending — and when the first acceptance and the
+   * last rejection were made; null for a relation.
+   */
+  proposals: { accepted: number; rejected: number; settled: number; reopened: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
   /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
   stands: boolean | null;
   /**
@@ -595,7 +601,7 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
   SELECT b.ticket_a, b.ticket_b, b.word, b.posted_on, b.origin, b.posted_at,
          extract(epoch FROM now() - b.posted_at)::float8 AS age_s,
          CASE WHEN l.linked_now THEN extract(epoch FROM coalesce(l.first_after, b.posted_at) - b.posted_at)::float8 END AS linked_s,
-         p.accepted, p.rejected, p.stale, p.pending,
+         p.accepted, p.rejected, p.settled, p.reopened, p.stale, p.pending,
          extract(epoch FROM p.accepted_at - b.posted_at)::float8 AS accepted_s,
          extract(epoch FROM p.rejected_at - b.posted_at)::float8 AS rejected_s,
          extract(epoch FROM coalesce(p.withdrawn_at, r.gone_at) - b.posted_at)::float8 AS withdrawn_s,
@@ -622,25 +628,28 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
     -- (consolidate.ts), which this file may not import; test-board-findings
     -- holds the two equal.
     -- Taken back is when the pass had settled every proposal still present
-    -- since the judge last asserted it — each by its first settle since its
-    -- judged_at, from 091's record, which 067's reopen on a later text move
-    -- does not clear (SMD-2913). judged_at moves only when a re-judge finds
-    -- the conflict again (063's replace in place): the judge saying it again,
-    -- after which the comment on the board is its verdict once more, and a
-    -- settle before was of the earlier one (review pass 1). The poster posts
-    -- pending rows only, so a settle since judged_at is after the finding was
-    -- chosen — one made before its comment was posted counts, at 0.
+    -- since the judge last asserted it — each by its first settle in 091's
+    -- record, which 067's reopen on a later text move keeps and a re-judge
+    -- finding the conflict again (063: the judge saying it again, after which
+    -- the comment on the board is its verdict once more) empties (SMD-2913,
+    -- review passes 1 and 2). The poster posts pending rows only, so a settle
+    -- in the record came after the finding was chosen — one made before its
+    -- comment was posted counts, at 0. A stale row the pass settled since is
+    -- reopened: taken back, so it neither waits nor holds off a person's
+    -- rejection; stale is one that waits on its re-judge (review pass 2).
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE s.state = 'accepted')::int AS accepted,
              count(*) FILTER (WHERE s.state = 'rejected')::int AS rejected,
-             count(*) FILTER (WHERE s.state = 'stale')::int AS stale,
+             count(*) FILTER (WHERE s.state = 'settled')::int AS settled,
+             count(*) FILTER (WHERE s.state = 'stale' AND s.settled_since IS NOT NULL)::int AS reopened,
+             count(*) FILTER (WHERE s.state = 'stale' AND s.settled_since IS NULL)::int AS stale,
              count(*) FILTER (WHERE s.state = 'pending')::int AS pending,
              min(s.reviewed_at) FILTER (WHERE s.state = 'accepted') AS accepted_at,
              max(s.reviewed_at) FILTER (WHERE s.state = 'rejected') AS rejected_at,
              CASE WHEN bool_and(s.settled_since IS NOT NULL) THEN max(s.settled_since) END AS withdrawn_at
         FROM (SELECT x.reviewed_at,
                      CASE WHEN x.status = 'rejected' AND x.review_note LIKE 'settled by the pass:%' THEN 'settled' ELSE x.status END AS state,
-                     (SELECT min(t) FROM unnest(x.pass_settled_at) AS t WHERE t >= x.judged_at) AS settled_since
+                     (SELECT min(t) FROM unnest(x.pass_settled_at) AS t) AS settled_since
                 FROM supersession_proposals x
                WHERE b.word = 'outdates' AND x.id = ANY (b.finding_ids)) s) p ON b.word = 'outdates'
     -- A re-judge closes a relation and writes its successor on the same pair
@@ -692,6 +701,7 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
       proposals: word === "outdates"
         ? {
             accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0),
+            settled: countOf("findings", r.settled ?? 0), reopened: countOf("findings", r.reopened ?? 0),
             stale: countOf("findings", r.stale ?? 0), pending: countOf("findings", r.pending ?? 0),
             acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s),
           }
@@ -706,23 +716,29 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * What became of one posted finding, first match wins:
  *
  *   outdates   accepted   a proposal it named was accepted
- *              rejected   none is pending or stale and a person rejected one —
- *                         a link on the board since does not undo that no
+ *              rejected   none is pending or waiting on a re-judge and a
+ *                         person rejected one — a link on the board since
+ *                         does not undo that no; a proposal the pass took
+ *                         back and a text move reopened does not wait
  *              accepted   the board links the pair
  *              withdrawn  the pass settled every proposal it named that is
  *                         still present (067's marker: its re-judge found no
  *                         conflict), each since the judge last asserted it,
  *                         within the window — stale since by a text move or
  *                         not; after it, unanswered
- *              open       a proposal is still pending, or stale and never
- *                         settled since it was asserted (063, 067)
- *              withdrawn  the rest: every proposal it named is gone
+ *              open       a proposal is still pending, or stale and not
+ *                         settled since it was last asserted (063, 067)
+ *              withdrawn  the rest: every proposal it named is gone (or 091's
+ *                         record was bypassed and a settle left no time)
  *   relation   accepted   the board links the pair
  *              open       a relation of its word still stands
  *              withdrawn  the judge stopped saying it within the window
  *              unanswered …or after it: the board had the window and left it
  *
- * An open finding posted more than `days` ago is unanswered. The board has no
+ * An open finding posted more than `days` ago is unanswered — the window runs
+ * from the post, the tracker's "a month of posted findings", so a finding the
+ * judge asserts again late in it leaves the board less time, and past it reads
+ * unanswered at once (review pass 2). The board has no
  * "no" for a relation: left unlinked past the window is how it says one, and
  * a judge that changes its mind afterwards does not take that back (review
  * pass 1: a withdrawal after the window left the rate's denominator). A
@@ -758,8 +774,8 @@ export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): Fin
     if (p.accepted > 0) return { outcome: "accepted", how: "proposal", answeredS: p.acceptedS === null ? null : Math.max(0, p.acceptedS) };
     if (p.pending === 0 && p.stale === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
     if (linked) return linked;
-    // Ahead of open: a stale proposal settled since it was asserted is a
-    // take-back a text move reopened; a pending one carries none.
+    // Every proposal present was taken back since it was last asserted, a
+    // text move having reopened some or none (091 keeps the settle).
     if (r.withdrawnS !== null) return withdrawn(r.withdrawnS);
     if (p.pending + p.stale > 0) return open();
     return withdrawn(null);

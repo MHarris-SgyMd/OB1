@@ -1,8 +1,8 @@
 -- =============================================================================
--- Migration 091: every time the consolidation pass settled a proposal is
---                kept on its row, across 067's reopen — so a finding the pass
---                took back reads taken back, whatever the row says now
---                (SMD-2913)
+-- Migration 091: every time the consolidation pass settled a proposal since
+--                the judge last asserted it is kept on its row, across
+--                067's reopen — so a finding the pass took back reads taken
+--                back, whatever the row says now (SMD-2913)
 -- =============================================================================
 --
 -- WHY
@@ -25,27 +25,33 @@
 --
 -- WHAT
 --   * supersession_proposals.pass_settled_at — every time the pass settled
---     the row, oldest first: the reviewed_at of each settle. Empty for a row
---     the pass never settled.
+--     the row since the judge last asserted it, oldest first: the
+--     reviewed_at of each settle. Empty for a row the pass has not settled
+--     since.
 --   * supersession_proposals_keep_settles, BEFORE INSERT OR UPDATE: the one
---     writer of the column. It appends NEW.reviewed_at when the row becomes
---     settled (it was not before the write), and otherwise carries the
---     column over as it was — 067's reopen, 063's replace in place (back to
---     pending), a person's review and a caller's own value alike. A row
---     inserted settled starts with its time.
+--     writer of the column — a value a caller writes is replaced. It empties
+--     the column when judged_at moves (063's replace in place: a re-judge
+--     found the conflict again), appends NEW.reviewed_at when the row
+--     becomes settled (it was not before the write), and otherwise keeps it
+--     as it was — 067's reopen and a person's review alike. A row inserted
+--     settled starts with its time. The judge's assertion is read from the
+--     write itself, not by comparing judged_at with settle times written by
+--     other transactions, so two passes at once cannot misorder them.
 --   * Rows settled now are backfilled with their reviewed_at, before the
 --     trigger exists. A settle 067 already reopened before this file left no
 --     time behind; it is not recovered.
 --
 -- NOT HERE
 --   * The read (server-portable/brain-info.ts FINDING_OUTCOMES_SQL): each
---     proposal's first settle since its judged_at, the latest of them over
---     every proposal a finding named — the server's change, beside this one.
+--     proposal's first settle in the column, the latest of them over every
+--     proposal a finding named that is still present — the server's change,
+--     beside this one.
 --   * Grants: none. The trigger writes the row being written, so a role that
 --     may settle (UPDATE on the table, 029's) needs nothing more, and 087's
 --     table stays insert-only.
---   * A bound on the array: one element per settle, and each settle after the
---     first needs a text move under the pair and a pass to re-judge it.
+--   * A bound on the array: one element per settle since the last assertion,
+--     and each settle after the first needs a text move under the pair and a
+--     pass to re-judge it.
 --   * A caller's value on INSERT: the trigger replaces it, so a data-only
 --     reload (pg_restore --data-only, COPY) of supersession_proposals with
 --     triggers enabled rebuilds each row's array from its status alone and
@@ -72,7 +78,7 @@ ALTER TABLE supersession_proposals
   ADD COLUMN IF NOT EXISTS pass_settled_at timestamptz[] NOT NULL DEFAULT '{}';
 
 COMMENT ON COLUMN supersession_proposals.pass_settled_at IS
-  'Every time the consolidation pass settled this row (067: rejected with a review_note beginning ''settled by the pass:''), oldest first — each settle''s reviewed_at, kept when rebuild_derived reopens the row (stale, reviewed_at cleared) and the pass settles it again. Written only by supersession_proposals_keep_settles. Read by SMD-2682''s findings read: a finding the pass took back on its fifth day reads taken back after a reopen. Migration 091 / SMD-2913.';
+  'Every time the consolidation pass settled this row (067: rejected with a review_note beginning ''settled by the pass:'') since the judge last asserted it, oldest first — each settle''s reviewed_at, kept when rebuild_derived reopens the row (stale, reviewed_at cleared) and the pass settles it again; emptied when a re-judge finds the conflict again (063, judged_at moved). Written only by supersession_proposals_keep_settles. Read by SMD-2682''s findings read: a finding the pass took back on its fifth day reads taken back after a reopen. Migration 091 / SMD-2913.';
 
 DROP TRIGGER IF EXISTS supersession_proposals_keep_settles ON supersession_proposals;
 
@@ -92,17 +98,20 @@ DECLARE
 BEGIN
   IF TG_OP = 'INSERT' THEN
     NEW.pass_settled_at := CASE WHEN v_settled THEN ARRAY[coalesce(NEW.reviewed_at, now())] ELSE '{}'::timestamptz[] END;
-  ELSIF v_settled AND NOT (OLD.status = 'rejected' AND coalesce(OLD.review_note LIKE 'settled by the pass:%', false)) THEN
-    NEW.pass_settled_at := OLD.pass_settled_at || coalesce(NEW.reviewed_at, now());
-  ELSE
-    NEW.pass_settled_at := OLD.pass_settled_at;
+    RETURN NEW;
+  END IF;
+  -- The judge asserted it again (063 moves judged_at): the settles before
+  -- were of the earlier verdict.
+  NEW.pass_settled_at := CASE WHEN NEW.judged_at IS DISTINCT FROM OLD.judged_at THEN '{}'::timestamptz[] ELSE OLD.pass_settled_at END;
+  IF v_settled AND NOT (OLD.status = 'rejected' AND coalesce(OLD.review_note LIKE 'settled by the pass:%', false)) THEN
+    NEW.pass_settled_at := NEW.pass_settled_at || coalesce(NEW.reviewed_at, now());
   END IF;
   RETURN NEW;
 END;
 $$;
 
 COMMENT ON FUNCTION ob1_keep_proposal_settles() IS
-  'BEFORE INSERT OR UPDATE on supersession_proposals (supersession_proposals_keep_settles, 091): the one writer of pass_settled_at. Appends NEW.reviewed_at (now() when it is null) when the row becomes settled by the pass — rejected with a review_note beginning ''settled by the pass:'' (067''s marker) where it was not before the write; carries the column over unchanged on every other write, a caller''s own value included; a row inserted settled starts with its time. Migration 091 / SMD-2913.';
+  'BEFORE INSERT OR UPDATE on supersession_proposals (supersession_proposals_keep_settles, 091): the one writer of pass_settled_at. Empties it when judged_at moves (063''s replace in place: the judge asserted the row again); appends NEW.reviewed_at (now() when it is null) when the row becomes settled by the pass — rejected with a review_note beginning ''settled by the pass:'' (067''s marker) where it was not before the write; otherwise keeps it as it was. A value a caller writes is replaced on every write; a row inserted settled starts with its time. Migration 091 / SMD-2913.';
 
 CREATE TRIGGER supersession_proposals_keep_settles
   BEFORE INSERT OR UPDATE ON supersession_proposals

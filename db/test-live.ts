@@ -11940,11 +11940,11 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
          VALUES (${`ZR-${a}`}, ${`ZR-${b}`}, ${word}, ${`ZR-${b}`}, ${origin}, ${origin === "posted" ? `c-zr-${a}` : null}, ${`{${ids.join(",")}}`}::uuid[], now() - make_interval(days => ${daysAgo}))`;
     if (word === "outdates")
-      await bsql`UPDATE supersession_proposals SET judged_at = least(judged_at, now() - make_interval(days => ${daysAgo}) - interval '1 hour') WHERE id = ANY (${`{${ids.join(",")}}`}::uuid[])`;
+      await bsql`UPDATE supersession_proposals SET judged_at = least(judged_at, now() - make_interval(days => ${daysAgo}) - interval '1 hour') WHERE id = ANY (${`{${ids.join(",")}}`}::uuid[]) AND status = 'pending'`;
   };
   try {
     // The ticket pairs sort as text, so each pair is (ZR-1n, ZR-1m) with n < m below 10.
-    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63].map(async (n) => [n, await ticket(n)] as const)));
+    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67].map(async (n) => [n, await ticket(n)] as const)));
     // accepted through the proposal; rejected with a link since; pending, linked from a section row, the other way; stale.
     const pA = await propose(t[10], t[11]); await review(pA, "accept"); await told(10, 11, "outdates", [pA], 6);
     const pB = await propose(t[12], t[13]); await review(pB, "reject"); await told(12, 13, "outdates", [pB], 6); await link(t[12], "relates_to", "ZR-13");
@@ -12032,6 +12032,18 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     const reassertedZ = await propose(t[60], { id: t61.id, fp: t61.fp });
     // Settled by the pass after it was chosen and before its comment was posted: a take-back, at 0 (review pass 1).
     const pR = await propose(t[62], t[63]); await settleOn(pR, 0); await told(62, 63, "outdates", [pR], 0);
+    // A person rejected one proposal; the pass settled the other, and a ticket edit reopened it: taken back, it does not
+    // hold off the person's no — rejected, not open (review pass 2).
+    const row65 = await row("ZR-65 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-65" });
+    const pQ = await propose(t[64], t[65]), pQ2 = await propose(t[64], row65); await told(64, 65, "outdates", [pQ, pQ2], 10);
+    await review(pQ, "reject"); await settleOn(pQ2, 5);
+    const r65 = await edit(row65, "ZR-65 · a dated section, its text moved (findings-report fixture)");
+    // The pass settled both, a ticket edit reopened both, and a person then rejected one: the person's no stands (review pass 2).
+    const row67 = await row("ZR-67 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-67" });
+    const pK = await propose(t[66], t[67]), pK2 = await propose(t[66], row67); await told(66, 67, "outdates", [pK, pK2], 10);
+    await settleOn(pK, 6); await settleOn(pK2, 6);
+    const r66 = await edit(t[66], "ZR-66 — a ticket, its status moved (findings-report fixture)");
+    await review(pK, "reject");
     // The older thought deleted (084 closes the relation, it does not cascade): a delete, not the judge — no time, so the comment's age decides (review pass 3).
     const rR = await relate(t[45], t[44], "related"); await told(44, 45, "related", [rR.id!], 40);
     await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rR.id!}::uuid`;
@@ -12039,7 +12051,9 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     assert(settledO.ok === true && settledP.ok === true && reopenedP === "stale" && [t41, t47, t49].every((e) => e.code === 0)
         && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pS}::uuid`)[0] as { status: string }).status === "stale"
         && reproposed === pT && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pT}::uuid`)[0] as { status: string }).status === "pending"
-        && t61.code === 0 && reassertedZ === pZ && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pZ}::uuid`)[0] as { status: string }).status === "pending",
+        && t61.code === 0 && r65.code === 0 && r66.code === 0
+        && ((await bsql`SELECT string_agg(status, ',' ORDER BY status) AS s FROM supersession_proposals WHERE id IN (${pK}::uuid, ${pK2}::uuid)`)[0] as { s: string }).s === "rejected,stale" && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pQ2}::uuid`)[0] as { status: string }).status === "stale"
+        && reassertedZ === pZ && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pZ}::uuid`)[0] as { status: string }).status === "pending",
       `the fixtures: a ticket edit reopens a settle (rebuild.ts --input), the pass settles both stale proposals, a re-judge puts one back to pending in place (${JSON.stringify([settledO, settledP, reopenedP, t41.out.slice(0, 200)])})`);
     assert(rQ2.action === "added" && rQ3.action === "closed" && rU2.action === "added" && rV2.id !== rV.id && rV3.action === "closed" && rY2.action === "closed" && rY3.action === "added",
       `the fixtures: a closed relation said again is a new facet, closed again by a NULL (${rQ2.action}, ${rQ3.action}, ${rU2.action})`);
@@ -12056,10 +12070,10 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
       "ZR-32~ZR-33": "withdrawn/null", "ZR-34~ZR-35": "unanswered/null", "ZR-36~ZR-37": "accepted/linked",
       "ZR-38~ZR-39": "accepted/linked", "ZR-40~ZR-41": "withdrawn/null", "ZR-42~ZR-43": "unanswered/null", "ZR-44~ZR-45": "unanswered/null",
       "ZR-46~ZR-47": "withdrawn/null", "ZR-48~ZR-49": "open/null", "ZR-50~ZR-51": "unanswered/null", "ZR-52~ZR-53": "open/null",
-      "ZR-54~ZR-55": "open/null", "ZR-56~ZR-57": "unanswered/null", "ZR-58~ZR-59": "open/null", "ZR-60~ZR-61": "unanswered/null", "ZR-62~ZR-63": "withdrawn/null",
+      "ZR-54~ZR-55": "open/null", "ZR-56~ZR-57": "unanswered/null", "ZR-58~ZR-59": "open/null", "ZR-60~ZR-61": "unanswered/null", "ZR-62~ZR-63": "withdrawn/null", "ZR-64~ZR-65": "rejected/proposal", "ZR-66~ZR-67": "rejected/proposal",
     };
     const closedLink = Number(((await bsql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[28].id}::uuid AND valid_until IS NOT NULL`)[0] as { n: number }).n);
-    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 27 && closedLink === 1,
+    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 29 && closedLink === 1,
       `each posted pair reads what became of it, from the database (${JSON.stringify(said)})`);
     const linked = zr.find((r) => r.a === "ZR-14")!;
     const relinked = zr.find((r) => r.a === "ZR-36")!;
@@ -12067,8 +12081,8 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
         && relinked.linkedS !== null && Math.abs(relinked.linkedS - firstLinkS) < 0.01,
       `the time to an answer is the first link's since the post, or the review's (${linked.linkedS}, ${relinked.linkedS} vs ${firstLinkS})`);
     const v = findingsValue(zr);
-    assert(v.posted === 26 && v.comments === 26 && v.found === 1 && v.accepted === 5 && v.rejected === 1 && v.withdrawn === 6 && v.open === 7 && v.unanswered === 7,
-      `the ZR pairs count 5 accepted, 1 rejected, 7 unanswered, 7 open, 6 withdrawn, 1 found (${JSON.stringify(v)})`);
+    assert(v.posted === 28 && v.comments === 28 && v.found === 1 && v.accepted === 5 && v.rejected === 3 && v.withdrawn === 6 && v.open === 7 && v.unanswered === 7,
+      `the ZR pairs count 5 accepted, 3 rejected, 7 unanswered, 7 open, 6 withdrawn, 1 found (${JSON.stringify(v)})`);
     const first = zr.find((r) => r.a === "ZR-40")!, lastRel = zr.find((r) => r.a === "ZR-42")!, early = zr.find((r) => r.a === "ZR-62")!;
     assert(first.withdrawnS !== null && Math.abs(first.withdrawnS - 5 * 86_400) < 3600 && lastRel.withdrawnS !== null && Math.abs(lastRel.withdrawnS - lastRel.ageS) < 60
         && early.withdrawnS !== null && early.withdrawnS <= 0 && early.withdrawnS > -60 && zr.find((r) => r.a === "ZR-20")!.withdrawnS === null,
@@ -12134,7 +12148,7 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     try {
       const behind = await runScript(["bun", join(HERE, "board-findings.ts"), "--url", URL_!, "--report"], { env, cwd: HERE });
       const behindFacts = await readDatabaseFacts(bsql);
-      assert(behind.code === 2 && /Nothing to report: migration 091 is not applied/.test(behind.stderr) && !/at .*\.ts:\d+/.test(behind.stderr)
+      assert(behind.code === 2 && /Nothing to report: the supersession_proposals on this role.s search_path has no pass_settled_at — migration 091 is not applied/.test(behind.stderr) && !/at .*\.ts:\d+/.test(behind.stderr)
           && behindFacts.findings === null && findingsLine(behindFacts) === "? (migration 091 is not applied)" && behindFacts.proposals !== null,
         `a brain without 091's column: --report names the migration with exit 2, no stack, and brain_info's Findings row says so, the queue beside it read (${behind.code}: ${behind.stderr.slice(0, 200)}; ${findingsLine(behindFacts)})`);
     } finally {

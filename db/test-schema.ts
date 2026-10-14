@@ -13914,7 +13914,7 @@ console.log("\n[80] Migration 090: a re-capture over a capture-only key's label 
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[81] Migration 091: every time the consolidation pass settled a proposal is kept on its row — appended as the row becomes settled, carried over 067's reopen, 063's replace in place and a person's review, never a caller's value; a row inserted settled starts with its time (SMD-2913)");
+console.log("\n[81] Migration 091: every time the consolidation pass settled a proposal since the judge last asserted it is kept on its row — appended as the row becomes settled, kept over 067's reopen and a person's review, emptied by 063's replace in place, never a caller's value; a row inserted settled starts with its time (SMD-2913)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -13956,30 +13956,36 @@ console.log("\n[81] Migration 091: every time the consolidation pass settled a p
   const pid = (await propose(B.id, A.id)).id!;
   assert(JSON.stringify((await row(pid)).settles) === "[]", "a proposal recorded pending starts with no settle");
 
-  // Settled, reopened by a text move, judged in conflict again (063's replace in place), stale again, settled again.
+  // Settled, reopened by a text move, settled again; then judged in conflict again (063's replace in place), stale, settled.
   const aFp2 = await move(A.id, "091: the newer note about Bea, rewritten once");
   assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp2)).ok === true, "the fixture: stale by a text move, then settled by the pass");
   const s1 = await row(pid);
   assert(s1.status === "rejected" && s1.settles.length === 1 && s1.reviewed !== null && Date.parse(s1.settles[0]) === Date.parse(s1.reviewed),
     `a settle appends its reviewed_at (${JSON.stringify(s1)})`);
-  await move(A.id, "091: the newer note about Bea, rewritten twice");
+  const aFp3 = await move(A.id, "091: the newer note about Bea, rewritten twice");
   const reopened = await rebuild(A.id);
   const s2 = await row(pid);
   assert(reopened.stale_proposals === 1 && s2.status === "stale" && s2.reviewed === null && JSON.stringify(s2.settles) === JSON.stringify(s1.settles),
     `067's reopen clears reviewed_at; the settle it reopened is kept (${JSON.stringify(s2)})`);
-  await propose(B.id, A.id);
+  assert((await settle(pid, B.fingerprint, aFp3)).ok === true, "the fixture: settled again after the reopen");
   const s3 = await row(pid);
-  assert(s3.status === "pending" && JSON.stringify(s3.settles) === JSON.stringify(s1.settles), `063's replace in place, back to pending, keeps it too (${JSON.stringify(s3)})`);
-  const aFp4 = await move(A.id, "091: the newer note about Bea, rewritten three times");
-  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp4)).ok === true, "the fixture: stale again, settled again");
+  assert(s3.settles.length === 2 && s3.settles[0] === s1.settles[0] && Date.parse(s3.settles[1]) === Date.parse(s3.reviewed!) && Date.parse(s3.settles[1]) >= Date.parse(s3.settles[0]),
+    `a second settle appends, oldest first (${JSON.stringify(s3)})`);
+  await move(A.id, "091: the newer note about Bea, rewritten three times");
+  assert((await rebuild(A.id)).stale_proposals === 1, "the fixture: a third text move reopens it");
+  await propose(B.id, A.id);
   const s4 = await row(pid);
-  assert(s4.settles.length === 2 && s4.settles[0] === s1.settles[0] && Date.parse(s4.settles[1]) === Date.parse(s4.reviewed!) && Date.parse(s4.settles[1]) >= Date.parse(s4.settles[0]),
-    `a second settle appends, oldest first (${JSON.stringify(s4)})`);
+  assert(s4.status === "pending" && JSON.stringify(s4.settles) === "[]",
+    `063's replace in place — the judge finding the conflict again, judged_at moved — empties it: the settles were of the earlier verdict (review pass 2) (${JSON.stringify(s4)})`);
+  const aFp5 = await move(A.id, "091: the newer note about Bea, rewritten four times");
+  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp5)).ok === true, "the fixture: stale and settled after the re-assertion");
+  const s4b = await row(pid);
+  assert(s4b.settles.length === 1 && Date.parse(s4b.settles[0]) === Date.parse(s4b.reviewed!), `…and a settle after it starts the record again (${JSON.stringify(s4b)})`);
 
   // A write on a settled row that does not settle it, and a caller's own value: carried over unchanged.
   await db.query(`UPDATE supersession_proposals SET confidence = 0.5, reviewed_at = now() - interval '9 days', pass_settled_at = ARRAY[now() - interval '40 days'] WHERE id = $1::uuid`, [pid]);
   const s5 = await row(pid);
-  assert(JSON.stringify(s5.settles) === JSON.stringify(s4.settles), `a write that does not settle the row, and a caller's own pass_settled_at, change nothing (${JSON.stringify(s5)})`);
+  assert(JSON.stringify(s5.settles) === JSON.stringify(s4b.settles), `a write that does not settle the row, and a caller's own pass_settled_at, change nothing (${JSON.stringify(s5)})`);
 
   // A person's rejection is no settle; a row inserted settled starts with its time.
   const C = await cap("091: a third note about Bea", 3);

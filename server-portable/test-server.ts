@@ -1136,7 +1136,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 1, comments: 1, withdrawn: 1 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
     renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000)),
     // A brain behind this server: the read names 091's column (SMD-2913, review pass 1).
-    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.pass_settled_at does not exist" } } }), 1000))]
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.pass_settled_at does not exist" } } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.reviewed_at does not exist" } } }), 1000))]
     .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
   assert(toldRows.join("\n") === [
     "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — acceptance 50% (2 of 4: accepted over accepted, rejected and unanswered), median 2 d to an answer; 1 found on the board from another poster",
@@ -1149,6 +1150,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "Findings:        ? (thought_facets not read in time)",
     "Findings:        ? (not read in time)",
     "Findings:        ? (migration 091 is not applied)",
+    "Findings:        ? (not read)",
   ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, no row without the stats, and 091 named when its column is absent (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [
