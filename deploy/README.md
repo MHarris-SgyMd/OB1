@@ -145,6 +145,71 @@ repository's visibility is, and `pull` on a clean machine then wants a login —
 make `ob1-server` and `ob1-migrate` public in the package settings if they are
 not.
 
+## One env file is one brain
+
+A brain is its env file (SMD-2873, under the one-brain-per-stack decision,
+[`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)). Any number run
+on one machine, each from its own file, all from the one `compose.yaml`:
+
+- **`COMPOSE_PROJECT_NAME`** names it. Unset, the project is `compose.yaml`'s
+  `name:`, `open-brain`. The value in the env file wins over that, as the shell's
+  and `-p` do. Everything the project makes carries its name: containers are
+  `<project>-<service>-1`, networks `<project>_data`, `<project>_egress` and
+  the rest, the database volume `<project>_pgdata`, and the server image
+  `<project>-server`. Two instances share no network, volume, image tag or
+  container name (measured, the decision's "Measured").
+- **Its own secrets**: a `POSTGRES_PASSWORD` and `MCP_ACCESS_KEYS` of its own
+  (step 1). A key opens only the brains whose `MCP_ACCESS_KEYS` lists its hash.
+- **Its host ports.** These are the only thing two instances collide on. With no
+  profile that is the forwarder's, `SERVER_PORT` (8000; `SERVER_BIND`
+  127.0.0.1). Each profile or overlay an instance runs adds its own:
+  - `N8N_PORT` for `--profile orchestration`;
+  - `POSTGRES_PORT`, `OLLAMA_PORT` and `JEV_PORT` for `compose.host-ports.yaml`,
+    each with its `_BIND`.
+
+  Set each one in the second instance's file. Otherwise its `up` fails to bind,
+  in compose's words, which do not name the setting.
+
+A second brain beside the first:
+
+```bash
+cp deploy/.env.example deploy/.env.ob1b.local   # .env.*.local: the root .gitignore ignores it
+# deploy/.env.ob1b.local: its own POSTGRES_PASSWORD and MCP_ACCESS_KEYS, as in step 1, and
+#   COMPOSE_PROJECT_NAME=ob1b
+#   SERVER_PORT=8040
+docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
+OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
+```
+
+Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
+ignores (it does not ignore `.env.<name>`); the fork's checks refuse a tracked
+env file.
+`--env-file` replaces `deploy/.env` for that command, so give it on every
+compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
+env file names the canary's project, but its port, tier and mesh are
+`canary.sh`'s to set: stand it up and take it down with `canary.sh`, and give
+compose its file only to look (`ps`, `logs`). The three-brain stack reads
+`deploy/.env` too, so a `COMPOSE_PROJECT_NAME` there puts it in that brain's
+project ("What is reachable from where", below). The scripts
+take the brain the same way:
+- `deploy/canary.sh --env-file deploy/.env.ob1b.local up` stands `ob1b`'s canary. Its
+  project is `ob1b-canary`, its connector `ob1b-canary`, and its env file
+  `.env.ob1b-canary.local`. `--stable-project` overrides the project the env
+  file names.
+- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data` and
+  `ob1b_egress`. `--project` overrides the project, and `--network` names the
+  networks outright.
+
+**Local models.** An instance on `--profile local-models` runs its own Ollama
+and `ollama` volume, so both models are pulled, and held in memory, once per
+instance. The alternative is one Ollama on the host that every instance names
+(`deploy/.env.example`, Option B):
+- Under podman machine, a container reaches the host's loopback, so `ollama
+  serve` on its 127.0.0.1 default serves every instance (measured).
+- On Docker on Linux, a container does not reach a port the host binds to
+  loopback, so that Ollama must listen on the bridge address (SETUP.md) or on
+  every interface. The second exposes it on the LAN.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
@@ -791,6 +856,7 @@ it joined the boot list at once (measured). `podman update` takes one
 container at a time; `docker update --restart unless-stopped` takes several.
 
 ```bash
+# the default project's names; another brain's are <project>-… ("One env file is one brain")
 podman update --restart unless-stopped open-brain-postgres-1
 podman update --restart unless-stopped open-brain-canary-postgres-1   # a canary's (deploy/canary.sh)
 podman update --restart unless-stopped open-brain-ollama-1            # with --profile local-models
@@ -921,7 +987,8 @@ keys after the client or device they are for (`laptop`, `claude-desktop`), not
 after a person, so the log stays free of names and addresses.
 
 ```bash
-# every request that did not end `ok`, on either server
+# every request that did not end `ok`, on either server (the default project's
+# containers; another brain's are <project>-server-1 and <project>-api-1)
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 ```
@@ -1816,8 +1883,11 @@ alive.
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
 the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
-as given. `--network` defaults to `open-brain_data,open-brain_egress` (a
-stack from before SMD-2583 has one, `open-brain_default`), and `--runtime` is
+as given. `--network` defaults to the stack's `<project>_data,<project>_egress`
+(`open-brain_data,open-brain_egress` for the default project; a stack from
+before SMD-2583 has one, `<project>_default`). The project is the one
+`--env-file` names, `COMPOSE_PROJECT_NAME` as compose reads it, else
+`open-brain`, or `--project NAME` (SMD-2873; not with `--network`). `--runtime` is
 `docker` or `podman` (docker when it is on the PATH). `--from-env-file PATH`
 takes a short-form `--from`'s password from another env file, when `--from`
 is another stack's with a password of its own (the canary's refresh names
@@ -1933,26 +2003,44 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env up --connect
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
-The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, networks and images, `OB1_TIER=canary`, and two
+The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
+`open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
+env file names `COMPOSE_PROJECT_NAME=ob1b`. Stable's project is the one its env
+file names, as compose reads it, unless `--stable-project` names another.
+`canary.sh names` prints stable's project, the canary's, the connector and the
+canary's env file, and changes nothing. The read sees `COMPOSE_PROJECT_NAME`
+(the env file's, or the shell's, which wins); a stable brought up with `-p`, or
+with a `COMPOSE_FILE` overlay carrying a `name:` of its own, needs
+`--stable-project`. A canary stood beside such a stable before SMD-2873 is
+`open-brain-canary`, whatever `--stable-project` said: take it down first with
+`--stable-project open-brain down`, since the next `up` stands `<stable>-canary`
+beside it, under the same names on stable's mesh; the old canary's
+`.env.canary.local` is then no canary's, and can be deleted. The
+canary has its own Postgres, volume, networks and images, `OB1_TIER=canary`, and two
 servers: the MCP server and the REST core. It needs Docker Compose v2
 (`config --format json`, `up --wait`), which is what `docker compose` is and
 what `podman compose` runs when it is installed; the Python podman-compose is
 not enough.
 
-It runs on an env file of its own (SMD-2583): `.env.canary.local` beside
-stable's (`--canary-env-file` names another, never stable's own file). The
+It runs on an env file of its own (SMD-2583): `.env.<canary>.local` beside
+stable's, named for the canary's project so two brains' canaries in one
+directory stay apart (SMD-2873), and `.env.canary.local` for
+`open-brain-canary`, the name it had before (`--canary-env-file` names
+another, never stable's own file). The
 root `.gitignore` has ignored `.env.*.local` since before this, so stable's
 checkout ignores it whatever its age, and the temporary file it is written
 in, `.env.canary-<pid>-<n>.local`, which is removed however `up` ends. The
 first `up` writes it from stable's file as compose reads it, mode 600: every
-setting, each with the value compose read, quoted afresh, but for three kinds:
+setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
   the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
   `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
   comment; SMD-2882);
+- **stable's `COMPOSE_PROJECT_NAME`**: the file names the canary's own
+  project instead, `COMPOSE_PROJECT_NAME="<canary>"`, so compose given that file
+  alone acts on the canary, never on stable (SMD-2873);
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the
@@ -2040,8 +2128,8 @@ stable is redeployed:
      back to the `local-models` profile's `ollama`, and the jev profile's
      setup is `http://jev:8020`. Name an endpoint the canary can reach for
      the canary alone, in the shell, which wins over the env file for the
-     canary and leaves stable as it is (or in `.env.canary.local`, once `up` has
-     made it):
+     canary and leaves stable as it is (or in the canary's env file, once `up`
+     has made it):
      `OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1 deploy/canary.sh
      … up` for an Ollama on the host, or a host's full name for one on the
      LAN. It must serve the brain's embedding model. A remote provider also
@@ -2056,15 +2144,20 @@ stable is redeployed:
      lost that stable does not hold. A process on the host listening there is
      refused too;
    - `--connect` finds another connector under the name (below);
-   - stable's Postgres, found by its compose labels (`--stable-project`,
-     default `open-brain`), is stamped `canary` or `working`, or carries a
+   - stable's project cannot be read from its env file, or is not a compose
+     project name, or ends in `-canary`: that is a canary's own project, so a
+     brain named so has no canary of its own (SMD-2873);
+   - stable's Postgres, found by its compose labels (stable's project), is
+     stamped `canary` or `working`, or carries a
      refresh's mark (`canary`, `working`): that is a copy, not the record.
      A mark of `stable` or `off`, an operator's protection, is not one;
    - stable's Postgres is on neither `<stable>_data` nor `<stable>_default`,
      where the refresh would reach it (SMD-2583);
    - the canary's env file, when it has one, holds no `POSTGRES_PASSWORD` of
      its own, or one built from the shell or spanning lines, or holds
-     stable's database password anywhere (above).
+     stable's database password anywhere (above), or names a project other
+     than the canary's (SMD-2873). One that names none, made before SMD-2873,
+     is let through with a note to add `COMPOSE_PROJECT_NAME=<canary>`.
 
    Stable with no tier stamp is stamped `tier=stable`. When stable's server
    runs without `OB1_TIER=stable` it says so; set that in the env file and
@@ -2113,8 +2206,9 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke and needs no key.
-5. With `--connect` it registers the Claude Code connector
-   `open-brain-canary` (`--name`) at user scope, under the same key; a new
+5. With `--connect` it registers the Claude Code connector named for the
+   canary's project, `open-brain-canary` beside the default stable (`--name`
+   names another), at user scope, under the same key; a new
    session sees its tools. The URL is the canary's: `/canary/mcp` on
    stable's origin, or `/mcp` on `--port`.
 
@@ -2150,10 +2244,10 @@ refuses to replace it. `--volumes` also deletes the canary's database, and
 only once it says it is a canary: stamped `canary`, marked by a refresh, or
 holding nothing, which is what a first refresh that died before its mark
 leaves. A refusal puts the canary's Postgres back as it found it. The volume
-is looked for by name (`open-brain-canary_pgdata`), which is how `compose
-down --volumes` removes it. With none there is nothing to delete, and nothing
-is started to find out. Neither touches stable: `down` acts on the project
-`open-brain-canary` alone.
+is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
+beside the default stable), which is how `compose down --volumes` removes it.
+With none there is nothing to delete, and nothing is started to find out.
+Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing

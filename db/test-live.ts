@@ -11708,6 +11708,42 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     const bodyNew = String(posts().at(-1)?.vars.body ?? "");
     assert(rw.posted.length === 1 && rw.posted[0].on === "ZQ-3" && rw.posted[0].words.join() === "outdates" && !/is related to/.test(bodyNew) && (await rowsOf("ZQ-3", "ZQ-4")).length === 2,
       `a pair posted as related and later judged outdates is posted again, for the new word alone (${summaryLine(rw, 10, false).trim()})`);
+    // The judge relates rows: a ticket and its dated section, both related to the other ticket, are one bullet, the record naming both (SMD-2930).
+    const z50 = await ticket(50, "rows a"), z51 = await ticket(51, "rows b");
+    const z51s = await row("ZQ-51 — 2026-10-03: its own section (board-findings fixture)", { source: "linear", ticket: "ZQ-51", section: "2026-10-03" });
+    const r5051 = await relate(z51, z50, "related", 0.8), r5051s = await relate(z51s, z50, "related", 0.9);
+    const rr = await run();
+    const bodyRows = String(posts().at(-1)?.vars.body ?? "");
+    const ids5051 = (await rowsOf("ZQ-50", "ZQ-51"))[0]?.ids ?? [];
+    assert(rr.posted.length === 1 && rr.posted[0].on === "ZQ-51" && (bodyRows.match(/is related to/g) ?? []).length === 1 && /\(confidence 0\.90, best of 2 row pairs\)/.test(bodyRows)
+        && ids5051.length === 2 && ids5051.includes(r5051.id!) && ids5051.includes(r5051s.id!),
+      `a relation between rows of two tickets is one bullet at its best confidence, saying how many row pairs back it, and the record names every facet (${JSON.stringify(ids5051)}; ${bodyRows.split("\n").filter((l) => l.startsWith("- ")).join(" / ")})`);
+
+    // A pair of closed tickets is not posted; a closed newer ticket's comment goes on the open older one; a reopened ticket's pair is posted again (SMD-2932).
+    const ticketAs = (n: number, what: string, status_type: string) => row(`ZQ-${n} — ${what} (board-findings fixture)`, { source: "linear", issue: `ZQ-${n}`, status: status_type, status_type });
+    // Each closed type once: completed, duplicate (Linear's Duplicate has a type of its own), canceled.
+    const z72 = await ticketAs(72, "done a", "completed"), z73 = await ticketAs(73, "a duplicate", "duplicate");
+    const z74 = await ticketAs(74, "open, older", "started"), z75 = await ticketAs(75, "canceled, newer", "canceled");
+    await relate(z73, z72, "related", 0.88);
+    await relate(z75, z74, "evolves", 0.87);
+    const before72 = posts().length;
+    const rc1 = await run();
+    const on75 = posts().slice(before72).map((o) => String(o.vars.issueId));
+    assert(rc1.posted.length === 1 && rc1.posted[0].on === "ZQ-74" && on75.join() === "uuid-ZQ-74" && (await rowsOf("ZQ-74", "ZQ-75"))[0]?.posted_on === "ZQ-74"
+        && (await rowsOf("ZQ-72", "ZQ-73")).length === 0 && !(await selectFindings(bsql)).some((f) => f.a === "ZQ-72"),
+      `two closed tickets are not posted, and a closed newer ticket's comment goes on the open older one (${summaryLine(rc1, 10, false).trim()}; on ${on75.join()})`);
+    await bsql`UPDATE thoughts SET metadata = metadata || '{"status": "started", "status_type": "started"}'::jsonb WHERE id = ${z72.id}::uuid`;
+    const rc2 = await run();
+    assert(rc2.posted.length === 1 && rc2.posted[0].on === "ZQ-72" && (await rowsOf("ZQ-72", "ZQ-73"))[0]?.posted_on === "ZQ-72",
+      `…and once one of them reopens, the pair is posted, on the reopened one (${summaryLine(rc2, 10, false).trim()})`);
+    // A hand capture carrying the issue and superseding a closed ticket's Linear row becomes its head, with no status: the ticket is still closed, read from its newest Linear row (SMD-2932 review pass 1).
+    const z76 = await ticketAs(76, "done, then a hand note over it", "completed"), z77 = await ticketAs(77, "done too", "completed");
+    await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint, supersedes) VALUES ('ZQ-76 — a hand note (board-findings fixture)', ${{ source: "manual", issue: "ZQ-76" }}::jsonb, content_fingerprint_of('ZQ-76 — a hand note (board-findings fixture)'), ${z76.id}::uuid)`;
+    const head76 = ((await bsql`SELECT status_type FROM ob1_ticket_head WHERE issue = 'ZQ-76'`)[0] as { status_type: string | null } | undefined)?.status_type;
+    await relate(z77, z76, "related", 0.86);
+    const rc3 = await run();
+    assert(head76 === null && rc3.posted.every((p) => p.on !== "ZQ-76" && p.on !== "ZQ-77") && (await rowsOf("ZQ-76", "ZQ-77")).length === 0 && !(await selectFindings(bsql)).some((f) => f.a === "ZQ-76"),
+      `a ticket whose head is a hand capture with no status is still closed, read from its newest Linear row, so two closed tickets stay unposted (head ${head76}; ${summaryLine(rc3, 10, false).trim()})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");
@@ -11814,7 +11850,8 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     // Pending, best first: the cross pair the cap left (0.95 or 0.94, allowed), GONE-1 ~ ZQ-44 (0.8, refused: no "ZQ-9"), ZQ-94 ~ ZQ-95 (allowed), ZQ-96 ~ ZQ-97 (left for the cap).
     assert(pendingDry === 4 && dryRun2.wouldPost === 2 && dryRun2.refused === 1 && dryRun2.waitingOnCap === 1,
       `a dry run takes the cap's places for what it would post, not for what the gate would refuse (${summaryLine(dryRun2, today3 + 2, true).trim()})`);
-    await run();
+    // Drains what is pending, whatever the day's count — run()'s cap of 10 left a pair behind once another case posted (SMD-2930 review).
+    await run({ cap: 100 });
 
     // 5. The step as board-sync sets it up from the environment.
     const off = await findingsStep(bsql, {});
@@ -11863,9 +11900,12 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
         const noInsert = await findingsSchemaProblem(rs), dryOk = await findingsSchemaProblem(rs, { write: false });
         await bsql.unsafe(`REVOKE SELECT ON supersession_proposals FROM ${FROLE}`);
         const noQueue = await findingsSchemaProblem(rs, { write: false });
+        await bsql.unsafe(`REVOKE SELECT ON ob1_ticket_head FROM ${FROLE}`);
+        const noHead = await findingsSchemaProblem(rs, { write: false });
         assert(granted.code === 0 && full === null && /lacks SELECT and INSERT on board_findings_posted \(the structure group\)/.test(noInsert ?? "") && dryOk === null
-            && /lacks SELECT on supersession_proposals \(the structure group\).*--groups capture,structure/.test(noQueue ?? ""),
-          `capture and structure are the step's grants; without INSERT on the record it is off, naming it, while a dry run needs the reads alone (${JSON.stringify([full, noInsert, dryOk, noQueue])})`);
+            && /lacks SELECT on supersession_proposals \(the structure group\).*--groups capture,structure/.test(noQueue ?? "")
+            && /SELECT on thoughts, thought_facets and ob1_ticket_head \(the capture group\)/.test(noHead ?? ""),
+          `capture and structure are the step's grants; without INSERT on the record it is off, naming it, while a dry run needs the reads alone, ob1_ticket_head among them (SMD-2932) (${JSON.stringify([full, noInsert, dryOk, noQueue, noHead])})`);
       } finally {
         await rs.close();
         await dropF();

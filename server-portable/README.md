@@ -801,7 +801,10 @@ stripped (`X-Forwarded-Prefix`).
   that header, an empty one or two of them included, is a 401 `UNAUTHORIZED`
   with `credential: "forwarder"`, checked before either key reaches the
   registry; a revoked one a 401 `REVOKED`, a busy registry a 503, each with the
-  same — so a client holding two keys cannot stamp one as the other's carrier.
+  same — so a client holding two keys cannot stamp one as the other's carrier. A
+  request it carries is answered its refusals and its captures whole (SMD-2287), the
+  words the MCP server says them in, which the caller's key alone is not told over
+  REST: a forwarder key is the MCP server's alone, never an integration's.
   The public `/api` route deletes the header, so it is read only inside the
   stack (`rest-client/` sends it, and nothing in the stack does until the MCP
   server forwards, SMD-2287). Mint a forwarder under a name never used before —
@@ -812,7 +815,9 @@ stripped (`X-Forwarded-Prefix`).
   re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
   `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
   `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
-  egress gate's reasons or the extractor's tags. A refusal is its code, `retryable` and the facts its code declares
+  egress gate's reasons or the extractor's tags — unless a forwarder carried the
+  request, which is answered the whole value for the MCP server to word for that key,
+  as a refusal is (SMD-2287). A refusal is its code, `retryable` and the facts its code declares
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
@@ -835,8 +840,19 @@ stripped (`X-Forwarded-Prefix`).
   method, the route's template, the operation, the key's name, the status, an
   error answer's code and the time — with no query string, key, id or content
   in it.
-- **`GET /health`** is liveness with no key, for the container's healthcheck; the
-  keyed BrainInfo is `GET /v1/brain`. A write through the REST core records its door
+- **The idle timeout** is Bun's ceiling, 255 s (`api.ts`'s `IDLE_TIMEOUT_S`): on Bun
+  1.4.3 the 10 s default cuts a GET whose handler has not answered — measured, a
+  14-second GET reset at about 12 s while a POST ran on — and the MCP server's
+  whoami, fetch, stats and job polls are GETs a locked table can hold that long
+  (SMD-2287). A dead keep-alive socket on the stack's internal network is held up to
+  255 s.
+- **`GET /health`** is liveness with no key, for the container's healthcheck, and
+  writes no line. With a key it answers as `index.ts`'s `/health` does: the brain's
+  record on the health surface (statements capped, within `HEALTH_DEADLINE_MS`) for a
+  key that may read `brain_info` and that the registry clears in time, and liveness
+  for any other key, never a refusal. The MCP server as a REST client (`mcp-server/`,
+  SMD-2287) shows that record at its public `/health`. The tool's record, on the slower
+  tool surface, is `GET /v1/brain`. A write through the REST core records its door
   as `open-brain-api` (thought_audit.origin).
 - **Jobs** are durable as the MCP server's are (069's `jobs`), and its own: each server
   writes its door on the jobs it starts (`jobs.door`, migration 078) and its start-up
@@ -859,16 +875,16 @@ word any refusal as this one does.
 
 ```bash
 bun test-server.ts        # 1071 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849)
-bun test-auth.ts          # 190 — scoped, hashed, named keys
-bun test-rest.ts          # 357 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
-bun test-plugins.ts       # 260 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
+bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
+bun test-rest.ts          # 375 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
+bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 257 — store conformance, real Postgres in a container
-bun run test:e2e          # 569 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 571 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 571 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
 ../db/with-postgres.sh bun test-rest-sql.ts  # 202 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
-../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
+../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row; the same 107 with OB1_MCP_UNDER_TEST=client
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

@@ -21,6 +21,7 @@ import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
+import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
@@ -113,6 +114,42 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
   const transformed = withOp("crm", "len", { output: { len: z.string().transform((s) => s.length) } });
   assert(/its output schema transforms/.test(manifestProblems([transformed]).join()), "an output schema that transforms is refused: MCP holds the answer to it again");
   assert(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().uuid() }, output: { at: z.string().default("now") } })]).length === 0, "a string path field with a format, and an output default, are sound");
+  // Review pass 1 of SMD-2287 PR 4a: what the MCP server, calling the REST core, would answer otherwise than index.ts.
+  const plusOne = withOp("crm", "bump", { method: "POST", input: { n: z.number().transform((x) => x + 1), at: z.preprocess((v) => v, z.string()) } });
+  assert(manifestProblems([plusOne]).length === 0, `an input that transforms is sound: the MCP server sends what its client sent, parsed once by the REST core (review pass 2) (${manifestProblems([plusOne]).join()})`);
+  assert(/its input schema cannot be stated as JSON Schema/.test(manifestProblems([withOp("crm", "when", { method: "POST", input: { at: z.date() } })]).join()), "an input JSON Schema cannot state (a date) is refused, as tools/list states it");
+  for (const [label, input, want] of [
+    ["a nullable number", { n: z.number().nullable().optional() }, /its query field n is not text, a number or a boolean/],
+    ["a union", { u: z.union([z.number(), z.string()]) }, /its query field u is not text, a number or a boolean/],
+    ["an object", { o: z.object({ a: z.string() }) }, /its query field o is not text, a number or a boolean/],
+    ["a list of numbers", { ids: z.array(z.number()).default([]) }, /its query field ids is a list of other than text/],
+    ["a list of text with no default", { tags: z.array(z.string()).optional() }, /its query field tags is a list whose absence is not \[\] as \[\] is/],
+    ["a name no query carries", { "a b": z.string() }, /its input field "a b" is no name a query string carries/],
+  ] as const) {
+    assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: a query string cannot carry it as given (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
+  }
+  assert(manifestProblems([withOp("crm", "find", { method: "DELETE", input: { n: z.number().nullable() } })]).some((p) => /query field n/.test(p)), "…a DELETE's too");
+  // Review pass 3: a URL field that takes a value of another type would get it back as another value.
+  for (const [label, input, want] of [
+    ["a coerce", { on: z.coerce.boolean() }, /its query field on has a coerce/],
+    ["a catch", { n: z.number().catch(-1) }, /its query field n has a catch/],
+    ["a list of text items that catch", { tags: z.array(z.string().catch("x")).default([]) }, /its query field tags has a catch/],
+    // Review pass 4: steps a sample of values missed, and a transform that gives absent and [] apart.
+    ["a preprocess keyed on one value", { on: z.preprocess((v) => (v === 1 ? true : v), z.boolean()) }, /its query field on has a preprocess/],
+    ["a preprocess keyed on a decimal's text", { n: z.preprocess((v) => (typeof v === "string" && /^\d+\.\d{2}$/.test(v) ? Math.round(parseFloat(v) * 100) : v), z.number().int()) }, /its query field n has a preprocess/],
+    ["a list of text items that preprocess", { tags: z.array(z.preprocess((v) => v ?? "none", z.string())).default([]) }, /its query field tags has a preprocess/],
+    ["a list whose transform runs past its default", { tags: z.array(z.string()).transform((a) => (a.length ? a : ["all"])).default([]) }, /its query field tags is a list whose absence is not \[\] as \[\] is/],
+  ] as const) {
+    assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: it takes another type, which the query string would carry as another value (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
+  }
+  assert(/its path's \{id\} has a preprocess/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (typeof v === "number" ? String(v) : v), z.string()) } })]).join()), "a path field with a preprocess is refused: it takes a value of any type");
+  const throwsOnAbsent = withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (v as string).trim(), z.string().min(1)) } });
+  assert(/its path's \{id\} has a preprocess/.test(manifestProblems([throwsOnAbsent]).join()), "a step that throws on the load's own probe is refused in words, never a throw out of the check (review pass 4)");
+  assert(manifestProblems([withOp("crm", "find", { input: { on: z.stringbool().default(false), q: z.string().trim().toLowerCase(), at: z.iso.datetime().optional() } })]).length === 0, "a GET's stringbool (a codec on text), trim and an ISO datetime: sound");
+  assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { on: z.coerce.boolean(), n: z.number().catch(-1), s: z.preprocess((v) => String(v), z.string()) } })]).length === 0, "the same steps in a POST's body, which JSON carries as given: sound");
+  const queryable = withOp("crm", "find", { input: { q: z.string().trim(), n: z.number().int().optional(), on: z.boolean().default(false), kind: z.enum(["a", "b"]), tags: z.array(z.string()).default([]) } });
+  assert(manifestProblems([queryable]).length === 0, `a GET's text, number, boolean, enum and defaulted list of text are sound, and an idempotent trim (${manifestProblems([queryable]).join()})`);
+  assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { n: z.number().nullable(), ids: z.array(z.number()), o: z.object({ a: z.string() }) } })]).length === 0, "a POST's body carries a nullable, a list of numbers and an object as JSON: sound");
   assert(toolNameOf("meal-planning", "add_recipe") === "meal_planning_add_recipe", "a tool name reads the plugin's hyphens as underscores");
 }
 
@@ -387,7 +424,9 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
 
 console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for the keys whose scope reaches it");
 {
-  const worker = (await import("./index.ts")).default as { fetch: (req: Request) => Response | Promise<Response> };
+  // index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287 PR 4a).
+  const worker = await mcpUnderTest();
+  assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
   const H = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   const rpc = async (key: string, method: string, params: Record<string, unknown>) => {
     const r = await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }));
@@ -440,8 +479,17 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
   } finally {
     useRequestLog(before);
   }
-  const line = JSON.parse(said[0] ?? "{}") as Record<string, unknown>;
-  assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
+  const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
+  if (mcpTarget() === "client") {
+    // The MCP server writes no line of its own yet (SMD-2287 PR 4b): the lines are the REST core's — the call's
+    // whoami, then the operation's route, the tool named on it, as it ended.
+    const op = lines.find((l) => l.route === "/v1/plugins/example/recent");
+    assert(lines.length === 2 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 1 && op?.tool === "example_recent" && op.outcome === "error" && op.code === "FAILED",
+      `a plugin tool's call is on the REST core's line as it ended: \`error\` FAILED (${said.join(" / ")})`);
+  } else {
+    const line = lines[0] ?? {};
+    assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
+  }
   const bad = await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 50 } });
   assert(JSON.stringify(bad).includes("limit") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument past its schema is refused before the operation runs");
 }

@@ -36,14 +36,26 @@
  * never posted, nor is a session note.
  *
  * One comment per ticket pair, on the ticket of the thought the judge saw as
- * newer: several proposals or relations between rows of the same two
- * tickets are one comment. The record (migration 087, board_findings_posted)
- * is per pair and WORD — outdates, related, evolves, duplicate — so a
+ * newer — or on the other, when that one is closed and the other is not:
+ * several proposals or relations between rows of the same two tickets are
+ * one comment. A pair of closed tickets (status type completed, canceled or
+ * duplicate, read from 068's ob1_ticket_head) is not posted until one
+ * reopens: a comment asking to link two finished tickets is the least useful
+ * kind, and it spends the cap open work could use (SMD-2932). A ticket whose
+ * head carries no status (a hand capture over a superseded Linear row) reads
+ * its newest Linear row's; one with no status at all counts as open. The
+ * record (migration 087,
+ * board_findings_posted) is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
  * pair posted as related is posted once more only when the judge says
  * something else about it. The comment carries the two identifiers, the word
  * and its direction, the judge's confidence, a proposal's one-line reason (a
  * code span: a link or a mention in it is shown, not rendered) and its id.
+ * The judge relates thoughts, and a ticket's dated sections are rows of their
+ * own, so a relation between two tickets can stand on several row pairs,
+ * either way round: each word is one line, in its best finding's direction,
+ * saying how many row pairs back it and how many read it the other way
+ * (SMD-2930). A proposal stays a line of its own, its own decision.
  * It proposes only: no link is added, no status moved, no description
  * edited. A proposal is decided in the brain (consolidate.ts --accept /
  * --reject); a relation by linking the tickets on the board, which
@@ -142,13 +154,16 @@ export type Finding = {
   reason: string | null;
   /** When it was judged (a relation: when its facet was written). */
   at: string;
+  /** Whether each side's ticket is closed now: its head's status type completed, canceled or duplicate (068's ob1_ticket_head; SMD-2932). */
+  olderClosed: boolean;
+  newerClosed: boolean;
 };
 
 /** The findings of one ticket pair, ranked, with the ticket the comment goes on. */
 export type FindingGroup = {
   a: string;
   b: string;
-  /** The newer side of the pair's first-ranked finding. */
+  /** The newer side of the pair's first-ranked finding — the older when the newer is closed and the older is not (SMD-2932). */
   on: string;
   findings: Finding[];
 };
@@ -172,7 +187,9 @@ export function groupFindings(rows: readonly Finding[]): FindingGroup[] {
   const out: FindingGroup[] = [];
   for (const fs of groups.values()) {
     fs.sort(rankFindings);
-    out.push({ a: fs[0].a, b: fs[0].b, on: fs[0].newer, findings: fs });
+    // A closed ticket is less likely to be read than an open one (SMD-2932).
+    const best = fs[0];
+    out.push({ a: best.a, b: best.b, on: best.newerClosed && !best.olderClosed ? best.older : best.newer, findings: fs });
   }
   return out.sort((g, h) => rankFindings(g.findings[0], h.findings[0]));
 }
@@ -188,7 +205,18 @@ export function onlyWords(g: FindingGroup, words: ReadonlySet<FindingWord>): Fin
   return findings.length ? { ...g, findings } : null;
 }
 
-const conf = (c: number | null) => (c === null ? "" : ` (confidence ${c.toFixed(2)})`);
+/**
+ * The confidence, how many row pairs a collapsed relation stands for, and how
+ * many of those the judge read the other way round (SMD-2930).
+ */
+const conf = (c: number | null, rows = 1, against = 0) => {
+  const parts = [
+    ...(c === null ? [] : [`confidence ${c.toFixed(2)}`]),
+    ...(rows > 1 ? [c === null ? `${rows} row pairs` : `best of ${rows} row pairs`] : []),
+    ...(against > 0 ? [`${against} the other way`] : []),
+  ];
+  return parts.length ? ` (${parts.join(", ")})` : "";
+};
 /**
  * A reason as one code span, bounded: on one line, so it cannot start a line
  * of its own (a marker), and inside backticks, so a link, an image, a mention
@@ -199,8 +227,8 @@ const reasonSpan = (s: string) => {
   return `\`${flat.length > REASON_CHARS ? `${flat.slice(0, REASON_CHARS - 1)}…` : flat}\``;
 };
 
-/** One finding's bullet. */
-export function findingLine(f: Finding): string {
+/** One finding's bullet; `rows` the row pairs a collapsed relation stands for, `against` those read the other way round. */
+export function findingLine(f: Finding, rows = 1, against = 0): string {
   if (f.kind === "proposal") {
     const says = f.verdict === "newer_supersedes_older" ? `**${f.newer} outdates ${f.older}**`
       : f.verdict === "older_supersedes_newer" ? `**${f.older} outdates ${f.newer}**`
@@ -216,8 +244,37 @@ export function findingLine(f: Finding): string {
   // duplicate_of does not — 079 leaves it to the judge — so only this post
   // stops (review pass 1: the comment said the brain stops pairing them).
   return f.word === "duplicate"
-    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
-    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows, against)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
+    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows, against)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+}
+
+/**
+ * A group's bullets, in rank order: a proposal each — its own pending
+ * decision, with its own id — and a relation once per word, in its best
+ * finding's direction and at its confidence, saying how many row pairs back
+ * it and, for evolves and duplicate, how many the judge read the other way
+ * round. The judge relates thoughts, and a ticket's dated sections are rows
+ * of their own, falling on either side of the other ticket's dates, so one
+ * ticket pair can carry the same word several times, either way round; a
+ * comment printed it once per row pair, and evolves both ways as two bullets
+ * that contradicted each other (SMD-2930). The record still names every id.
+ */
+export function findingLines(g: Pick<FindingGroup, "findings">): string[] {
+  const kept: { f: Finding; rows: number; against: number }[] = [];
+  const at = new Map<FindingWord, number>();
+  for (const f of g.findings) {
+    const i = f.kind === "relation" ? at.get(f.word) : undefined;
+    if (i === undefined) {
+      at.set(f.word, kept.length);
+      kept.push({ f, rows: 1, against: 0 });
+      continue;
+    }
+    const k = kept[i];
+    k.rows++;
+    // related reads the same either way round; the others name a direction.
+    if (f.word !== "related" && f.newer !== k.f.newer) k.against++;
+  }
+  return kept.map(({ f, rows, against }) => findingLine(f, rows, against));
 }
 
 /**
@@ -237,7 +294,7 @@ export function commentBody(g: FindingGroup): string {
   return [
     `**Open Brain found something about ${g.on} and ${other}**, two tickets this board does not link.`,
     "",
-    ...g.findings.map(findingLine),
+    ...findingLines(g),
     "",
     "Posted by the brain's consolidation pass; it proposes only, and changed nothing on this board.",
     "",
@@ -333,20 +390,39 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
                                to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
-  // 029's table precedes 087 in every tree, so it exists here.
+  // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
-                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read,
+                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AND has_table_privilege('ob1_ticket_head', 'SELECT') AS read,
                                has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
                                has_function_privilege('consolidation_tickets_linked(jsonb, jsonb)', 'EXECUTE') AS linked`;
   const missing = [
     ...(g.posted_read && (g.posted_write || !write) ? [] : [`${write ? "SELECT and INSERT" : "SELECT"} on board_findings_posted (the structure group)`]),
-    ...(g.read ? [] : ["SELECT on thoughts and thought_facets (the capture group)"]),
+    ...(g.read ? [] : ["SELECT on thoughts, thought_facets and ob1_ticket_head (the capture group)"]),
     ...(g.proposals ? [] : ["SELECT on supersession_proposals (the structure group)"]),
     ...(g.linked ? [] : ["EXECUTE on consolidation_tickets_linked(jsonb, jsonb)"]),
   ];
   return missing.length ? `this role lacks ${missing.join("; ")} — cd db && bun migrate.ts --url <owner's url> --grant <role> --groups capture,structure` : null;
 }
+
+// A ticket is closed when its status type is completed, canceled or
+// duplicate (Done, Canceled, Duplicate — Linear gives Duplicate a type of its
+// own): its head's, from 068's ob1_ticket_head by its key, or — when the head
+// carries none, as a hand capture superseding the Linear row does — its
+// newest Linear row's, through 068's issue-key index (review pass 1). A ticket
+// with neither is open, and an unknown never reads as NULL, which would drop
+// the pair. A pair of closed tickets is not posted: a comment asking to link
+// two finished tickets is the least useful kind, and it spends the cap open
+// work could use (SMD-2932). Reopened, it is again. 058's
+// node_settled_types() lacks duplicate, so this set is its own until
+// SMD-2935 adds it there and this reads it.
+const closed = (k: string) => `coalesce(coalesce(
+    (SELECT th.status_type FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IS NOT NULL),
+    (SELECT t.metadata->>'status_type' FROM thoughts t
+      WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(${k})::uuid
+        AND t.metadata->>'source' = 'linear' AND t.metadata->>'status_type' IS NOT NULL
+      ORDER BY t.metadata->>'linear_updated_at' DESC NULLS LAST, t.created_at DESC, t.id DESC LIMIT 1)
+  ) IN ('completed', 'canceled', 'duplicate'), false)`;
 
 // Both sides are Linear rows (metadata.source = 'linear': board-sync's
 // tickets and their dated sections), and both identities are identifiers —
@@ -357,6 +433,7 @@ const PAIR_RULE = `
      os = 'linear' AND ns = 'linear'
  AND ko ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND kn ~ '^[A-Z][A-Z0-9]*-[0-9]+$'
  AND ko <> kn
+ AND NOT (${closed("ko")} AND ${closed("kn")})
  AND NOT consolidation_tickets_linked(om, nm)
  AND NOT EXISTS (SELECT 1 FROM thought_facets d JOIN thoughts dh ON dh.id = d.thought_id
                   WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
@@ -366,7 +443,7 @@ const PAIR_RULE = `
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       x.verdict, x.confidence, x.reason, x.at
+       x.verdict, x.confidence, x.reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT p.id, 'outdates'::text AS word, p.verdict, p.confidence::float8 AS confidence, p.reason, p.judged_at AS at,
                o.metadata AS om, n.metadata AS nm, o.metadata->>'source' AS os, n.metadata->>'source' AS ns,
                coalesce(o.metadata->>'ticket', o.metadata->>'issue') AS ko, coalesce(n.metadata->>'ticket', n.metadata->>'issue') AS kn
@@ -378,7 +455,7 @@ SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, l
 
 const RELATIONS = `
 SELECT 'relation' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at
+       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT f.id, f.payload->>'relation' AS word, (f.payload->>'confidence')::float8 AS confidence, f.created_at AS at,
                t.metadata AS om, h.metadata AS nm, t.metadata->>'source' AS os, h.metadata->>'source' AS ns,
                coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS ko, coalesce(h.metadata->>'ticket', h.metadata->>'issue') AS kn
@@ -411,6 +488,8 @@ export async function selectFindings(sql: SQL): Promise<Finding[]> {
     confidence: r.confidence === null || r.confidence === undefined ? null : Number(r.confidence),
     reason: (r.reason as string | null) ?? null,
     at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
+    olderClosed: r.older_closed === true,
+    newerClosed: r.newer_closed === true,
   }));
 }
 

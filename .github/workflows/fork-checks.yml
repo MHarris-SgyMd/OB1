@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -206,6 +206,37 @@ jobs:
       - name: The REST client against the REST core
         working-directory: rest-client
         run: bun test-client.ts
+
+      # The MCP server as a client of the REST core (SMD-2287): its own suite
+      # over the real REST app with a stub core, then test-auth's assertions
+      # held to it with the REST core behind it in process — the same suite
+      # the step above runs against server-portable's index.ts.
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the MCP server
+        working-directory: mcp-server
+        run: bunx tsc --noEmit
+
+      - name: The MCP server over the REST core
+        working-directory: mcp-server
+        run: bun test-mcp.ts
+
+      - name: Scoped access keys, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-auth.ts
+
+      # An enabled plugin's operation as the MCP server's tool, called on the
+      # REST core by its route (SMD-2287 PR 4a); its request line is the REST
+      # core's until PR 4b.
+      - name: Plugins in the contract, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-plugins.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
@@ -718,6 +749,27 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The same suite through the MCP server as a client of the REST core
+      # (SMD-2287 PR 3b), the REST core in process behind it: the same
+      # assertions, but a write records the REST core's door with the MCP
+      # server as its carrier, and the request lines are the REST core's
+      # until the MCP server writes its own (PR 4). The two installs pin its
+      # cross-directory imports; Bun would otherwise fetch them (SMD-2978).
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: End-to-end over MCP, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
+
       # The REST core beside the MCP server on one database (SMD-2284): every
       # operation through both doors, the MCP reply what render.ts makes of the
       # REST answer, the same refusals, and test-auth's cases against REST.
@@ -735,6 +787,15 @@ jobs:
         run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The example's operations read back through the MCP server as a REST
+      # client (SMD-2287 PR 4a), on the installs above.
+      - name: Plugin tables, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-plugins-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
 
       # The fully local path: both model calls go to a configured endpoint with no
       # credential, and a wrong-width vector is refused rather than stored.
@@ -2026,6 +2087,17 @@ jobs:
           }
           refused postgres open-brain-postgres-1 'name the same database'
           refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
+          # SMD-2873: the networks are the project's that the env file names (the
+          # runs above, on .env, which names none, joined open-brain's); and
+          # --project with --network is refused.
+          (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
+          rc=0; ./tier.sh --env-file /tmp/ob1x.env --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'no network ob1x_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not take ob1x's networks from an env file naming ob1x (exit $rc)" >&2; exit 1; fi
+          rc=0; ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--project and --network both name the networks' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; exit 1; fi
+          rc=0; ./tier.sh --env-file /tmp/ob1x.env --project ob1y --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'no network ob1y_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "--project did not name the networks over the env file's project" >&2; exit 1; fi
+          rm -f /tmp/ob1x.env
           [ "$(q openbrain "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the brain lost its thought" >&2; exit 1; }
 
       # SMD-2038. deploy/canary.sh stands a canary beside this stack and takes
@@ -2077,6 +2149,24 @@ jobs:
           refused 'takes a value' up --port ''
           refused 'takes a value' up --name ' '
           refused 'takes a compose project name' up --stable-project 'Open Brain'
+          # SMD-2873: stable's project is the one its env file names, so the canary
+          # looks for that project's stack, and every name follows it; and a
+          # canary's project is no stable.
+          (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
+          refused 'in compose project ob1x' up --env-file /tmp/ob1x.env
+          [ ! -e /tmp/.env.ob1x-canary.local ] || { echo "a refused up made ob1x's canary env file" >&2; exit 1; }
+          # Exit 0 and nothing on stderr, so a `names` that went on to act fails here.
+          names() {
+            local out
+            out="$(./canary.sh "$@" names 2> /tmp/canary-names.err)" || { cat /tmp/canary-names.err >&2; echo "canary.sh $* names exited non-zero" >&2; return 1; }
+            [ ! -s /tmp/canary-names.err ] || { cat /tmp/canary-names.err >&2; echo "canary.sh $* names wrote to stderr" >&2; return 1; }
+            printf '%s\n' "$out" | sed 's/  */ /g' | tr '\n' '|'
+          }
+          [ "$(names --env-file /tmp/ob1x.env)" = "stable ob1x|canary ob1x-canary|connector ob1x-canary|env file /tmp/.env.ob1x-canary.local|" ] || { names --env-file /tmp/ob1x.env >&2; echo "canary.sh's names do not follow the project ob1x's env file names" >&2; exit 1; }
+          [ "$(names --env-file /tmp/ob1x.env --stable-project ob1y)" = "stable ob1y|canary ob1y-canary|connector ob1y-canary|env file /tmp/.env.ob1y-canary.local|" ] || { echo "--stable-project does not name the canary" >&2; exit 1; }
+          [ "$(names)" = "stable open-brain|canary open-brain-canary|connector open-brain-canary|env file $PWD/.env.canary.local|" ] || { names >&2; echo "the default stable's canary is not open-brain-canary on .env.canary.local" >&2; exit 1; }
+          rm -f /tmp/ob1x.env
+          refused "is a canary's" up --stable-project open-brain-canary
           # The image the stack already pulled holds the port as well as any.
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
           refused 'port 8011 is published by ob1-port-squat' up --port 8011
@@ -2194,6 +2284,21 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
+          # SMD-2873: the file names the canary's own project, so compose given it
+          # alone acts on the canary; one naming another is refused at an up.
+          grep -qx 'COMPOSE_PROJECT_NAME="open-brain-canary"' .env.canary.local || { echo "the canary's env file does not name its project" >&2; exit 1; }
+          [ "$(printf 'name: x\nservices: {}\n' | docker compose --env-file .env.canary.local -f - config | sed -n 's/^name: //p')" = open-brain-canary ] || { echo "compose given the canary's env file alone does not take the canary's project" >&2; exit 1; }
+          printf 'COMPOSE_PROJECT_NAME=open-brain\n' >> .env.canary.local
+          rc=0; ./canary.sh up --no-smoke > /tmp/canary-guard.out 2>&1 || rc=$?
+          sed -i '$d' .env.canary.local
+          if [ "$rc" != 2 ] || ! grep -F "COMPOSE_PROJECT_NAME names open-brain, not the canary's project, open-brain-canary" /tmp/canary-guard.out; then cat /tmp/canary-guard.out >&2; echo "an up did not refuse a canary env file naming stable's project" >&2; exit 1; fi
+          # A canary file from before SMD-2873 names no project, as the dogfood's
+          # does: an up lets it through with a note, and here stops at the
+          # smoke key's refusal, which comes next.
+          (umask 077 && grep -v '^COMPOSE_PROJECT_NAME=' .env.canary.local > .env.canary-noname.local)
+          rc=0; OB1_SMOKE_KEY='' ./canary.sh up --canary-env-file .env.canary-noname.local > /tmp/canary-noname.out 2>&1 || rc=$?
+          rm -f .env.canary-noname.local
+          if [ "$rc" != 2 ] || ! grep -F 'names no project: add COMPOSE_PROJECT_NAME=open-brain-canary' /tmp/canary-noname.out || ! grep -F 'up smoke-tests the canary with OB1_SMOKE_KEY' /tmp/canary-noname.out; then cat /tmp/canary-noname.out >&2; echo "an up did not let a canary env file naming no project through with its note" >&2; exit 1; fi
           # The password through docker's environment, and grep's pattern from a
           # file, so neither is on a command line (review pass 3).
           login() { PGPASSWORD="$3" docker run --rm --network "$1" -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h "$2" -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
