@@ -109,14 +109,15 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 
 ```bash
 bun test-mcp.ts                                                  # 73 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; the method guard
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 190 — test-auth's assertions, held to this server with the REST core behind it
-cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 570 — the whole server over MCP on real Postgres, held to this server the same way
+cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
+cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 571 — the whole server over MCP on real Postgres, held to this server the same way
 ```
 
 `OB1_MCP_UNDER_TEST=client` makes a server-portable suite drive this server through
-`stack.ts` in place of `index.ts` (`server-portable/test-support.ts`'s `mcpUnderTest`).
+`stack.ts` in place of `index.ts` (`server-portable/test-support.ts`'s `mcpUnderTest`); each
+suite first asserts that the server it got is the one the variable names.
 CI runs test-auth and test-e2e-sql both ways. Where the two servers differ, test-e2e-sql
 says which it expects: a write through this server records the REST core's door,
-`open-brain-api`, with this server as its carrier (`act`), and a job it starts carries
-that door; the request lines are the REST core's, one per call it is sent, until this
-server writes its own (PR 4).
+`open-brain-api`, with this server as its carrier (`act`); the request lines are the
+REST core's, one per call it is sent, until this server writes its own (PR 4). [18]
+runs server-portable's own entry either way: this server holds no job store.

@@ -744,8 +744,8 @@ jobs:
       # (SMD-2287 PR 3b), the REST core in process behind it: the same
       # assertions, but a write records the REST core's door with the MCP
       # server as its carrier, and the request lines are the REST core's
-      # until the MCP server writes its own (PR 4). Its imports resolve
-      # through each directory's own install.
+      # until the MCP server writes its own (PR 4). The two installs pin its
+      # cross-directory imports; Bun would otherwise fetch them (SMD-2978).
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
