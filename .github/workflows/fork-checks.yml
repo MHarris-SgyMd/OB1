@@ -238,6 +238,15 @@ jobs:
           OB1_MCP_UNDER_TEST: client
         run: bun test-plugins.ts
 
+      # The real server's suite through the MCP server as a REST client
+      # (SMD-2287 PR 4b): its request lines, its refusals, its mirrors and its
+      # stop's count of tool calls — [22]'s spans are PR 4c's, skipped till then.
+      - name: Test against the real server, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-server.ts
+
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
       # them: SMD-1903 gave getEmbedding a required argument, the compiler fixed

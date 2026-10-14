@@ -5,6 +5,7 @@ import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./to
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
+import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
 /**
  * test-server.ts
  *
@@ -91,11 +92,9 @@ const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
-// The import under test.
-const worker = (await import("./index.ts")).default as {
-  fetch: (req: Request) => Response | Promise<Response>;
-  port?: number;
-};
+// The server under test: index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+const worker = await mcpUnderTest();
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 
 // The authorization server's health check, stubbed before any request: up or
 // down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
@@ -1917,10 +1916,12 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     aborter.abort();
     await gone;
     await Bun.sleep(150);
-    const whileRunning = toolCallsRunning();
+    // The server under test's own count: index.ts's, or the MCP server's (SMD-2287 PR 4b).
+    const running = worker.toolCallsRunning ?? toolCallsRunning;
+    const whileRunning = running();
     await Bun.sleep(900);
-    assert(whileRunning === 1 && toolCallsRunning() === 0,
-      `index.ts counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${toolCallsRunning()} after)`);
+    assert(whileRunning === 1 && running() === 0,
+      `the server counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${running()} after)`);
   } finally {
     console.warn = quiet;
     embedDelayMs = 0;
@@ -2814,7 +2815,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Exactly one line, never zero and never two, however the request ends —
   // each case collected apart, and given time for anything late to arrive.
   type Timing = { intervalMs: number; maxMs: number };
-  const { useKeepaliveTiming } = await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing };
+  // The server under test's own: index.ts's, or the MCP server's (SMD-2287 PR 4b).
+  const useKeepaliveTiming = worker.useKeepaliveTiming ?? (await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing }).useKeepaliveTiming;
   const { agents } = await import("./root.ts");
   const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
     const got: string[] = [];
@@ -2923,8 +2925,10 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
     registry.resolve = resolve;
     console.error = realError;
   }
-  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === "MCP_ACCESS_KEY",
-    `a throw in the route: one 500 \`error\` line, by the key's name (${JSON.stringify(thrown)})`);
+  // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
+  // its line names none, where index.ts matched the key's hash first (SMD-2287 PR 4b).
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === (mcpTarget() === "client" ? undefined : "MCP_ACCESS_KEY"),
+    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 
@@ -3135,7 +3139,9 @@ const durationPoints = (exporter: { getMetrics(): { scopeMetrics: { metrics: { d
   (exporter.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as DurationPoint[]);
 
 console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent linked (continued where trusted), its trace id on the line — and no key, URL or text in any span");
-{
+// Through the MCP server, its spans and the traceparent it sends are SMD-2287 PR 4c's: the section is index.ts's alone till then.
+if (mcpTarget() === "client") console.log("  (through the MCP server: SMD-2287 PR 4c's — its spans, and the traceparent it sends the REST core)");
+else {
   const { useRequestLog } = await import("./telemetry.ts");
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");

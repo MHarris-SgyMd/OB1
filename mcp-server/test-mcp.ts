@@ -602,6 +602,44 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   assert(npCode === 2 && /OB1_PLUGINS/.test(npSaid) && /no-such-plugin/.test(npSaid) && !/\n\s+at /.test(npSaid), `OB1_PLUGINS naming no plugin: exit 2, in words (${npCode}: ${npSaid.trim().slice(0, 90)})`);
 }
 
+console.log("\n[8f] The entry's stop: it waits for a tool call past its client's request, then cuts it, its line `cut` (SMD-2287 PR 4b)");
+{
+  // A REST core whose every operation hangs, and the entry in front of it with a short grace: the stop finds a tool call running.
+  const hangingCore = new Proxy({}, { get: () => () => new Promise(() => {}) }) as unknown as Core;
+  const hangingRest = createRestApp({
+    core: hangingCore,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-1" }),
+    track: (run) => run(),
+    log: () => {},
+  });
+  const restServer = Bun.serve({ port: 0, fetch: (req) => hangingRest.fetch(req) });
+  const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = holder.port;
+  holder.stop(true);
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
+  let up = false;
+  for (let i = 0; i < 100 && !up; i++) {
+    up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
+    if (!up) await Bun.sleep(50);
+  }
+  const pending = fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }).then((r) => r.text(), () => "gone");
+  await Bun.sleep(300);
+  entry.kill("SIGTERM");
+  const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);
+  const code = await entry.exited;
+  clearTimeout(hung);
+  await pending;
+  restServer.stop(true);
+  const out = await new Response(entry.stdout).text();
+  const err = await new Response(entry.stderr).text();
+  const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
+  const cut = lines.filter((l) => l.door === "mcp" && l.tool === "thought_stats");
+  assert(up && cut.length === 1 && cut[0].outcome === "cut" && /SIGTERM: no longer accepting; .*1 tool call running/.test(out) && /cut off by the server's stop/.test(err),
+    `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
+}
+
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");
 {
   let r = await app.fetch(new Request("http://mcp/mcp"));

@@ -3266,24 +3266,15 @@ console.log("\n[19] A capture's request line names the tool, the key and the tim
   try {
     await call("capture_thought", { content: PLANTED, metadata: { note: "planted-metadata-value" } });
     await call("search_thoughts", { query: "planted-search-words" });
-    for (let i = 0; i < 50 && said.length < (VIA_CLIENT ? 4 : 2); i++) await Bun.sleep(20); // a stream's line is written as it ends
+    for (let i = 0; i < 50 && said.length < 2; i++) await Bun.sleep(20); // a stream's line is written as it ends
   } finally {
     useRequestLog(previous);
   }
   const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
   const captures = lines.filter((l) => l.tool === "capture_thought");
   const captured = captures[0];
-  if (VIA_CLIENT) {
-    // The MCP server writes no line of its own yet (SMD-2287 PR 4): the lines are the REST core's, one per call it
-    // was sent — each tool call's whoami, then the operation, the tool named on the operation's. No rpc or bytes:
-    // telemetry records those for an MCP or streamed answer, not a REST JSON one.
-    assert(lines.length === 4 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 2
-      && captures.length === 1 && captured?.route === "/v1/thoughts" && captured.outcome === "ok" && captured.status === 201 && typeof captured.ms === "number",
-      `two calls, the REST core's four lines; the capture's: the tool, ok, a duration (${said.join(" / ")})`);
-  } else {
-    assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
-      `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
-  }
+  assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
+    `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
   assert(lines.filter((l) => l.tool === "search_thoughts" && l.outcome === "ok").length === 1, "…and one for the search");
   const all = said.join("\n");
   for (const s of ["omega", "never reach", "planted-metadata-value", "planted-search-words", "e2e-key"]) assert(!all.includes(s), `no ${s} in any line`);

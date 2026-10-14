@@ -370,8 +370,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
-    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
-    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
+    // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,
+    // and a forwarder's key, checked above, grants nothing.
+    const named = carrier ? { name: principal.name } : {};
+    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named }, { "WWW-Authenticate": "Bearer" });
+    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     if (carrier) {
