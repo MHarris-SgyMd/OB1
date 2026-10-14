@@ -449,9 +449,19 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
         input: { n: z.preprocess((v) => Number(v) + 1, z.number()), flag: z.stringbool(), word: z.string().overwrite((w) => `${w}!`) }, output: { n: z.number(), flag: z.boolean(), word: z.string() },
         async handler(_ctx, input) { return pluginOk({ n: input.n, flag: input.flag, word: input.word }); },
       }),
+      vet: operation({
+        title: "Vet", description: "An async refinement.", scope: "read", method: "POST", path: "/vet",
+        input: { s: z.string().refine(async (v) => v.length > 0, "empty") }, output: { s: z.string() },
+        async handler(_ctx, input) { return pluginOk({ s: input.s }); },
+      }),
+      tally: operation({
+        title: "Tally", description: "A default a step changes.", scope: "read", method: "POST", path: "/tally",
+        input: { n: z.number().default(1).transform((x) => x + 1) }, output: { n: z.number() },
+        async handler(_ctx, input) { return pluginOk({ n: input.n }); },
+      }),
       seek: operation({
         title: "Seek", description: "A GET's steps.", scope: "read", method: "GET", path: "/seek",
-        input: { n: z.preprocess((v) => Number(v) + 1, z.number()), flag: z.stringbool() }, output: { n: z.number(), flag: z.boolean() },
+        input: { n: z.number().transform((x) => x + 1), flag: z.stringbool() }, output: { n: z.number(), flag: z.boolean() },
         async handler(_ctx, input) { return pluginOk({ n: input.n, flag: input.flag }); },
       }),
     },
@@ -487,7 +497,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const listOf = async (key: string) => ((await ask("tools/list", {}, key)).result?.tools ?? []) as Listed[];
   const read = await listOf("read-raw");
   const names = read.map((t) => t.name);
-  assert(same(names, [...names.filter((n) => !n.startsWith("probe_kit_")), "probe_kit_item", "probe_kit_shape", "probe_kit_seek"]) && names.includes("search"), `a read key: the core's tools, then its plugin operations in the manifest's order, as index.ts lists them (${names.slice(-3).join(", ")})`);
+  assert(same(names, [...names.filter((n) => !n.startsWith("probe_kit_")), "probe_kit_item", "probe_kit_shape", "probe_kit_vet", "probe_kit_tally", "probe_kit_seek"]) && names.includes("search"), `a read key: the core's tools, then its plugin operations in the manifest's order, as index.ts lists them (${names.slice(-3).join(", ")})`);
   const item = read.find((t) => t.name === "probe_kit_item");
   assert(item?.annotations?.readOnlyHint === true && item.outputSchema?.properties !== undefined && "item_id" in item.outputSchema.properties, "…with the manifest's read-only hint and output schema");
   assert(!names.includes("other_kit_look"), "a plugin the REST core runs and this server was not given: no tool here");
@@ -500,7 +510,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const ops = loadPlugins("probe-kit", [probe])[0].operations;
   const inProcess = async (key: string, input: Record<string, unknown>, scope: "read" | "write" = "read") => {
     const op = ops.find((o) => o.key === key)!;
-    return say.renderPlugin(await runOperation(op, { core, principal: { name: "chatgpt", scope } as Principal }, op.input.parse(input)));
+    return say.renderPlugin(await runOperation(op, { core, principal: { name: "chatgpt", scope } as Principal }, await op.input.parseAsync(input)));
   };
   sentPaths.length = 0;
   let got = await callTool("probe_kit_item", { item_id: "a b", verbose: true });
@@ -518,6 +528,19 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
     got = await callTool(`probe_kit_${key}`, args);
     assert(expectReply(got, await inProcess(key, args)) && !got.isError, `${key}: a preprocess, a codec and an overwrite run once, as in process; a stray argument dropped as the SDK drops it (${got.text})`);
   }
+  got = await callTool("probe_kit_vet", { s: "ok" });
+  assert(expectReply(got, await inProcess("vet", { s: "ok" })) && !got.isError, `an async refinement: parsed and run, as in process (review pass 3: the REST core's sync parse threw) (${got.text})`);
+  // No arguments at all: read as {}, as the SDK reads them, the step run once (review pass 3: it fell back to the SDK's parse).
+  const bare = ((await ask("tools/call", { name: "probe_kit_tally" }, "read-raw")).result ?? {}) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+  assert(expectReply({ text: (bare.content ?? []).map((c) => c.text).join("\n"), sc: bare.structuredContent ?? {}, isError: bare.isError === true }, await inProcess("tally", {})), `a call with no arguments: the default's step run once, as in process (${bare.content?.[0]?.text})`);
+  // Two calls of one batch under one id: refused, never run with the other's arguments (review pass 3).
+  sentPaths.length = 0;
+  const batch = await withPlugins.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify([
+    { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "probe_kit_pin", arguments: { text: "A" } } },
+    { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "probe_kit_pin", arguments: { text: "B" } } },
+  ]) }));
+  const batchText = await batch.text();
+  assert(!sentPaths.some((path) => path.includes("/pins")) && /share the JSON-RPC id 9/.test(batchText) && !batchText.includes('"pinned"'), `a batch whose two calls share an id: both refused, neither sent (${batchText.replace(/\s+/g, " ").slice(0, 120)})`);
   got = await callTool("probe_kit_pin", { text: "hello" }, "write-raw");
   assert(expectReply(got, await inProcess("pin", { text: "hello" }, "write")) && sentPaths.includes("POST /v1/plugins/probe-kit/pins"), `a write: its body sent, its value said (${got.text})`);
   const refusedCall = await ask("tools/call", { name: "probe_kit_pin", arguments: { text: "x" } }, "read-raw");

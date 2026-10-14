@@ -181,7 +181,7 @@ const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[]
   return [...methods].sort();
 };
 
-/** `template`: a plugin operation's route, for the request line — its Hono route is the one wildcard. */
+/** `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter. */
 type RestEnv = { Variables: { template?: string } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
@@ -242,7 +242,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       throw err;
     }
     if (trace.deferred || trace.ended) return;
-    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the wildcard's.
+    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the catch-all route's.
     const template = c.get("template");
     trace.route ??= template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
     // An error answer's code is the one set as it was answered (answerError, or the hook route from its handler's checked JSON), never read back from the answer (PR 2c).
@@ -483,7 +483,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     for (const f of Object.keys(path)) {
       if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
     }
-    const parsed = z.object(shape).strict().safeParse({ ...rest, ...path });
+    // Awaited, so a plugin's async refinement runs as the MCP SDK's validation runs it (SMD-2287 PR 4a review pass 3).
+    const parsed = await z.object(shape).strict().safeParseAsync({ ...rest, ...path });
     if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
     return { input: parsed.data };
   }
@@ -540,7 +541,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
     const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
     if (!found) {
-      // No operation's route: the request line says so as any unrouted one does, not the wildcard's template.
+      // No operation's route: the request line says so as any unrouted one does, not the catch-all route's template.
       c.set("template", "-");
       return c.notFound();
     }

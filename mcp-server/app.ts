@@ -124,18 +124,27 @@ export function pluginOutcomeOf(a: Answer): Outcome {
   return a.ok ? { ok: true, value: a.body } : outcomeOf(a);
 }
 
-/** Each tools/call's arguments as its client sent them, by the request's JSON-RPC id (JSON-written): a body of one message or a batch. */
-export type RawArguments = ReadonlyMap<string, Record<string, unknown>>;
+/** Two calls of one request under one JSON-RPC id: which arguments are whose cannot be told (review pass 3). */
+export const AMBIGUOUS = Symbol("two calls share an id");
+/**
+ * Each tools/call's arguments as its client sent them, by the request's
+ * JSON-RPC id (JSON-written), from a body of one message or a batch: none
+ * given is `{}`, as the SDK reads it (review pass 3: a call with no arguments
+ * fell back to the SDK's parse, and a step ran twice); an id two calls share
+ * is AMBIGUOUS, never the first one's (review pass 3: both ran with it).
+ */
+export type RawArguments = ReadonlyMap<string, Record<string, unknown> | typeof AMBIGUOUS>;
 export function argumentsById(body: string | null): RawArguments {
-  const out = new Map<string, Record<string, unknown>>();
+  const out = new Map<string, Record<string, unknown> | typeof AMBIGUOUS>();
   let parsed: unknown;
   try { parsed = body ? JSON.parse(body) : null; } catch { return out; }
   for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
     const msg = m as { id?: unknown; method?: unknown; params?: { arguments?: unknown } } | null;
-    const args = msg?.params?.arguments;
-    if (msg?.method !== "tools/call" || msg.id === undefined || args === null || typeof args !== "object" || Array.isArray(args)) continue;
+    if (msg?.method !== "tools/call" || msg.id === undefined) continue;
+    const args = msg.params?.arguments ?? {};
+    if (typeof args !== "object" || Array.isArray(args)) continue;
     const key = JSON.stringify(msg.id);
-    if (!out.has(key)) out.set(key, args as Record<string, unknown>);
+    out.set(key, out.has(key) ? AMBIGUOUS : args as Record<string, unknown>);
   }
   return out;
 }
@@ -223,7 +232,9 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
     if (!caller.operations.has(op.tool)) continue;
     register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input: never, ctx) => {
       try {
-        const given = raw.get(JSON.stringify(ctx?.mcpReq?.id));
+        const id = JSON.stringify(ctx?.mcpReq?.id);
+        const given = raw.get(id);
+        if (given === AMBIGUOUS) return say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`));
         const sent = given ? Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field))) : input as Record<string, unknown>;
         const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
         return "fault" in outcome ? say.failed(outcome.fault) : say.renderPlugin(outcome as never);

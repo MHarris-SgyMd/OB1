@@ -129,6 +129,16 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
     assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: a query string cannot carry it as given (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
   }
   assert(manifestProblems([withOp("crm", "find", { method: "DELETE", input: { n: z.number().nullable() } })]).some((p) => /query field n/.test(p)), "…a DELETE's too");
+  // Review pass 3: a URL field that takes a value of another type would get it back as another value.
+  for (const [label, input, want] of [
+    ["a coerce", { on: z.coerce.boolean() }, /its query field on takes .* as well as its own type/],
+    ["a catch", { n: z.number().catch(-1) }, /its query field n takes .* as well as its own type/],
+    ["a list of text items that catch", { tags: z.array(z.string().catch("x")).default([]) }, /its query field tags takes .* as well as its own type/],
+  ] as const) {
+    assert(want.test(manifestProblems([withOp("crm", "find", { input })]).join()), `a GET's ${label} is refused: it takes another type, which the query string would carry as another value (${manifestProblems([withOp("crm", "find", { input })]).join() || "none"})`);
+  }
+  assert(/its path's \{id\} takes 0 as well as text/.test(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.preprocess((v) => (typeof v === "number" ? String(v) : v), z.string()) } })]).join()), "a path field that takes a number as well as text is refused");
+  assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { on: z.coerce.boolean(), n: z.number().catch(-1), s: z.preprocess((v) => String(v), z.string()) } })]).length === 0, "the same steps in a POST's body, which JSON carries as given: sound");
   const queryable = withOp("crm", "find", { input: { q: z.string().trim(), n: z.number().int().optional(), on: z.boolean().default(false), kind: z.enum(["a", "b"]), tags: z.array(z.string()).default([]) } });
   assert(manifestProblems([queryable]).length === 0, `a GET's text, number, boolean, enum and defaulted list of text are sound, and an idempotent trim (${manifestProblems([queryable]).join()})`);
   assert(manifestProblems([withOp("crm", "put", { method: "POST", input: { n: z.number().nullable(), ids: z.array(z.number()), o: z.object({ a: z.string() }) } })]).length === 0, "a POST's body carries a nullable, a list of numbers and an object as JSON: sound");

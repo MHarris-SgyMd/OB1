@@ -29,6 +29,30 @@ const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const QUERY_NAME = /^[A-Za-z0-9_.-]+$/;
 /** The types the REST core reads back from a query string's text (rest/app.ts inputFromQueryShape). */
 const QUERY_SCALARS = new Set(["string", "number", "integer", "boolean"]);
+/** A JSON value of each type, for asking a field whether it takes one other than its own. */
+const PROBES: unknown[] = [true, 0, "", "0", "true", null, [], ["x"], [0], [true], {}];
+const jsonTypeOf = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+/**
+ * The first JSON value of another type a URL field takes — a coerce, a catch
+ * or a preprocess takes them — or none. The MCP server sends the value its
+ * client sent, which a URL carries as text and the REST core reads back by
+ * the field's own type, so a value of another type would arrive as another
+ * value (review pass 3: a coerce.boolean's "false" arrived as false where
+ * index.ts parsed true).
+ */
+function takesOtherType(field: z.ZodType, type: string): unknown {
+  const own = type === "integer" ? "number" : type;
+  for (const v of PROBES) {
+    const kind = jsonTypeOf(v);
+    if (kind === own && !(kind === "array" && (v as unknown[]).some((item) => typeof item !== "string"))) continue;
+    try {
+      if (field.safeParse(v).success) return v;
+    } catch {
+      return v; // an async step, which no URL value gets past synchronously: a body field's
+    }
+  }
+  return undefined;
+}
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
 /** A webhook's name: one path segment of lower-case words and hyphens. */
@@ -135,6 +159,7 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
         else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
         // A path segment is always there: a field that may be absent is one MCP could call without.
         else if (field.safeParse(undefined).success) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
+        else if (takesOtherType(field, "string") !== undefined) problems.push(`${where}: its path's {${f}} takes ${JSON.stringify(takesOtherType(field, "string"))} as well as text, which a path carries as text`);
       }
       // A GET's or a DELETE's input rides the query string, through the REST
       // core and through the MCP server that calls it: each field one the REST
@@ -154,7 +179,10 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
             else if (!(absent.success && Array.isArray(absent.data) && absent.data.length === 0)) problems.push(`${where}: its query field ${f} is a list with no default of []: a query string carries no empty list`);
           } else if (!QUERY_SCALARS.has(js.type ?? "")) {
             problems.push(`${where}: its query field ${f} is not text, a number or a boolean (nullable, a union or an object), which a query string cannot carry as it was given`);
+            continue;
           }
+          const other = takesOtherType(field, js.type ?? "");
+          if (other !== undefined) problems.push(`${where}: its query field ${f} takes ${JSON.stringify(other)} as well as its own type (a coerce, a catch, a preprocess), which a query string would carry as another value`);
         }
       }
       // tools/list states the input as JSON Schema: a type it cannot state (a
