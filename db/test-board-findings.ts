@@ -33,7 +33,7 @@ function ok(cond: boolean, msg: string): void {
 
 const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Finding => {
   const [a, b] = o.older < o.newer ? [o.older, o.newer] : [o.newer, o.older];
-  return { kind: "relation", word: "related", verdict: null, confidence: null, reason: null, at: "2026-10-01T00:00:00.000Z", a, b, ...o };
+  return { kind: "relation", word: "related", verdict: null, confidence: null, reason: null, at: "2026-10-01T00:00:00.000Z", a, b, olderClosed: false, newerClosed: false, ...o };
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,12 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(g[0].on === "SMD-1" && g[0].findings.map((x) => x.id).join(",") === "r1,p1", `the comment goes on the newer side of the pair's best finding (${g[0].on})`);
   ok(groupWords(g[0]).join(",") === "related,outdates", "the words in rank order");
   ok(onlyWords(g[0], new Set(["outdates"]))?.findings.map((x) => x.id).join(",") === "p1" && onlyWords(g[0], new Set(["duplicate"])) === null, "onlyWords keeps a word's findings, and nothing when none is left");
+  // SMD-2932: a closed newer ticket with an open older one: the comment goes on the open one; otherwise the newer.
+  const on = (o: Partial<Finding>) => groupFindings([f({ id: "c", older: "SMD-1", newer: "SMD-2", ...o })])[0].on;
+  ok(on({}) === "SMD-2" && on({ newerClosed: true }) === "SMD-1" && on({ olderClosed: true }) === "SMD-2" && on({ newerClosed: true, olderClosed: true }) === "SMD-2",
+    "the comment goes on the newer ticket, but on the older when only the newer is closed");
+  const mixed = groupFindings([f({ id: "m1", older: "SMD-1", newer: "SMD-2", confidence: 0.9, newerClosed: true }), f({ id: "m2", older: "SMD-2", newer: "SMD-1", confidence: 0.5, olderClosed: true })])[0];
+  ok(mixed.on === "SMD-1", `…read on the pair's best finding (${mixed.on})`);
 }
 
 // ---------------------------------------------------------------------------
