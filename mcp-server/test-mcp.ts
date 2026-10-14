@@ -323,6 +323,12 @@ console.log("\n[8c] Review pass 2: /health's one deadline, a job stream's answer
   let took = performance.now() - t0;
   const slowText = await slow.text();
   assert(slowText.includes('"version":"1.0.0"') && took < 2_200, `a registry at 1.5 s: /health's record, the key's check and the read together (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  // A key the core does not know before the one that decides: its record asked from the start too (review pass 4).
+  t0 = performance.now();
+  const second = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "bogus-raw", "x-access-key": "read-raw" } }));
+  took = performance.now() - t0;
+  const secondText = await second.text();
+  assert(secondText.includes('"version":"1.0.0"') && took < 2_200, `an unknown key before a read key, the registry at 1.5 s: the read key's record, asked from the start (${Math.round(took)} ms, ${secondText.slice(0, 30)})`);
   resolveDelayMs = 2_700;
   t0 = performance.now();
   const past = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
@@ -617,13 +623,17 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
   let sent = 0;
   let healthDown = false;
   let turnedAfterWhoami = false;
+  let afterWhoami: Record<string, unknown> | null = null;
   let healthBody: string | null = null;
   const counting = createMcpApp({
     rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => {
       sent++;
       const path = new URL(req.url).pathname;
       if (restDown || (healthDown && path === "/health")) throw new TypeError("fetch failed: connection refused");
-      if (turnedAfterWhoami && path !== "/v1/whoami") return new Response(JSON.stringify({ code: "REVOKED" }), { status: 401, headers: { "content-type": "application/json" } });
+      // A streamed body, as a socket's is: one a cancel disturbs, where a string's survives it.
+      const streamed = (body: unknown) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode(JSON.stringify(body))); ctl.close(); } }), { status: 401, headers: { "content-type": "application/json" } });
+      if (turnedAfterWhoami && path !== "/v1/whoami") return streamed({ code: "REVOKED" });
+      if (afterWhoami && path !== "/v1/whoami") return streamed(afterWhoami);
       if (healthBody !== null && path === "/health") return new Response(healthBody, { status: 200, headers: { "content-type": "application/json" } });
       return restApp.fetch(req);
     } }),
@@ -659,13 +669,35 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
     }
     // A key the registry revoked between its check and the call: `refused` REVOKED, shown `ok`, as index.ts reads it — never a fault, nor a poll's 500 (review pass 3).
     turnedAfterWhoami = true;
-    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"]] as const) {
-      const r = await counting.fetch(new Request(`http://mcp${path}`, { headers: { "x-brain-key": "read-raw" } }));
+    for (const [path, route, method, key] of [
+      ["/worker-status", "/worker-status", "GET", "read-raw"],
+      ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id", "GET", "read-raw"],
+      ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream", "GET", "read-raw"],
+      ["/worker-retry-failed", "/worker-retry-failed", "POST", "write-raw"],
+    ] as const) {
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method, headers: { "x-brain-key": key, ...(method === "POST" ? { "content-type": "application/json" } : {}) }, ...(method === "POST" ? { body: "{}" } : {}) }));
       const text = await r.text();
       const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
       assert(r.status === 200 && text === "ok" && l.outcome === "refused" && l.code === "REVOKED" && l.route === route, `a key revoked after whoami at ${route}: \`refused\` REVOKED, shown \`ok\` (${r.status} ${said.at(-1)})`);
     }
     turnedAfterWhoami = false;
+    // The stream's other 401s: an unknown key `refused` with no code, never the 500 a body read after its cancel gave (review pass 4).
+    afterWhoami = { code: "UNAUTHORIZED" };
+    const unknownAt = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009/stream", { headers: { "x-brain-key": "read-raw" } }));
+    await unknownAt.text();
+    const unknownLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(unknownAt.status === 200 && unknownLine.outcome === "refused" && !("code" in unknownLine), `a 401 UNAUTHORIZED at the stream after whoami: \`refused\`, no code, no 500 (${unknownAt.status} ${said.at(-1)})`);
+    // This server's forwarder revoked mid-call is its misconfiguration, as standingOf reads it — not the caller's key (review pass 4).
+    afterWhoami = { code: "REVOKED", credential: "forwarder" };
+    const fwdAt = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdAt.text();
+    const fwdLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    const fwdStream = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009/stream", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdStream.text();
+    const fwdStreamLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    afterWhoami = null;
+    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED", `a forwarder revoked after whoami: \`error\` FAILED, not the caller's key REVOKED (${said.at(-1)})`);
+    assert(fwdStreamLine.code !== "REVOKED", `…and at the stream, not the caller's key REVOKED (${JSON.stringify(fwdStreamLine)})`);
     // /health answered with no record: `error` FAILED, not a string's characters served as fields (review pass 3).
     healthBody = JSON.stringify("garbage");
     const junk = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
@@ -685,6 +717,7 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
     restDown = false;
     healthDown = false;
     turnedAfterWhoami = false;
+    afterWhoami = null;
     healthBody = null;
     useRequestLog(before);
   }

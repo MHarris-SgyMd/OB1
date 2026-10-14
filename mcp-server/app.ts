@@ -360,7 +360,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   const busyNow = (a: Answer) => a.status === 503 && (a.body as { code?: string } | null)?.code === "BUSY";
   /** The registry's word on a key it turned between its check and the call — busy, or revoked — or none (review pass 3 of PR 4b: a revoked one read as a fault). */
   const turned = (a: Answer): { status: "busy" | "revoked" } | null =>
-    busyNow(a) ? { status: "busy" } : a.status === 401 && (a.body as { code?: string } | null)?.code === "REVOKED" ? { status: "revoked" } : null;
+    busyNow(a) ? { status: "busy" } : a.status === 401 && (a.body as { code?: string; credential?: string } | null)?.code === "REVOKED" && (a.body as { credential?: string }).credential !== "forwarder" ? { status: "revoked" } : null;
   /**
    * The caller of a keyed mirror or /health, its key's standing within
    * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
@@ -443,21 +443,24 @@ export function createMcpApp(deps: McpDeps): Hono {
     // and the route answers `ok` (review pass 2: one after the other, a keyed
     // probe could wait twice the deadline).
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
-    // The record asked beside the key's standing, for the first key presented — the one that decides in all but a
-    // rare request — as index.ts starts its read with the registry's check: one after the other, a slow registry and a
-    // slow read each inside the deadline ran past it together (review pass 3 of PR 4b). The REST core's registry runs
-    // one lookup per key at a time (agents.ts), so the two share it. Let go when another key decides.
+    // The record asked beside the key's standing, for each key presented — whichever decides — as index.ts starts its
+    // read with the registry's check: one after the other, a slow registry and a slow read each inside the deadline ran
+    // past it together (review passes 3 and 4 of PR 4b). The REST core's registry runs one lookup per key at a time
+    // (agents.ts), so each read shares its key's, and a key it does not know answers at once with none. Those of the
+    // keys that do not decide are let go.
     type Read = { a: Answer | null; fault: unknown };
     const early = new AbortController();
-    const first = presentedKeys(c.req.raw)[0];
-    const read = (key: string, signal: AbortSignal): Promise<Read> =>
-      deps.rest.call("health" as never, {} as never, { key, signal }).then((a) => ({ a, fault: null }), (fault) => ({ a: null, fault }));
-    const firstRead = read(first, AbortSignal.any([budget, early.signal]));
+    const signal = AbortSignal.any([budget, early.signal]);
+    const reads = new Map(presentedKeys(c.req.raw).map((key) => [key, deps.rest.call("health" as never, {} as never, { key, signal })
+      .then((a): Read => ({ a, fault: null }), (fault): Read => ({ a: null, fault }))] as const));
     const caller = await keyedCaller(c, "/health", "brain_info", budget);
-    if (caller instanceof Response || caller.key !== first) early.abort();
-    if (caller instanceof Response) return caller;
+    if (caller instanceof Response) {
+      early.abort();
+      return caller;
+    }
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    const { a, fault } = caller.key === first ? await firstRead : await read(caller.key, budget);
+    const { a, fault } = await reads.get(caller.key)!;
+    early.abort();
     // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
     // or an answer that is no record and no liveness, is this server's fault: liveness all the same, its line `error`
     // FAILED (review pass 2 of PR 4b: the REST core gone between the two calls read as the key refused).
@@ -558,14 +561,17 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (streamMatch) {
       const upstream = await deps.rest.stream(id, { key: caller.key, signal: c.req.raw.signal });
       if (upstream.status !== 200 || !upstream.body) {
-        void upstream.body?.cancel().catch(() => {});
+        // A 401's code read, its body consumed by the read; any other's let go unread (review pass 4 of PR 4b: a clone
+        // after the cancel threw, and every 401 at the stream was a 500).
+        const refusal = upstream.status === 401 ? (await upstream.json().catch(() => null)) as { code?: string; credential?: string } | null : null;
+        if (upstream.status !== 401) void upstream.body?.cancel().catch(() => {});
         // Not there for this key: index.ts's 404. A fault — the durable job
         // store away — is Hono's 500, as index.ts's throw is; a key the REST
         // core no longer stands by is shown `ok` (review pass 2: all three read
         // "not found", which a poller gives up on).
         if (upstream.status === 404) return c.json({ error: "not found" }, 404, corsHeaders);
         if (upstream.status >= 500 && upstream.status !== 503) throw new Error(`the REST core answered the job stream ${upstream.status}`);
-        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : upstream.status === 401 && (await upstream.clone().json().catch(() => null) as { code?: string } | null)?.code === "REVOKED" ? { status: "revoked" } : null);
+        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : refusal?.code === "REVOKED" && refusal.credential !== "forwarder" ? { status: "revoked" } : null);
       }
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
       // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
