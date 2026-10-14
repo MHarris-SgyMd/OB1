@@ -68,6 +68,18 @@ export interface McpDeps {
   stop?: { cut: boolean };
 }
 
+/**
+ * The REST core refused this server's own forward-scope key — unknown, out of
+ * scope, revoked: the server is misconfigured, whichever route asked. Said once
+ * in the log in these words wherever it arrives (review pass 5 of PR 4b: four
+ * routes said it four ways, one as the caller refused).
+ */
+export class ForwarderRefused extends Error {
+  constructor(status: number, code: string | undefined) {
+    super(`the REST core refused this server's forwarder key (${status} ${code ?? "?"}): set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds`);
+  }
+}
+
 /** Who a request's key is, as the REST core's whoami says: its name, its scope and the operations it may call — or why not. */
 export type Standing =
   | { kind: "caller"; key: string; name: string; scope: string; operations: ReadonlySet<string> }
@@ -84,20 +96,22 @@ export type Standing =
  * this server fills is its own: refused there, the server is misconfigured,
  * and the request is a fault, never a caller's refusal.
  */
-export async function standingOf(rest: RestClient, req: Request, signal?: AbortSignal): Promise<Standing> {
+export async function standingOf(rest: RestClient, req: Request, signal?: AbortSignal, onUnknown?: (key: string) => void): Promise<Standing> {
   for (const key of presentedKeys(req)) {
     const a = await rest.call("whoami" as never, {} as never, { key, signal });
     const body = (a.body ?? {}) as { code?: string; credential?: string; name?: string; scope?: string; operations?: string[] };
     // This server's own key in the forwarder slot: busy is the registry's, as for a caller's key (review pass 3: it read
     // as a misconfiguration); refused, the server is misconfigured.
-    if (body.credential === "forwarder" && a.status === 503) return { kind: "busy" };
     // A caller's key the registry revoked or is busy on is named, as the REST core names it to a forwarder, for the line.
     const named = typeof body.name === "string" ? { name: body.name } : {};
-    if (body.credential === "forwarder") throw new Error(`the REST core refused this server's forwarder key (${a.status} ${body.code ?? "?"}): set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds`);
+    if (body.credential === "forwarder" && a.status === 503) return { kind: "busy", ...named };
+    if (body.credential === "forwarder") throw new ForwarderRefused(a.status, body.code);
     if (a.status === 200) return { kind: "caller", key, name: String(body.name), scope: String(body.scope), operations: new Set(body.operations ?? []) };
     if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked", ...named };
     if (a.status === 503) return { kind: "busy", ...named };
     if (a.status !== 401) throw new Error(`the REST core answered whoami ${a.status} ${body.code ?? ""}`.trim());
+    // A key the REST core does not know: the next decides, if one does.
+    onUnknown?.(key);
   }
   return { kind: "none" };
 }
@@ -115,9 +129,11 @@ type Outcome = { ok: true; value: unknown } | { ok: false; refusal: Refusal } | 
  * answered itself) is a fault naming its code.
  */
 export function outcomeOf(a: Answer): Outcome {
-  const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; issues?: { path: string; message: string }[] };
+  const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; credential?: string; issues?: { path: string; message: string }[] };
   if (body.refusal && typeof body.refusal === "object") return { ok: false, refusal: body.refusal };
   if (a.ok) return { ok: true, value: a.body };
+  // This server's forwarder refused mid-call: its misconfiguration, whichever operation asked (review pass 5). Busy is the registry's (turned).
+  if (body.credential === "forwarder" && a.status !== 503) return { fault: new ForwarderRefused(a.status, body.code) };
   if ((body.code === "FAILED" || body.code === "STORE_UNAVAILABLE") && typeof body.message === "string") return { fault: new Error(body.message) };
   if (body.code === "REFUSED_INPUT" && body.issues?.length) return { fault: new Error(body.issues.map((i) => `${i.path || "input"}: ${i.message}`).join("; ")) };
   return { fault: new Error(`the REST core answered ${a.status}${body.code ? ` ${body.code}` : ""}`) };
@@ -368,11 +384,11 @@ export function createMcpApp(deps: McpDeps): Hono {
    * the route shows `ok` (review pass 1: it waited out the REST timeout).
    */
   type Found = Standing | { kind: "fault"; err: unknown };
-  const standingInTime = async (req: Request, budget: AbortSignal): Promise<Found> => {
+  const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void): Promise<Found> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
     const standing = await Promise.race([
-      standingOf(deps.rest, req, budget).catch((err): Found => {
+      standingOf(deps.rest, req, budget, onUnknown).catch((err): Found => {
         // The deadline's own abort is the registry's silence, shown nothing; any other throw is this server's fault (review pass 1 of PR 4b).
         if (budget.aborted) return { kind: "none" };
         sayOnce(err);
@@ -395,9 +411,9 @@ export function createMcpApp(deps: McpDeps): Hono {
    * said which (mcp-edge.ts shownNothing, notCleared).
    */
   type Caller = Extract<Standing, { kind: "caller" }>;
-  const keyedCaller = async (c: Context, route: string, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS)): Promise<Caller | Response> => {
+  const keyedCaller = async (c: Context, route: string, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS), onUnknown?: (key: string) => void): Promise<Caller | Response> => {
     const trace = nameRoute(c, route, tool);
-    const standing = await standingInTime(c.req.raw, budget);
+    const standing = await standingInTime(c.req.raw, budget, onUnknown);
     if (standing.kind === "caller" && standing.operations.has(tool)) {
       if (trace) trace.agent = standing.name;
       return standing;
@@ -416,6 +432,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
   /** A route that faulted: its line `error` FAILED, its kind on the span; a mirror's 200 {error} answer as index.ts's, or (`shownOk`) liveness. */
   const faultedAt = (c: Context, err: unknown, shownOk = false) => {
+    if (err instanceof ForwarderRefused) sayOnce(err, "this server is misconfigured");
     const trace = traceOf(c.req.raw);
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(err); }
     return shownOk ? c.text("ok", 200, corsHeaders) : c.json({ error: (err as Error).message }, 200, corsHeaders);
@@ -443,22 +460,29 @@ export function createMcpApp(deps: McpDeps): Hono {
     // and the route answers `ok` (review pass 2: one after the other, a keyed
     // probe could wait twice the deadline).
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
-    // The record asked beside the key's standing, for each key presented — whichever decides — as index.ts starts its
-    // read with the registry's check: one after the other, a slow registry and a slow read each inside the deadline ran
-    // past it together (review passes 3 and 4 of PR 4b). The REST core's registry runs one lookup per key at a time
-    // (agents.ts), so each read shares its key's, and a key it does not know answers at once with none. Those of the
-    // keys that do not decide are let go.
+    // The record asked beside the key's standing, as index.ts starts its read with the registry's check: one after the
+    // other, a slow registry and a slow read each inside the deadline ran past it together (review passes 3 and 4 of PR
+    // 4b). A key's record is asked once every key before it is found unknown — the first that could decide, as index.ts
+    // reads the first key that matches, never one more (review pass 5: each valid key asked cost a read and a lookup).
+    // The REST core's registry runs one lookup per key at a time (agents.ts), so a read shares its key's whoami lookup;
+    // the edge's view starts beside them, as index.ts starts it with its read.
     type Read = { a: Answer | null; fault: unknown };
     const early = new AbortController();
     const signal = AbortSignal.any([budget, early.signal]);
-    const reads = new Map(presentedKeys(c.req.raw).map((key) => [key, deps.rest.call("health" as never, {} as never, { key, signal })
-      .then((a): Read => ({ a, fault: null }), (fault): Read => ({ a: null, fault }))] as const));
-    const caller = await keyedCaller(c, "/health", "brain_info", budget);
+    const keys = presentedKeys(c.req.raw);
+    const reads = new Map<string, Promise<Read>>();
+    const ask = (key: string | undefined) => {
+      if (key === undefined || reads.has(key)) return;
+      reads.set(key, deps.rest.call("health" as never, {} as never, { key, signal }).then((a): Read => ({ a, fault: null }), (fault): Read => ({ a: null, fault })));
+    };
+    ask(keys[0]);
+    const oauth = edgeView(edgeHere(), () => authReachability().reachable());
+    const caller = await keyedCaller(c, "/health", "brain_info", budget, (key) => ask(keys[keys.indexOf(key) + 1]));
     if (caller instanceof Response) {
       early.abort();
       return caller;
     }
-    const oauth = edgeView(edgeHere(), () => authReachability().reachable());
+    ask(caller.key);
     const { a, fault } = await reads.get(caller.key)!;
     early.abort();
     // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
@@ -571,6 +595,8 @@ export function createMcpApp(deps: McpDeps): Hono {
         // "not found", which a poller gives up on).
         if (upstream.status === 404) return c.json({ error: "not found" }, 404, corsHeaders);
         if (upstream.status >= 500 && upstream.status !== 503) throw new Error(`the REST core answered the job stream ${upstream.status}`);
+        // This server's forwarder refused or revoked there: its misconfiguration, a 500 said once, as at the poll (review pass 5 of PR 4b).
+        if (refusal?.credential === "forwarder") throw new ForwarderRefused(401, refusal.code);
         return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : refusal?.code === "REVOKED" && refusal.credential !== "forwarder" ? { status: "revoked" } : null);
       }
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });

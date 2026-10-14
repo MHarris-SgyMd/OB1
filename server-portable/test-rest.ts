@@ -277,7 +277,7 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   identity = { status: "ok", agentId: "agent-1" };
   carrierIdentity = { status: "revoked", agentId: "agent-f", revokedAt: "2026-10-05T00:00:00Z", reason: null };
   r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
-  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(r.body)})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder" && r.body.name === "r", `a revoked forwarder → 401 REVOKED, credential forwarder, the caller named for the forwarder's line (${JSON.stringify(r.body)})`);
   carrierIdentity = { status: "busy" } as AgentOutcome;
   const busy = await fwd("/v1/whoami", "read-raw", "fwd-raw");
   const busyBody = await busy.clone().json() as Record<string, unknown>;

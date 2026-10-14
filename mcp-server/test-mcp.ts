@@ -625,10 +625,13 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
   let turnedAfterWhoami = false;
   let afterWhoami: Record<string, unknown> | null = null;
   let healthBody: string | null = null;
+  const healthAsked: string[] = [];
+  const countingWarned: string[] = [];
   const counting = createMcpApp({
     rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => {
       sent++;
       const path = new URL(req.url).pathname;
+      if (path === "/health") healthAsked.push(req.headers.get("x-brain-key") ?? "?");
       if (restDown || (healthDown && path === "/health")) throw new TypeError("fetch failed: connection refused");
       // A streamed body, as a socket's is: one a cancel disturbs, where a string's survives it.
       const streamed = (body: unknown) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode(JSON.stringify(body))); ctl.close(); } }), { status: 401, headers: { "content-type": "application/json" } });
@@ -638,7 +641,7 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
       return restApp.fetch(req);
     } }),
     edge: () => ({ configured: false, origin: null }),
-    warn: () => {},
+    warn: (l) => countingWarned.push(l),
   });
   try {
     restDown = true;
@@ -689,15 +692,31 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
     assert(unknownAt.status === 200 && unknownLine.outcome === "refused" && !("code" in unknownLine), `a 401 UNAUTHORIZED at the stream after whoami: \`refused\`, no code, no 500 (${unknownAt.status} ${said.at(-1)})`);
     // This server's forwarder revoked mid-call is its misconfiguration, as standingOf reads it — not the caller's key (review pass 4).
     afterWhoami = { code: "REVOKED", credential: "forwarder" };
+    countingWarned.length = 0;
     const fwdAt = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
     await fwdAt.text();
     const fwdLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    const fwdSaid = [...countingWarned];
+    const fwdPoll = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdPoll.text();
+    const fwdPollLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
     const fwdStream = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009/stream", { headers: { "x-brain-key": "read-raw" } }));
     await fwdStream.text();
     const fwdStreamLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
     afterWhoami = null;
-    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED", `a forwarder revoked after whoami: \`error\` FAILED, not the caller's key REVOKED (${said.at(-1)})`);
-    assert(fwdStreamLine.code !== "REVOKED", `…and at the stream, not the caller's key REVOKED (${JSON.stringify(fwdStreamLine)})`);
+    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED" && fwdSaid.length === 1 && /misconfigured.*forwarder key/.test(fwdSaid[0]),
+      `a forwarder revoked after whoami: \`error\` FAILED, said once as this server's misconfiguration (review pass 5) (${fwdSaid.join(" | ")})`);
+    assert(fwdPoll.status === 500 && fwdPollLine.outcome === "error", `…a 500 \`error\` at the job poll (${fwdPoll.status} ${JSON.stringify(fwdPollLine)})`);
+    assert(fwdStreamLine.outcome === "error" && fwdStreamLine.status === 500, `…and at the stream, a 500 \`error\` as at the poll, not the caller's key refused (review pass 5) (${JSON.stringify(fwdStreamLine)})`);
+    // A record asked for the first key that could decide alone, as index.ts reads the first key that matches (review pass 5):
+    // two valid keys, one read; an unknown key first, its read and the next key's.
+    healthAsked.length = 0;
+    await (await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw", "x-access-key": "write-raw" } }))).text();
+    const twoValid = [...healthAsked];
+    healthAsked.length = 0;
+    await (await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "bogus-raw", "x-access-key": "read-raw" } }))).text();
+    const unknownFirst = [...healthAsked];
+    assert(same(twoValid, ["read-raw"]) && same(unknownFirst, ["bogus-raw", "read-raw"]), `/health's record asked for the first key that could decide alone (two valid: ${twoValid.join()}; unknown first: ${unknownFirst.join()})`);
     // /health answered with no record: `error` FAILED, not a string's characters served as fields (review pass 3).
     healthBody = JSON.stringify("garbage");
     const junk = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));

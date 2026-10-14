@@ -83,13 +83,16 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   (`mcp-edge.ts`'s `MIRROR_INPUT` and `MIRROR_WORDS`). Their key check, like
   `/health`'s, is held to `HEALTH_DEADLINE_MS` (`server-portable/deadlines.ts`): a
   registry that does not answer by then is shown `ok`, the lookup aborted. On
-  `/health` one deadline covers the key's standing and the record, asked together for
-  each key presented, as `index.ts` starts both. A job poll or stream whose read
+  `/health` one deadline covers the key's standing and the record, asked together, as
+  `index.ts` starts both — for the first key presented, and the next once one is found
+  unknown, so no key that could not decide is read. A job poll or stream whose read
   faults is a 500; a key the registry turns busy or revoked between its check and the
   call is `ok`, its line `refused` BUSY or REVOKED. A fault finding the caller or the
   record (this server's forwarder refused or revoked, the REST core away, a registry
   that throws, a record that is no object) is shown `ok` there, its line `error`
-  FAILED, a 500 `error` at the endpoint, and said in the log at most once a minute. A
+  FAILED, a 500 `error` at the endpoint, and said in the log at most once a minute;
+  this server's forwarder refused during a call is the same misconfiguration, said in
+  the same words — a mirror's `error` FAILED, a job poll's or stream's 500. A
   keyed HEAD at `/health` and the mirrors is `ok` at once, asking the REST core
   nothing. The
   registry busy on this server's own key is busy, `-32003` with `Retry-After`, not a
@@ -110,9 +113,9 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   with no code, the REST core's keyed `/health` answering liveness. With this
   server's forwarder misconfigured, an unknown key reads `refused`, the REST core
   refusing it before the forwarder.
-- **The REST core's lines** for a keyed `GET /health` are two a key presented (its
-  whoami and its `/health`, asked together): a key it does not know reads `refused` on
-  both.
+- **The REST core's lines** for a keyed `GET /health` are two for the key that decides
+  (its whoami and its `/health`, asked together), and two for each unknown key before
+  it, `refused`.
 - **A key turned during a tool call** (revoked or busy after this server's whoami) is
   the tool's fault, FAILED, where `index.ts` refuses a key turned before the call.
 - **The stop** counts this server's tool calls; a scan's job body runs in the REST core,
@@ -148,7 +151,7 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 ## Test
 
 ```bash
-bun test-mcp.ts                                                  # 115 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the method guard
+bun test-mcp.ts                                                  # 117 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the method guard
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
 cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 571 — the whole server over MCP on real Postgres, held to this server the same way
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1008 — the real server's suite, its request lines and stop; [22]'s 54 span assertions are PR 4c's
