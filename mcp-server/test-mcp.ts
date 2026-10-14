@@ -346,6 +346,48 @@ console.log("\n[8c] Review pass 2: /health's one deadline, a job stream's answer
   assert(lines.length === 1 && /forwarder/.test(lines[0]), `a forwarder the REST core refuses: one line, naming it, however often asked (${lines.length}: ${lines[0]?.slice(0, 80)})`);
 }
 
+console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base");
+{
+  // A REST core whose answers this test writes: whoami, then the call.
+  const scripted = (whoami: () => Response, call: () => Response, lines?: string[]) => createMcpApp({
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => (new URL(req.url).pathname.endsWith("/whoami") ? whoami() : call()) }),
+    edge: () => ({ configured: false, origin: null }),
+    warn: (l) => lines?.push(l),
+  });
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const reader = () => json(200, { name: "chatgpt", scope: "read", operations: ["worker_status", "job_status", "thought_stats"] });
+  // The registry busy on this server's own key: busy, -32003 and Retry-After, as on a caller's — not a misconfiguration's 500.
+  const fwdBusy = scripted(() => json(503, { code: "BUSY", retryable: true, credential: "forwarder" }), () => json(200, {}));
+  const r = await fwdBusy.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }));
+  const rBody = await r.json() as { error?: { code?: number } };
+  assert(r.status === 200 && rBody.error?.code === -32003 && r.headers.get("retry-after") === "2", `the forwarder's key busy: -32003 with Retry-After (${r.status} ${JSON.stringify(rBody)})`);
+  // The registry busy between the key's check and the call: ok, as index.ts shows a busy key.
+  const midBusy = scripted(reader, () => json(503, { code: "BUSY", retryable: true }));
+  for (const path of ["/worker-status", "/mcp/jobs/job-7"]) {
+    const m = await midBusy.fetch(new Request(`http://mcp${path}`, { headers: { "x-brain-key": "read-raw" } }));
+    assert(m.status === 200 && (await m.text()) === "ok", `${path} with the registry busy mid-call: ok (${m.status})`);
+  }
+  const run = await scripted(() => json(200, { name: "laptop", scope: "write", operations: ["run_worker"] }), () => json(503, { code: "BUSY", retryable: true })).fetch(new Request("http://mcp/worker-run", { method: "POST", headers: { "x-brain-key": "write-raw" }, body: "{}" }));
+  assert(run.status === 200 && (await run.text()) === "ok", "…and a worker POST: ok");
+  // A route's throw: Hono's 500 and one line, however often, not a stack per request.
+  const lines: string[] = [];
+  const broken = scripted(() => json(401, { code: "UNAUTHORIZED", credential: "forwarder" }), () => json(200, {}), lines);
+  const statuses: number[] = [];
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...a: unknown[]) => { errors.push(a.map(String).join(" ")); };
+  for (let i = 0; i < 3; i++) statuses.push((await broken.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }))).status);
+  console.error = originalError;
+  assert(same(statuses, [500, 500, 500]) && lines.length === 1 && /forwarder/.test(lines[0]) && errors.length === 0, `a forwarder refused at the endpoint: three 500s, one line, no stack (${statuses}; ${lines.length} lines, ${errors.length} errors)`);
+  // The entry: Bun's longest idle timeout — its 10 s default cuts a GET whose handler has not answered — and a base it cannot serve refused in words.
+  const entry = (await import("./index.ts")).default as { idleTimeout?: number };
+  assert(entry.idleTimeout === 255, `the entry's idle timeout is Bun's ceiling (${entry.idleTimeout})`);
+  const badBase = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, OB1_FORWARDER_KEY: "x".repeat(64), OB1_REST_URL: "http://api?x=1" }, stdout: "pipe", stderr: "pipe" });
+  const code = await badBase.exited;
+  const said = await new Response(badBase.stderr).text();
+  assert(code === 2 && /OB1_REST_URL/.test(said) && !/\n\s+at /.test(said), `a base the client refuses: exit 2, in words, no stack (${code}: ${said.trim().slice(0, 80)})`);
+}
+
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");
 {
   let r = await app.fetch(new Request("http://mcp/mcp"));

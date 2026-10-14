@@ -71,6 +71,9 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
   for (const key of presentedKeys(req)) {
     const a = await rest.call("whoami" as never, {} as never, { key, signal });
     const body = (a.body ?? {}) as { code?: string; credential?: string; name?: string; scope?: string; operations?: string[] };
+    // This server's own key in the forwarder slot: busy is the registry's, as for a caller's key (review pass 3: it read
+    // as a misconfiguration); refused, the server is misconfigured.
+    if (body.credential === "forwarder" && a.status === 503) return { kind: "busy" };
     if (body.credential === "forwarder") throw new Error(`the REST core refused this server's forwarder key (${a.status} ${body.code ?? "?"}): set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds`);
     if (a.status === 200) return { kind: "caller", key, name: String(body.name), scope: String(body.scope), operations: new Set(body.operations ?? []) };
     if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked" };
@@ -201,14 +204,22 @@ export function createMcpApp(deps: McpDeps): Hono {
    * standing not had by then — the registry's tables locked — is none, and
    * the route shows `ok` (review pass 1: it waited out the REST timeout).
    */
-  /** A fault finding the caller — this server's forwarder refused, the REST core away — said once per kind of message: /health and the mirrors show `ok` for it, so the log is where it is seen (review pass 2). */
-  const said = new Set<string>();
+  /**
+   * A fault finding the caller — this server's forwarder refused, the REST
+   * core away — said at most once a minute per message: /health and the
+   * mirrors show `ok` for it, and the endpoint a 500, so the log is where it
+   * is seen, and seen again if it comes back (review passes 2 and 3).
+   */
+  const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown) => {
     const line = `mcp-server: the caller could not be found: ${(err as Error)?.message ?? String(err)}`;
-    if (said.has(line)) return;
-    said.add(line);
+    const now = Date.now();
+    if (now - (lastSaid.get(line) ?? -Infinity) < 60_000) return;
+    lastSaid.set(line, now);
     warn(line);
   };
+  /** The registry busy on a key between its check and the call: shown `ok`, as index.ts shows a busy key at every keyed route (review pass 3). */
+  const busyNow = (a: Answer) => a.status === 503 && (a.body as { code?: string } | null)?.code === "BUSY";
   const standingInTime = async (req: Request, budget: AbortSignal): Promise<Standing> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
@@ -267,7 +278,9 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
     noteLegacyRoute(c.req.raw, caller.name);
     try {
-      const o = outcomeOf(await deps.rest.call("worker_status", {}, { key: caller.key }));
+      const answered = await deps.rest.call("worker_status", {}, { key: caller.key });
+      if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+      const o = outcomeOf(answered);
       if ("fault" in o) return c.json({ error: o.fault.message }, 200, corsHeaders);
       // The operation answers an object (a tool result is one); this route has always answered the bare rows.
       return c.json(o.ok ? (o.value as { pools: unknown }).pools : [], 200, corsHeaders);
@@ -291,7 +304,9 @@ export function createMcpApp(deps: McpDeps): Hono {
     const body = await c.req.json().catch(() => null);
     const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     try {
-      const o = outcomeOf(await deps.rest.call(tool, MIRROR_INPUT[tool](args) as never, { key: caller.key }));
+      const answered = await deps.rest.call(tool, MIRROR_INPUT[tool](args) as never, { key: caller.key });
+      if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+      const o = outcomeOf(answered);
       if ("fault" in o) return c.json({ error: o.fault.message }, 200, corsHeaders);
       if (o.ok) return c.json(o.value as object, 200, corsHeaders);
       const words = MIRROR_WORDS[tool] as Record<string, string>;
@@ -328,7 +343,9 @@ export function createMcpApp(deps: McpDeps): Hono {
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
       return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
     }
-    const o = outcomeOf(await deps.rest.call("job_status", { job_id: id }, { key: caller.key }));
+    const answered = await deps.rest.call("job_status", { job_id: id }, { key: caller.key });
+    if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+    const o = outcomeOf(answered);
     if ("fault" in o) throw o.fault;
     if (!o.ok) return c.json({ error: "not found" }, 404, corsHeaders);
     return c.json(o.value as object, 200, corsHeaders);
@@ -364,13 +381,13 @@ export function createMcpApp(deps: McpDeps): Hono {
       throw err;
     }
     async function answer(): Promise<Response> {
-      const standing = await standingOf(deps.rest, c.req.raw);
+      const standing = await standingOf(deps.rest, c.req.raw, signal);
       if (standing.kind === "none") {
-        const answer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
+        const edgeAnswer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
         const target = refusalTarget(await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT));
         settled = true;
-        if (answer.kind === "challenge") return challengeResponse(answer.origin, answer.refusedToken, target);
-        if (answer.kind === "unavailable") return unavailableResponse(target);
+        if (edgeAnswer.kind === "challenge") return challengeResponse(edgeAnswer.origin, edgeAnswer.refusedToken, target);
+        if (edgeAnswer.kind === "unavailable") return unavailableResponse(target);
         return target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse();
       }
       if (standing.kind === "revoked" || standing.kind === "busy") {
@@ -402,6 +419,13 @@ export function createMcpApp(deps: McpDeps): Hono {
         onCancel: abandoned,
       });
     }
+  });
+
+  // A throw from a route — the REST core away, this server's forwarder refused — is a 500, as Hono's default answers
+  // it, and one line in the log at most once a minute, not a stack trace per request (review pass 3).
+  app.onError((err, c) => {
+    sayOnce(err);
+    return c.text("Internal Server Error", 500);
   });
 
   // Whatever no route above matched: 405 with `Allow` (index.ts's notFound).

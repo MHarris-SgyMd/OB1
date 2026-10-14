@@ -71,8 +71,11 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   registry that does not answer by then is shown `ok`, the lookup aborted. On
   `/health` one deadline covers the key's standing and the record together. A job
   poll or stream whose read faults is a 500, and a stream the registry is busy on
-  `ok`. A fault finding the caller (this server's forwarder refused, the REST core
-  away) is shown `ok` there and said once in the log.
+  `ok`, as is a key the registry turns busy between its check and the call. A fault
+  finding the caller (this server's forwarder refused, the REST core away) is shown
+  `ok` there, a 500 at the endpoint, and said in the log at most once a minute. The
+  registry busy on this server's own key is busy, `-32003` with `Retry-After`, not a
+  misconfiguration.
 
 **Known differences from `index.ts` (the parity runs below):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
@@ -81,7 +84,14 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   - plugin tools (`<plugin>_<operation>`): tools/list holds the core tools alone;
   - the MCP request line and its spans (`door: "mcp"`, SMD-1849): only the REST core's
     lines are written;
-  - the stop's drain of an answer's stream past its handler.
+  - the stop's drain of an answer's stream past its handler: today the stop counts
+    requests in flight, not tool calls (`0 tool calls running` for a call that is), and
+    a call whose client has gone is cut at once — the REST core runs it to its end.
+
+**The entry** serves with Bun's longest idle timeout, 255 s (`IDLE_TIMEOUT_S`): its job
+polls and mirrors are GETs that wait on the REST core, and Bun's 10 s default cuts such
+a GET (the REST core's own reason, `server-portable/api.ts`). With no store, its stop
+says no pool was opened. A base it cannot serve exits 2 in words.
 
 ## Run
 
@@ -98,7 +108,7 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 ## Test
 
 ```bash
-bun test-mcp.ts                                                  # 62 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the method guard
+bun test-mcp.ts                                                  # 69 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; the method guard
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 190 — test-auth's assertions, held to this server with the REST core behind it
 ```
 
