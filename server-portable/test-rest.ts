@@ -1064,11 +1064,12 @@ console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default c
   // What the setting is for, measured on this runtime: a GET whose handler answers after 14 s (Bun cuts at its 10 s default plus its sweep, about 12 s).
   const probe = (idleTimeout?: number) => {
     const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
-    return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 30)}`).finally(() => server.stop(true));
+    return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 40)}`).finally(() => server.stop(true));
   };
   const [held, cut] = await Promise.all([probe(255), probe()]);
   assert(held === "200 done", `at 255, a 14-second GET is answered (${held})`);
-  assert(cut !== "200 done", `…where Bun's default cuts it — the setting's reason, still true on this runtime (${cut})`);
+  // A tripwire: when a Bun bump stops cutting, this fails — revisit IDLE_TIMEOUT_S here and in mcp-server/index.ts, and sse.ts's comment (SMD-2931).
+  assert(/^cut: .*ECONNRESET|^cut: .*closed/i.test(cut), `…where Bun's default cuts it, the connection reset — the setting's reason, still true on this runtime; if this fails after a Bun bump, revisit IDLE_TIMEOUT_S (api.ts, mcp-server/index.ts) and sse.ts's comment (${cut})`);
 }
 
 report();

@@ -49,6 +49,8 @@ export interface McpDeps {
   keepalive?: { intervalMs: number; maxMs: number };
   /** Where a client gone mid-call is told, one line (sse.ts's abandonedRequestLine); stderr unless a suite listens. */
   warn?: (line: string) => void;
+  /** Where the REST core answers, for this server's fault lines (credentials blanked by the entry); none named unless given. */
+  restUrl?: string;
 }
 
 /** Who a request's key is, as the REST core's whoami says: its name, its scope and the operations it may call — or why not. */
@@ -211,8 +213,8 @@ export function createMcpApp(deps: McpDeps): Hono {
    * is seen, and seen again if it comes back (review passes 2 and 3).
    */
   const lastSaid = new Map<string, number>();
-  const sayOnce = (err: unknown) => {
-    const line = `mcp-server: the caller could not be found: ${(err as Error)?.message ?? String(err)}`;
+  const sayOnce = (err: unknown, lead = "the caller could not be found") => {
+    const line = `mcp-server: ${lead}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}`;
     const now = Date.now();
     if (now - (lastSaid.get(line) ?? -Infinity) < 60_000) return;
     lastSaid.set(line, now);
@@ -424,7 +426,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   // A throw from a route — the REST core away, this server's forwarder refused — is a 500, as Hono's default answers
   // it, and one line in the log at most once a minute, not a stack trace per request (review pass 3).
   app.onError((err, c) => {
-    sayOnce(err);
+    if (!c.req.raw.signal.aborted) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
     return c.text("Internal Server Error", 500);
   });
 

@@ -379,6 +379,27 @@ console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy m
   for (let i = 0; i < 3; i++) statuses.push((await broken.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }))).status);
   console.error = originalError;
   assert(same(statuses, [500, 500, 500]) && lines.length === 1 && /forwarder/.test(lines[0]) && errors.length === 0, `a forwarder refused at the endpoint: three 500s, one line, no stack (${statuses}; ${lines.length} lines, ${errors.length} errors)`);
+  // A route's throw is said as a route's, with the REST core's address (review pass 4).
+  const named: string[] = [];
+  const brokenNamed = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async () => json(401, { code: "UNAUTHORIZED", credential: "forwarder" }) }), edge: () => ({ configured: false, origin: null }), warn: (l) => named.push(l), restUrl: "http://api.test:8000" });
+  await (await brokenNamed.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }))).text();
+  assert(named.length === 1 && named[0].includes("POST a route failed") && named[0].includes("(REST core at http://api.test:8000)"), `a route's throw: named as a route's, the REST core's address beside it (${named[0]?.slice(0, 90)})`);
+  // A client gone while its key is asked: the abandoned line's, not a fault line (review pass 4).
+  const quiet: string[] = [];
+  let releaseWhoami: () => void = () => {};
+  const held = new Promise<void>((done) => { releaseWhoami = done; });
+  const slowWhoami = createMcpApp({
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { await held; if (req.signal.aborted) throw req.signal.reason; return reader(); } }),
+    edge: () => ({ configured: false, origin: null }),
+    warn: (l) => quiet.push(l),
+  });
+  const leaving = new AbortController();
+  const pendingAnswer = slowWhoami.fetch(new Request("http://mcp/mcp", { method: "POST", signal: leaving.signal, headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }));
+  await Bun.sleep(20);
+  leaving.abort();
+  releaseWhoami();
+  await Promise.resolve(pendingAnswer).catch(() => null);
+  assert(!quiet.some((l) => /failed|could not be found/.test(l)), `a client gone during whoami: no fault line (${quiet.join(" | ") || "none"})`);
   // The entry: Bun's longest idle timeout — its 10 s default cuts a GET whose handler has not answered — and a base it cannot serve refused in words.
   const entry = (await import("./index.ts")).default as { idleTimeout?: number };
   assert(entry.idleTimeout === 255, `the entry's idle timeout is Bun's ceiling (${entry.idleTimeout})`);
@@ -386,6 +407,15 @@ console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy m
   const code = await badBase.exited;
   const said = await new Response(badBase.stderr).text();
   assert(code === 2 && /OB1_REST_URL/.test(said) && !/\n\s+at /.test(said), `a base the client refuses: exit 2, in words, no stack (${code}: ${said.trim().slice(0, 80)})`);
+  const withPassword = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, OB1_FORWARDER_KEY: "x".repeat(64), OB1_REST_URL: "http://svc:hunter2pass@api" }, stdout: "pipe", stderr: "pipe" });
+  const pwCode = await withPassword.exited;
+  const pwSaid = await new Response(withPassword.stderr).text();
+  assert(pwCode === 2 && !pwSaid.includes("hunter2pass") && /credentials/.test(pwSaid), `a base carrying credentials: refused without printing them (${pwSaid.trim().slice(0, 90)})`);
+  // Imported, not run, the entry leaves a bad base to its importer: a throw, never the importer's exit 2 (review pass 4).
+  const imported = Bun.spawn(["bun", "-e", "await import('./index.ts').catch((e) => { console.log('threw: ' + e.message.slice(0, 40)); process.exit(0); })"], { cwd: import.meta.dir, env: { ...process.env, OB1_FORWARDER_KEY: "x".repeat(64), OB1_REST_URL: "http://api?x=1" }, stdout: "pipe", stderr: "pipe" });
+  const impCode = await imported.exited;
+  const impSaid = await new Response(imported.stdout).text();
+  assert(impCode === 0 && impSaid.startsWith("threw: "), `imported with a bad base: it throws to its importer (${impCode}: ${impSaid.trim()})`);
 }
 
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");
