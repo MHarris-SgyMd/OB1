@@ -27,7 +27,11 @@
 # tier.ts unchanged (db/README.md has its verbs).
 #
 # Flags of this wrapper's own, all optional:
-#   --network NAME   the stack's networks (default open-brain_data,open-brain_egress,
+#   --project NAME   the stack whose networks this joins (default: the project
+#                    --env-file names, COMPOSE_PROJECT_NAME as compose reads it,
+#                    else compose.yaml's open-brain; SMD-2873): its
+#                    <project>_data and <project>_egress. Not with --network
+#   --network NAME   the stack's networks (default <project>_data,<project>_egress,
 #                    deploy/compose.yaml's: Postgres is on `data`, internal,
 #                    and a --replay or --diff embeds through the model
 #                    provider on `egress`; SMD-2583. A --refresh needs `data`
@@ -100,7 +104,8 @@ usage() {
   exit 2
 }
 
-NETWORK=open-brain_data,open-brain_egress
+NETWORK=""
+PROJECT=""
 ENV_FILE="$HERE/.env"
 FROM_ENV_FILE=""
 RUNTIME=""
@@ -110,12 +115,15 @@ SEEN=" "
 PASS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --network|--env-file|--from-env-file|--runtime|--from|--to)
+    --network|--project|--env-file|--from-env-file|--runtime|--from|--to)
       [ $# -ge 2 ] && [ "${2#--}" = "$2" ] || { echo "$1 takes a value." >&2; exit 2; }
+      # An empty --network or --project would fall through to the env file's project.
+      case "$1" in --network|--project) [ -n "${2//[[:space:]]/}" ] || { echo "$1 takes a value." >&2; exit 2; } ;; esac
       case "$SEEN" in *" $1 "*) echo "$1 given twice." >&2; exit 2 ;; esac
       SEEN="$SEEN$1 "
       case "$1" in
         --network) NETWORK="$2" ;;
+        --project) PROJECT="$2" ;;
         --env-file) ENV_FILE="$2" ;;
         --from-env-file) FROM_ENV_FILE="$2" ;;
         --runtime) RUNTIME="$2" ;;
@@ -146,6 +154,39 @@ if [ -z "$RUNTIME" ]; then
   else echo "neither docker nor podman is on PATH." >&2; exit 2
   fi
 fi
+command -v "$RUNTIME" >/dev/null 2>&1 || { echo "--runtime $RUNTIME is not on PATH." >&2; exit 2; }
+
+# The networks (SMD-2873): --network as given, or the project's data and egress.
+# One env file is one brain, so the project is the one --env-file names, read as
+# compose reads it (a stub carrying compose.yaml's `name: open-brain`, which an
+# env file's or the shell's COMPOSE_PROJECT_NAME overrides), unless --project
+# names it.
+case "$SEEN" in *" --network "*)
+  case "$SEEN" in *" --project "*) echo "--project and --network both name the networks: give one." >&2; exit 2 ;; esac ;;
+esac
+FROM_WHERE=""
+if [ -z "$NETWORK" ]; then
+  FROM_WHERE="--project"
+  if [ -z "$PROJECT" ]; then
+    if [ -n "${COMPOSE_PROJECT_NAME+set}" ]; then FROM_WHERE="COMPOSE_PROJECT_NAME in the shell"; else FROM_WHERE="COMPOSE_PROJECT_NAME in $ENV_FILE, or compose.yaml's open-brain"; fi
+    # The runtime's compose, then either other one, as resolve_env below reads
+    # the file (compose quotes a name YAML would read otherwise, `"123"`).
+    errf="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-project.XXXXXX")"
+    for c in "$RUNTIME" docker podman; do
+      command -v "$c" >/dev/null 2>&1 || continue
+      PROJECT="$(printf 'name: open-brain\nservices: {}\n' | "$c" compose --env-file "$ENV_FILE" -f - config 2>"$errf" | sed -n 's/^name: //p' | head -n 1 | tr -d "\"'")" || true
+      [ -z "$PROJECT" ] || break
+    done
+    if [ -z "$PROJECT" ]; then
+      sed $'s/\x1b\\[[0-9;]*m//g' "$errf" | grep -v -E 'Executing external compose provider|^Error: executing .*compose|^[[:space:]]*$' | tail -n 1 >&2 || true
+      rm -f "$errf"
+      echo "could not read the stack's project from $ENV_FILE through compose (its reason above); name it with --project, or the networks with --network." >&2; exit 2
+    fi
+    rm -f "$errf"
+  fi
+  [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "the project ($FROM_WHERE) takes a compose project name (lower-case letters, digits, - and _): '$PROJECT'" >&2; exit 2; }
+  NETWORK="${PROJECT}_data,${PROJECT}_egress"
+fi
 
 # Before anything is built: a mistyped network (open-brain_data against
 # open-brain-tiers_data) is a usage error, not the runtime's 125 at the end.
@@ -159,7 +200,7 @@ for net in "${NETS[@]}"; do
   case "$SEEN_NETS" in *" $net "*) echo "--network names $net twice." >&2; exit 2 ;; esac
   SEEN_NETS="$SEEN_NETS$net "
   "$RUNTIME" network inspect "$net" >/dev/null 2>&1 || {
-    echo "no network $net — name the stack's with --network. The runtime has:" >&2
+    echo "no network $net${FROM_WHERE:+ (the project $PROJECT, from $FROM_WHERE)} — name the stack's with --project or --network. The runtime has:" >&2
     "$RUNTIME" network ls >&2 || true
     exit 2
   }
