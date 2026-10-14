@@ -70,8 +70,8 @@
  *      publish through compose.host-ports.yaml, a second -f; and
  *      deploy/.env.example's live lines are exactly the keys an operator fills
  *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685)
- *      or any env file (.env.x, .env-x, .env_x, x.env, .envrc) but an
- *      .example, .sample or .template; and deploy/canary.sh and deploy/tier.sh
+ *      or any env file (a name that starts `.env`, ends `.env` or holds
+ *      `.env.`) but an .example, .sample or .template; and deploy/canary.sh and deploy/tier.sh
  *      read the stack's project through a stub carrying compose.yaml's own
  *      `name:` on one code line that reads an env file, and name it nowhere
  *      else in code but a short list (SMD-2873).

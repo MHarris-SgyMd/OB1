@@ -179,8 +179,9 @@ docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --
 OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 
-Name an instance's file `.env.<name>.local`: the root `.gitignore` ignores that
-form, and not `.env.<name>`, and the fork's checks refuse a tracked env file.
+Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
+ignores (it does not ignore `.env.<name>`); the fork's checks refuse a tracked
+env file.
 `--env-file` replaces `deploy/.env` for that command, so give it on every
 compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
 env file names the canary's project, but its port, tier and mesh are

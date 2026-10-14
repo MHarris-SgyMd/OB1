@@ -7,6 +7,7 @@
 # runs this checkout's tier.ts in it, on the stack's network, so the database
 # services are reached by name and nothing is published for it.
 #
+#   # (the default project's names; another brain's are <project>_data and the rest)
 #   # replay stable's logged searches on the canary deploy/canary.sh stood up:
 #   # both projects' database networks, so by container name (each has a
 #   # `postgres`), and stable's egress, for the model the replay embeds with;
