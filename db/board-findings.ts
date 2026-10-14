@@ -835,9 +835,11 @@ export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string 
     v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
     : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
     : v.outcome === "withdrawn"
-      ? r.proposals
-        ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
-        : r.withdrawnS === null ? "withdrawn: its relation is gone with a thought" : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
+      // The first take-back decides; what the judge said since is named, not counted (SMD-2913).
+      ? r.withdrawnS === null ? (r.proposals ? "withdrawn: its proposal is gone" : "withdrawn: its relation is gone with a thought")
+        : r.proposals
+          ? `withdrawn: the pass settled its proposal ${ago(Math.max(0, r.withdrawnS))} after${r.proposals.pending + r.proposals.stale > 0 ? " (reopened since)" : ""}`
+          : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after${r.stands ? " (said again since)" : ""}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     // A found row is never in the rate, so it has no window to count down (review pass 4).
     : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;

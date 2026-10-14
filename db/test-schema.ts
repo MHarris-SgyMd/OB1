@@ -3167,8 +3167,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const EXTRACT = "extract:stub@p1";
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
-    `supersession_proposals has the seventeen columns, in order (${cols.join(",")})`);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written,pass_settled_at",
+    `supersession_proposals has the eighteen columns, in order — 091's pass_settled_at last (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -13912,6 +13912,97 @@ console.log("\n[80] Migration 090: a re-capture over a capture-only key's label 
     "090 re-applied: one of each function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[81] Migration 091: every time the consolidation pass settled a proposal is kept on its row — appended as the row becomes settled, carried over 067's reopen, 063's replace in place and a person's review, never a caller's value; a row inserted settled starts with its time (SMD-2913)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const ACTOR = { name: "op-81", via: "test-door" };
+  const PASS_ACTOR = { name: "consolidator", via: "consolidate", session: "consolidate:stub@p81" };
+  const JUDGE = "consolidate:stub@p81";
+  const cap = async (content: string, at: number) =>
+    (await one<{ r: { id: string; fingerprint: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(at)])).r;
+  const move = async (id: string, content: string) => {
+    await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [id, content]);
+    return fpOf(content);
+  };
+  const rebuild = async (id: string) =>
+    (await one<{ r: { ok: boolean; stale_proposals: number } }>(`SELECT rebuild_derived($1::uuid, 'edit', false, NULL::text[], false, false) AS r`, [id])).r;
+  const settle = async (id: string, ofp: string, nfp: string) =>
+    (await one<{ r: { ok: boolean; error?: string } }>(`SELECT settle_supersession_proposal($1::uuid, $2::text, $3::jsonb, $4::text, $5::text, $6::text, '{"deterministic": false, "model": "stub-judge", "settled": "unrelated"}'::jsonb, NULL::uuid) AS r`,
+      [id, `${PASS_SETTLED_PREFIX} judged again after a text moved — unrelated at ${JUDGE}`, JSON.stringify(PASS_ACTOR), JUDGE, ofp, nfp])).r;
+  const propose = (older: string, newer: string) =>
+    one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, $3::text, NULL, NULL, NULL, '{"deterministic": false, "model": "stub-judge"}'::jsonb) AS id`, [older, newer, JUDGE]);
+  type Row = { status: string; reviewed: string | null; settles: string[] };
+  const row = (id: string) => one<Row>(`SELECT status, reviewed_at::text AS reviewed, pass_settled_at::text[] AS settles FROM supersession_proposals WHERE id = $1::uuid`, [id]);
+  await restoreShipped("rebuild_derived", "settle_supersession_proposal", "ob1_keep_proposal_settles");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+
+  // The shape.
+  const trig = await q<{ t: string; when: string }>(`SELECT tgname AS t, pg_get_triggerdef(oid) AS when FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND NOT tgisinternal AND tgname = 'supersession_proposals_keep_settles'`);
+  const col = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["supersession_proposals", "pass_settled_at"])).c ?? "";
+  const fc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_keep_proposal_settles()"])).c ?? "";
+  assert(trig.length === 1 && /BEFORE INSERT OR UPDATE ON public\.supersession_proposals FOR EACH ROW/.test(trig[0].when) && lastDefinerOf("ob1_keep_proposal_settles").startsWith("091")
+      && /091 \/ SMD-2913/.test(col) && /091 \/ SMD-2913/.test(fc) && (await functionsNamed("ob1_keep_proposal_settles")) === 1,
+    `one BEFORE INSERT OR UPDATE trigger, 091 its function's last definer, the column's and the function's comments naming 091 and the ticket (${trig.map((t) => t.when).join()})`);
+
+  // The fixture: B older, A newer; a pending proposal on the pair.
+  const B = await cap("091: the older note about Bea", 1);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [B.id]);
+  const A = await cap("091: the newer note about Bea", 2);
+  const pid = (await propose(B.id, A.id)).id!;
+  assert(JSON.stringify((await row(pid)).settles) === "[]", "a proposal recorded pending starts with no settle");
+
+  // Settled, reopened by a text move, judged in conflict again (063's replace in place), stale again, settled again.
+  const aFp2 = await move(A.id, "091: the newer note about Bea, rewritten once");
+  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp2)).ok === true, "the fixture: stale by a text move, then settled by the pass");
+  const s1 = await row(pid);
+  assert(s1.status === "rejected" && s1.settles.length === 1 && s1.reviewed !== null && Date.parse(s1.settles[0]) === Date.parse(s1.reviewed),
+    `a settle appends its reviewed_at (${JSON.stringify(s1)})`);
+  await move(A.id, "091: the newer note about Bea, rewritten twice");
+  const reopened = await rebuild(A.id);
+  const s2 = await row(pid);
+  assert(reopened.stale_proposals === 1 && s2.status === "stale" && s2.reviewed === null && JSON.stringify(s2.settles) === JSON.stringify(s1.settles),
+    `067's reopen clears reviewed_at; the settle it reopened is kept (${JSON.stringify(s2)})`);
+  await propose(B.id, A.id);
+  const s3 = await row(pid);
+  assert(s3.status === "pending" && JSON.stringify(s3.settles) === JSON.stringify(s1.settles), `063's replace in place, back to pending, keeps it too (${JSON.stringify(s3)})`);
+  const aFp4 = await move(A.id, "091: the newer note about Bea, rewritten three times");
+  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp4)).ok === true, "the fixture: stale again, settled again");
+  const s4 = await row(pid);
+  assert(s4.settles.length === 2 && s4.settles[0] === s1.settles[0] && Date.parse(s4.settles[1]) === Date.parse(s4.reviewed!) && Date.parse(s4.settles[1]) >= Date.parse(s4.settles[0]),
+    `a second settle appends, oldest first (${JSON.stringify(s4)})`);
+
+  // A write on a settled row that does not settle it, and a caller's own value: carried over unchanged.
+  await db.query(`UPDATE supersession_proposals SET confidence = 0.5, reviewed_at = now() - interval '9 days', pass_settled_at = ARRAY[now() - interval '40 days'] WHERE id = $1::uuid`, [pid]);
+  const s5 = await row(pid);
+  assert(JSON.stringify(s5.settles) === JSON.stringify(s4.settles), `a write that does not settle the row, and a caller's own pass_settled_at, change nothing (${JSON.stringify(s5)})`);
+
+  // A person's rejection is no settle; a row inserted settled starts with its time.
+  const C = await cap("091: a third note about Bea", 3);
+  const pid2 = (await propose(B.id, C.id)).id!;
+  await db.query(`SELECT review_supersession_proposal($1::uuid, 'reject', 'not the same claim')`, [pid2]);
+  const inserted = await one<{ settles: string[]; reviewed: string }>(
+    `INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, judge_key, status, reviewed_at, review_note, pass_settled_at)
+     VALUES ($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', $3::text, 'rejected', now() - interval '2 days', $4::text, '{}')
+     RETURNING pass_settled_at::text[] AS settles, reviewed_at::text AS reviewed`, [C.id, A.id, JUDGE, `${PASS_SETTLED_PREFIX} inserted settled`]);
+  const pending = await one<{ settles: string[] }>(
+    `INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, judge_key, pass_settled_at)
+     VALUES ($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', $3::text, ARRAY[now()]) RETURNING pass_settled_at::text[] AS settles`, [A.id, C.id, JUDGE]);
+  assert(JSON.stringify((await row(pid2)).settles) === "[]" && inserted.settles.length === 1 && Date.parse(inserted.settles[0]) === Date.parse(inserted.reviewed) && JSON.stringify(pending.settles) === "[]",
+    `a person's rejection appends nothing; a row inserted settled starts with its reviewed_at, one inserted pending with none, whatever the caller gave (${JSON.stringify([inserted, pending])})`);
+
+  // A re-apply moves nothing: the backfill touches only settled rows still empty.
+  const before = JSON.stringify(await q(`SELECT id, status, pass_settled_at::text FROM supersession_proposals ORDER BY id`));
+  await reapply("091");
+  assert(JSON.stringify(await q(`SELECT id, status, pass_settled_at::text FROM supersession_proposals ORDER BY id`)) === before && (await functionsNamed("ob1_keep_proposal_settles")) === 1
+      && (await q(`SELECT 1 FROM pg_trigger WHERE tgname = 'supersession_proposals_keep_settles'`)).length === 1,
+    "091 re-applied: one function, one trigger, no row moved");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

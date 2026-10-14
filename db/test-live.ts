@@ -11940,7 +11940,7 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
          VALUES (${`ZR-${a}`}, ${`ZR-${b}`}, ${word}, ${`ZR-${b}`}, ${origin}, ${origin === "posted" ? `c-zr-${a}` : null}, ${`{${ids.join(",")}}`}::uuid[], now() - make_interval(days => ${daysAgo}))`;
   try {
     // The ticket pairs sort as text, so each pair is (ZR-1n, ZR-1m) with n < m below 10.
-    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45].map(async (n) => [n, await ticket(n)] as const)));
+    const t = Object.fromEntries(await Promise.all([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59].map(async (n) => [n, await ticket(n)] as const)));
     // accepted through the proposal; rejected with a link since; pending, linked from a section row, the other way; stale.
     const pA = await propose(t[10], t[11]); await review(pA, "accept"); await told(10, 11, "outdates", [pA], 6);
     const pB = await propose(t[12], t[13]); await review(pB, "reject"); await told(12, 13, "outdates", [pB], 6); await link(t[12], "relates_to", "ZR-13");
@@ -11976,18 +11976,59 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     const pO = await propose(t[38], t[39]); await told(38, 39, "outdates", [pO], 5); await bsql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${pO}::uuid`;
     await link(t[38], "relates_to", "ZR-39");
     const settledO = ((await settle(pO, t[38], t[39]))[0] as { r: { ok: boolean } }).r;
-    // Posted 40 days ago and settled on its fifth day: within the window, so withdrawn, not unanswered by the post's age.
-    const pP = await propose(t[40], t[41]); await told(40, 41, "outdates", [pP], 40); await bsql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${pP}::uuid`;
-    const settledP = ((await settle(pP, t[40], t[41]))[0] as { r: { ok: boolean } }).r;
-    await bsql`UPDATE supersession_proposals SET reviewed_at = now() - interval '35 days' WHERE id = ${pP}::uuid`;
-    // A relation posted 40 days ago and closed on its fifth day (a close may be dated back, 084): withdrawn by its close, not its age.
+    // Posted 40 days ago and settled on its fifth day (the settle dated back, as the pass would have written it then); a ticket
+    // edit since reopens it (067, through rebuild.ts --input) and the pass settles it again today: the first settle decides,
+    // within the window, so withdrawn — not unanswered by the second (SMD-2913). Left reopened, the same (ZR-46).
+    const settleOn = (id: string, daysAgo: number) =>
+      bsql`UPDATE supersession_proposals SET status = 'rejected', reviewed_at = now() - make_interval(days => ${daysAgo}),
+                  review_note = 'settled by the pass: unrelated — findings-report fixture at consolidate:stub@p4' WHERE id = ${id}::uuid`;
+    const edit = async (th: { id: string; fp: string }, content: string) => {
+      const [{ fp }] = (await bsql`UPDATE thoughts SET content = ${content}, content_fingerprint = content_fingerprint_of(${content}) WHERE id = ${th.id}::uuid RETURNING content_fingerprint AS fp`) as { fp: string }[];
+      const rb = await runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, "--input", th.id, "--reason", "findings-report fixture: a ticket edit"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+      return { id: th.id, fp, code: rb.code, out: rb.stdout + rb.stderr };
+    };
+    const pP = await propose(t[40], t[41]); await told(40, 41, "outdates", [pP], 40); await settleOn(pP, 35);
+    const t41 = await edit(t[41], "ZR-41 — a ticket, its status moved (findings-report fixture)");
+    const reopenedP = ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pP}::uuid`)[0] as { status: string }).status;
+    const settledP = ((await settle(pP, t[40], t41))[0] as { r: { ok: boolean } }).r;
+    const pS = await propose(t[46], t[47]); await told(46, 47, "outdates", [pS], 40); await settleOn(pS, 35);
+    const t47 = await edit(t[47], "ZR-47 — a ticket, its labels moved (findings-report fixture)");
+    // Settled before the post, reopened and judged in conflict again (063's replace in place), then posted: a settle of an
+    // earlier verdict is no take-back of the post, so open (SMD-2913).
+    const pT = await propose(t[48], t[49]); await settleOn(pT, 3);
+    const t49 = await edit(t[49], "ZR-49 — a ticket, its parent moved (findings-report fixture)");
+    const reproposed = await propose(t[48], { id: t49.id, fp: t49.fp }); await told(48, 49, "outdates", [pT], 1);
+    // A relation posted 40 days ago and closed on its fifth day (a close may be dated back, 084), said again and closed again
+    // today: withdrawn by its first close, not its last or its age (SMD-2913). Said again and standing, the same (ZR-50).
     const rQ = await relate(t[43], t[42], "related"); await told(42, 43, "related", [rQ.id!], 40);
     await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rQ.id!}::uuid`;
+    const rQ2 = await relate(t[43], t[42], "related"); const rQ3 = await relate(t[43], t[42], null);
+    const rU = await relate(t[51], t[50], "related"); await told(50, 51, "related", [rU.id!], 40);
+    await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rU.id!}::uuid`;
+    const rU2 = await relate(t[51], t[50], "related");
+    // Two row pairs carry the word, one closed and the other standing: the judge still says it, open.
+    const row53 = await row("ZR-53 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-53" });
+    const rV = await relate(t[53], t[52], "related"); const rV2 = await relate(row53, t[52], "related"); await told(52, 53, "related", [rV.id!, rV2.id!], 10);
+    const rV3 = await relate(t[53], t[52], null);
+    // Two proposals named: taken back once the pass settled both since the post, by the later first settle — one still
+    // pending, open (ZR-54); settled on days 5 and 35, past the window, unanswered (ZR-56).
+    const row55 = await row("ZR-55 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-55" });
+    const row57 = await row("ZR-57 · a dated section (findings-report fixture)", { source: "linear", ticket: "ZR-57" });
+    const pW = await propose(t[54], t[55]), pW2 = await propose(t[54], row55); await told(54, 55, "outdates", [pW, pW2], 5); await settleOn(pW, 3);
+    const pX = await propose(t[56], t[57]), pX2 = await propose(t[56], row57); await told(56, 57, "outdates", [pX, pX2], 40); await settleOn(pX, 35); await settleOn(pX2, 5);
+    // Closed and said again before the post: a close of an earlier verdict is no take-back of the post, open (ZR-58).
+    const rY = await relate(t[59], t[58], "related"); const rY2 = await relate(t[59], t[58], null); const rY3 = await relate(t[59], t[58], "related");
+    await told(58, 59, "related", [rY.id!], 0);
     // The older thought deleted (084 closes the relation, it does not cascade): a delete, not the judge — no time, so the comment's age decides (review pass 3).
     const rR = await relate(t[45], t[44], "related"); await told(44, 45, "related", [rR.id!], 40);
     await bsql`UPDATE thought_facets SET valid_until = now() - interval '35 days' WHERE id = ${rR.id!}::uuid`;
     await bsql`SELECT delete_thought(${t[44].id}::uuid, NULL::jsonb)`;
-    assert(settledO.ok === true && settledP.ok === true, `the fixtures: the pass settles both stale proposals (${JSON.stringify([settledO, settledP])})`);
+    assert(settledO.ok === true && settledP.ok === true && reopenedP === "stale" && [t41, t47, t49].every((e) => e.code === 0)
+        && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pS}::uuid`)[0] as { status: string }).status === "stale"
+        && reproposed === pT && ((await bsql`SELECT status FROM supersession_proposals WHERE id = ${pT}::uuid`)[0] as { status: string }).status === "pending",
+      `the fixtures: a ticket edit reopens a settle (rebuild.ts --input), the pass settles both stale proposals, a re-judge puts one back to pending in place (${JSON.stringify([settledO, settledP, reopenedP, t41.out.slice(0, 200)])})`);
+    assert(rQ2.action === "added" && rQ3.action === "closed" && rU2.action === "added" && rV2.id !== rV.id && rV3.action === "closed" && rY2.action === "closed" && rY3.action === "added",
+      `the fixtures: a closed relation said again is a new facet, closed again by a NULL (${rQ2.action}, ${rQ3.action}, ${rU2.action})`);
     const firstLinkS = Number(((await bsql`SELECT extract(epoch FROM min(f.created_at) - (SELECT posted_at FROM board_findings_posted WHERE ticket_a = 'ZR-36'))::float8 AS s
                                              FROM thought_facets f WHERE f.kind = 'link' AND f.thought_id = ${t[36].id}::uuid`)[0] as { s: number }).s);
     assert(rF2.action === "replaced" && rF2.id !== rF.id && rG2.action === "closed", `the fixtures: a re-judge at its word replaces the facet, a NULL closes one (${rF2.action}, ${rG2.action})`);
@@ -12000,9 +12041,11 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
       "ZR-18~ZR-19": "unanswered/null", "ZR-20~ZR-21": "open/null", "ZR-22~ZR-23": "withdrawn/null", "ZR-24~ZR-25": "accepted/linked", "ZR-26~ZR-27": "open/null", "ZR-28~ZR-29": "open/null", "ZR-30~ZR-31": "withdrawn/null",
       "ZR-32~ZR-33": "withdrawn/null", "ZR-34~ZR-35": "unanswered/null", "ZR-36~ZR-37": "accepted/linked",
       "ZR-38~ZR-39": "accepted/linked", "ZR-40~ZR-41": "withdrawn/null", "ZR-42~ZR-43": "withdrawn/null", "ZR-44~ZR-45": "unanswered/null",
+      "ZR-46~ZR-47": "withdrawn/null", "ZR-48~ZR-49": "open/null", "ZR-50~ZR-51": "withdrawn/null", "ZR-52~ZR-53": "open/null",
+      "ZR-54~ZR-55": "open/null", "ZR-56~ZR-57": "unanswered/null", "ZR-58~ZR-59": "open/null",
     };
     const closedLink = Number(((await bsql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'link' AND thought_id = ${t[28].id}::uuid AND valid_until IS NOT NULL`)[0] as { n: number }).n);
-    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 18 && closedLink === 1,
+    assert(Object.entries(want).every(([k, w]) => said[k] === w) && Object.keys(said).length === 25 && closedLink === 1,
       `each posted pair reads what became of it, from the database (${JSON.stringify(said)})`);
     const linked = zr.find((r) => r.a === "ZR-14")!;
     const relinked = zr.find((r) => r.a === "ZR-36")!;
@@ -12010,8 +12053,12 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
         && relinked.linkedS !== null && Math.abs(relinked.linkedS - firstLinkS) < 0.01,
       `the time to an answer is the first link's since the post, or the review's (${linked.linkedS}, ${relinked.linkedS} vs ${firstLinkS})`);
     const v = findingsValue(zr);
-    assert(v.posted === 17 && v.comments === 17 && v.found === 1 && v.accepted === 5 && v.rejected === 1 && v.withdrawn === 5 && v.open === 3 && v.unanswered === 3,
-      `the ZR pairs count 5 accepted, 1 rejected, 3 unanswered, 3 open, 5 withdrawn, 1 found (${JSON.stringify(v)})`);
+    assert(v.posted === 24 && v.comments === 24 && v.found === 1 && v.accepted === 5 && v.rejected === 1 && v.withdrawn === 7 && v.open === 7 && v.unanswered === 4,
+      `the ZR pairs count 5 accepted, 1 rejected, 4 unanswered, 7 open, 7 withdrawn, 1 found (${JSON.stringify(v)})`);
+    const first = zr.find((r) => r.a === "ZR-40")!, firstRel = zr.find((r) => r.a === "ZR-42")!, closedNow = zr.find((r) => r.a === "ZR-22")!;
+    assert(first.withdrawnS !== null && Math.abs(first.withdrawnS - 5 * 86_400) < 3600 && firstRel.withdrawnS !== null && Math.abs(firstRel.withdrawnS - 5 * 86_400) < 3600
+        && closedNow.withdrawnS !== null && Math.abs(closedNow.withdrawnS - closedNow.ageS) < 60,
+      `the take-back's time is the first settle's and the first close's since the post, day 5, not the latest; a close made now is timed now, not covered by itself (${first.withdrawnS}, ${firstRel.withdrawnS}, ${closedNow.withdrawnS})`);
 
     // brain_info's read is the same read: its record is findingsValue over every row.
     const facts = await readDatabaseFacts(bsql);
@@ -12030,8 +12077,11 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
         && /ZR-14 ~ ZR-15 +outdates .* — accepted: the board linked them 6 d after/.test(lineOf(rep.stdout, "ZR-14 ~ ZR-15"))
         && /— unanswered: open past 30 d/.test(lineOf(rep.stdout, "ZR-18 ~ ZR-19")) && /— open: 25 d before it counts as unanswered/.test(lineOf(rep.stdout, "ZR-20 ~ ZR-21"))
         && rep.stdout.indexOf("ZR-26 ~ ZR-27") > rep.stdout.indexOf("found on the board (another poster's comment; not in the rate):")
-        && /— unanswered: open past 3 d/.test(lineOf(short.stdout, "ZR-20 ~ ZR-21")) && short.code === 0,
-      `--report prints each pair's outcome, the found apart, and --days moves the window (${rep.code}: ${[lineOf(rep.stdout, "ZR-14 ~ ZR-15"), lineOf(short.stdout, "ZR-20 ~ ZR-21")].join(" / ")}${rep.stderr.slice(0, 300)})`);
+        && /— unanswered: open past 3 d/.test(lineOf(short.stdout, "ZR-20 ~ ZR-21")) && short.code === 0
+        && /— withdrawn: the pass settled its proposal 5 d after \(reopened since\)$/.test(lineOf(rep.stdout, "ZR-46 ~ ZR-47"))
+        && /— withdrawn: the judge stopped saying related 5 d after \(said again since\)$/.test(lineOf(rep.stdout, "ZR-50 ~ ZR-51"))
+        && /— withdrawn: the judge stopped saying related 5 d after$/.test(lineOf(rep.stdout, "ZR-42 ~ ZR-43")),
+      `--report prints each pair's outcome, the found apart, what the judge said since a take-back, and --days moves the window (${rep.code}: ${[lineOf(rep.stdout, "ZR-14 ~ ZR-15"), lineOf(short.stdout, "ZR-20 ~ ZR-21"), lineOf(rep.stdout, "ZR-46 ~ ZR-47"), lineOf(rep.stdout, "ZR-50 ~ ZR-51")].join(" / ")}${rep.stderr.slice(0, 300)})`);
     assert(bad.every((b) => b.code === 2) && /--report reads what became/.test(bad[0].stderr) && /--report reads what became/.test(bad[2].stderr) && /--days/.test(bad[3].stderr) && !bad.some((b) => /findings on the board/.test(b.stdout)),
       `--report takes no --dry-run or --cap, --days is its own, and a zero window is refused (${bad.map((b) => b.code).join(",")})`);
 
