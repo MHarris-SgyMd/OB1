@@ -2916,8 +2916,8 @@
   {
    "generated": "2026-10-14",
    "agreement": {
-    "raw": 1.0,
-    "kappa": 1.0,
+    "raw": 1,
+    "kappa": 1,
     "adjudicated": 0
    }
   },
@@ -2932,6 +2932,7 @@
  ],
  "recorded": {
   "generated": "2026-10-14",
+  "order": 2543244411,
   "labels": [
    601,
    711,

@@ -94,8 +94,8 @@
  *   moved-stored and moved-chain read the wrong time. But over EVERY graded
  *   label moved-session produces, 7 of 68 are wrong (0.897; after the fix —
  *   not the seven above): a sample of 30 missed them, and the registration
- *   read the sample alone. All 7 are one case: a note written 0–18 minutes before board-sync recorded a move its
- *   writer had just made (fab47c58, stored 19:10, SMD-1938 Done at 19:25). So
+ *   read the sample alone. All 7 are one case: a note written 0–18 minutes
+ *   before board-sync recorded a move its writer had just made (fab47c58, stored 19:10, SMD-1938 Done at 19:25). So
  *   the first registration's pick does not ship.
  *
  * SECOND registration (written after round 2's grades, before it ran):
@@ -128,13 +128,13 @@
  *
  *   RESULT of the third registration (round 3, 30 held-out labels, κ 0.714,
  *   4 adjudicated): moved-session-settled QUALIFIES and is chosen — held out
- *   29 of 30 right (0.967) and 21 useful (0.700); pooled over every graded
+ *   29 of 30 right (0.967) and 21 useful (0.700), the only independent
+ *   evidence; pooled over every graded
  *   label it produces, 82 of 84 (0.976, the 53 of 54 that chose it among
  *   them); the measured case labelled. On the corpus: 742 labels on 409
  *   thoughts (274 of the labels on superseded thoughts), 519 estimated useful
  *   (328 on thoughts nothing supersedes, the sample's own population); one
- *   thought's
- *   label names up to 12 tickets (3 at p90), so the label needs a cap. Its two
+ *   thought's label names up to 12 tickets (3 at p90), so the label needs a cap. Its two
  *   wrong labels are a ticket that moved minutes after the note to a status
  *   that is not its current one (3a37f18b, 1886b600). evals/README.md has the
  *   tables.
@@ -145,9 +145,14 @@
  * re-run's verdict into "none" — drift read as a failed rule. The gold now
  * records, per graded item, the samples that drew it and the label sets that
  * held it, and per candidate its counts and whether it labelled the measured
- * case (`--record`, merged into the fixture). The verdict is computed from
- * that record (recordedDecision), the self-check holds its numbers with no
- * database, and a live run prints how far the brain has moved from it.
+ * case. The verdict is computed from that record (recordedDecision), the
+ * self-check holds its numbers with no database, and a live run prints how far
+ * the brain has moved from it. (The second review pass made it one snapshot:
+ * the gold's and a live run's are built and compared the same way, whole —
+ * samples and pooled sets by item, label counts, fresh counts, the measured
+ * case — so "matches the record" means equal; `--record` writes the gold with
+ * a run recorded, through mergeRecord, and readGold refuses a record that
+ * breaks its invariants or names another candidate order.)
  *
  * KNOWN HAZARDS for PR 2 (the first review pass; inside the measured
  * precision, not fixed here): a list step takes a count with the key's digit
@@ -172,16 +177,17 @@
  *   … eval-stated-status.ts --dump-ungraded <file>   every live sampled label
  *        the gold lacks, with the excerpt, dates and histories to grade it from
  *        (write it outside the repo)
- *   … eval-stated-status.ts --record <file>          the live samples, label
- *        sets and counts, for the gold (refused while a sampled label is
- *        ungraded; write it outside the repo, then merge)
+ *   … eval-stated-status.ts --record <file>          the gold with this run's
+ *        snapshot recorded (refused while a sampled label is ungraded; write
+ *        it outside the repo, then copy it over the fixture to adopt it)
  *   bun eval-stated-status.ts --self-check           the readings, the
  *        candidates, the sample, the verdict and the gold's provenance; no
  *        database
  */
 
 import { SQL } from "bun";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CANDIDATES, chainRoot, keysOf, LAG_MS, labelsOf, mentionsOf, SECOND, sessionEnd, statedAfter, statusAt, THIRD, writtenAt, type Candidate, type ChainRow, type Change, type Label, type Reading, type Status } from "./stated-status.ts";
@@ -217,8 +223,13 @@ export const ALL: readonly Candidate[] = [...CANDIDATES, ...SECOND, ...THIRD];
  */
 export type Item = { id: string; key: string; kind: Label["kind"]; claim: string; now: string; a: Grade; b: Grade; grade: Grade; round: number; sampled: Candidate[]; pooled: Candidate[] };
 type Round = { generated: string; agreement: { raw: number; kappa: number; adjudicated: number } };
-/** What the verdict read besides the grades, per candidate (ALL's order): its labels, those on unsuperseded thoughts, and whether it labelled the measured case. */
-export type Recorded = { generated: string; labels: number[]; fresh: number[]; measured: boolean[] };
+/**
+ * What the verdict read besides the grades, per candidate (ALL's order): its
+ * labels, those on unsuperseded thoughts, and whether it labelled the measured
+ * case; `order` is fnv1a of ALL's names joined, so a reordered candidate list
+ * cannot re-point the recorded indices silently.
+ */
+export type Recorded = { generated: string; order: number; labels: number[]; fresh: number[]; measured: boolean[] };
 export type Gold = { items: Item[]; rounds: Round[]; recorded: Recorded | null };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -227,7 +238,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export const itemKey = (id: string, l: Pick<Label, "key" | "kind"> & { claim: string; now: string }) => `${id}|${l.key}|${l.kind}|${l.claim}|${l.now}`;
 const labelKey = (id: string, l: Label) => itemKey(id, { key: l.key, kind: l.kind, claim: l.claim.type, now: l.now.type });
 
-/** The committed gold; a missing file or a malformed entry is an Error naming the file. */
+/** fnv1a of ALL's names, the order the recorded indices are read in. */
+export const allOrder = () => fnv1a(ALL.join(","));
+
+/**
+ * The committed gold; a missing file or a malformed entry is an Error naming
+ * the file. A gold that records a verdict is held to the record's invariants:
+ * every item a sample drew is in that candidate's pooled set; each sample holds
+ * SAMPLE items (the closed second registration's none); the held-out samples
+ * hold no item graded in rounds 1–FIRST_ROUNDS; and `order` is ALL's.
+ */
 export function readGold(path = GOLD_PATH): Gold {
   if (!existsSync(path)) throw new Error(`${path}: the gold is missing`);
   let raw: { version?: unknown; items?: unknown; rounds?: unknown; recorded?: unknown };
@@ -266,9 +286,20 @@ export function readGold(path = GOLD_PATH): Gold {
       return v as number[];
     };
     if (typeof r?.generated !== "string") throw new Error(`${path}: recorded lacks generated`);
+    if ((r as { order?: unknown }).order !== allOrder()) throw new Error(`${path}: recorded.order is not this file's candidate order (${allOrder()}): the indices would point at other candidates`);
     const measured = counts(r.measured, "measured");
     if (!measured.every((x) => x === 0 || x === 1)) throw new Error(`${path}: recorded.measured holds 0 or 1 per candidate`);
-    recorded = { generated: r.generated, labels: counts(r.labels, "labels"), fresh: counts(r.fresh, "fresh"), measured: measured.map((x) => x === 1) };
+    recorded = { generated: r.generated, order: allOrder(), labels: counts(r.labels, "labels"), fresh: counts(r.fresh, "fresh"), measured: measured.map((x) => x === 1) };
+    for (const it of items) {
+      const stray = it.sampled.find((c) => !it.pooled.includes(c));
+      if (stray) throw new Error(`${path}: item ${it.id} ${it.key} is in ${stray}'s sample but not its pooled set`);
+      const early = it.sampled.find((c) => !(CANDIDATES as readonly Candidate[]).includes(c) && it.round <= FIRST_ROUNDS);
+      if (early) throw new Error(`${path}: item ${it.id} ${it.key}, graded in round ${it.round}, is in ${early}'s held-out sample`);
+    }
+    for (const c of ALL) {
+      const n = items.filter((it) => it.sampled.includes(c)).length, want = (SECOND as readonly Candidate[]).includes(c) ? 0 : SAMPLE;
+      if (n !== want) throw new Error(`${path}: ${c}'s recorded sample holds ${n} items, not ${want}`);
+    }
   }
   return { items, rounds, recorded };
 }
@@ -310,7 +341,8 @@ export type Verdict = { candidate: Candidate; ok: boolean; why: string[]; estima
 export function judge(t: Tally): Verdict {
   const why: string[] = [];
   if (!t.measured) why.push("(a) dd70dccc carries no started → completed label for SMD-2306");
-  if (t.graded < t.sampled) why.push(`(b) ${t.sampled - t.graded} of ${t.sampled} sampled labels ungraded`);
+  if (t.sampled === 0) why.push("(b) no sample graded (closed)");
+  else if (t.graded < t.sampled) why.push(`(b) ${t.sampled - t.graded} of ${t.sampled} sampled labels ungraded`);
   else if (t.graded === 0 || (t.graded - t.wrong) / t.graded < PRECISION_MIN) why.push(`(b) precision ${t.graded ? ((t.graded - t.wrong) / t.graded).toFixed(3) : "n/a"} < ${PRECISION_MIN}`);
   if (t.graded > 0 && t.useful / t.graded < USEFUL_MIN) why.push(`(c) useful share ${(t.useful / t.graded).toFixed(3)} < ${USEFUL_MIN}`);
   const share = t.graded ? t.useful / t.graded : 0;
@@ -361,19 +393,77 @@ export function decide(tallyOf: (c: Candidate) => Tally, pooledOf: (c: Candidate
   };
 }
 
-/** The decision the gold records: each candidate's sample and pooled set as recorded, its counts from `recorded`. Null when the gold records none. */
-export function recordedDecision(gold: Gold): Decision | null {
+/**
+ * What a verdict reads of one candidate besides the grades: the item keys of
+ * its sample, the GRADED item keys in its label set (pooled), its labels, those
+ * on unsuperseded thoughts, and whether it labels the measured case. The gold
+ * records one per candidate; a live run builds one the same way, and the two
+ * are compared whole.
+ */
+export type Snap = { sample: Set<string>; pooled: Set<string>; labels: number; fresh: number; measured: boolean };
+export type Snapshot = Map<Candidate, Snap>;
+
+/** The snapshot the gold records; null when it records none. */
+export function snapshotOfGold(gold: Gold): Snapshot | null {
   const rec = gold.recorded;
   if (!rec) return null;
-  const at = (c: Candidate) => ALL.indexOf(c);
+  const keysIn = (c: Candidate, of: "sampled" | "pooled") => new Set(gold.items.filter((it) => it[of].includes(c)).map((it) => itemKey(it.id, it)));
+  return new Map(ALL.map((c, i) => [c, { sample: keysIn(c, "sampled"), pooled: keysIn(c, "pooled"), labels: rec.labels[i], fresh: rec.fresh[i], measured: rec.measured[i] }]));
+}
+
+/** The decision a snapshot and the grades make. */
+export function decisionOf(snap: Snapshot, graded: ReadonlyMap<string, Item>): Decision {
+  const items = (keys: Set<string>) => [...keys].map((k) => graded.get(k)).filter((x): x is Item => x !== undefined);
   return decide(
     (c) => {
-      const s = gold.items.filter((it) => it.sampled.includes(c));
-      return { candidate: c, labels: rec.labels[at(c)], fresh: rec.fresh[at(c)], sampled: s.length, graded: s.length, wrong: s.filter((x) => x.grade === "wrong").length, useful: s.filter((x) => x.grade === "useful").length, measured: rec.measured[at(c)] };
+      const sn = snap.get(c)!, g = items(sn.sample);
+      return { candidate: c, labels: sn.labels, fresh: sn.fresh, sampled: sn.sample.size, graded: g.length, wrong: g.filter((x) => x.grade === "wrong").length, useful: g.filter((x) => x.grade === "useful").length, measured: sn.measured };
     },
-    (c) => { const p = gold.items.filter((it) => it.pooled.includes(c)); return { graded: p.length, wrong: p.filter((x) => x.grade === "wrong").length }; },
+    (c) => { const p = items(snap.get(c)!.pooled); return { graded: p.length, wrong: p.filter((x) => x.grade === "wrong").length }; },
   );
 }
+
+/** The decision the gold records; null when it records none. */
+export function recordedDecision(gold: Gold): Decision | null {
+  const snap = snapshotOfGold(gold);
+  return snap && decisionOf(snap, new Map(gold.items.map((it) => [itemKey(it.id, it), it])));
+}
+
+/** How one candidate's live snapshot differs from the recorded one; `n` counts every difference. */
+export type Drift = { candidate: Candidate; sampleIn: number; sampleOut: number; pooledIn: number; pooledOut: number; labels: [number, number]; fresh: [number, number]; measured: [boolean, boolean]; n: number };
+export function driftOf(rec: Snapshot, live: Snapshot): Drift[] {
+  const minus = (a: Set<string>, b: Set<string>) => [...a].filter((k) => !b.has(k)).length;
+  return ALL.map((c) => {
+    const r = rec.get(c)!, l = live.get(c)!;
+    const d = { candidate: c, sampleIn: minus(l.sample, r.sample), sampleOut: minus(r.sample, l.sample), pooledIn: minus(l.pooled, r.pooled), pooledOut: minus(r.pooled, l.pooled), labels: [r.labels, l.labels] as [number, number], fresh: [r.fresh, l.fresh] as [number, number], measured: [r.measured, l.measured] as [boolean, boolean] };
+    return { ...d, n: d.sampleIn + d.sampleOut + d.pooledIn + d.pooledOut + Number(r.labels !== l.labels) + Number(r.fresh !== l.fresh) + Number(r.measured !== l.measured) };
+  });
+}
+
+/** An item's key from its raw form in the gold file. */
+const rawKey = (e: { id: string; issue: number; kind: number; claim: number; now: number }) => `${e.id}|${TEAM}-${e.issue}|${KINDS[e.kind]}|${TYPES[e.claim]}|${TYPES[e.now]}`;
+
+/**
+ * The gold file with `snap` recorded: every item's memberships replaced (an
+ * item no sample or label set holds any more keeps none), `recorded` rewritten.
+ * Refuses a snapshot whose sample holds an item the gold has not graded.
+ */
+export function mergeRecord(raw: { items: Record<string, unknown>[]; recorded?: unknown }, snap: Snapshot, generated: string): Record<string, unknown> {
+  const keys = new Set(raw.items.map((e) => rawKey(e as Parameters<typeof rawKey>[0])));
+  for (const [c, sn] of snap) for (const k of sn.sample) if (!keys.has(k)) throw new Error(`${c}'s sample holds an ungraded label (${k}): grade it first`);
+  const items = raw.items.map((e) => {
+    const { sampled: _s, pooled: _p, ...rest } = e as Record<string, unknown>;
+    const k = rawKey(e as Parameters<typeof rawKey>[0]);
+    const sampled = ALL.flatMap((c, i) => (snap.get(c)!.sample.has(k) ? [i] : [])), pooled = ALL.flatMap((c, i) => (snap.get(c)!.pooled.has(k) ? [i] : []));
+    return { ...rest, ...(sampled.length ? { sampled } : {}), ...(pooled.length ? { pooled } : {}) };
+  });
+  return {
+    ...raw, items,
+    recorded: { generated, order: allOrder(), labels: ALL.map((c) => snap.get(c)!.labels), fresh: ALL.map((c) => snap.get(c)!.fresh), measured: ALL.map((c) => (snap.get(c)!.measured ? 1 : 0)) },
+  };
+}
+/** The gold file's text, as it is committed. */
+export const goldText = (g: unknown) => `${JSON.stringify(g, null, 1)}\n`;
 
 /** The decision's tables, as the README carries them. */
 function printDecision(d: Decision, listWrong: (c: Candidate) => string[]) {
@@ -398,14 +488,12 @@ function printDecision(d: Decision, listWrong: (c: Candidate) => string[]) {
   const heldHead = "| candidate | (a) measured | held-out sampled | graded | wrong | useful | precision | useful share | pooled graded | pooled wrong | est. useful labels | est. (unsuperseded) | qualifies |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|";
   console.log(`\n## The second registration (held-out sample, lag ${LAG_MS / 60000} min)\n\n${heldHead}`);
   for (const x of d.second) console.log(row(x, true));
-  console.log("\nClosed: its pooled precision failed before its held-out sample was graded, so the sample is not.");
+  if (d.second.every((x) => x.t.sampled === 0)) console.log("\nClosed: its pooled precision failed before its held-out sample was graded, so the sample is not.");
   console.log(`\n## The third registration (held-out sample, settled within ${LAG_MS / 60000} min)\n\n${heldHead}`);
   for (const x of d.third) console.log(row(x, true));
   console.log(`\nChosen: ${d.chosen ?? "none — the label does not ship as specified"}`);
 }
 
-/** What `--record` writes: per graded item key, the samples that drew it and the label sets that held it; per candidate, its counts. */
-export type Record_ = { generated: string; sampled: Record<string, number[]>; pooled: Record<string, number[]>; labels: number[]; fresh: number[]; measured: number[] };
 
 // ── The measurement ──────────────────────────────────────────────────────────
 
@@ -415,7 +503,7 @@ const day = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T",
 
 /** What a grader reads of a thought: its opening, and ±EXCERPT characters around every mention of the labelled tickets, merged; the hook's session line. */
 const EXCERPT = 300;
-function excerpt(content: string, keys: ReadonlySet<string>): string {
+export function excerpt(content: string, keys: ReadonlySet<string>): string {
   const spans: [number, number][] = [[0, Math.min(content.length, EXCERPT)]];
   for (const m of mentionsOf(content)) if (keys.has(m.key)) spans.push([Math.max(0, m.start - EXCERPT), Math.min(content.length, m.end + EXCERPT)]);
   const session = [...content.matchAll(/^Session [0-9a-f-]{36}, .*$/gm)].at(-1);
@@ -507,8 +595,11 @@ async function measure(url: string, dumpPath: string | undefined, recordPath: st
   }
 
   // The live samples, and what the gold says of them.
+  // Only a missing gold is "no gold yet"; a malformed one stops the run, never
+  // turning into a live verdict.
   let gold: Gold = { items: [], rounds: [], recorded: null };
-  try { gold = readGold(); } catch (e) { console.log(`\n(no gold yet: ${(e as Error).message})`); }
+  if (existsSync(GOLD_PATH)) gold = readGold();
+  else console.log(`\n(no gold yet: ${GOLD_PATH})`);
   const graded = new Map(gold.items.map((it) => [itemKey(it.id, it), it]));
   const firstGraded = new Set(gold.items.filter((it) => it.round <= FIRST_ROUNDS).map((it) => itemKey(it.id, it)));
   const live = new Map<Candidate, { tally: Tally; sample: string[]; keys: Set<string> }>();
@@ -529,10 +620,10 @@ async function measure(url: string, dumpPath: string | undefined, recordPath: st
       sample: isSecond ? [] : sample, keys: new Set(ls.map((x) => labelKey(x.id, x.label))),
     });
   }
-  const livePooled = (c: Candidate): Pooled => {
-    const g = [...live.get(c)!.keys].map((k) => graded.get(k)).filter((x): x is Item => x !== undefined);
-    return { graded: g.length, wrong: g.filter((x) => x.grade === "wrong").length };
-  };
+  const liveSnap: Snapshot = new Map(ALL.map((c) => {
+    const l = live.get(c)!;
+    return [c, { sample: new Set(l.sample), pooled: new Set([...l.keys].filter((k) => graded.has(k))), labels: l.tally.labels, fresh: l.tally.fresh, measured: l.tally.measured }];
+  }));
   const wrongOf = (c: Candidate, inSet: (it: Item) => boolean) => process.argv.includes("--list-wrong")
     ? gold.items.filter((it) => inSet(it) && it.grade === "wrong").map((x) => `${x.id.slice(0, 8)} ${x.key} ${x.kind} ${x.claim} → ${x.now}`) : [];
 
@@ -544,37 +635,27 @@ async function measure(url: string, dumpPath: string | undefined, recordPath: st
     console.log(`\nThe verdict as recorded on ${gold.recorded!.generated} (from the gold; a live run does not re-decide it):`);
     printDecision(rec, (c) => wrongOf(c, (it) => it.pooled.includes(c)));
     console.log("\n## Drift since the record\n");
-    console.log("| candidate | labels (recorded → live) | sample items not in the record | recorded sample items gone | pooled (recorded → live) | measured |");
+    console.log("| candidate | sample items in / out | graded pooled items in / out | labels | fresh | measured |");
     console.log("|---|---|---|---|---|---|");
-    let drift = 0;
-    for (const c of ALL) {
-      const l = live.get(c)!, i = ALL.indexOf(c);
-      const recSample = new Set(gold.items.filter((it) => it.sampled.includes(c)).map((it) => itemKey(it.id, it)));
-      const added = l.sample.filter((k) => !recSample.has(k)).length, gone = [...recSample].filter((k) => !l.sample.includes(k)).length;
-      const rp = rec.pooled.get(c)!, lp = livePooled(c);
-      drift += added + gone + Math.abs(lp.graded - rp.graded);
-      console.log(`| ${c} | ${gold.recorded!.labels[i]} → ${l.tally.labels} | ${added} | ${gone} | ${rp.graded - rp.wrong}/${rp.graded} → ${lp.graded - lp.wrong}/${lp.graded} | ${gold.recorded!.measured[i] ? "yes" : "no"} → ${l.tally.measured ? "yes" : "no"} |`);
-    }
-    console.log(drift ? "\nThe brain has moved since the record: grade what --dump-ungraded writes and re-record before deciding again." : "\nThe live run matches the record.");
+    const drift = driftOf(snapshotOfGold(gold)!, liveSnap);
+    const yn = (b: boolean) => (b ? "yes" : "no");
+    for (const d of drift) console.log(`| ${d.candidate} | ${d.sampleIn} / ${d.sampleOut} | ${d.pooledIn} / ${d.pooledOut} | ${d.labels[0]} → ${d.labels[1]} | ${d.fresh[0]} → ${d.fresh[1]} | ${yn(d.measured[0])} → ${yn(d.measured[1])} |`);
+    console.log(drift.some((d) => d.n) ? "\nThe brain has moved since the record: grade what --dump-ungraded writes and --record before deciding again." : "\nThe live run matches the record.");
   } else {
     console.log("\n(the gold records no verdict yet: deciding from the live samples)");
-    printDecision(decide((c) => live.get(c)!.tally, livePooled), (c) => wrongOf(c, (it) => live.get(c)!.keys.has(itemKey(it.id, it))));
+    printDecision(decisionOf(liveSnap, graded), (c) => wrongOf(c, (it) => live.get(c)!.keys.has(itemKey(it.id, it))));
   }
   if (gold.rounds.length) for (const [i, r] of gold.rounds.entries()) console.log(`Round ${i + 1} (${r.generated}): raw agreement ${r.agreement.raw.toFixed(3)}, kappa ${r.agreement.kappa.toFixed(3)}, ${r.agreement.adjudicated} adjudicated`);
   console.log(`Ungraded live sample labels: ${toGrade.size}`);
 
   if (recordPath) {
-    // What the verdict reads, for the gold: refused while any sampled label is ungraded.
+    // The gold with the live snapshot recorded, written whole to `recordPath`
+    // (outside the repo; copy it over the fixture to adopt it). Refused while
+    // any sampled label is ungraded.
     if (toGrade.size) { console.error(`--record: ${toGrade.size} sampled labels are ungraded; grade them first`); process.exit(1); }
-    const out: Record_ = { generated: new Date().toISOString().slice(0, 10), sampled: {}, pooled: {}, labels: [], fresh: [], measured: [] };
-    for (const c of ALL) {
-      const l = live.get(c)!, i = ALL.indexOf(c);
-      for (const k of l.sample) (out.sampled[k] ??= []).push(i);
-      for (const k of l.keys) if (graded.has(k)) (out.pooled[k] ??= []).push(i);
-      out.labels.push(l.tally.labels); out.fresh.push(l.tally.fresh); out.measured.push(l.tally.measured ? 1 : 0);
-    }
-    writeFileSync(recordPath, JSON.stringify(out, null, 1));
-    console.log(`Wrote the record to ${recordPath}`);
+    const raw = JSON.parse(readFileSync(GOLD_PATH, "utf8"));
+    writeFileSync(recordPath, goldText(mergeRecord(raw, liveSnap, new Date().toISOString().slice(0, 10))));
+    console.log(`Wrote the gold with this run recorded to ${recordPath}`);
   }
 
   if (dumpPath) {
@@ -694,6 +775,8 @@ function selfCheck() {
   const mid = (content: string): Reading => ({ ...rd(content, stored10_08), timeline: (k) => tlsMid.get(k) ?? [] });
   const midLabel = labelsOf("moved-session-settled", mid(sess("2026-10-02 21:59"))).find((l) => l.key === "SMD-2306");
   ok(midLabel?.claim.type === "backlog" && labelsOf("moved-session-lag", mid(sess("2026-10-02 21:59"))).find((l) => l.key === "SMD-2306")?.claim.type === "started", "a move within the hour to a status that is not the current one: settled keeps the written time's Backlog, lag would claim the later In Progress");
+  ok(sampleOf(many, SAMPLE, HELD_OUT_SALT_3)[0] === "00000000-0000-4000-8000-000000000042|SMD-1|moved|started|completed", "the third's salt is the one its sample was drawn with (its first item, pinned)");
+  ok(excerpt(`x\nSession 3a5c3458-9a28-4681-8812-16209c1209ba, 2026-10-01 00:00 → 2026-10-01 01:00.\n${"y".repeat(400)}\nSession 3a5c3458-9a28-4681-8812-16209c1209ba, 2026-10-02 00:00 → 2026-10-02 01:00.`, new Set()).includes("2026-10-02 01:00"), "the grader's excerpt shows the session line sessionEnd reads: the last");
   ok(sampleOf(many, SAMPLE, HELD_OUT_SALT_3).join() !== s1.join() && sampleOf(many, SAMPLE, HELD_OUT_SALT_3).join() !== sampleOf(many, SAMPLE, HELD_OUT_SALT).join(), "each salt orders the sample its own way, with nothing excluded");
   // A ticket whose status NAME changed within the hour but whose type is already the current one is settled.
   const tlsType = new Map<string, Change[]>([["SMD-2306", [{ at: T("2026-10-01T12:00:00Z"), name: "Backlog", type: "backlog" }, { at: T("2026-10-03T03:30:00Z"), name: "In Review", type: "started" }]]]);
@@ -734,6 +817,51 @@ function selfCheck() {
       "the recorded numbers: held out 1 of 30 wrong, 21 useful; pooled 2 of 84 wrong; 742 labels");
     ok(ms !== null && ms.wrong === 0 && d!.pooled.get("moved-session")!.wrong === 8 && d!.pooled.get("moved-session")!.graded === 98, "the first pick's own sample was clean (0 of 30) and its pooled precision was not (8 of 98 wrong)");
     ok(g.items.every((it) => it.sampled.every((c) => c !== "moved-session-lag")), "the second registration's sample is recorded as never graded");
+    const lag = d!.pooled.get("moved-session-lag")!, lagRow = d!.second[0];
+    ok(lag.graded === 75 && lag.wrong === 5 && lagRow.v.why.some((w) => w.includes("closed")) && lagRow.v.why.some((w) => w.includes("pooled precision 0.933")), "the second registration: closed, and failed on pooled 70 of 75 (0.933), not on a precision its empty sample cannot have");
+    ok(third!.fresh === 468 && Math.round(d!.third[0].v.estimateFresh) === 328, "the third's unsuperseded estimate: 468 labels × 0.700 = 328");
+
+    // The record round-trips: merging the gold's own snapshot rewrites the committed file byte for byte.
+    const text = readFileSync(GOLD_PATH, "utf8"), raw = JSON.parse(text);
+    const snap = snapshotOfGold(g)!;
+    ok(goldText(mergeRecord(raw, snap, g.recorded!.generated)) === text, "mergeRecord(the gold, its own snapshot) is the committed file, byte for byte");
+    const withNew = new Map([...snap].map(([c, sn]) => [c, { ...sn, sample: new Set(sn.sample) }]));
+    withNew.get("moved-session-settled")!.sample.add("00000000-0000-4000-8000-000000000000|SMD-1|moved|started|completed");
+    ok(throws(() => mergeRecord(raw, withNew, "x")), "mergeRecord refuses a sample holding an ungraded label");
+    const empty: Snapshot = new Map(ALL.map((c) => [c, { sample: new Set<string>(), pooled: new Set<string>(), labels: 0, fresh: 0, measured: false }]));
+    ok((mergeRecord(raw, empty, "x").items as Record<string, unknown>[]).every((e) => !("sampled" in e) && !("pooled" in e)), "mergeRecord drops a membership the new snapshot no longer holds");
+
+    // Drift counts every kind of difference; the same snapshot has none.
+    const clone = (f: (sn: Snap, c: Candidate) => Snap) => new Map([...snap].map(([c, sn]) => [c, f({ ...sn, sample: new Set(sn.sample), pooled: new Set(sn.pooled) }, c)]));
+    const total = (live: Snapshot) => driftOf(snap, live).reduce((n, x) => n + x.n, 0);
+    const settledOnly = (f: (sn: Snap) => void) => clone((sn, c) => { if (c === "moved-session-settled") f(sn); return sn; });
+    const [inKey] = [...snap.get("moved-session")!.pooled].filter((k) => !snap.get("moved-session-settled")!.pooled.has(k));
+    const [outKey] = [...snap.get("moved-session-settled")!.pooled].filter((k) => !snap.get("moved-session-settled")!.sample.has(k));
+    ok(total(clone((sn) => sn)) === 0, "drift: the recorded snapshot against itself has none");
+    ok(total(settledOnly((sn) => { sn.measured = !sn.measured; })) === 1 && total(settledOnly((sn) => { sn.labels += 1; })) === 1 && total(settledOnly((sn) => { sn.fresh -= 1; })) === 1, "drift: a measured flag, a label count, a fresh count each count");
+    ok(total(settledOnly((sn) => { sn.pooled.delete(outKey); sn.pooled.add(inKey); })) === 2, "drift: a pooled set swapping one item for another, its size unchanged, counts both");
+    ok(total(settledOnly((sn) => { const [k] = sn.sample; sn.sample.delete(k); sn.sample.add(inKey); })) === 2, "drift: a sample swapping one item counts both");
+
+    // A malformed gold is refused, each way the record can be wrong.
+    const dir = mkdtempSync(join(tmpdir(), "stated-status-gold-"));
+    try {
+      const bad = (what: string, f: (r: any) => void) => {
+        const r = JSON.parse(text); f(r);
+        const p = join(dir, "gold.json"); writeFileSync(p, JSON.stringify(r));
+        ok(throws(() => readGold(p)), `readGold refuses ${what}`);
+      };
+      const sampledAt = (c: Candidate) => raw.items.findIndex((e: { sampled?: number[] }) => e.sampled?.includes(ALL.indexOf(c)));
+      bad("a candidate index out of range", (r) => { r.items[sampledAt("moved-session")].pooled.push(ALL.length); });
+      bad("a recorded array of the wrong length", (r) => { r.recorded.labels.pop(); });
+      bad("a measured flag that is not 0 or 1", (r) => { r.recorded.measured[0] = 2; });
+      bad("another candidate order", (r) => { r.recorded.order += 1; });
+      bad("an item in a sample but not its pooled set", (r) => { const e = r.items[sampledAt("moved-session-settled")]; e.pooled = e.pooled.filter((i: number) => i !== ALL.indexOf("moved-session-settled")); });
+      bad("a sample of 29", (r) => { const e = r.items[sampledAt("moved-session-settled")]; e.sampled = e.sampled.filter((i: number) => i !== ALL.indexOf("moved-session-settled")); });
+      bad("a held-out sample holding a round 1–2 item", (r) => { const e = r.items[sampledAt("moved-session-settled")]; e.round = 1; });
+      bad("an item that is not an object", (r) => { r.items.push(null); });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+    // A third that does not qualify chooses nothing.
+    ok(decisionOf(snap, new Map(g.items.map((it) => [itemKey(it.id, it), { ...it, grade: "wrong" as Grade }]))).chosen === null, "decide: a third registration that fails chooses none");
   }
 
   if (failed) { console.error(`self-check: ${failed} FAILED`); process.exit(1); }

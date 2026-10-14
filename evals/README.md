@@ -2970,8 +2970,8 @@ minutes) recorded a move its writer had just made. Grading also found a bug: the
 history was read in audit seq order, and 046's backfill numbered older events
 after newer ones; it is read in the log's order now, through 060's
 `ob1_thought_events_in_order` (disclosed in the header; six of the seven wrong
-labels moved-session then produced were this — a different seven from the 7 of
-68 above, counted after the fix).
+labels moved-session then produced were this — a different seven from those
+the 0.897 above counts, after the fix).
 
 **Second registration**, `moved-session-lag` ("then" read an hour after the
 written time), failed on pooled precision before its held-out sample was graded
@@ -2988,10 +2988,11 @@ was registered it scored 53/54, disclosed; that number chose the rule.
 |---|---|---|---|---|---|
 | moved-session-settled | 1/30 (0.967) | 21 (0.700) | 0.976 (84) | 742 on 409 thoughts | 519 (328 unsuperseded) |
 
-It qualifies and is chosen. The held-out 29/30 is the only independent number:
-the pooled 82/84 holds the 53/54 that chose the rule. 274 of the 742 labels sit
-on superseded thoughts, which `prefer_current` mostly hides; the sample is drawn
-from the rest, so 328 is the estimate over the sample's own population. A labelled thought names up to 12 moved tickets
+It qualifies and is chosen. The held-out sample (29/30 right, 21 useful) is
+the only independent evidence: the pooled 82/84 holds the 53/54 that chose the
+rule. 274 of the 742 labels sit on superseded thoughts, which `prefer_current`
+mostly hides; the sample is drawn from the rest, so 328 is the estimate over
+the sample's own population. A labelled thought names up to 12 moved tickets
 (3 at p90), so the label needs a cap. Its wrong labels are a ticket that moved
 minutes after the note to a status that is not its current one (`3a37f18b`,
 `1886b600`). Without the lifecycle guard, 408 thoughts with a lifecycle of
@@ -3008,10 +3009,12 @@ status now is the head's.
 
 The verdict is the gold's record, not a re-draw: each graded item carries the
 samples that drew it and the label sets that held it, and the gold the counts
-each candidate had (`--record`). A re-run decides nothing; it prints how far the
-brain has moved since (a ticket that moves changes an item's identity, a new
-thought can hash into a sample), and `--self-check` holds the recorded numbers
-with no database.
+each candidate had. A re-run decides nothing; it compares its own snapshot with
+the recorded one, whole, and prints how far the brain has moved (a ticket that
+moves changes an item's identity, a new thought can hash into a sample: one did
+within hours of the record, entering three first-registration samples).
+`--record` writes the gold with a run recorded; `--self-check` holds the
+recorded numbers, the record's invariants and the round trip with no database.
 
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
