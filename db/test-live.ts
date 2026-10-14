@@ -5209,6 +5209,47 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
     `a kept window whose answer is of another shape is sent again, the rest reused, and the thought succeeds (sent ${sent.join(",")}, ${shapeDone?.status})`);
   await sql`DELETE FROM thoughts WHERE id = ${shape}::uuid`;
 
+  // A first stop — a deploy's SIGTERM, a caller's signal — ends a windowed
+  // thought at its next window, those answered kept, where it waited out the
+  // whole document, killed past a grace with its lease held (review pass 5).
+  const soft = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "soft")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 600;
+  sent.length = 0;
+  const softAc = new AbortController();
+  const softRun = inProcess({ signal: softAc.signal });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+  const softAt = Date.now();
+  softAc.abort();
+  const softOut = await softRun;
+  const softMs = Date.now() - softAt;
+  slowMs = 0;
+  const [softRow] = await sql`SELECT stops, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${soft}::uuid AND work_type = ${KEY}`;
+  const [softClaim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${soft}::uuid AND work_type = ${KEY}`;
+  assert(softOut.code === 130 && softMs < 1500 && sent.length <= 3 && softClaim?.status === "pending" && softClaim.attempt_count === 0 && Number(softRow?.kept) >= 1 && Number(softRow?.stops) === 0,
+    `a first stop ends a long thought at its next window: back to the pool at once, its attempt refunded, its windows kept, no stop counted (${softMs} ms, ${sent.length} sent, ${JSON.stringify({ softClaim, softRow })})`);
+  await sql`DELETE FROM thoughts WHERE id = ${soft}::uuid`;
+
+  // Each run prunes the rows no reader can use (review pass 5): one beside a
+  // claim released succeeded, one of text its thought no longer holds; one
+  // beside a failed claim at its text stays, for --retry-failed.
+  const pruneOk = ((await sql`SELECT upsert_thought(${"A pruned note, succeeded."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const pruneOld = ((await sql`SELECT upsert_thought(${"A pruned note, edited since."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const pruneKeep = ((await sql`SELECT upsert_thought(${"A kept note, failed at its text."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  await sql`SELECT enqueue_thoughts(${KEY}, ARRAY[${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid])`;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${pruneOk}::uuid`;
+  await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now() WHERE work_type = ${KEY} AND thought_id IN (${pruneOld}::uuid, ${pruneKeep}::uuid)`;
+  const { resolveEmbedConfig: resolveP } = await import("../server-portable/embed.ts");
+  const { windowingFor: windowingP } = await import("../server-portable/entities.ts");
+  const sigP = JSON.stringify(windowingP(resolveP(env as Record<string, string>)));
+  for (const [tid, fp] of [[pruneOk, null], [pruneOld, "an earlier text"], [pruneKeep, null]] as [string, string | null][]) {
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled)
+              SELECT id, ${KEY}, COALESCE(${fp}, content_fingerprint), ${sigP}, 1, 0 FROM thoughts WHERE id = ${tid}::uuid`;
+  }
+  await inProcess();
+  const left = (await sql`SELECT thought_id::text AS id FROM extraction_progress WHERE thought_id IN (${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid)`) as { id: string }[];
+  assert(left.length === 1 && left[0].id === pruneKeep, `a run prunes the rows beside a succeeded claim and of earlier text, and keeps a failed one's at its text (${left.map((l) => l.id === pruneKeep ? "kept" : l.id === pruneOk ? "succeeded" : "earlier").join(",") || "none"} left)`);
+  await sql`DELETE FROM thoughts WHERE id IN (${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid)`;
+
   // A brain without the table (a role without its grant reads the same):
   // the worker keeps nothing, says so once, and extracts as before.
   await sql`UPDATE thoughts SET content = ${`${atlasText}\n\nAn edit.`} WHERE id = ${atlas}::uuid`;

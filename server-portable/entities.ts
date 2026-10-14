@@ -127,6 +127,21 @@ export interface ExtractProgress {
   kept(index: number, sent: string): ExtractionWindow | undefined;
   /** A window just answered and parsed, of `windows` the thought is sent in; the caller's errors are its own. */
   save(part: ExtractionWindow, sent: string, windows: number): Promise<void>;
+  /**
+   * A first stop (SMD-2694, review pass 5): aborted, the next window not kept
+   * is not sent, and the extraction rejects with StoppedBetweenWindows — the
+   * windows answered so far are kept, so a stop need not wait out a whole
+   * document, as a deploy's SIGTERM did, killed past its grace.
+   */
+  between?: AbortSignal;
+}
+
+/** A windowed extraction a first stop ended before its next window (ExtractProgress.between): its windows answered so far are kept. */
+export class StoppedBetweenWindows extends Error {
+  constructor() {
+    super("stopped between windows: the windows answered so far are kept");
+    this.name = "StoppedBetweenWindows";
+  }
 }
 export type Extraction = {
   entities: ExtractedEntity[];
@@ -1361,6 +1376,8 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
         parts.push({ ...kept, index: w.index, resumed: true });
         continue;
       }
+      // A first stop ends it here, between windows, those answered kept.
+      if (progress?.between?.aborted) throw new StoppedBetweenWindows();
       const t0 = Date.now();
       const ex = await extractCall(w.content, cfg, deadline, part, windowing, onCall, stop);
       retriedAny ||= ex.retried;

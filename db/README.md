@@ -2242,10 +2242,15 @@ provider pauses aside, so a busy day's sleeps of seconds stall nothing), once
 however many hard calls land, and `--status` lists the
 thoughts with windows kept or stops counted, of the text in force. The
 worker's own release waits for the stop's count, which another worker's
-release would otherwise beat. A succeeded release deletes the
-row in the same statement; a failed one keeps it, so `--retry-failed` resumes a thought that timed
-out in a late window. Without the table or the extraction group's grant on it,
-the worker keeps nothing and says so once.
+release would otherwise beat. A succeeded release deletes the row in the
+same statement; a failed one keeps it, so `--retry-failed` resumes a thought
+that timed out in a late window, and each run prunes, once, a row beside a
+succeeded claim and one of text its thought no longer holds. A first stop —
+a deploy's SIGTERM, the scheduler's service stopped, the operator's first
+Ctrl-C — ends a windowed thought at its next window, those answered kept and
+its lease returned at once, where it waited out the whole document and was
+killed past the service's grace with the lease held. Without the table or the
+extraction group's grant on it, the worker keeps nothing and says so once.
 
 **A run whose model looks at fault says so and exits 3 (SMD-2266).** Since a
 windowed thought with any window parsed is succeeded, a model answering many
@@ -4134,7 +4139,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2761 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1286 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1288 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

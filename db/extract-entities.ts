@@ -81,8 +81,10 @@
  * only for the request it answered (the text's fingerprint, the windowing,
  * the request's hash), a malformed one never; the hard stop counts itself on
  * the thought in hand before its lease goes back, a stall only when it had
- * held the thought at least STALL_FLOOR_MS, provider pauses aside. --status
- * lists them.
+ * held the thought at least STALL_FLOOR_MS, provider pauses aside. A first
+ * stop ends a windowed thought at its next window, those answered kept, not
+ * after its last. Each run prunes the rows no reader can use. --status lists
+ * them.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
@@ -170,7 +172,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
-import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -1108,6 +1110,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (!keeping) return undefined;
     }
     return {
+      // The first stop: a windowed thought ends at its next window, not its last (review pass 5).
+      between: onStop.signal,
       kept(index, sent) {
         const p = kept.get(index);
         if (!p || p.h !== hashOf(sent)) return undefined;
@@ -1354,6 +1358,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 calls += callsMadeBy(e);
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
+                // A first stop ended it between windows, those answered kept: it
+                // goes back to the pool with the leases the finally returns, its
+                // attempt refunded, no stop counted (review pass 5).
+                if (e instanceof StoppedBetweenWindows) return;
                 // The database went away under the write: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -1721,6 +1729,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
     const added = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
+    // Once a run, 089's rows no reader can use (review pass 5): beside a
+    // claim released succeeded — left only when the table was out of reach at
+    // the release — or of this pool's thoughts at text they no longer hold.
+    // A row beside a failed claim at the text it holds stays, for
+    // --retry-failed.
+    if (firstPass && keeping) {
+      await sql`
+        DELETE FROM extraction_progress e
+         USING thought_work_claims c, thoughts t
+         WHERE c.thought_id = e.thought_id AND c.work_type = e.work_type AND t.id = e.thought_id
+           AND (c.status = 'succeeded' OR (e.work_type = ${JOB} AND e.fingerprint <> COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))))`
+        .catch((e: unknown) => keepingFailed(e, "prune"));
+    }
     firstPass = false;
     const before = await counts();
     if (added > 0 || !FOLLOW) out(`  pool: ${added} thought(s) added`);

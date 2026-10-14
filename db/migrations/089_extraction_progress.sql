@@ -59,7 +59,8 @@
 --     the release itself proving the claim still the worker's — so a row is
 --     not left beside a claim released succeeded while the worker can reach
 --     the table; one beside a failed claim stays for --retry-failed, which
---     `--status` lists.
+--     `--status` lists. Each extraction run prunes, once, a row beside a
+--     succeeded claim and one of text its thought no longer holds.
 --   * Both functions give up a lock wait after a second (lock_timeout): the
 --     stop returns the lease after its count, and a count or a save blocked
 --     on the kept row held its share lock on the claim, the release queued
