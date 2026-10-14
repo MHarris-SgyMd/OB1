@@ -44,6 +44,11 @@
  * something else about it. The comment carries the two identifiers, the word
  * and its direction, the judge's confidence, a proposal's one-line reason (a
  * code span: a link or a mention in it is shown, not rendered) and its id.
+ * The judge relates thoughts, and a ticket's dated sections are rows of their
+ * own, so a relation between two tickets can stand on several row pairs,
+ * either way round: each word is one line, in its best finding's direction,
+ * saying how many row pairs back it and how many read it the other way
+ * (SMD-2930). A proposal stays a line of its own, its own decision.
  * It proposes only: no link is added, no status moved, no description
  * edited. A proposal is decided in the brain (consolidate.ts --accept /
  * --reject); a relation by linking the tickets on the board, which
@@ -188,7 +193,18 @@ export function onlyWords(g: FindingGroup, words: ReadonlySet<FindingWord>): Fin
   return findings.length ? { ...g, findings } : null;
 }
 
-const conf = (c: number | null) => (c === null ? "" : ` (confidence ${c.toFixed(2)})`);
+/**
+ * The confidence, how many row pairs a collapsed relation stands for, and how
+ * many of those the judge read the other way round (SMD-2930).
+ */
+const conf = (c: number | null, rows = 1, against = 0) => {
+  const parts = [
+    ...(c === null ? [] : [`confidence ${c.toFixed(2)}`]),
+    ...(rows > 1 ? [c === null ? `${rows} row pairs` : `best of ${rows} row pairs`] : []),
+    ...(against > 0 ? [`${against} the other way`] : []),
+  ];
+  return parts.length ? ` (${parts.join(", ")})` : "";
+};
 /**
  * A reason as one code span, bounded: on one line, so it cannot start a line
  * of its own (a marker), and inside backticks, so a link, an image, a mention
@@ -199,8 +215,8 @@ const reasonSpan = (s: string) => {
   return `\`${flat.length > REASON_CHARS ? `${flat.slice(0, REASON_CHARS - 1)}…` : flat}\``;
 };
 
-/** One finding's bullet. */
-export function findingLine(f: Finding): string {
+/** One finding's bullet; `rows` the row pairs a collapsed relation stands for, `against` those read the other way round. */
+export function findingLine(f: Finding, rows = 1, against = 0): string {
   if (f.kind === "proposal") {
     const says = f.verdict === "newer_supersedes_older" ? `**${f.newer} outdates ${f.older}**`
       : f.verdict === "older_supersedes_newer" ? `**${f.older} outdates ${f.newer}**`
@@ -216,8 +232,37 @@ export function findingLine(f: Finding): string {
   // duplicate_of does not — 079 leaves it to the judge — so only this post
   // stops (review pass 1: the comment said the brain stops pairing them).
   return f.word === "duplicate"
-    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
-    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows, against)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
+    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows, against)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+}
+
+/**
+ * A group's bullets, in rank order: a proposal each — its own pending
+ * decision, with its own id — and a relation once per word, in its best
+ * finding's direction and at its confidence, saying how many row pairs back
+ * it and, for evolves and duplicate, how many the judge read the other way
+ * round. The judge relates thoughts, and a ticket's dated sections are rows
+ * of their own, falling on either side of the other ticket's dates, so one
+ * ticket pair can carry the same word several times, either way round; a
+ * comment printed it once per row pair, and evolves both ways as two bullets
+ * that contradicted each other (SMD-2930). The record still names every id.
+ */
+export function findingLines(g: Pick<FindingGroup, "findings">): string[] {
+  const kept: { f: Finding; rows: number; against: number }[] = [];
+  const at = new Map<FindingWord, number>();
+  for (const f of g.findings) {
+    const i = f.kind === "relation" ? at.get(f.word) : undefined;
+    if (i === undefined) {
+      at.set(f.word, kept.length);
+      kept.push({ f, rows: 1, against: 0 });
+      continue;
+    }
+    const k = kept[i];
+    k.rows++;
+    // related reads the same either way round; the others name a direction.
+    if (f.word !== "related" && f.newer !== k.f.newer) k.against++;
+  }
+  return kept.map(({ f, rows, against }) => findingLine(f, rows, against));
 }
 
 /**
@@ -237,7 +282,7 @@ export function commentBody(g: FindingGroup): string {
   return [
     `**Open Brain found something about ${g.on} and ${other}**, two tickets this board does not link.`,
     "",
-    ...g.findings.map(findingLine),
+    ...findingLines(g),
     "",
     "Posted by the brain's consolidation pass; it proposes only, and changed nothing on this board.",
     "",

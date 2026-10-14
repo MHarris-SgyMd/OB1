@@ -11708,6 +11708,16 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     const bodyNew = String(posts().at(-1)?.vars.body ?? "");
     assert(rw.posted.length === 1 && rw.posted[0].on === "ZQ-3" && rw.posted[0].words.join() === "outdates" && !/is related to/.test(bodyNew) && (await rowsOf("ZQ-3", "ZQ-4")).length === 2,
       `a pair posted as related and later judged outdates is posted again, for the new word alone (${summaryLine(rw, 10, false).trim()})`);
+    // The judge relates rows: a ticket and its dated section, both related to the other ticket, are one bullet, the record naming both (SMD-2930).
+    const z50 = await ticket(50, "rows a"), z51 = await ticket(51, "rows b");
+    const z51s = await row("ZQ-51 — 2026-10-03: its own section (board-findings fixture)", { source: "linear", ticket: "ZQ-51", section: "2026-10-03" });
+    const r5051 = await relate(z51, z50, "related", 0.8), r5051s = await relate(z51s, z50, "related", 0.9);
+    const rr = await run();
+    const bodyRows = String(posts().at(-1)?.vars.body ?? "");
+    const ids5051 = (await rowsOf("ZQ-50", "ZQ-51"))[0]?.ids ?? [];
+    assert(rr.posted.length === 1 && rr.posted[0].on === "ZQ-51" && (bodyRows.match(/is related to/g) ?? []).length === 1 && /\(confidence 0\.90, best of 2 row pairs\)/.test(bodyRows)
+        && ids5051.length === 2 && ids5051.includes(r5051.id!) && ids5051.includes(r5051s.id!),
+      `a relation between rows of two tickets is one bullet at its best confidence, saying how many row pairs back it, and the record names every facet (${JSON.stringify(ids5051)}; ${bodyRows.split("\n").filter((l) => l.startsWith("- ")).join(" / ")})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");
@@ -11814,7 +11824,8 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
     // Pending, best first: the cross pair the cap left (0.95 or 0.94, allowed), GONE-1 ~ ZQ-44 (0.8, refused: no "ZQ-9"), ZQ-94 ~ ZQ-95 (allowed), ZQ-96 ~ ZQ-97 (left for the cap).
     assert(pendingDry === 4 && dryRun2.wouldPost === 2 && dryRun2.refused === 1 && dryRun2.waitingOnCap === 1,
       `a dry run takes the cap's places for what it would post, not for what the gate would refuse (${summaryLine(dryRun2, today3 + 2, true).trim()})`);
-    await run();
+    // Drains what is pending, whatever the day's count — run()'s cap of 10 left a pair behind once another case posted (SMD-2930 review).
+    await run({ cap: 100 });
 
     // 5. The step as board-sync sets it up from the environment.
     const off = await findingsStep(bsql, {});
