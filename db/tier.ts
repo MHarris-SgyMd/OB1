@@ -10,10 +10,8 @@
  *              ingest-records.ts (slice 1). This tool never writes to it except on
  *              --promote.
  *   canary   — main's shadow. On every merge: refresh from stable's dump, migrate
- *              forward with the merged tree, replay the query log and diff the ids
- *              — the searches stable logs over a soak after the refresh, or a
- *              --since before it: straight after a refresh the default window is
- *              empty, and --diff exits 3 on it.
+ *              forward with the merged tree, then replay stable's query log on
+ *              both brains and diff the ids.
  *   working  — a per-worktree disposable copy of stable, migrated by the branch.
  *
  * This is the tooling half (slice 2); ingest-records.ts, OB1_TIER, the
@@ -22,11 +20,11 @@
  *   # snapshot stable into the canary (or a working copy) and migrate it forward
  *   bun db/tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
  *
- *   # replay stable's logged searches against the canary and report the ranking
- *   bun db/tier.ts --replay --from <stable-url> --to <canary-url> [--since <iso-ts>]
+ *   # replay stable's logged searches on stable and the canary, over HTTP, and report the ranking
+ *   bun db/tier.ts --replay --from <stable> --to <canary> [--since <iso-ts>] [--json]
  *
  *   # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
- *   bun db/tier.ts --diff   --from <stable-url> --to <canary-url> [--since <iso-ts>]
+ *   bun db/tier.ts --diff   --from <stable> --to <canary> [--since <iso-ts>] [--json]
  *
  *   # after a soak: stamp the canary's version onto stable
  *   bun db/tier.ts --promote --from <canary-url> --to <stable-url>
@@ -56,24 +54,24 @@
  * built from the URL's parts (connect.ts toolTarget), never the URL, and
  * pg_dump must find a table made through the dropping connection first.
  *
- * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
- * is the offline, model-free, fixture-vector half in CI). For each search row
- * stable logged, it re-runs the query against the canary through the SHIPPED
- * retrieval and diffs the returned ids against the ids stable recorded:
- *   • the keyword arm (search_thoughts_keyword) is model-free — the arm the CI
- *     end-to-end (test-live [20]) exercises;
- *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
- *     text, so it is replayed with the brain's configured model through the egress
- *     gate (SMD-2290), and skipped-with-a-note when the policy would refuse the
- *     endpoint;
- *   • the current arm (search_thoughts with prefer_current, 059) is the hybrid's
- *     through search_thoughts_current, with the same provider rule.
- * A row logged before migration 045 carries a NULL arm (no way to know which arm
- * produced its ids), so it is skipped rather than guessed. Both verbs print how
- * many rows the window held, replayed and skipped. A window that replayed none
- * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182):
- * stable logs nothing unless it runs with OB1_QUERY_LOG=on, and the default
- * window starts at the canary's last refresh.
+ * --replay and --diff reach the two brains over HTTP, never Postgres (SMD-2875):
+ * --from and --to are each brain's MCP URL or Claude Code connector name, with
+ * a read key found as --compare finds one (--from-key/--to-key, OB1_COMPARE_KEY,
+ * the URL's ?key=, the connector's header). Stable's logged searches
+ * (list_logged_searches, SMD-2245: the window --since names, else the most
+ * recent page), each on the arm that ran it and each (query, arm) once, run
+ * on both brains, and the ids the two return now are diffed
+ * (db/brain-compare.ts runTierReplay). So a thought stable gained since the
+ * refresh can read as a move, and each brain embeds its own query: no model
+ * or egress gate is this tool's. A row logged before migration 045 has no arm
+ * and is skipped. The replays are real searches, which a brain running with
+ * OB1_QUERY_LOG=on logs. Both verbs print --compare's report, then the window
+ * and how many searches were replayed and skipped. A window that replayed none
+ * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182).
+ * Until SMD-2875 they read both databases from one container on both brains'
+ * networks, and diffed the canary against the ids stable had logged.
+ * db/test-replay.ts is still the replay gate's offline, model-free half in CI
+ * (SMD-1295).
  */
 
 import { SQL } from "bun";
@@ -84,173 +82,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig, quoteIdent, searchPathSchemas } from "./config.mjs";
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
-import { parsePgUuidArray } from "../evals/query-log.ts";
-import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { egressRefusal } from "./worker-bootstrap.ts";
-import { runCompare, type CompareArgs } from "./brain-compare.ts";
+import { runCompare, runTierReplay, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
-import { closeThenExit, connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
+import { connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-
-// ---------------------------------------------------------------------------
-// The replay gate — the reusable engine (imported by db/test-live.ts [20]).
-// ---------------------------------------------------------------------------
-
-/** One search the stable log recorded — everything a faithful replay needs, plus the answer to diff against. */
-export type LoggedSearch = {
-  id: string;
-  query: string;
-  /** 'current' is search_thoughts with prefer_current (059, SMD-2255): replayed through search_thoughts_current. */
-  arm: "hybrid" | "keyword" | "current" | null;
-  matchCount: number | null;
-  threshold: number | null;
-  recencyWeight: number | null;
-  filter: Record<string, unknown>;
-  /** The ids stable returned, in rank order (query_log.result_ids). */
-  resultIds: string[];
-};
-
-/** How a canary's replay of one row differs from what stable logged. */
-export type RowDiff = {
-  id: string;
-  query: string;
-  logged: string[];
-  replayed: string[];
-  /** ids the canary returned that stable did not. */
-  added: string[];
-  /** ids stable returned that the canary did not. */
-  dropped: string[];
-  /** the same set, a different order. */
-  reordered: boolean;
-  changed: boolean;
-};
-
-export type ReplaySummary = {
-  /** search rows in the window. */
-  total: number;
-  /** rows actually replayed (hybrid rows skip when no model is configured; NULL-arm rows always skip). */
-  replayed: number;
-  skipped: number;
-  /** the reasons rows were skipped, counted. */
-  skips: Record<string, number>;
-  /** rows whose ids moved. */
-  changed: number;
-  /** the moved rows — the per-PR "what moved". */
-  diffs: RowDiff[];
-};
-
-/** An embed function for the hybrid arm — injected so the engine has no provider dependency of its own (and the model-free CI path passes none). */
-export type EmbedFn = (query: string) => Promise<number[]>;
-
-/**
- * The stable searches to replay: every search row in the window, stable's own
- * (tier 'stable', or NULL for a brain that predates the column). Ordered oldest
- * first so a printed diff reads in the order the queries were asked. Kept pure —
- * no requireQueryLog / process.exit — so a test can drive it; the CLI checks the
- * table exists before calling.
- */
-export async function readLoggedSearches(sql: SQL, since: string | null): Promise<LoggedSearch[]> {
-  const rows = await sql`
-    SELECT id, query, arm, match_count, threshold, recency_weight, filter, result_ids
-    FROM query_log
-    WHERE kind = 'search'
-      AND query IS NOT NULL
-      AND (tier = 'stable' OR tier IS NULL)
-      AND (${since}::timestamptz IS NULL OR logged_at > ${since}::timestamptz)
-    ORDER BY logged_at ASC, id ASC`;
-  return rows.map((r: Record<string, unknown>) => ({
-    id: r.id as string,
-    query: r.query as string,
-    arm: (r.arm as LoggedSearch["arm"]) ?? null,
-    matchCount: (r.match_count as number | null) ?? null,
-    threshold: (r.threshold as number | null) ?? null,
-    recencyWeight: (r.recency_weight as number | null) ?? null,
-    filter: (r.filter as Record<string, unknown> | null) ?? {},
-    resultIds: parsePgUuidArray(r.result_ids),
-  }));
-}
-
-/**
- * Re-run one logged search against the target brain through the shipped
- * retrieval, returning the ids in rank order. `ran` is false when the row cannot
- * be replayed faithfully: a hybrid row with no embed function, or a NULL-arm row.
- */
-export async function replayOne(
-  sql: SQL,
-  row: LoggedSearch,
-  embedFn?: EmbedFn,
-): Promise<{ ids: string[]; ran: boolean; reason?: string }> {
-  const filter = row.filter ?? {};
-  if (row.arm === "keyword") {
-    // The exact-string arm — no vector, so it replays with no model. match_count
-    // maps to the function's p_limit; the logged filter is threaded so the
-    // filtered path (SMD-1490) is replayed as it ran.
-    const limit = row.matchCount ?? 25;
-    const rows = await sql`SELECT id FROM search_thoughts_keyword(${row.query}, ${limit}, 0, ${filter}::jsonb)`;
-    return { ids: rows.map((r: { id: string }) => r.id), ran: true };
-  }
-  if (row.arm === "hybrid" || row.arm === "current") {
-    if (!embedFn) return { ids: [], ran: false, reason: `${row.arm} needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)` };
-    const qv = await embedFn(row.query);
-    const threshold = row.threshold ?? -1;
-    const count = row.matchCount ?? 10;
-    const recency = row.recencyWeight ?? 0;
-    // `current` is the same arm through 059's function, the one the server
-    // called (SMD-2255); a function name cannot be a bound parameter, so two
-    // literal statements.
-    const rows = row.arm === "current"
-      ? await sql`
-          SELECT id FROM search_thoughts_current(
-            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`
-      : await sql`
-          SELECT id FROM search_thoughts_hybrid(
-            ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
-    return { ids: rows.map((r: { id: string }) => r.id), ran: true };
-  }
-  return { ids: [], ran: false, reason: "arm is NULL (logged before migration 045) — which arm produced its ids is unknown" };
-}
-
-/** The set/order difference between what stable logged and what the canary returned. */
-export function diffResult(logged: string[], replayed: string[]): Omit<RowDiff, "id" | "query" | "logged" | "replayed"> {
-  const loggedSet = new Set(logged);
-  const replayedSet = new Set(replayed);
-  const added = replayed.filter((id) => !loggedSet.has(id));
-  const dropped = logged.filter((id) => !replayedSet.has(id));
-  const sameSet = added.length === 0 && dropped.length === 0;
-  const reordered = sameSet && logged.join(",") !== replayed.join(",");
-  return { added, dropped, reordered, changed: added.length > 0 || dropped.length > 0 || reordered };
-}
-
-/**
- * Replay every stable search in the window against the canary and collect the
- * rows whose ids moved — the measured "what moved" a PR would otherwise write by
- * hand. `stable` supplies the logged searches and answers; `canary` is replayed.
- */
-export async function replayAndDiff(
-  stable: SQL,
-  canary: SQL,
-  opts: { since: string | null; embedFn?: EmbedFn } = { since: null },
-): Promise<ReplaySummary> {
-  const searches = await readLoggedSearches(stable, opts.since);
-  const summary: ReplaySummary = { total: searches.length, replayed: 0, skipped: 0, skips: {}, changed: 0, diffs: [] };
-  for (const row of searches) {
-    const { ids, ran, reason } = await replayOne(canary, row, opts.embedFn);
-    if (!ran) {
-      summary.skipped++;
-      const key = reason ?? "skipped";
-      summary.skips[key] = (summary.skips[key] ?? 0) + 1;
-      continue;
-    }
-    summary.replayed++;
-    const d = diffResult(row.resultIds, ids);
-    if (d.changed) {
-      summary.changed++;
-      summary.diffs.push({ id: row.id, query: row.query, logged: row.resultIds, replayed: ids, ...d });
-    }
-  }
-  return summary;
-}
 
 // ---------------------------------------------------------------------------
 // The refresh — a faithful whole-database snapshot, then migrate forward.
@@ -821,45 +657,6 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
 }
 
 // ---------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------
-
-/**
- * Print a replay's report and return its verdict: `empty` when nothing was
- * replayed, so nothing was compared — a window stable logged nothing in, or
- * one whose every row was skipped — which --diff must not pass as "nothing
- * moved" (SMD-2182). `window.words` says which searches were read; `bounded`
- * is false when that was all of stable's log, which no --since can widen.
- */
-function printSummary(s: ReplaySummary, gate: boolean, window: { words: string; bounded: boolean }): "moved" | "unmoved" | "empty" {
-  const short = (id: string) => id.slice(0, 8);
-  console.log(`replayed ${s.replayed} of ${s.total} logged searches ${window.words} (${s.skipped} skipped)`);
-  for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
-  if (s.replayed === 0) {
-    console.log(s.total === 0
-      ? `nothing to compare: stable logged no searches in the window. Stable logs them only with OB1_QUERY_LOG=on${window.bounded ? ", and an earlier --since widens the window" : ""}.`
-      : "nothing to compare: every search in the window was skipped.");
-    return "empty";
-  }
-  if (s.changed === 0) {
-    const scope = s.skipped ? `the ${s.replayed} replayed (${s.skipped} skipped, not compared)`
-      : s.replayed === 1 ? "the one replayed"
-      : `all ${s.replayed} replayed`;
-    console.log(gate ? `what moved: nothing — the canary reproduces stable's rankings on ${scope}.` : `no ranking moved on ${scope}.`);
-    return "unmoved";
-  }
-  console.log(`\nwhat moved — ${s.changed} of ${s.replayed} replayed queries returned different ids:`);
-  for (const d of s.diffs) {
-    const bits: string[] = [];
-    if (d.dropped.length) bits.push(`dropped ${d.dropped.map(short).join(",")}`);
-    if (d.added.length) bits.push(`added ${d.added.map(short).join(",")}`);
-    if (d.reordered) bits.push("reordered");
-    console.log(`  • ${JSON.stringify(d.query.slice(0, 70))}: ${bits.join("; ")}`);
-  }
-  return "moved";
-}
-
-// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -867,7 +664,9 @@ const COMPARE_USAGE =
   "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
   "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
 const VERB_USAGE =
-  "  db/tier.ts --refresh | --replay | --diff | --promote (one verb) --from <postgres://…> --to <postgres://…> [--since <iso-ts>] [--tier <canary|working>]";
+  "  db/tier.ts --refresh | --promote (one verb) --from <postgres://…> --to <postgres://…> [--tier <canary|working>]\n" +
+  "  db/tier.ts --replay | --diff (one verb) --from <stable> --to <canary> [--from-key <key>] [--to-key <key>] [--since <iso-ts>] [--json]\n" +
+  "  <stable>/<canary>: an http(s):// MCP URL (key from --from-key/--to-key, OB1_COMPARE_KEY, or ?key=) or a connector name";
 
 /**
  * Parse the --compare arguments: `--compare <a> <b>` names the two brains (a URL
@@ -935,16 +734,49 @@ async function main(): Promise<void> {
     process.exit(await runCompare(parseCompareArgs(args)));
   }
 
+  const oneVerb = (n: number): void => {
+    if (n !== 1) {
+      console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${n}.`);
+      process.exit(2);
+    }
+  };
+
+  // --replay and --diff reach the two brains over HTTP (SMD-2875), so they take
+  // brain references, as --compare does, and flags of their own.
+  if (args.includes("--replay") || args.includes("--diff")) {
+    const cli = commandLine("tier.ts", {
+      from: "one", to: "one", "from-key": "one", "to-key": "one", since: "one", json: "none", replay: "none", diff: "none", refresh: "none", promote: "none",
+    }, { hints: { from: "<stable>", to: "<canary>", "from-key": "<key>", "to-key": "<key>", since: "<iso-ts>" } }, args);
+    const verbs = (["refresh", "replay", "diff", "promote"] as const).filter((v) => cli.has(v));
+    oneVerb(verbs.length);
+    const verb = verbs[0];
+    const from = cli.value("from");
+    const to = cli.value("to");
+    if (!from || !to) {
+      console.error(`--${verb} needs --from and --to.`);
+      process.exit(2);
+    }
+    for (const [flag, ref] of [["--from", from], ["--to", to]] as const) {
+      if (/^postgres(ql)?:\/\//i.test(ref)) {
+        console.error(`--${verb} runs over HTTP now (SMD-2875): ${flag} is a brain's MCP URL or connector name, not a database.\n${VERB_USAGE}`);
+        process.exit(2);
+      }
+    }
+    const since = cli.value("since");
+    if (since !== undefined && Number.isNaN(Date.parse(since))) {
+      console.error("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");
+      process.exit(2);
+    }
+    process.exit(await runTierReplay({ from, to, fromKey: cli.value("from-key"), toKey: cli.value("to-key"), since, gate: verb === "diff", json: cli.has("json") }));
+  }
+
   // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
   const cli = commandLine("tier.ts", {
-    from: "one", to: "one", since: "one", tier: "one", refresh: "none", replay: "none", diff: "none", promote: "none",
-  }, { hints: { from: "<postgres://…>", to: "<postgres://…>", since: "<iso-ts>", tier: "<canary|working>" } }, args);
+    from: "one", to: "one", tier: "one", refresh: "none", promote: "none",
+  }, { hints: { from: "<postgres://…>", to: "<postgres://…>", tier: "<canary|working>" } }, args);
 
-  const verbs = (["refresh", "replay", "diff", "promote"] as const).filter((v) => cli.has(v));
-  if (verbs.length !== 1) {
-    console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${verbs.length}.`);
-    process.exit(2);
-  }
+  const verbs = (["refresh", "promote"] as const).filter((v) => cli.has(v));
+  oneVerb(verbs.length);
   const verb = verbs[0];
   const from = cli.value("from");
   const to = cli.value("to");
@@ -970,59 +802,6 @@ async function main(): Promise<void> {
     console.log(`remaining: point the stable stack at the published image and migrate it (SMD-1860) — no image is published yet.`);
     return;
   }
-
-  // replay | diff
-  const since = cli.value("since") ?? null;
-  const stable = openSql(from, { max: 4 });
-  const canary = openSql(to, { max: 4 });
-  // The code is returned and applied after both pools close: an exit inside
-  // the body skipped the close (a throw still closes, then reaches main's catch).
-  await closeThenExit([stable, canary], async () => {
-    // Each side answers and has the table; say so in the reader's words, not a driver trace.
-    for (const [sql, url, label] of [[stable, from, "--from (stable)"], [canary, to, "--to (canary)"]] as const) {
-      await reach(sql, url, label);
-      const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
-      if (!present) {
-        console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);
-        return 2;
-      }
-    }
-    // The default window is since the canary was last refreshed; else everything.
-    const refreshed = since === null ? await readConfig(canary, "last_refresh") : null;
-    const window = since ?? refreshed;
-    const words = since !== null ? `since ${since} (--since)`
-      : refreshed !== null ? `since ${refreshed} (the canary's last refresh)`
-      : "in all of stable's log (the canary records no refresh)";
-    // The replay embeds each logged query with the brain's own configured model,
-    // so it measures what the canary's search would return, and through the same
-    // egress gate every other provider call in the fork passes (SMD-2290). The
-    // wholesale refusal the claim workers apply (as sync-linear.ts does): null
-    // when the endpoint is declared local, or the policy is off or allows it. A
-    // logged query carries only its text — the `marker` unit, no actor and no row
-    // metadata — so the gate reads that one unit: it stays what getEmbedding's
-    // own per-call gate will judge below, so the two agree rather than this one
-    // passing on an actor:/source: term the query never carries and the per-call
-    // one then refusing.
-    const embedCfg = resolveEmbedConfig(process.env as EmbedEnv);
-    const embedRefused = egressRefusal(embedCfg.embeddings, embedCfg.egress, ["marker"]);
-    let embedFn: EmbedFn | undefined;
-    if (embedRefused) {
-      console.error(`note: the embeddings endpoint is not available to the replay (${embedRefused}) — hybrid- and current-arm searches will be skipped (the keyword arm replays without a model). Declare it local (OB1_LLM_LOCAL=1) or allow it in OB1_EGRESS_POLICY to embed the logged queries.`);
-    } else {
-      // getEmbedding applies the model's query template (db/config.mjs) and gates
-      // each call as the server's search does; the subject is the query text alone
-      // (no actor — a replay is not a worker key's send).
-      const embedder = createEmbedder(() => embedCfg, { rememberRefusal: false });
-      embedFn = (q) => embedder.getEmbedding(q, { kind: "query", content: q }, "query");
-    }
-    const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
-    const verdict = printSummary(summary, verb === "diff", { words, bounded: window !== null });
-    // The gate: 1 when a ranking moved, 3 when nothing was compared — not a
-    // pass, and not a move either, so a caller can tell the two apart. (A
-    // failed step is 1 as well, below; a usage error or refusal is 2.)
-    if (verb === "diff" && verdict !== "unmoved") return verdict === "moved" ? 1 : 3;
-    return 0;
-  });
 }
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace

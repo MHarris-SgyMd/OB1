@@ -46,7 +46,7 @@ Validation needs a second brain to compare against. Federation needs brains that
 | 6 | **The edge reaches each brain through the brain's published port.** | proposed; SMD-2876 settles it (open question 1) | the edge joining the brains' networks |
 | 7 | **The edge holds no key and injects no credential or identity.** A client's own key passes through, unchanged, to the brain the client names. | proposed; SMD-2876 | the edge as an authenticating gateway for several brains |
 | 8 | **An instance is its env file**: `COMPOSE_PROJECT_NAME`, `SERVER_PORT`/`SERVER_BIND` and the profile ports, all in the one file. `compose.yaml` stays one file for every instance. | proposed; SMD-2873 (measured to work today) | a compose file per instance; `name:` edited per copy |
-| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump streamed from stable's project into the canary's; replay, diff and promote by the means SMD-2875 settles. | proposed; SMD-2875 | the joined container |
+| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump streamed from stable's project into the canary's; replay and diff over HTTP; promote by the means SMD-2875 settles. | replay and diff over HTTP, decided and built (SMD-2875 PR 1); refresh and promote proposed, SMD-2875 PR 2 | the joined container |
 | 10 | **Each brain has its own access keys.** A brain calling another is an HTTP client with a key the other issued, and a canary is an instance with its own port and keys. | proposed here; SMD-2874 for the canary. It doesn't follow from row 1: the canary takes stable's keys because `canary.sh` copies them into its env file, which needs no shared network. | the canary accepting stable's keys |
 
 Some answers to the open questions would amend a row:
@@ -131,7 +131,7 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
 
 **The tier tools (SMD-2875):** today one container joins both data networks and holds both superuser passwords. Under this decision each brain is reached through its own project:
 - **Refresh:** a dump streamed from stable's project into the canary's. Its re-migrate and refresh mark run in the canary's own project.
-- **Replay and diff** run today over Postgres, with a hybrid arm keyed on `OB1_EVAL_EMBED`. SMD-2875 settles whether they move onto HTTP (`db/brain-compare.ts`) or keep Postgres through each brain's own project. Moving them changes what is measured.
+- **Replay and diff** moved onto HTTP (SMD-2875 PR 1, the maintainer's choice over keeping the Postgres engine split across the two projects). `db/tier.ts --diff` replays stable's logged searches on both brains through `db/brain-compare.ts`, each at its own URL with its own key, so no container reaches either database. What is measured changed: the canary is diffed against stable as it answers now, not against the ids stable logged, and each brain embeds its own query.
 - **Promote** reads the canary's `schema_version` and writes stable's `tier`, `promoted_schema_version` and `promoted_at`. The read runs through the canary's project, the write through stable's.
 
 **New:**

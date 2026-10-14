@@ -62,7 +62,7 @@ import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, settleRefreshed, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -7070,18 +7070,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806); the CLI reports its window, exits 3 on nothing compared, and names a side that does not answer (SMD-2182)");
+console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
 {
-  // The live replay gate (SMD-1295's live half): stable logs a search and the ids
-  // it returned; the canary, refreshed from stable, replays that search and its
-  // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
-  // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. A real pg_dump refresh needs client tools this job
-  // does not have: the deploy-stack job runs one through deploy/tier.sh
-  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
-  // the guards run before any tool is looked for. The hybrid arm needs a
-  // provider, the same split as eval-replay.ts vs test-replay.ts.
-  await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
+  // A real pg_dump refresh needs client tools this job does not have: the
+  // deploy-stack job runs one through deploy/tier.sh (SMD-2036), and below,
+  // stand-in tools drive refresh() to its restore and the guards run before
+  // any tool is looked for.
+  await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
       VALUES (${id}::uuid, ${content}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${content}))`;
@@ -7095,19 +7090,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     { id: recordId("fork", "tier-d"), content: "zqdelta — unrelated content about pruning old rows" },
   ];
   for (const c of corpus) await put(sql, c.id, c.content);
-
-  // Log what STABLE returns for each needle — the answer the canary is diffed against.
-  const loggedFor = async (needle: string): Promise<string[]> => {
-    const rows = await sql`SELECT id FROM search_thoughts_keyword(${needle}, 25, 0, '{}'::jsonb)`;
-    const ids = rows.map((r: { id: string }) => r.id);
-    await sql`
-      INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm, tier)
-      VALUES ('search', 'search_thoughts_keyword', NULL, ${needle}, 25, NULL, NULL, '{}'::jsonb, ${`{${ids.join(",")}}`}::uuid[], NULL, 'keyword', 'stable')`;
-    return ids;
-  };
-  const canaryHits = await loggedFor("zqcanary");
-  await loggedFor("zqdelta");
-  assert(canaryHits.length === 3, `stable's "zqcanary" search returned the three matching rows (${canaryHits.length})`);
 
   // Build the canary as a genuinely separate database on this cluster, migrated
   // forward and given the identical corpus — the refresh's shape without pg_dump,
@@ -7124,111 +7106,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     canarySql = new SQL({ url: canaryUrl, max: 4 });
     for (const c of corpus) await put(canarySql, c.id, c.content);
 
-    // An identical canary reproduces stable's rankings — the diff is empty.
-    const clean = await replayAndDiff(sql, canarySql, { since: null });
-    assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
-    assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
-
-    // 059 (SMD-2255): a row logged as arm `current` — search_thoughts with
-    // prefer_current — replays through search_thoughts_current. The canary's
-    // first zqcanary row is stamped a completed ticket, so the two functions
-    // differ: the current replay moves it last, the hybrid keeps it where it
-    // was (first review pass: with nothing demotable the two agreed, and a
-    // replay sending `current` to the hybrid passed). A stub vector stands in
-    // for the provider (the rows carry none, so they rank on the quoted literal).
-    const stub = async () => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return v; };
-    const logged = { id: "00000000-0000-4000-8000-000000002255", query: "\"zqcanary\"", matchCount: 10, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [] };
-    const plainHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const settledId = plainHybrid.ids[0];
-    await canarySql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-9955", "status": "Done", "status_type": "completed"}'::jsonb WHERE id = ${settledId}::uuid`;
-    const asCurrent = await replayOne(canarySql, { ...logged, arm: "current" }, stub);
-    const asHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
-    await canarySql`UPDATE thoughts SET metadata = metadata - 'issue' - 'status' - 'status_type' WHERE id = ${settledId}::uuid`;
-    assert(asCurrent.ran && asCurrent.ids.length === 3 && asHybrid.ids[0] === settledId && asCurrent.ids[2] === settledId
-        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)",
-      `a logged prefer_current search replays through search_thoughts_current — the completed row the hybrid ranks first comes last — and without a provider it is skipped with the arm named (${asCurrent.ids.indexOf(settledId) + 1} of ${asCurrent.ids.length}; ${noModel.reason})`);
-
-    // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
-    // print the window and the counts, and a window that replayed nothing is
-    // --diff's exit 3, where it used to be the pass "nothing moved".
-    // The replay embeds through the egress gate (SMD-2290): with the embeddings
-    // endpoint not declared local under the default deny, the hybrid/current arms
-    // are skipped before any request, so these CLI runs reach no provider. Start
-    // each run from a clean, refusing egress config (a stray OB1_LLM_LOCAL or
-    // OB1_EGRESS_* in the host's env would let it embed) and let a case opt back
-    // in through extraEnv; --no-env-file and OB1_ENV_FILES=off from a directory
-    // outside the checkout, as tier.sh does, keep a .env from declaring one local.
+    // The CLI as tier.sh runs it: --no-env-file and OB1_ENV_FILES=off from a
+    // directory outside the checkout, so no .env reaches it.
     const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
-      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
-      for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete env[k];
-      Object.assign(env, extraEnv);
+      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off", ...extraEnv };
       const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
       const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
       return { code: await p.exited, out, err };
     };
-    const both = ["--from", URL_!, "--to", canaryUrl];
-    const all = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(all.code === 0 && /^replayed 2 of 2 logged searches since 1970-01-01T00:00:00Z \(--since\) \(0 skipped\)$/m.test(all.out) && all.out.includes("what moved: nothing — the canary reproduces stable's rankings on all 2 replayed."),
-      `--diff over both keyword searches prints the window and the counts, and passes (exit ${all.code}: ${all.out.trim()})`);
-    // The server's clock, which stamped the logged rows, not this host's.
-    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    const fresh = await tierCli(["--diff", ...both]);
-    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches") && fresh.out.includes("an earlier --since widens the window"),
-      `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
-    const freshReplay = await tierCli(["--replay", ...both]);
-    assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
-    // A hybrid row, logged after the refresh: with the embeddings endpoint refused
-    // by the default deny it is skipped, and the report says so on both windows.
-    await sql`
-      INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
-      VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
-    const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
-      `--diff with a hybrid row and the endpoint refused reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
-    const skippedAll = await tierCli(["--diff", ...both]);
-    assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
-      `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
-
-    // SMD-2290: the embed arms send the logged query text to the provider, so they
-    // pass through the egress gate now, like every other provider call in the fork.
-    // A stub records requests. The property that matters is the zero: no logged
-    // query text leaves under the default deny. It is held twice over — the up-front
-    // skip when the endpoint is not declared local, and, under that, getEmbedding's
-    // own per-call gate (a ProviderError before any request). The local case then
-    // embeds and the stub IS called, so the zero is a gate holding, not a broken
-    // embedder. (Dropping the up-front skip alone keeps the zero — the per-call gate
-    // still refuses — but turns the graceful skip into an exit-1 error, which the
-    // [20] skip assertions above catch.)
-    {
-      let stubReqs = 0;
-      const stub = Bun.serve({ port: 0, fetch() { stubReqs++; const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return Response.json({ data: [{ embedding: v }] }); } });
-      const stubUrl = `http://127.0.0.1:${stub.port}/v1`;
-      try {
-        stubReqs = 0;
-        const denied = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL });
-        assert(stubReqs === 0 && denied.out.includes("hybrid needs a provider"),
-          `the replay sends the stub nothing under the default deny — the logged query text does not leave (${stubReqs} request(s) to the stub; ${denied.out.trim().split("\n").pop()})`);
-        stubReqs = 0;
-        const allowed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL, OB1_LLM_LOCAL: "1" });
-        assert(stubReqs >= 1 && /replayed 3 of 3 logged searches/.test(allowed.out),
-          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay, so the deny zero is a gate holding, not a dead embedder (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
-      } finally {
-        stub.stop(true);
-      }
-    }
-    await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
-    await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
-    // A window that is already all of the log: the canary as its own --from
-    // (its query_log is empty, and it records no refresh). No --since can
-    // widen that, so the hint does not offer one.
-    const unbounded = await tierCli(["--diff", "--from", canaryUrl, "--to", canaryUrl]);
-    assert(unbounded.code === 3 && /^replayed 0 of 0 logged searches in all of stable's log \(the canary records no refresh\)/m.test(unbounded.out) && unbounded.out.includes("only with OB1_QUERY_LOG=on.") && !unbounded.out.includes("--since"),
-      `--diff over all of an empty log exits 3 and offers no --since (exit ${unbounded.code}: ${unbounded.out.trim()})`);
-    // A side that does not answer is named, with its host, and never its password.
-    const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
-    assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
-      `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
     // OB1_ALLOW_REMOTE_DB only so a test server off loopback still reaches the
     // connection check rather than the loopback refusal; nothing is reset, as
     // --from never answers.
@@ -7241,14 +7126,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
     assert(unencoded.every((w) => w === "a URL with an @ after its host — is its password percent-encoded?"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
     assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
-
-    // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
-    // query — moves, and the diff names the dropped id. The gate has teeth.
-    await canarySql`DELETE FROM thoughts WHERE id = ${corpus[0].id}::uuid`;
-    const perturbed = await replayAndDiff(sql, canarySql, { since: null });
-    assert(perturbed.changed === 1, `deleting one canary row moves exactly the query that returned it (${perturbed.changed} changed)`);
-    const moved = perturbed.diffs[0];
-    assert(moved?.dropped.includes(corpus[0].id) && moved.added.length === 0, "the diff names the dropped id and adds none — a real difference, measured");
 
     // --promote, the data half: it reads the soaked canary's schema_version (044,
     // stamped when the canary migrated) and records it on stable as

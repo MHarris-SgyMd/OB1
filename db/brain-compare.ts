@@ -107,6 +107,13 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
   }
 }
 
+/** The verb a reference was given to and its key flags, for the messages: --compare's, or tier.ts --diff's (SMD-2875). */
+export interface AskedBy {
+  verb: string;
+  keys: string;
+}
+const COMPARE_ASKS: AskedBy = { verb: "--compare", keys: "--a-key/--b-key" };
+
 /**
  * A reference is a URL or a connector name. A URL carries its key in --*-key, the
  * env, or its own ?key= (which is then taken OFF the base — the key travels as a
@@ -115,28 +122,28 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
  * that output also prints the key, so this reads only the two lines it needs and
  * returns the key without ever putting it in a message.
  */
-export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
+export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined, how: AskedBy = COMPARE_ASKS): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
     const parsed = splitKeyFromUrl(ref);
     // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
     // show only the part before any query string (review pass 2 — a key-safety tidy
     // in already-merged code, reachable via --a/--b too).
-    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
+    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
     // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
     // /mcp against /canary/mcp, and a host alone would label both alike.
     const at = new URL(parsed.base);
     const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;
-    if (!key) throw new Error(`--compare: no read key for ${label}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
+    if (!key) throw new Error(`${how.verb}: no read key for ${label}. Pass ${how.keys}, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
     return { label, base: parsed.base, key, basic: parsed.basic };
   }
   // A connector name — resolve it the way canary.sh does, reading the URL and the
   // x-brain-key header out of `claude mcp get`, and echoing neither back.
-  return resolveConnector(ref, keyArg, envKey);
+  return resolveConnector(ref, keyArg, envKey, how);
 }
 
 /** Read a connector's base URL and key from `claude mcp get <name>` — its key is used, never printed. */
-export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
+export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined, how: AskedBy = COMPARE_ASKS): Promise<BrainEndpoint> {
   let out: string;
   let code: number;
   try {
@@ -145,25 +152,25 @@ export async function resolveConnector(name: string, keyArg: string | undefined,
   } catch (e) {
     // The binary is not on PATH (ENOENT) — say so, rather than surface a raw spawn
     // error, and point at the URL path that needs no CLI (review pass 3).
-    throw new Error(`--compare: the connector-name path needs the Claude CLI (\`claude\`) on PATH to resolve ${JSON.stringify(name)} — pass an http(s):// URL instead. (${(e as Error).message})`);
+    throw new Error(`${how.verb}: the connector-name path needs the Claude CLI (\`claude\`) on PATH to resolve ${JSON.stringify(name)} — pass an http(s):// URL instead. (${(e as Error).message})`);
   }
   if (code !== 0) {
-    throw new Error(`--compare: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
+    throw new Error(`${how.verb}: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
   }
   // Read the `URL: http://…` line and the `x-brain-key: …` header line; the URL is
   // normalized below (a ?key= split off), never followed or rewritten otherwise.
   const urlLine = out.split("\n").find((l) => /^\s*URL:/i.test(l));
   const url = urlLine?.replace(/^\s*URL:\s*/i, "").trim();
-  if (!url) throw new Error(`--compare: \`claude mcp get ${name}\` named no URL.`);
+  if (!url) throw new Error(`${how.verb}: \`claude mcp get ${name}\` named no URL.`);
   const headerLine = out.split("\n").find((l) => /x-brain-key:/i.test(l));
   const headerKey = headerLine?.replace(/^.*x-brain-key:\s*/i, "").trim() || undefined;
   // A connector may hold its key as ?key= on the URL rather than a header; split it
   // off the base (which then has /health appended) so the key never rides the POST
   // target a proxy logs — the same normalization the URL path does (review pass 1).
   const parsed = splitKeyFromUrl(url);
-  if (!parsed) throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
+  if (!parsed) throw new Error(`${how.verb}: the connector ${JSON.stringify(name)} named an invalid URL.`);
   const key = keyArg ?? headerKey ?? parsed.urlKey ?? envKey;
-  if (!key) throw new Error(`--compare: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass --a-key/--b-key or set OB1_COMPARE_KEY.`);
+  if (!key) throw new Error(`${how.verb}: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass ${how.keys} or set OB1_COMPARE_KEY.`);
   return { label: name, base: parsed.base, key, basic: parsed.basic };
 }
 
@@ -946,4 +953,95 @@ export async function runCompare(args: CompareArgs): Promise<number> {
     freshDelta ||
     (c.retrieval?.rows.some((r) => r.changed) ?? false);
   return anyDelta ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The tier gate — db/tier.ts --replay and --diff (SMD-2875).
+// ---------------------------------------------------------------------------
+
+/** --replay and --diff: stable's logged searches replayed on stable and the canary, each over HTTP. */
+export interface TierReplayArgs {
+  /** Stable: the brain whose logged searches are replayed. */
+  from: string;
+  /** The canary, replayed beside it. */
+  to: string;
+  fromKey?: string;
+  toKey?: string;
+  /** The window for stable's logged searches (ISO-8601). */
+  since?: string;
+  /** --diff: exit 1 when a ranking moved and 3 when nothing was compared; --replay reports and exits 0. */
+  gate: boolean;
+  json: boolean;
+}
+
+/** What a log-sourced replay found: `unread` when stable's log could not be read, `empty` when no search was compared. */
+export type ReplayVerdict = "moved" | "unmoved" | "empty" | "unread";
+
+export function replayVerdict(r: NonNullable<Comparison["retrieval"]>): ReplayVerdict {
+  if (r.sourceError) return "unread";
+  const ran = r.rows.filter((row) => !row.skipped);
+  if (ran.length === 0) return "empty";
+  return ran.some((row) => row.changed) ? "moved" : "unmoved";
+}
+
+/**
+ * The gate's lines under the report: the window and the counts, then the
+ * verdict in words. A window that compared nothing says why, so --diff's exit
+ * 3 is not read as a pass (SMD-2182).
+ */
+export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels: { stable: string; canary: string }, since: string | undefined, gate: boolean): string[] {
+  const verdict = replayVerdict(r);
+  if (verdict === "unread") return [`nothing replayed: the log of ${labels.stable} could not be read.`];
+  const ran = r.rows.filter((row) => !row.skipped);
+  const skipped = r.rows.length - ran.length;
+  const window = since !== undefined ? `since ${since} (--since)` : `in the log of ${labels.stable}`;
+  const lines = [`replayed ${ran.length} of ${r.queries} logged searches ${window} (${skipped} skipped)`];
+  if (verdict === "empty") {
+    lines.push(r.queries === 0
+      ? `nothing to compare: ${labels.stable} logged no searches in the window. A brain logs them only with OB1_QUERY_LOG=on${since !== undefined ? ", and an earlier --since widens the window" : ""}.`
+      : "nothing to compare: every search in the window was skipped.");
+  } else if (verdict === "unmoved") {
+    const scope = skipped ? `the ${ran.length} replayed (${skipped} skipped, not compared)` : ran.length === 1 ? "the one replayed" : `all ${ran.length} replayed`;
+    lines.push(gate ? `what moved: nothing — ${labels.canary} returns ${labels.stable}'s ids on ${scope}.` : `no ranking moved on ${scope}.`);
+  } else {
+    lines.push(`what moved: ${ran.filter((row) => row.changed).length} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
+  }
+  return lines;
+}
+
+/**
+ * Run --replay or --diff end to end: stable's logged searches, each on the arm
+ * that ran it, replayed on both brains as a client searches, the ids diffed.
+ * Neither brain's database is reached, and each embeds its own query. Returns
+ * the exit code: 1 when stable's log could not be read, and for --diff 1 when
+ * a ranking moved, 3 when nothing was compared.
+ */
+export async function runTierReplay(args: TierReplayArgs): Promise<number> {
+  const how: AskedBy = { verb: args.gate ? "--diff" : "--replay", keys: "--from-key/--to-key" };
+  const envKey = process.env.OB1_COMPARE_KEY;
+  const [stable, canary] = await Promise.all([
+    resolveBrain(args.from, args.fromKey, envKey, how),
+    resolveBrain(args.to, args.toKey, envKey, how),
+  ]);
+  let opts: Parameters<typeof compareBrains>[2];
+  try {
+    const page = await fetchLoggedSearches(stable, args.since ?? null);
+    opts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${stable.label}`, truncated: page.truncated };
+  } catch (e) {
+    opts = { fromLog: [], source: `the log of ${stable.label}`, sourceError: (e as Error).message };
+  }
+  const c = await compareBrains(stable, canary, opts);
+  // A plan from a log always reports, an empty one included.
+  const retrieval = c.retrieval!;
+  const verdict = replayVerdict(retrieval);
+  if (args.json) {
+    console.log(JSON.stringify({ ...c, gate: verdict }, null, 2));
+  } else {
+    console.log(renderComparison(c));
+    console.log("");
+    for (const line of replayGateLines(retrieval, { stable: stable.label, canary: canary.label }, args.since, args.gate)) console.log(line);
+  }
+  if (verdict === "unread") return 1;
+  if (!args.gate) return 0;
+  return verdict === "moved" ? 1 : verdict === "empty" ? 3 : 0;
 }

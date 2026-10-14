@@ -490,7 +490,8 @@ async function selfCheck(): Promise<number> {
     const resolved = ["OB1_TIER=canary", "OB1_AUTH_JWKS={}", "OB1_AUTH_COOKIE_KEYS=c", "OB1_AUTH_OPERATOR_PASSWORD=x", "OB1_AUTH_OPERATOR_PASSWORD_HASH=h", "OB1_AUTH_SECRET_GUI=y", "OB1_ENV_FILE=f", "POSTGRES_PASSWORD=p", "OPENROUTER_API_KEY=o", "MCP_ACCESS_KEYS=k"].join("\n");
     const ran = loop ? Bun.spawnSync(["bash", "-c", `TMP_ENV="$1"; RESOLVED="$2"; POSTGRES_PASSWORD=""\n${loop}`, "tier", handed, resolved]) : undefined;
     const got = ran?.exitCode === 0 && existsSync(handed) ? readFileSync(handed, "utf8").trim().split("\n") : [];
-    expect("deploy/tier.sh hands tier.ts no OB1_AUTH_* setting, and still hands its own", JSON.stringify(got) === '["OB1_TIER=canary","POSTGRES_PASSWORD=p","OPENROUTER_API_KEY=o"]', loop ? JSON.stringify(got) : "the loop was not found in tier.sh");
+    // OPENROUTER_API_KEY stays behind since the replay left the container (SMD-2875).
+    expect("deploy/tier.sh hands tier.ts no OB1_AUTH_* setting, and still hands its own", JSON.stringify(got) === '["OB1_TIER=canary","POSTGRES_PASSWORD=p"]', loop ? JSON.stringify(got) : "the loop was not found in tier.sh");
 
     // deploy/compose.yaml's `auth` service, as written.
     const doc = Bun.YAML.parse(readFileSync(COMPOSE_FILE, "utf8")) as any;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run db/tier.ts — refresh, replay, diff, promote — beside a running stack (SMD-2036).
+# Run db/tier.ts's --refresh and --promote beside a running stack (SMD-2036).
 #
 # tier.ts --refresh needs Bun AND a pg_dump / pg_restore at the source server's
 # major, and neither the stack's images nor a host carries both. This builds
@@ -7,19 +7,14 @@
 # runs this checkout's tier.ts in it, on the stack's network, so the database
 # services are reached by name and nothing is published for it.
 #
-#   # (the default project's names; another brain's are <project>_data and the rest)
-#   # replay stable's logged searches on the canary deploy/canary.sh stood up:
-#   # both projects' database networks, so by container name (each has a
-#   # `postgres`), and stable's egress, for the model the replay embeds with;
-#   # the canary's own env file for --to and the settings, stable's for --from
-#   deploy/tier.sh --env-file ~/stack/deploy/.env.canary.local --from-env-file ~/stack/deploy/.env \
-#     --network open-brain_data,open-brain-canary_data,open-brain_egress \
-#     --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
 #   # the three-tier stack's own database network and services
 #   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
 #
-# (deploy/canary.sh runs the canary's --refresh itself; deploy/README.md,
-# "Refreshing a tier", says what a --diff replays and what it skips.)
+# (deploy/canary.sh runs the canary's --refresh itself.) --replay and --diff
+# reach the two brains over HTTP, each at its own URL with its own key, and
+# need no container: run them as `bun db/tier.ts --diff --from <stable> --to
+# <canary>` (SMD-2875; deploy/README.md, "Refreshing a tier"). Given here,
+# they are refused.
 #
 # --from / --to take a database on the network as HOST[:PORT][/DB] — port 5432
 # and database openbrain unless named — and this builds the URL as the stack's
@@ -31,12 +26,10 @@
 #   --project NAME   the stack whose networks this joins (default: the project
 #                    --env-file names, COMPOSE_PROJECT_NAME as compose reads it,
 #                    else compose.yaml's open-brain; SMD-2873): its
-#                    <project>_data and <project>_egress. Not with --network
-#   --network NAME   the stack's networks (default <project>_data,<project>_egress,
-#                    deploy/compose.yaml's: Postgres is on `data`, internal,
-#                    and a --replay or --diff embeds through the model
-#                    provider on `egress`; SMD-2583. A --refresh needs `data`
-#                    alone, and a stack from before SMD-2583 has one network,
+#                    <project>_data. Not with --network
+#   --network NAME   the stack's network (default <project>_data,
+#                    deploy/compose.yaml's: Postgres is on `data`, internal;
+#                    SMD-2583. A stack from before SMD-2583 has one network,
 #                    <project>_default);
 #                    NAME,NAME joins more than one, for a --from and a --to that
 #                    share none (deploy/canary.sh's two projects, SMD-2038) —
@@ -53,15 +46,12 @@
 # The environment is compose's: `compose config --environment` reads the env
 # file as the stack does (quotes, inline comments, `export`, CRLF, a BOM) under
 # the shell's own variables, which win there too. Of that, only what tier.ts and
-# migrate.ts read is handed on — the OB1_* knobs (migrate.ts's OB1_EMBEDDING_*
-# on a refresh; the replay's OB1_LLM_*, OB1_EMBEDDING_* and OB1_EGRESS_*, now that
-# it embeds each logged query with the brain's model through the egress gate —
-# SMD-2290), POSTGRES_PASSWORD, which builds the URLs, and the key the replay's
-# embed falls back to when OB1_LLM_API_KEY is unset (OPENROUTER_API_KEY). Access
-# keys, LINEAR_API_KEY, the authorization server's OB1_AUTH_* settings (its
-# signing key, client secrets and password; SMD-2285) and the rest stay
-# behind (OLLAMA_BASE too, now that the replay reads OB1_LLM_BASE_URL through
-# resolveEmbedConfig, not evals/lib.ts). The values travel in a mode-600
+# migrate.ts read is handed on: the OB1_* knobs (migrate.ts's OB1_EMBEDDING_*
+# and OB1_PLUGINS on a refresh) and POSTGRES_PASSWORD, which builds the URLs.
+# Access keys, OPENROUTER_API_KEY (a replay's embed fell back to it before the
+# replay moved onto HTTP, SMD-2875), LINEAR_API_KEY, the authorization server's
+# OB1_AUTH_* settings (its signing key, client secrets and password; SMD-2285)
+# and the rest stay behind. The values travel in a mode-600
 # temporary env file, so they are not on this command line or the runtime's; they are in the container's
 # environment (`inspect` shows it while it runs), and the URLs are on the
 # argument lists inside it (bun's, pg_dump's, pg_restore's, migrate.ts's), which
@@ -90,9 +80,8 @@
 # needs a label the container may read; relabel the checkout once (`chcon -Rt
 # container_file_t <checkout>`) — this script does not relabel it for you.
 #
-# Exit status is tier.ts's (--diff exits 1 when a ranking moved, 3 when it
-# compared nothing); 2 for a usage error here, a network that does not exist
-# included.
+# Exit status is tier.ts's; 2 for a usage error here, a network that does not
+# exist included.
 set -euo pipefail
 unset CDPATH # a cd that prints the directory would put two lines in HERE
 
@@ -133,6 +122,9 @@ while [ $# -gt 0 ]; do
       esac
       shift 2 ;;
     -h|--help) usage ;;
+    --replay|--diff)
+      echo "$1 runs over HTTP now, each brain at its own URL with its own key, and needs no container (SMD-2875): bun db/tier.ts $1 --from <stable's MCP URL or connector> --to <the canary's>." >&2
+      exit 2 ;;
     *) PASS+=("$1"); shift ;;
   esac
 done
@@ -157,7 +149,7 @@ if [ -z "$RUNTIME" ]; then
 fi
 command -v "$RUNTIME" >/dev/null 2>&1 || { echo "--runtime $RUNTIME is not on PATH." >&2; exit 2; }
 
-# The networks (SMD-2873): --network as given, or the project's data and egress.
+# The networks (SMD-2873): --network as given, or the project's data network.
 # One env file is one brain, so the project is the one --env-file names, read as
 # compose reads it (a stub carrying compose.yaml's `name: open-brain`, which an
 # env file's or the shell's COMPOSE_PROJECT_NAME overrides), unless --project
@@ -186,7 +178,7 @@ if [ -z "$NETWORK" ]; then
     rm -f "$errf"
   fi
   [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "the project ($FROM_WHERE) takes a compose project name (lower-case letters, digits, - and _): '$PROJECT'" >&2; exit 2; }
-  NETWORK="${PROJECT}_data,${PROJECT}_egress"
+  NETWORK="${PROJECT}_data"
 fi
 
 # Before anything is built: a mistyped network (open-brain_data against
@@ -254,7 +246,7 @@ while IFS= read -r line; do
     # deploy/auth/provision.ts --self-check runs this loop). A line of its
     # own: db/test-connect.ts reads the one above as names alone.
     OB1_AUTH_*) continue ;;
-    OB1_*|POSTGRES_PASSWORD|OPENROUTER_API_KEY) ;;
+    OB1_*|POSTGRES_PASSWORD) ;;
     *) continue ;;
   esac
   printf '%s\n' "$line" >> "$TMP_ENV"
@@ -312,8 +304,8 @@ TO_URL="$(to_url "$TO" "$POSTGRES_PASSWORD" "$ENV_FILE")"
 } >> "$TMP_ENV"
 
 # Cached after the first build; rebuilt when db/tier.Dockerfile changes. The
-# image id it prints is dropped, and a build's errors go to stderr, so a
-# --diff's report is the only thing on stdout.
+# image id it prints is dropped, and a build's errors go to stderr, so
+# tier.ts's own words are the only thing on stdout.
 # --load for docker with buildx: under a docker-container builder (this Mac's
 # docker CLI over podman is one) a build without it stays in the builder's
 # cache and `run` then looks the tag up in a registry. A docker with no buildx
