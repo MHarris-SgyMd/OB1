@@ -2914,6 +2914,89 @@ ms per search (paired median; +6.0 at p90) over 075's 4.5 ms, the hybrid alone
 1.7 ms — the references are read from each window row's text at search time,
 nothing stored. Re-deriving a stale summary rides SMD-2243's pool.
 
+## A ticket a thought no longer tells right, labelled (SMD-2540)
+
+`eval-stated-status.ts` (SMD-2540). Read-only against the dogfood brain
+(`default_transaction_read_only` on every connection), no model called, from a
+one-off container on its data network (the file's header has the command);
+`--self-check` holds the readings, the candidates, the samples, the three
+registrations' verdicts and the gold's provenance with no database, in CI.
+
+077 never demotes a thought that names an open ticket, so a session summary
+that says "2306 is in progress" stays first for a "what next" query after
+SMD-2306 went Done (`dd70dccc`, 2026-10-14). The ticket's fix is a label, not a
+demotion: the hit says which tickets moved, and its rank stays 077's. This
+prices which reading finds them. Two families, each over thoughts with no
+lifecycle of their own (`evals/stated-status.ts`):
+
+- **moved-*** — the ticket's status when the thought was written against its
+  status now, from `thought_audit` (board-sync updates a ticket row in place, so
+  every status it held is an event's payload). "Written" is when the row was
+  stored, when its supersedes chain's oldest row was, or the session's end the
+  hook's last line records. Stored is not written: 351 of stable's 1,006
+  summaries were stored a day or more after their session ended (re-captures),
+  `dd70dccc` among them.
+- **stated-*** — the status the text states after a mention of the ticket, read
+  by pattern, against now: after a key, or after list steps (`SMD-2287, 2286,
+  2306`) and bare repeats (`2306 is in progress`) too.
+
+Gold: 148 labels in three rounds, each graded `wrong` (the claim is false),
+`noise` (true, but the thought says nothing of the ticket a reader could take as
+current) or `useful`, by two blind graders given an excerpt, the dates and the
+tickets' histories, never the candidates (κ 0.969, 1.000, 0.714; 6 adjudicated
+by a third blind grader). `evals/fixtures/stated-status-labels.json` holds ids
+and numbers only.
+
+**First registration** (pre-registered: the measured case labelled, ≥ 0.95 of a
+30-label sample not wrong, ≥ half useful; the most estimated useful labels wins,
+a stated-* one only 20% over the best moved-*):
+
+| candidate | labels | sample wrong | useful | pooled precision |
+|---|---|---|---|---|
+| moved-stored | 601 | 3/30 | 15 | 0.841 (69) |
+| moved-chain | 711 | 2/30 | 16 | 0.928 (83) |
+| moved-session | 819 | 0/30 | 20 | 0.918 (98) |
+| moved-session-stated | 99 | 7/30 | 16 | 0.750 (32) |
+| stated-keys | 60 | 13/30 | 17 | 0.567 (30) |
+| stated-lists | 72 | 15/30 | 15 | 0.500 (36) |
+
+The text pattern is dead: it reads reported speech ("It says SMD-2284 is
+Backlog. In fact…") and a status that belongs to a PR or a step as the
+thought's own claim. moved-session qualified on its sample, but pooled over
+every graded label it produces it is 0.897 at the time (0.918 above, with round
+3's labels), and the registration read the sample alone. Every wrong label was
+one case: a note written 0–18 minutes before board-sync (a pass every 5
+minutes) recorded a move its writer had just made. Grading also found a bug: the
+history was read in audit seq order, and 046's backfill numbered older events
+after newer ones; it is read by time now (disclosed in the header; six of seven
+wrong labels then were this).
+
+**Second registration**, `moved-session-lag` ("then" read an hour after the
+written time), failed on pooled precision before its held-out sample was graded
+(0.922 at the time; 0.933 above): it claimed moves the note never knew of
+(`45144934`: SMD-2294 started a minute after the session ended).
+
+**Third registration** (the maintainer chose it over stopping), judged on a
+held-out sample of its own and on pooled precision: `moved-session-settled`
+reads "then" at the written time and gives no label when the ticket already
+held its current status type an hour after it. Computed on rounds 1–2 before it
+was registered it scored 53/54, disclosed; that number chose the rule.
+
+| candidate | held-out wrong | useful | pooled precision | labels | est. useful |
+|---|---|---|---|---|---|
+| moved-session-settled | 1/30 (0.967) | 21 (0.700) | 0.976 (84) | 742 on 409 thoughts | 519 |
+
+It qualifies and is chosen. A labelled thought names up to 12 moved tickets
+(3 at p90), so the label needs a cap. Its wrong labels are a ticket that moved
+minutes after the note to a status that is not its current one (`3a37f18b`,
+`1886b600`). Without the lifecycle guard, 408 thoughts with a lifecycle of
+their own (ticket rows, notes filed under one) would carry a label.
+1,006 of the 1,117 lifecycle-less thoughts are session summaries, so the
+session line does most of the work; a note whose ticket has no history at its
+written time (691 pairs, mostly before board-sync began on 09-22) gets none.
+Caveats: graders are models, not the maintainer; one brain; three registrations
+on the same corpus — the held-out sample is the guard, and it is 30 labels.
+
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
 `eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second

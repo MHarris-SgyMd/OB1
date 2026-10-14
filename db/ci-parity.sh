@@ -173,6 +173,7 @@ main() {
   nodb evals              eval-projection-replay.ts --self-check
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
+  nodb evals              eval-stated-status.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check
