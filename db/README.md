@@ -4032,8 +4032,13 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   note, or any thought that is not a Linear row, on either side is never
   posted.
 - **One comment per ticket pair.** Several proposals or relations between rows
-  of the same two tickets are one comment. It names the two tickets, each
-  finding's word and direction and the judge's confidence, a proposal's
+  of the same two tickets are one comment. Each relation word is one line, in
+  its best finding's direction and at its confidence, saying how many row
+  pairs back it and how many the judge read the other way round: a ticket's
+  dated sections are rows of their own, so one pair of tickets can carry the
+  same word several times (SMD-2930). Each proposal is a line of its own, its
+  own decision. The comment names the two tickets, each finding's word and
+  direction and the judge's confidence, a proposal's
   one-line reason (as code, so a link or a mention in it is shown, not
   rendered), and how to act: a proposal is decided in the brain
   (`cd db && bun consolidate.ts --accept <id>`, or `--reject <id>`); a
@@ -4155,7 +4160,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2766 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1271 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1272 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
