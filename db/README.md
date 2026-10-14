@@ -4032,11 +4032,13 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   note, or any thought that is not a Linear row, on either side is never
   posted.
 - **One comment per ticket pair.** Several proposals or relations between rows
-  of the same two tickets are one comment. It names the two tickets, each
-  finding's word and direction and the judge's confidence — a relation once,
-  at its best confidence, saying how many row pairs back it when the judge
-  related more than one (a ticket's dated sections are rows of their own;
-  SMD-2930), a proposal once each, since each is its own decision — a proposal's
+  of the same two tickets are one comment. Each relation word is one line, in
+  its best finding's direction and at its confidence, saying how many row
+  pairs back it and how many the judge read the other way round: a ticket's
+  dated sections are rows of their own, so one pair of tickets can carry the
+  same word several times (SMD-2930). Each proposal is a line of its own, its
+  own decision. The comment names the two tickets, each finding's word and
+  direction and the judge's confidence, a proposal's
   one-line reason (as code, so a link or a mention in it is shown, not
   rendered), and how to act: a proposal is decided in the brain
   (`cd db && bun consolidate.ts --accept <id>`, or `--reject <id>`); a

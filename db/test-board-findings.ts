@@ -92,15 +92,22 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     p, { ...p, id: "p2", confidence: 0.6 },
   ])[0];
   const bullets = findingLines(rows);
-  ok(bullets.length === 5
-      && bullets.filter((b) => /is related to/.test(b)).length === 1 && bullets.some((b) => /^- \*\*SMD-2 is related to SMD-1\*\* \(confidence 0\.99, best of 4 row pairs\)\./.test(b))
-      && bullets.some((b) => /^- \*\*SMD-2 evolves from SMD-1\*\* \(confidence 0\.70, best of 2 row pairs\)\./.test(b)) && bullets.some((b) => /^- \*\*SMD-1 evolves from SMD-2\*\* \(confidence 0\.60\)\./.test(b))
-      && bullets.filter((b) => /A pending supersession proposal/.test(b)).length === 2,
-    `a relation is one bullet at its best confidence, saying how many row pairs back it — related either way round, evolves by direction; each proposal its own (${bullets.join(" / ")})`);
+  const heads = bullets.map((b) => /^- \*\*([^*]+)\*\*( \([^)]*\))?/.exec(b)?.slice(1).join("") ?? b);
+  ok(JSON.stringify(heads) === JSON.stringify([
+      "SMD-2 is related to SMD-1 (confidence 0.99, best of 4 row pairs)",
+      "SMD-2 outdates SMD-1 (confidence 0.83)",
+      "SMD-2 evolves from SMD-1 (confidence 0.70, best of 3 row pairs, 1 the other way)",
+      "SMD-2 outdates SMD-1 (confidence 0.60)",
+    ]),
+    `each relation word is one bullet, in its best finding's direction, at its rank: related either way round, evolves noting the row pair read the other way; each proposal its own, in rank order (${heads.join(" / ")})`);
   const rowsBody = commentBody(rows);
-  ok(rowsBody.split("\n").filter((l) => l.startsWith("- ")).length === 5 && rowsBody.endsWith("ob1-finding SMD-1 SMD-2 related outdates evolves")
-      && rows.findings.length === 9 && JSON.stringify(findingLines({ findings: [f({ id: "x", older: "SMD-1", newer: "SMD-2", confidence: null }), f({ id: "y", older: "SMD-1", newer: "SMD-2", confidence: null })] })) === JSON.stringify(["- **SMD-2 is related to SMD-1** (best of 2 row pairs). If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them."]),
-    "the comment carries the collapsed bullets and the same marker; the group still names every finding, which the record keeps; no confidence, only the count");
+  const dup = findingLines({ findings: groupFindings([
+    f({ id: "d1", word: "duplicate", older: "SMD-1", newer: "SMD-2", confidence: 0.9 }), f({ id: "d2", word: "duplicate", older: "SMD-2", newer: "SMD-1", confidence: 0.5 }),
+  ])[0].findings });
+  ok(rowsBody.split("\n").filter((l) => l.startsWith("- ")).length === 4 && rowsBody.endsWith("ob1-finding SMD-1 SMD-2 related outdates evolves")
+      && rows.findings.length === 9 && JSON.stringify(findingLines({ findings: [f({ id: "x", older: "SMD-1", newer: "SMD-2", confidence: null }), f({ id: "y", older: "SMD-1", newer: "SMD-2", confidence: null })] })) === JSON.stringify(["- **SMD-2 is related to SMD-1** (2 row pairs). If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them."])
+      && dup.length === 1 && /^- \*\*SMD-2 duplicates SMD-1\*\* \(confidence 0\.90, best of 2 row pairs, 1 the other way\)\./.test(dup[0]),
+    "the comment carries the collapsed bullets and the same marker; the group still names every finding, which the record keeps; with no confidence, just the count; a duplicate read both ways is one bullet saying so");
 }
 
 // ---------------------------------------------------------------------------
