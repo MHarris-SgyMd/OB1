@@ -43,8 +43,8 @@
 --     short stop with no window saved leaves stalled as it was. A thought
 --     saving a window in every sleep is not stalled, and while gained is
 --     above 0 the row is gaining now, whatever stalled said at the last
---     stop: the sleep scheduler (db/sleep.ts) reads both before it lets
---     consolidation join past a thought extraction still holds (SMD-2694).
+--     stop: a scheduler reads both before it lets consolidation join past
+--     a thought extraction still holds (SMD-2694).
 --   * save_extraction_window(…) and note_extraction_stop(…) write it, and
 --     only for the claim's holder: each locks the claim row FOR SHARE and
 --     writes nothing (false) unless the row is claimed by the worker named.
