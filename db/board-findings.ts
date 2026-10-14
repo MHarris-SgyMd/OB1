@@ -816,6 +816,11 @@ export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
       ? "board_findings_posted exists but does not resolve for this role — not on its search_path, or no USAGE on its schema"
       : "migration 087 is not applied, so nothing posted was recorded (cd db && bun migrate.ts --url …)";
   }
+  // The read takes each settle by the pass from 091's column (SMD-2913; review pass 1: a brain at 090 met a raw column error).
+  // Probed as the read resolves it: another schema's table first on the path lacks it too (review pass 2).
+  const [c] = await sql`SELECT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('supersession_proposals')
+                                         AND a.attname = 'pass_settled_at' AND NOT a.attisdropped) AS settles`;
+  if (!c.settles) return "the supersession_proposals on this role's search_path has no pass_settled_at — migration 091 is not applied, or another schema's table comes first (cd db && bun migrate.ts --url …)";
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted,
                                has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
                                has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read`;
@@ -831,13 +836,21 @@ export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
 export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string {
   const v = findingOutcome(r, days);
   const after = v.answeredS === null ? "" : ` ${ago(v.answeredS)} after`;
+  // A settle between the finding being chosen and posted is timed before the post: 0 (SMD-2913).
+  const backAfter = r.withdrawnS === null ? "" : ` ${ago(Math.max(0, r.withdrawnS))} after`;
   const what =
     v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
     : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
     : v.outcome === "withdrawn"
-      ? r.proposals
-        ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
-        : r.withdrawnS === null ? "withdrawn: its relation is gone with a thought" : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
+      ? r.withdrawnS === null
+        ? r.proposals
+          // Present but no time kept (091's record bypassed): settled, not gone (review pass 2).
+          ? r.proposals.settled + r.proposals.reopened > 0 ? "withdrawn: the pass settled its proposal" : "withdrawn: its proposal is gone"
+          : "withdrawn: its relation is gone with a thought"
+        // A settle a text move reopened since stays a take-back (SMD-2913); the line says it was reopened.
+        : r.proposals
+          ? `withdrawn: the pass settled its proposal${backAfter}${r.proposals.reopened > 0 ? " (reopened since)" : ""}`
+          : `withdrawn: the judge stopped saying ${r.word}${backAfter}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     // A found row is never in the rate, so it has no window to count down (review pass 4).
     : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;

@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2766 assertions: 2766 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety (90) migrations applied, and
+`bun test-schema.ts` prints `2783 assertions: 2783 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-one (91) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1409,6 +1409,29 @@ It refuses
 to apply without 085 and 086. test-schema [80], test-upgrade [20ak],
 server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql and
 test-store-postgrest [8d], test-rest-sql [3].
+
+Migration 091 keeps every time the consolidation pass settled a proposal,
+since the judge last asserted it, on its row (SMD-2913). 067's `rebuild_derived` reopens a settled row on a later
+text move — stale, `reviewed_at` and the note cleared — and the pass's next
+settle writes a new time, so SMD-2682's read of what became of a posted
+finding lost the take-back: a finding the pass took back on its fifth day
+read open again after an unrelated ticket edit, and unanswered past the
+window. `supersession_proposals.pass_settled_at` is each settle's
+`reviewed_at`, oldest first; its one writer is the BEFORE INSERT OR UPDATE
+trigger `supersession_proposals_keep_settles` (a value a caller writes is
+replaced). It appends when the row becomes settled (rejected with the
+`settled by the pass:` note where it was not), empties the column when
+`judged_at` moves — 063's replace in place, a re-judge finding the conflict
+again: the judge saying it again, where a reopen is the brain asking again —
+and otherwise keeps it, through 067's reopen and a person's review. The
+assertion is read from the write itself, never by comparing times two
+transactions wrote. Rows settled at the upgrade are backfilled with their
+`reviewed_at`; a settle reopened before it left no time. The read takes each
+proposal's first settle in the column. No grant: the trigger writes the row being written, and 087's table
+stays insert-only. A data-only reload with triggers enabled rebuilds the
+column from each row's status. A relation needs nothing — it has no reopen,
+and said again it is the judge's verdict again. It refuses to apply without
+067. test-schema [81], test-upgrade [20al], test-live [42].
 
 ## What changed relative to the guide
 
@@ -4132,20 +4155,29 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   **accepted** — its proposal accepted, or the board linking the pair since
   (any active Linear link either way, `duplicate_of` included, timed from the
   first link made since the post); **rejected** — a person rejected one of
-  its proposals (`--reject`) and none is pending or stale, a link since
-  notwithstanding; **withdrawn** — within the window, its proposal settled by
+  its proposals (`--reject`) and none is pending or waiting on a re-judge
+  (a proposal the pass took back and a text move reopened does not wait), a
+  link since notwithstanding; **withdrawn** — within the window, its proposal settled by
   the pass's own re-judge (067's `settled by the pass:` note, a rejection no
   person made), or a relation the judge stopped saying at that word (one
   re-judged at the same word still stands); or its proposals or relation
   deleted with a thought, which leaves no time — the comment stays on the
-  board, so past the window that reads unanswered (it is read from the rows
-  as they stand: a settle a later text move reopens, 067, is judged by its
-  current state, and a later settle's time replaces the first, so a finding
-  taken back within the window can read unanswered past it — understating
-  the rate, never inflating it; SMD-2913 records the first withdrawal);
-  **open** — a proposal pending, or stale (a text moved) and waiting on a
-  re-judge or a reviewer, or a relation standing; or **unanswered**, open past `--days`
-  (30). The board has no "no" for a relation: left unlinked past the window
+  board, so past the window that reads unanswered. What the judge last
+  asserted decides (SMD-2913): the pass's settles are kept across 067's
+  reopen (migration 091), so a finding taken back on its fifth day stays
+  withdrawn when a ticket edit reopens it and the pass settles it again —
+  the line adds "(reopened since)"; but a re-judge that finds the conflict
+  again (pending, its `judged_at` moved), or a relation said again, is the
+  judge asserting it once more, and it reads open, then unanswered. With two
+  proposals named it is taken back once the pass has settled both, each
+  since it was last asserted. A settle reopened before 091 left no time, and
+  that finding reads by its state now, which can only understate the rate;
+  `--report` names 091 on a brain without it;
+  **open** — a proposal pending, or stale (a text moved) and not settled
+  since it was last asserted, waiting on a re-judge or a reviewer, or a
+  relation standing; or **unanswered**, open past `--days` (30), counted
+  from the post — a finding the judge asserts again late in the window
+  leaves the board less time, and past it reads unanswered at once. The board has no "no" for a relation: left unlinked past the window
   is how it says one, and a judge that stops saying it afterwards does not
   take that back. A pair is posted only unlinked as the brain knows it; a
   link Linear made without moving either ticket's `updatedAt` arrives at the
@@ -4169,8 +4201,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2766 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1275 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2783 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

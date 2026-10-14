@@ -518,7 +518,9 @@ export function boardPairsValue(field: string, row: { n?: unknown } | undefined)
 //     ticket's updatedAt reaches the brain at board-sync's next --full pass,
 //     after the post, and counts as an answer then — the brain cannot tell it
 //     from one made after the comment;
-//   * an outdates finding's proposals (029) were accepted or rejected;
+//   * an outdates finding's proposals (029) were accepted or rejected, or
+//     when the pass first settled them since the judge last asserted them
+//     (091's record, kept across 067's reopen);
 //   * a relation finding's facet (084) still stands, re-judged or not, at
 //     the same word, or when the judge stopped saying it.
 //
@@ -542,11 +544,27 @@ export interface FindingRow {
   ageS: number;
   /** While a link between the pair is active: seconds from posting to the first link made since, closed ones included (0 when none was made since); null when none is active. */
   linkedS: number | null;
-  /** An outdates finding's proposals among those it named, by status — a person's rejection apart from the pass's settle (067) — and when the first acceptance, the last rejection and the last settle were made; null for a relation. */
-  proposals: { accepted: number; rejected: number; settled: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null; settledS: number | null } | null;
+  /**
+   * An outdates finding's proposals among those it named and still present, by
+   * state — accepted; rejected by a person; settled by the pass (067); reopened,
+   * stale again after a settle since the judge last asserted it (091); stale,
+   * waiting on its re-judge; pending — and when the first acceptance and the
+   * last rejection were made; null for a relation.
+   */
+  proposals: { accepted: number; rejected: number; settled: number; reopened: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
   /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
   stands: boolean | null;
-  /** A relation finding no longer standing: seconds from posting to the close of the last relation of its word there; null when it stands, for outdates, or when the facets are gone. */
+  /**
+   * Seconds from posting to when the judge took the finding back: for
+   * outdates, when the pass had settled every proposal it named that is still
+   * present, each by its first settle since the judge last asserted it (091's
+   * record — a reopen by a text move does not clear it, a re-judge finding the
+   * conflict again does); for a relation no longer standing, the close of the
+   * last relation of its word there. Null when not taken back, or when no time
+   * is left (every proposal gone, or the relation's facets gone with a thought).
+   * Negative when the pass settled it between the finding being chosen and its
+   * comment being posted.
+   */
   withdrawnS: number | null;
 }
 
@@ -583,11 +601,11 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
   SELECT b.ticket_a, b.ticket_b, b.word, b.posted_on, b.origin, b.posted_at,
          extract(epoch FROM now() - b.posted_at)::float8 AS age_s,
          CASE WHEN l.linked_now THEN extract(epoch FROM coalesce(l.first_after, b.posted_at) - b.posted_at)::float8 END AS linked_s,
-         p.accepted, p.rejected, p.stale, p.pending, p.settled,
+         p.accepted, p.rejected, p.settled, p.reopened, p.stale, p.pending,
          extract(epoch FROM p.accepted_at - b.posted_at)::float8 AS accepted_s,
          extract(epoch FROM p.rejected_at - b.posted_at)::float8 AS rejected_s,
-         extract(epoch FROM p.settled_at - b.posted_at)::float8 AS settled_s,
-         r.stands, extract(epoch FROM r.gone_at - b.posted_at)::float8 AS withdrawn_s
+         extract(epoch FROM coalesce(p.withdrawn_at, r.gone_at) - b.posted_at)::float8 AS withdrawn_s,
+         r.stands
     FROM board_findings_posted b
     -- The link's target probes 053's target index; its holder is the other
     -- ticket's row. Linked is an active link now; answered is when the first
@@ -609,17 +627,29 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
     -- no: counted apart (review pass 2). The literal is PASS_SETTLED_PREFIX
     -- (consolidate.ts), which this file may not import; test-board-findings
     -- holds the two equal.
+    -- Taken back is when the pass had settled every proposal still present
+    -- since the judge last asserted it — each by its first settle in 091's
+    -- record, which 067's reopen on a later text move keeps and a re-judge
+    -- finding the conflict again (063: the judge saying it again, after which
+    -- the comment on the board is its verdict once more) empties (SMD-2913,
+    -- review passes 1 and 2). The poster posts pending rows only, so a settle
+    -- in the record came after the finding was chosen — one made before its
+    -- comment was posted counts, at 0. A stale row the pass settled since is
+    -- reopened: taken back, so it neither waits nor holds off a person's
+    -- rejection; stale is one that waits on its re-judge (review pass 2).
     LEFT JOIN LATERAL (
       SELECT count(*) FILTER (WHERE s.state = 'accepted')::int AS accepted,
              count(*) FILTER (WHERE s.state = 'rejected')::int AS rejected,
              count(*) FILTER (WHERE s.state = 'settled')::int AS settled,
-             count(*) FILTER (WHERE s.state = 'stale')::int AS stale,
+             count(*) FILTER (WHERE s.state = 'stale' AND s.settled_since IS NOT NULL)::int AS reopened,
+             count(*) FILTER (WHERE s.state = 'stale' AND s.settled_since IS NULL)::int AS stale,
              count(*) FILTER (WHERE s.state = 'pending')::int AS pending,
              min(s.reviewed_at) FILTER (WHERE s.state = 'accepted') AS accepted_at,
              max(s.reviewed_at) FILTER (WHERE s.state = 'rejected') AS rejected_at,
-             max(s.reviewed_at) FILTER (WHERE s.state = 'settled') AS settled_at
+             CASE WHEN bool_and(s.settled_since IS NOT NULL) THEN max(s.settled_since) END AS withdrawn_at
         FROM (SELECT x.reviewed_at,
-                     CASE WHEN x.status = 'rejected' AND x.review_note LIKE 'settled by the pass:%' THEN 'settled' ELSE x.status END AS state
+                     CASE WHEN x.status = 'rejected' AND x.review_note LIKE 'settled by the pass:%' THEN 'settled' ELSE x.status END AS state,
+                     (SELECT min(t) FROM unnest(x.pass_settled_at) AS t) AS settled_since
                 FROM supersession_proposals x
                WHERE b.word = 'outdates' AND x.id = ANY (b.finding_ids)) s) p ON b.word = 'outdates'
     -- A re-judge closes a relation and writes its successor on the same pair
@@ -670,13 +700,14 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
       linkedS: linked === null ? null : Math.max(0, linked),
       proposals: word === "outdates"
         ? {
-            accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0), settled: countOf("findings", r.settled ?? 0),
+            accepted: countOf("findings", r.accepted ?? 0), rejected: countOf("findings", r.rejected ?? 0),
+            settled: countOf("findings", r.settled ?? 0), reopened: countOf("findings", r.reopened ?? 0),
             stale: countOf("findings", r.stale ?? 0), pending: countOf("findings", r.pending ?? 0),
-            acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s), settledS: secondsOf("findings", r.settled_s),
+            acceptedS: secondsOf("findings", r.accepted_s), rejectedS: secondsOf("findings", r.rejected_s),
           }
         : null,
       stands: word === "outdates" ? null : r.stands === true,
-      withdrawnS: word === "outdates" || r.stands === true ? null : secondsOf("findings", r.withdrawn_s),
+      withdrawnS: word !== "outdates" && r.stands === true ? null : secondsOf("findings", r.withdrawn_s),
     };
   });
 }
@@ -685,20 +716,29 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * What became of one posted finding, first match wins:
  *
  *   outdates   accepted   a proposal it named was accepted
- *              rejected   none is pending or stale and a person rejected one —
- *                         a link on the board since does not undo that no
+ *              rejected   none is pending or waiting on a re-judge and a
+ *                         person rejected one — a link on the board since
+ *                         does not undo that no; a proposal the pass took
+ *                         back and a text move reopened does not wait
  *              accepted   the board links the pair
- *              open       a proposal is still pending, or stale: a text moved
- *                         and it waits on a re-judge or a reviewer (063, 067)
- *              withdrawn  the pass settled it (067's marker: its re-judge found
- *                         no conflict) within the window; after it, unanswered
- *              withdrawn  the rest: every proposal it named is gone
+ *              withdrawn  the pass settled every proposal it named that is
+ *                         still present (067's marker: its re-judge found no
+ *                         conflict), each since the judge last asserted it,
+ *                         within the window — stale since by a text move or
+ *                         not; after it, unanswered
+ *              open       a proposal is still pending, or stale and not
+ *                         settled since it was last asserted (063, 067)
+ *              withdrawn  the rest: every proposal it named is gone (or 091's
+ *                         record was bypassed and a settle left no time)
  *   relation   accepted   the board links the pair
  *              open       a relation of its word still stands
  *              withdrawn  the judge stopped saying it within the window
  *              unanswered …or after it: the board had the window and left it
  *
- * An open finding posted more than `days` ago is unanswered. The board has no
+ * An open finding posted more than `days` ago is unanswered — the window runs
+ * from the post, the tracker's "a month of posted findings", so a finding the
+ * judge asserts again late in it leaves the board less time, and past it reads
+ * unanswered at once (review pass 2). The board has no
  * "no" for a relation: left unlinked past the window is how it says one, and
  * a judge that changes its mind afterwards does not take that back (review
  * pass 1: a withdrawal after the window left the rate's denominator). A
@@ -706,14 +746,19 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  * the comment is still on the board, so withdrawn within the window,
  * unanswered past it.
  *
- * Read from the rows as they stand, not from a history: a settle that 067
- * reopens on a later text move (stale, its reviewed_at cleared) is judged
- * again by its current state, and a later settle's time replaces the first —
- * so a finding taken back within the window can read unanswered past it. That
- * can only understate the rate, never inflate it; recording each finding's
- * first withdrawal is SMD-2913. A rejection whose note a person wrote
- * beginning with 067's marker (by hand, in SQL: consolidate.ts --reject
- * refuses it) reads as the pass's, as 067 itself reads it.
+ * What the judge last asserted decides (SMD-2913). A text move reopening a
+ * settle (067: stale, reviewed_at cleared) is the brain asking again, not the
+ * judge saying it again: 091 keeps the settle, so a finding the pass took back
+ * on its fifth day stays withdrawn through the reopen and a second settle. A
+ * re-judge that finds the conflict again (pending, judged_at moved) or a
+ * relation said again is the judge asserting it once more — the comment on the
+ * board is its verdict again, so it reads open, then unanswered, and is counted
+ * (review pass 1: ranking every take-back ahead of that left it out of the
+ * rate). A settle 067 reopened before 091 left no time behind; that finding
+ * reads by its state now, which can only understate the rate. A rejection whose
+ * note a person wrote beginning with 067's marker (by hand, in SQL:
+ * consolidate.ts --reject refuses it) reads as the pass's, as 067 itself reads
+ * it.
  */
 export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): FindingVerdict {
   const open = (): FindingVerdict => ({ outcome: r.ageS > days * 86_400 ? "unanswered" : "open", how: null, answeredS: null });
@@ -729,8 +774,11 @@ export function findingOutcome(r: FindingRow, days = UNANSWERED_AFTER_DAYS): Fin
     if (p.accepted > 0) return { outcome: "accepted", how: "proposal", answeredS: p.acceptedS === null ? null : Math.max(0, p.acceptedS) };
     if (p.pending === 0 && p.stale === 0 && p.rejected > 0) return { outcome: "rejected", how: "proposal", answeredS: p.rejectedS === null ? null : Math.max(0, p.rejectedS) };
     if (linked) return linked;
+    // Every proposal present was taken back since it was last asserted, a
+    // text move having reopened some or none (091 keeps the settle).
+    if (r.withdrawnS !== null) return withdrawn(r.withdrawnS);
     if (p.pending + p.stale > 0) return open();
-    return withdrawn(p.settled > 0 ? p.settledS : null);
+    return withdrawn(null);
   }
   if (linked) return linked;
   if (r.stands) return open();
@@ -1228,6 +1276,8 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
   if (f === null) {
     const u = db.unread.findings;
     if (!u) return "no table — migration 087 is not applied";
+    // A brain behind this server: the read names 091's column (review pass 1).
+    if (/\bpass_settled_at\b.* does not exist/.test(u.message)) return "? (migration 091 is not applied)";
     // The read joins four tables: a refusal or an earlier lock names the one it
     // was (review pass 1); its own timeout names none, since Postgres does not
     // say which (review pass 2).
