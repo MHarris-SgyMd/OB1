@@ -81,7 +81,7 @@
  * only for the request it answered (the text's fingerprint, the windowing,
  * the request's hash), a malformed one never; the hard stop counts itself on
  * the thought in hand before its lease goes back, a stall only when it had
- * held the thought at least STALL_FLOOR_MS (or its slowest window). --status
+ * held the thought at least STALL_FLOOR_MS, provider pauses aside. --status
  * lists them.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
@@ -296,8 +296,7 @@ export interface ExtractOptions {
   /**
    * How long a hard stop must find the thought in hand, with no window saved
    * since the last stop, to count as a stall (089's p_long): STALL_FLOOR_MS
-   * unless a test drives it faster. The thought's slowest window, when longer,
-   * is its floor instead (review pass 2 of SMD-2694).
+   * unless a test drives it faster (review pass 2 of SMD-2694).
    */
   stallFloorMs?: number;
 }
@@ -312,8 +311,10 @@ export interface ExtractOptions {
  * nothing saved is a slow window, not a short sleep.
  */
 export const STALL_FLOOR_MS = 60_000;
-/** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). */
+/** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 089's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
 const STOP_NOTE_WAIT_MS = 1_500;
+/** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
+const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; limit: number; follow: number };
@@ -1077,10 +1078,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const hashOf = (sent: string): string => createHash("sha256").update(sent).digest("hex").slice(0, 32);
   /**
    * The thought each worker has in hand, for the hard stop's count (noteStop):
-   * set while processRow runs, with when it was taken up and its slowest
-   * window, kept or saved, which together say whether the stop was long.
+   * set while processRow runs, with when it was taken up — moved on past a
+   * provider pause, which is the provider's time and not the window's
+   * (review pass 3) — which says whether the stop was long.
    */
-  const inHand = new Map<string, { id: string; fingerprint: string; since: number; slowestMs: number }>();
+  const inHand = new Map<string, { id: string; fingerprint: string; since: number }>();
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
   /**
    * The hard stop's count for each worker, which the worker's own release
@@ -1101,8 +1103,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       const [r] = (await sql`SELECT fingerprint, windowing, parts FROM extraction_progress WHERE thought_id = ${row.id}::uuid AND work_type = ${JOB}`) as { fingerprint: string; windowing: string; parts: Record<string, Kept> }[];
       // Windows of other text, or that fell under another windowing, are of no use: the first save replaces them.
       if (r && r.fingerprint === fingerprint && r.windowing === WINDOWING_SIG) for (const [k, v] of Object.entries(r.parts)) kept.set(Number(k), v);
-      const hand = inHand.get(workerId);
-      if (hand) for (const v of kept.values()) if (typeof v.ms === "number" && v.ms > hand.slowestMs) hand.slowestMs = v.ms;
     } catch (e) {
       keepingFailed(e, "read");
       if (!keeping) return undefined;
@@ -1124,8 +1124,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // lands is kept, and the function keeps nothing after (review pass 1
         // — a window answered as the stop came was dropped).
         if (!keeping) return;
-        const hand = inHand.get(workerId);
-        if (hand && part.ms > hand.slowestMs) hand.slowestMs = part.ms;
         try {
           await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
         } catch (e) {
@@ -1139,8 +1137,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   async function noteStop(workerId: string): Promise<void> {
     const t = inHand.get(workerId);
     if (!t || !keeping) return;
-    // Long: held at least the floor, or the thought's slowest window if longer.
-    const long = Date.now() - t.since >= Math.max(STALL_FLOOR, t.slowestMs);
+    // Long: held at least the floor. Not the thought's slowest window, which
+    // took a kept 280 s window's document out of the stall for good, the case
+    // the scheduler joins past (review pass 3).
+    const long = Date.now() - t.since >= STALL_FLOOR;
     try {
       await sql`SELECT note_extraction_stop(${t.id}::uuid, ${JOB}, ${workerId}, ${t.fingerprint}, ${WINDOWING_SIG}, ${long})`;
     } catch (e) {
@@ -1344,7 +1344,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             outcome = { outcome: "vanished" };
           } else {
             let stopAfter = false;
-            if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now(), slowestMs: 0 });
+            if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row, workerId);
@@ -1415,6 +1415,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
                   await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  // The pause was the provider's: the thought's clock starts again (review pass 3).
+                  const paused = inHand.get(workerId);
+                  if (paused) paused.since = Date.now();
                   if (stopping || outage.reason !== null) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
@@ -1503,7 +1506,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               } catch (e) {
                 // The table or its grant gone since the start: the release alone, said once.
                 const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
-                if (code !== "42P01" && code !== "42501") throw e;
+                // Only 089's table's: a refusal on the claims themselves is the release's own (review pass 3).
+                if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
                 keepingFailed(e, "clear");
                 [{ ok }] = await release();
               }
@@ -1599,7 +1603,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       const release = Promise.all([...activeWorkers].map((w) => {
         // Bounded: a count waiting on a lock held the release past the CLI's
         // exit, and the lease for its whole TTL (review pass 2).
-        const noted = Promise.race([noteStop(w), Bun.sleep(STOP_NOTE_WAIT_MS)]);
+        const noted = Promise.race([noteStop(w), unrefSleep(STOP_NOTE_WAIT_MS)]);
         stopNotes.set(w, noted);
         return noted.then(() => sql`SELECT release_claims_for_worker(${JOB}, ${w})`).catch(() => null);
       }));

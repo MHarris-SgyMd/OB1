@@ -35,9 +35,8 @@
 --     row's text in hand; gained, the windows saved since the last of them;
 --     stalled, the latest LONG stops in a row with no window saved between —
 --     a stop is long when the worker had held the thought at least its
---     floor (db/extract-entities.ts: a minute, or the thought's slowest
---     window if longer), so a burst of short sleeps on a busy day stalls
---     nothing: a single window longer than every long sleep, or a stop that
+--     floor (db/extract-entities.ts: a minute, provider pauses aside), so a
+--     burst of short sleeps on a busy day stalls nothing: a single window longer than every long sleep, or a stop that
 --     keeps landing after the last window, in the decider's call or the
 --     write. A short stop with no window saved leaves stalled as it was. A thought
 --     saving a window in every sleep is not stalled, and while gained is
@@ -55,8 +54,13 @@
 --     it releases the claim succeeded; a failed release keeps it, so
 --     --retry-failed resumes a thought that timed out in a late window.
 --     The worker's delete is one statement with its release, so a row is
---     never left beside a claim released succeeded; one beside a failed
---     claim stays for --retry-failed, which `--status` lists.
+--     not left beside a claim released succeeded while the worker can reach
+--     the table; one beside a failed claim stays for --retry-failed, which
+--     `--status` lists.
+--   * Both functions give up a lock wait after a second (lock_timeout): the
+--     stop returns the lease after its count, and a count or a save blocked
+--     on the kept row held its share lock on the claim, the release queued
+--     behind it until the lock cleared.
 --   * Grants: none here. db/config.mjs's `extraction` group holds SELECT,
 --     INSERT, UPDATE and DELETE on it. The functions are SECURITY INVOKER,
 --     as 015's are: the lock needs the worker group's UPDATE on
@@ -85,7 +89,7 @@ CREATE TABLE IF NOT EXISTS extraction_progress (
 );
 
 COMMENT ON TABLE extraction_progress IS
-  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the windows saved since the last, and how many stops in a row saved none. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 089 / SMD-2694.';
+  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the windows saved since the last, and how many long stops in a row saved none. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 089 / SMD-2694.';
 COMMENT ON COLUMN extraction_progress.fingerprint IS
   'The content fingerprint (003) of the text the windows answered; a write under another replaces the row.';
 COMMENT ON COLUMN extraction_progress.windowing IS
@@ -123,6 +127,7 @@ CREATE OR REPLACE FUNCTION save_extraction_window(
 )
 RETURNS boolean
 LANGUAGE plpgsql
+SET lock_timeout = '1s'
 AS $$
 BEGIN
   IF p_index IS NULL OR p_index < 0 OR p_part IS NULL OR jsonb_typeof(p_part) <> 'object' THEN
@@ -178,6 +183,7 @@ CREATE OR REPLACE FUNCTION note_extraction_stop(
 )
 RETURNS boolean
 LANGUAGE plpgsql
+SET lock_timeout = '1s'
 AS $$
 BEGIN
   PERFORM 1 FROM thought_work_claims c

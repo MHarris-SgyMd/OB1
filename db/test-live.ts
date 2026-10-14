@@ -5045,6 +5045,96 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
     `two follower workers, one long thought: each of three hard stops is counted on it, and its windows kept (${JSON.stringify(orbitRow)})`);
   await sql`DELETE FROM thoughts WHERE id = ${orbit}::uuid`;
 
+  // The kept row locked by another session — a count and a save blocked on it
+  // held their share lock on the claim, and the release waited for the lock
+  // (review pass 3): the stop still returns the lease within its bound.
+  const locked = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "locked")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  sent.length = 0;
+  slowMs = 300;
+  let lockStop: PassStop | undefined;
+  const lockRun = inProcess({ onPass: (x) => { lockStop = x; } });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+  // The holder on a client of its own — the suite's is one connection by
+  // here — and the lock let go after 4 s whatever happens, so a regression
+  // fails this assertion rather than hanging the suite.
+  const lockSql = new SQL({ url: URL_!, max: 1 });
+  let unlock!: () => void;
+  const lockHeld = Promise.race([new Promise<void>((r) => { unlock = r; }), Bun.sleep(4000)]);
+  const holder = lockSql.begin(async (tx) => {
+    await tx`SELECT 1 FROM extraction_progress WHERE thought_id = ${locked}::uuid FOR UPDATE`;
+    await lockHeld;
+  });
+  await Bun.sleep(400);
+  lockStop?.();
+  const lockAt = Date.now();
+  await lockStop?.();
+  const lockMs = Date.now() - lockAt;
+  // Read while the lock is still held: the lease is back in the pool already.
+  await Bun.sleep(1000);
+  const [lockClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${locked}::uuid AND work_type = ${KEY}`;
+  unlock();
+  await holder;
+  await lockSql.close();
+  await lockRun;
+  slowMs = 0;
+  assert(lockMs < 2500 && lockClaim?.status === "pending",
+    `with the kept row locked by another session, the stop returns the lease within its bound, while the lock is held (${lockMs} ms, ${lockClaim?.status})`);
+  await sql`DELETE FROM thoughts WHERE id = ${locked}::uuid`;
+
+  // A release that is no longer the holder's — its lease lapsed and another
+  // worker took the thought and kept a window — deletes nothing: the delete
+  // in the release's statement is held to the release (review pass 3).
+  const thief = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "thief")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const { resolveEmbedConfig: resolveG } = await import("../server-portable/embed.ts");
+  const { windowingFor: windowingG } = await import("../server-portable/entities.ts");
+  const sigG = JSON.stringify(windowingG(resolveG(env as Record<string, string>)));
+  const [{ fpT }] = await sql`SELECT content_fingerprint AS "fpT" FROM thoughts WHERE id = ${thief}::uuid`;
+  slowMs = 200;
+  sent.length = 0;
+  const thiefRun = inProcess();
+  for (let i = 0; i < 200 && sent.length < 1; i++) await Bun.sleep(25);
+  await sql`UPDATE thought_work_claims SET worker_id = 'another-worker' WHERE thought_id = ${thief}::uuid AND work_type = ${KEY}`;
+  await sql`SELECT save_extraction_window(${thief}::uuid, ${KEY}, 'another-worker', ${fpT}, ${sigG}, 6, 5, ${{ index: 5, tokens: 1, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: "x" }}::jsonb)`;
+  await thiefRun;
+  slowMs = 0;
+  const [thiefRow] = await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${thief}::uuid`;
+  assert(thiefRow !== undefined && /\b5\b/.test(String(thiefRow.keys)), `a release no longer the holder's deletes nothing: the new holder's kept window stands (${JSON.stringify(thiefRow)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${thief}::uuid`;
+
+  // The table gone during a call: the release in its statement fails on it,
+  // and the release alone goes, said once (review pass 3).
+  const gone = ((await sql`SELECT upsert_thought(${"A one-window note, its table gone mid-call."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 1500;
+  sent.length = 0;
+  const goneRun = inProcess();
+  for (let i = 0; i < 200 && sent.length < 1; i++) await Bun.sleep(25);
+  await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+  const goneOut = await goneRun.finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
+  slowMs = 0;
+  const [goneClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${gone}::uuid AND work_type = ${KEY}`;
+  assert(goneClaim?.status === "succeeded" && goneOut.out.split("\n").filter((l) => /could not clear a long thought's kept windows/.test(l)).length === 1,
+    `the table gone mid-call: the release goes alone and succeeds, said once (${goneClaim?.status})`);
+  await sql`DELETE FROM thoughts WHERE id = ${gone}::uuid`;
+
+  // The clock is the thought's, not its batch's: the second of a batch of two,
+  // stopped half a second into its call some three seconds after the claim,
+  // is a short stop under a 2 s floor (review pass 3).
+  const firstOfTwo = ((await sql`SELECT upsert_thought(${"The first note of a batch of two."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const secondOfTwo = ((await sql`SELECT upsert_thought(${"The second note of a batch of two."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 2500;
+  sent.length = 0;
+  let batchStop: PassStop | undefined;
+  const batchRun = inProcess({ batch: 2, stallFloorMs: 2000, onPass: (x) => { batchStop = x; } });
+  for (let i = 0; i < 400 && sent.length < 2; i++) await Bun.sleep(25);
+  await Bun.sleep(500);
+  batchStop?.();
+  await batchStop?.();
+  await batchRun;
+  slowMs = 0;
+  const [secondRow] = await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${secondOfTwo}::uuid AND work_type = ${KEY}`;
+  assert(secondRow?.stops === 1 && secondRow.stalled === 0, `the second of a batch stopped half a second into its call is a short stop, its clock its own (${JSON.stringify(secondRow)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${firstOfTwo}::uuid, ${secondOfTwo}::uuid)`;
+
   // A one-window thought stopped at once: a stop, not a stall, under the
   // minute's floor; under a floor it outlasts, a stall (review pass 2).
   const brief = ((await sql`SELECT upsert_thought(${"A short atlas note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
