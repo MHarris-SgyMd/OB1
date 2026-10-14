@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, plugins/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -206,6 +206,28 @@ jobs:
       - name: The REST client against the REST core
         working-directory: rest-client
         run: bun test-client.ts
+
+      # The MCP server as a client of the REST core (SMD-2287): its own suite
+      # over the real REST app with a stub core, then test-auth's assertions
+      # held to it with the REST core behind it in process — the same suite
+      # the step above runs against server-portable's index.ts.
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the MCP server
+        working-directory: mcp-server
+        run: bunx tsc --noEmit
+
+      - name: The MCP server over the REST core
+        working-directory: mcp-server
+        run: bun test-mcp.ts
+
+      - name: Scoped access keys, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-auth.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled

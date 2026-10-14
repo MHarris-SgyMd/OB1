@@ -4045,7 +4045,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client", "mcp-server"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
@@ -5381,6 +5381,9 @@ const EDGE_ROLE: TransportRole = {
     ["./oauth-edge.ts", new Set(["challengeHeader", "UNREACHABLE_RETRY_AFTER_SECONDS"])],
     ["./telemetry.ts", new Set(["traceOf", "RequestOutcome", "RequestTrace"])],
     ["./tools.ts", new Set(["ToolName"])],
+    // The worker mirrors' inputs and the codes their words cover (SMD-2287): types alone.
+    ["./core/schemas.ts", new Set(["Input"])],
+    ["./core/workers.ts", new Set(["ReleaseLeasesCode", "RetryFailedCode", "RunWorkerCode"])],
   ]),
   wiring: false,
   mustImport: "./telemetry.ts",

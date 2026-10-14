@@ -8,6 +8,26 @@
  * easy to omit and only fails on transports that use it.
  */
 
+/** A server a suite drives: its fetch, as Bun.serve takes it. */
+export type ServerUnderTest = { fetch: (req: Request) => Response | Promise<Response> };
+
+/**
+ * The MCP server a suite drives (SMD-2287): server-portable's index.ts, or —
+ * with OB1_MCP_UNDER_TEST=client — the MCP server as a client of the REST core,
+ * with the REST core behind it in the same process (mcp-server/stack.ts), so
+ * the same assertions hold both. Call it after the suite has set its
+ * environment, as the import of index.ts it replaces came. The stack's path is
+ * read at run time, so this file's typecheck does not reach mcp-server's
+ * packages, which its own directory installs.
+ */
+export async function mcpUnderTest(): Promise<ServerUnderTest> {
+  const target = process.env.OB1_MCP_UNDER_TEST;
+  if (target === undefined || target === "" || target === "index") return (await import("./index.ts")).default as ServerUnderTest;
+  if (target !== "client") throw new Error(`OB1_MCP_UNDER_TEST must be unset, "index" or "client", not ${JSON.stringify(target)}`);
+  const stack = "../mcp-server/stack.ts";
+  return (await import(stack)).default as ServerUnderTest;
+}
+
 export type McpClient = {
   /** Call a tool and return its joined text content. Throws on a tool error. */
   call: (name: string, args?: Record<string, unknown>) => Promise<string>;

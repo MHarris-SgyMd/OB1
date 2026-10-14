@@ -70,9 +70,20 @@ if (SERVES_ON_BUN) {
   });
 }
 
+/** The server's idle timeout, in seconds: Bun's ceiling. */
+export const IDLE_TIMEOUT_S = 255;
+
 export default {
   // An empty PORT is unset, not port 0 (SMD-1799).
   port: Number(process.env.PORT || 8000),
+  // Bun's longest idle timeout, 255 s, not its 10 s default: on Bun 1.4.3 the
+  // default cuts a GET whose handler has not answered yet — measured, a
+  // 14-second GET reset at 12 s while a POST ran to its end — and the MCP
+  // server's whoami, fetch, stats and job polls are GETs that a locked
+  // table holds longer (SMD-2287 PR 3a review pass 3). A dead keep-alive
+  // socket on the stack's internal network is held up to that long.
+  idleTimeout: IDLE_TIMEOUT_S,
+
   fetch: (req: Request, server?: unknown) => {
     if (SERVES_ON_BUN && !bunServer && isStoppable(server)) bunServer = server;
     // A request whose URL will not parse, rebuilt so it is routed and refused, not a 500 (SMD-2535).
