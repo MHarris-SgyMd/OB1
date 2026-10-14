@@ -602,6 +602,36 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   assert(npCode === 2 && /OB1_PLUGINS/.test(npSaid) && /no-such-plugin/.test(npSaid) && !/\n\s+at /.test(npSaid), `OB1_PLUGINS naming no plugin: exit 2, in words (${npCode}: ${npSaid.trim().slice(0, 90)})`);
 }
 
+console.log("\n[8e2] A keyed route's line (review pass 1 of PR 4b): a REST core away is `error` FAILED, not a key refused; a keyed HEAD at /health asks the REST core nothing");
+{
+  const { useRequestLog } = await import("../server-portable/telemetry.ts");
+  const said: string[] = [];
+  const before = useRequestLog((l) => said.push(l));
+  let sent = 0;
+  const counting = createMcpApp({
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { sent++; if (restDown) throw new TypeError("fetch failed: connection refused"); return restApp.fetch(req); } }),
+    edge: () => ({ configured: false, origin: null }),
+    warn: () => {},
+  });
+  try {
+    restDown = true;
+    const r = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
+    const answered = await r.text();
+    restDown = false;
+    const line = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(r.status === 200 && answered === "ok" && line.outcome === "error" && line.code === "FAILED" && line.route === "/worker-status",
+      `the REST core away at a mirror: shown \`ok\`, its line \`error\` FAILED, not \`refused\` (${said.at(-1)})`);
+    sent = 0;
+    const head = await counting.fetch(new Request("http://mcp/health", { method: "HEAD", headers: { "x-brain-key": "read-raw" } }));
+    const headLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(head.status === 200 && sent === 0 && headLine.method === "HEAD" && headLine.outcome === "ok" && headLine.route === "/health",
+      `a keyed HEAD at /health: liveness at once, nothing sent to the REST core, its line \`ok\` (${sent} sent; ${said.at(-1)})`);
+  } finally {
+    restDown = false;
+    useRequestLog(before);
+  }
+}
+
 console.log("\n[8f] The entry's stop: it waits for a tool call past its client's request, then cuts it, its line `cut` (SMD-2287 PR 4b)");
 {
   // A REST core whose every operation hangs, and the entry in front of it with a short grace: the stop finds a tool call running.
@@ -624,7 +654,7 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
     if (!up) await Bun.sleep(50);
   }
-  const pending = fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }).then((r) => r.text(), () => "gone");
+  const pending = fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }).then((r) => r.text()).catch(() => "gone");
   await Bun.sleep(300);
   entry.kill("SIGTERM");
   const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);

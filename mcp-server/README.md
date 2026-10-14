@@ -94,9 +94,16 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 **Known differences from `index.ts` (the parity runs below):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
   `act` (the forwarder key's name), where server-portable records `open-brain`.
-- **A registry that throws** is the REST core's 500 to this server's whoami: the line
-  names no key, where `index.ts` matched the key's hash first. A revoked or busy key is
-  named, the REST core naming it to its forwarder.
+- **The key on a line.** `index.ts` matches a key's hash before it asks the registry;
+  this server knows a key only by the REST core's whoami. So a registry that throws, or
+  is silent past `HEALTH_DEADLINE_MS` at a keyed route, gives a line naming no key (a
+  throw `error`, the REST core away `error` FAILED with no JSON-RPC method or tool read
+  yet); a revoked or busy key is named, the REST core naming it to its forwarder. A
+  keyed HEAD at `/health` is `ok` at once with no key named, asking the REST core
+  nothing; at `/worker-status` and `/jobs` it asks whoami first, so a revoked key there
+  reads `refused` where `index.ts`'s reads `ok`.
+- **The stop** counts this server's tool calls; a scan's job body runs in the REST core,
+  whose own stop marks it lost, where `index.ts` counts it among its tool calls.
 - **Not yet, SMD-2287 PR 4c:** the spans (SMD-1849) and the `traceparent` this server
   sends the REST core; test-server's [22] is skipped through this server till then.
 
@@ -141,6 +148,5 @@ cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun te
 suite first asserts that the server it got is the one the variable names.
 CI runs test-server, test-auth, test-e2e-sql, test-plugins and test-plugins-sql both ways. Where the two servers differ, test-e2e-sql
 says which it expects: a write through this server records the REST core's door,
-`open-brain-api`, with this server as its carrier (`act`); the request lines are the
-REST core's, one per call it is sent, until this server writes its own (PR 4). [18]
-runs server-portable's own entry either way: this server holds no job store.
+`open-brain-api`, with this server as its carrier (`act`). [18] runs server-portable's
+own entry either way: this server holds no job store.

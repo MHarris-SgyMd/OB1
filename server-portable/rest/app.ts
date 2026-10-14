@@ -371,7 +371,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
     // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,
-    // and a forwarder's key, checked above, grants nothing.
+    // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
+    // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
     const named = carrier ? { name: principal.name } : {};
     if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named }, { "WWW-Authenticate": "Bearer" });
     if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);

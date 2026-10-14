@@ -364,15 +364,18 @@ export function createMcpApp(deps: McpDeps): Hono {
    * standing not had by then — the registry's tables locked — is none, and
    * the route shows `ok` (review pass 1: it waited out the REST timeout).
    */
-  const standingInTime = async (req: Request, budget: AbortSignal): Promise<Standing> => {
+  type Found = Standing | { kind: "fault"; err: unknown };
+  const standingInTime = async (req: Request, budget: AbortSignal): Promise<Found> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
     const standing = await Promise.race([
-      standingOf(deps.rest, req, budget).catch((err): Standing => {
-        if (!budget.aborted) sayOnce(err);
-        return { kind: "none" };
+      standingOf(deps.rest, req, budget).catch((err): Found => {
+        // The deadline's own abort is the registry's silence, shown nothing; any other throw is this server's fault (review pass 1 of PR 4b).
+        if (budget.aborted) return { kind: "none" };
+        sayOnce(err);
+        return { kind: "fault", err };
       }),
-      new Promise<Standing>((resolve) => {
+      new Promise<Found>((resolve) => {
         onAbort = () => resolve({ kind: "none" });
         budget.addEventListener("abort", onAbort, { once: true });
       }),
@@ -400,6 +403,12 @@ export function createMcpApp(deps: McpDeps): Hono {
       if (trace && standing.name) trace.agent = standing.name;
       return notCleared(c, trace, { status: standing.kind });
     }
+    // The REST core away, this server's forwarder refused, a whoami that threw: shown `ok` as before, its line
+    // `error` FAILED, not a key refused (review pass 1 of PR 4b: an outage read as every key turned away).
+    if (standing.kind === "fault") {
+      if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(standing.err); }
+      return c.text("ok", 200, corsHeaders);
+    }
     return shownNothing(c, trace);
   };
   /** A mirror's action that faulted, a 200 {error} answer as index.ts's: its line `error` FAILED, its kind on the span. */
@@ -416,6 +425,13 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.get("*", async (c, next) => {
     if (!HEALTH_PATH.test(c.req.path)) return next();
     if (presentedKeys(c.req.raw).length === 0) return c.text("ok", 200, corsHeaders);
+    // A keyed HEAD has no body to carry the record: liveness at once, no call to the REST core, so a probe never
+    // waits on the registry (review pass 1 of PR 4b: asking whoami first, a locked registry held it 1.8 s). Its line
+    // is `ok`, the route named and no key, where index.ts matched the key's hash.
+    if (c.req.method === "HEAD") {
+      nameRoute(c, "/health", "brain_info");
+      return c.text("ok", 200, corsHeaders);
+    }
     // The first key the REST core knows decides, as index.ts authenticates the
     // first that matches: a capture or revoked key before a read key is `ok`,
     // not the record (review pass 1).
@@ -426,8 +442,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
     const caller = await keyedCaller(c, "/health", "brain_info", budget);
     if (caller instanceof Response) return caller;
-    // A HEAD has no body to carry the record: liveness, the key named, and no read for nothing (index.ts's).
-    if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
     const a = await deps.rest.call("health" as never, {} as never, { key: caller.key, signal: budget }).catch(() => null);
     const body = a?.ok ? (a.body as Record<string, unknown> | null) : null;

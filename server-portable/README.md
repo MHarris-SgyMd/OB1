@@ -821,7 +821,8 @@ stripped (`X-Forwarded-Prefix`).
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
-  not built, 503 retry. Carried by a forwarder, a refusal also holds itself whole
+  not built, 503 retry. Carried by a forwarder, a revoked or busy caller's key is
+  named (`name`), for the MCP server's line (SMD-2287 PR 4b), and a refusal also holds itself whole
   as `refusal` — its words included, the caller's input quoted back and the
   store's or the egress gate's — so the MCP server says it as it always has
   (SMD-2287). It is the refusal as the operation made it for that caller, the

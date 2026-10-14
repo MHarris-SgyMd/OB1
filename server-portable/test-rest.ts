@@ -183,10 +183,11 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   answer = async () => ok({});
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-02T00:00:00Z", reason: null };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
-  assert(r.status === 401 && r.body.code === "REVOKED", `a revoked key → 401 REVOKED (${r.status} ${r.body.code})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && !("name" in r.body), `a revoked key → 401 REVOKED, its name told to no one but a forwarder (${JSON.stringify(r.body)})`);
   identity = { status: "busy" } as AgentOutcome;
   const busy = await hit("/v1/stats", { key: "read-raw" });
-  assert(busy.status === 503 && busy.headers.get("retry-after") === "2", `a busy registry → 503 with Retry-After (${busy.status})`);
+  const busyBody = await busy.clone().json() as Record<string, unknown>;
+  assert(busy.status === 503 && busy.headers.get("retry-after") === "2" && !("name" in busyBody), `a busy registry → 503 with Retry-After, no name (${busy.status} ${JSON.stringify(busyBody)})`);
   identity = { status: "ok", agentId: "agent-1" };
   calls.length = 0;
   await hit("/v1/stats", { key: "write-raw" });
@@ -269,7 +270,10 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `the forwarder slot alone, no caller's key → the caller's 401 (${JSON.stringify(r.body)})`);
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null };
   r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
-  assert(r.status === 401 && r.body.code === "REVOKED" && !("credential" in r.body), `a revoked caller beside a sound forwarder → the caller's REVOKED (${JSON.stringify(r.body)})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && !("credential" in r.body) && r.body.name === "r", `a revoked caller beside a sound forwarder → the caller's REVOKED, its key named to the forwarder for its line (SMD-2287 PR 4b) (${JSON.stringify(r.body)})`);
+  identity = { status: "busy" } as AgentOutcome;
+  r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.name === "r", `a busy caller beside a sound forwarder → BUSY, named too (${JSON.stringify(r.body)})`);
   identity = { status: "ok", agentId: "agent-1" };
   carrierIdentity = { status: "revoked", agentId: "agent-f", revokedAt: "2026-10-05T00:00:00Z", reason: null };
   r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
