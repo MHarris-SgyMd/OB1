@@ -836,6 +836,8 @@ export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
 export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string {
   const v = findingOutcome(r, days);
   const after = v.answeredS === null ? "" : ` ${ago(v.answeredS)} after`;
+  // A settle between the finding being chosen and posted is timed before the post: 0 (SMD-2913).
+  const backAfter = r.withdrawnS === null ? "" : ` ${ago(Math.max(0, r.withdrawnS))} after`;
   const what =
     v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
     : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
@@ -847,8 +849,8 @@ export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string 
           : "withdrawn: its relation is gone with a thought"
         // A settle a text move reopened since stays a take-back (SMD-2913); the line says it was reopened.
         : r.proposals
-          ? `withdrawn: the pass settled its proposal ${ago(Math.max(0, r.withdrawnS))} after${r.proposals.reopened > 0 ? " (reopened since)" : ""}`
-          : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
+          ? `withdrawn: the pass settled its proposal${backAfter}${r.proposals.reopened > 0 ? " (reopened since)" : ""}`
+          : `withdrawn: the judge stopped saying ${r.word}${backAfter}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     // A found row is never in the rate, so it has no window to count down (review pass 4).
     : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;

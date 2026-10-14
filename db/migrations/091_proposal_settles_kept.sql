@@ -31,9 +31,10 @@
 --   * supersession_proposals_keep_settles, BEFORE INSERT OR UPDATE: the one
 --     writer of the column — a value a caller writes is replaced. It empties
 --     the column when judged_at moves or a stale row turns pending (063's
---     replace in place: a re-judge found the conflict again), appends NEW.reviewed_at when the row
---     becomes settled (it was not before the write), and otherwise keeps it
---     as it was — 067's reopen and a person's review alike. A row inserted
+--     replace in place: a re-judge found the conflict again), appends
+--     NEW.reviewed_at when the row becomes settled (it was not before the
+--     write), and otherwise keeps it as it was — 067's reopen and a
+--     person's review alike. A row inserted
 --     settled starts with its time. The judge's assertion is read from the
 --     write itself, not by comparing judged_at with settle times written by
 --     other transactions, so two passes at once cannot misorder them.
