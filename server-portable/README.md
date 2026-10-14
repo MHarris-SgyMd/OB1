@@ -439,17 +439,20 @@ answer and `no table` before its table's migration.
 (SMD-2681's `board_findings_posted`, SMD-2682), one per ticket pair and word
 this brain posted: accepted (its proposal accepted, or the board linking the
 pair since — any active Linear link either way, `duplicate_of` included),
-rejected (a person rejected one of its proposals, none pending or stale — a
-link since does not undo that no), withdrawn (its proposals gone, or settled by
+rejected (a person rejected one of its proposals, none pending or waiting on a
+re-judge — a link since does not undo that no), withdrawn (its proposals gone, or settled by
 the consolidation pass's own re-judge, or a relation the judge stopped saying,
-within the window), open (a proposal pending, or stale and waiting on a
-re-judge, or a relation standing), or unanswered once open past 30 days — a finding the judge takes
+within the window), open (a proposal pending, or stale and not settled since it
+was last asserted, or a relation standing), or unanswered once open past 30 days
+from the post — a finding the judge takes
 back after that stays unanswered, and one deleted with its thought, which
-leaves no time, is unanswered once its comment is past the window. It is read
-from the rows as they stand: a settle that a later text move reopens (067) is
-judged by its current state, so a finding taken back within the window can read
-unanswered past it — the rate is understated by it, never inflated (SMD-2913
-records the first withdrawal). The rate is
+leaves no time, is unanswered once its comment is past the window. What the
+judge last asserted decides (SMD-2913): the pass's settles are kept across 067's
+reopen (migration 091), so a finding taken back within the window stays
+withdrawn when a text move reopens it; a re-judge that finds the conflict again,
+or a relation said again, makes it open once more — unanswered at once when the
+post is past the window. The row reads `? (migration
+091 is not applied)` on a brain without it. The rate is
 accepted over accepted, rejected and unanswered — an unanswered finding counts
 against it; withdrawn and open are left out — and the median is from the post to the first link since or the
 review. A link Linear made before the comment but board-sync brought in after
@@ -874,17 +877,17 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1061 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces (SMD-1849)
-bun test-auth.ts          # 190 — scoped, hashed, named keys; the same 190 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
+bun test-server.ts        # 1071 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849)
+bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-rest.ts          # 375 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, over a stub core, and `bun api.ts` stopped mid-request
-bun test-plugins.ts       # 259 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
+bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 202 — fully local provider, no credential
 bun run test:sql          # 257 — store conformance, real Postgres in a container
-bun run test:e2e          # 569 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run test:e2e          # 571 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 571 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
 ../db/with-postgres.sh bun test-rest-sql.ts  # 202 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
-../db/with-postgres.sh bun test-plugins-sql.ts  # 106 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
+../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row; the same 107 with OB1_MCP_UNDER_TEST=client
 bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 

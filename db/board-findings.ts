@@ -36,9 +36,16 @@
  * never posted, nor is a session note.
  *
  * One comment per ticket pair, on the ticket of the thought the judge saw as
- * newer: several proposals or relations between rows of the same two
- * tickets are one comment. The record (migration 087, board_findings_posted)
- * is per pair and WORD — outdates, related, evolves, duplicate — so a
+ * newer — or on the other, when that one is closed and the other is not:
+ * several proposals or relations between rows of the same two tickets are
+ * one comment. A pair of closed tickets (status type completed, canceled or
+ * duplicate, read from 068's ob1_ticket_head) is not posted until one
+ * reopens: a comment asking to link two finished tickets is the least useful
+ * kind, and it spends the cap open work could use (SMD-2932). A ticket whose
+ * head carries no status (a hand capture over a superseded Linear row) reads
+ * its newest Linear row's; one with no status at all counts as open. The
+ * record (migration 087,
+ * board_findings_posted) is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
  * pair posted as related is posted once more only when the judge says
  * something else about it. The comment carries the two identifiers, the word
@@ -147,13 +154,16 @@ export type Finding = {
   reason: string | null;
   /** When it was judged (a relation: when its facet was written). */
   at: string;
+  /** Whether each side's ticket is closed now: its head's status type completed, canceled or duplicate (068's ob1_ticket_head; SMD-2932). */
+  olderClosed: boolean;
+  newerClosed: boolean;
 };
 
 /** The findings of one ticket pair, ranked, with the ticket the comment goes on. */
 export type FindingGroup = {
   a: string;
   b: string;
-  /** The newer side of the pair's first-ranked finding. */
+  /** The newer side of the pair's first-ranked finding — the older when the newer is closed and the older is not (SMD-2932). */
   on: string;
   findings: Finding[];
 };
@@ -177,7 +187,9 @@ export function groupFindings(rows: readonly Finding[]): FindingGroup[] {
   const out: FindingGroup[] = [];
   for (const fs of groups.values()) {
     fs.sort(rankFindings);
-    out.push({ a: fs[0].a, b: fs[0].b, on: fs[0].newer, findings: fs });
+    // A closed ticket is less likely to be read than an open one (SMD-2932).
+    const best = fs[0];
+    out.push({ a: best.a, b: best.b, on: best.newerClosed && !best.olderClosed ? best.older : best.newer, findings: fs });
   }
   return out.sort((g, h) => rankFindings(g.findings[0], h.findings[0]));
 }
@@ -378,20 +390,39 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
                                to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
-  // 029's table precedes 087 in every tree, so it exists here.
+  // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
-                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read,
+                               has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AND has_table_privilege('ob1_ticket_head', 'SELECT') AS read,
                                has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
                                has_function_privilege('consolidation_tickets_linked(jsonb, jsonb)', 'EXECUTE') AS linked`;
   const missing = [
     ...(g.posted_read && (g.posted_write || !write) ? [] : [`${write ? "SELECT and INSERT" : "SELECT"} on board_findings_posted (the structure group)`]),
-    ...(g.read ? [] : ["SELECT on thoughts and thought_facets (the capture group)"]),
+    ...(g.read ? [] : ["SELECT on thoughts, thought_facets and ob1_ticket_head (the capture group)"]),
     ...(g.proposals ? [] : ["SELECT on supersession_proposals (the structure group)"]),
     ...(g.linked ? [] : ["EXECUTE on consolidation_tickets_linked(jsonb, jsonb)"]),
   ];
   return missing.length ? `this role lacks ${missing.join("; ")} — cd db && bun migrate.ts --url <owner's url> --grant <role> --groups capture,structure` : null;
 }
+
+// A ticket is closed when its status type is completed, canceled or
+// duplicate (Done, Canceled, Duplicate — Linear gives Duplicate a type of its
+// own): its head's, from 068's ob1_ticket_head by its key, or — when the head
+// carries none, as a hand capture superseding the Linear row does — its
+// newest Linear row's, through 068's issue-key index (review pass 1). A ticket
+// with neither is open, and an unknown never reads as NULL, which would drop
+// the pair. A pair of closed tickets is not posted: a comment asking to link
+// two finished tickets is the least useful kind, and it spends the cap open
+// work could use (SMD-2932). Reopened, it is again. 058's
+// node_settled_types() lacks duplicate, so this set is its own until
+// SMD-2935 adds it there and this reads it.
+const closed = (k: string) => `coalesce(coalesce(
+    (SELECT th.status_type FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IS NOT NULL),
+    (SELECT t.metadata->>'status_type' FROM thoughts t
+      WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(${k})::uuid
+        AND t.metadata->>'source' = 'linear' AND t.metadata->>'status_type' IS NOT NULL
+      ORDER BY t.metadata->>'linear_updated_at' DESC NULLS LAST, t.created_at DESC, t.id DESC LIMIT 1)
+  ) IN ('completed', 'canceled', 'duplicate'), false)`;
 
 // Both sides are Linear rows (metadata.source = 'linear': board-sync's
 // tickets and their dated sections), and both identities are identifiers —
@@ -402,6 +433,7 @@ const PAIR_RULE = `
      os = 'linear' AND ns = 'linear'
  AND ko ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND kn ~ '^[A-Z][A-Z0-9]*-[0-9]+$'
  AND ko <> kn
+ AND NOT (${closed("ko")} AND ${closed("kn")})
  AND NOT consolidation_tickets_linked(om, nm)
  AND NOT EXISTS (SELECT 1 FROM thought_facets d JOIN thoughts dh ON dh.id = d.thought_id
                   WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
@@ -411,7 +443,7 @@ const PAIR_RULE = `
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       x.verdict, x.confidence, x.reason, x.at
+       x.verdict, x.confidence, x.reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT p.id, 'outdates'::text AS word, p.verdict, p.confidence::float8 AS confidence, p.reason, p.judged_at AS at,
                o.metadata AS om, n.metadata AS nm, o.metadata->>'source' AS os, n.metadata->>'source' AS ns,
                coalesce(o.metadata->>'ticket', o.metadata->>'issue') AS ko, coalesce(n.metadata->>'ticket', n.metadata->>'issue') AS kn
@@ -423,7 +455,7 @@ SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, l
 
 const RELATIONS = `
 SELECT 'relation' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
-       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at
+       NULL::text AS verdict, x.confidence, NULL::text AS reason, x.at, ${closed("ko")} AS older_closed, ${closed("kn")} AS newer_closed
   FROM (SELECT f.id, f.payload->>'relation' AS word, (f.payload->>'confidence')::float8 AS confidence, f.created_at AS at,
                t.metadata AS om, h.metadata AS nm, t.metadata->>'source' AS os, h.metadata->>'source' AS ns,
                coalesce(t.metadata->>'ticket', t.metadata->>'issue') AS ko, coalesce(h.metadata->>'ticket', h.metadata->>'issue') AS kn
@@ -456,6 +488,8 @@ export async function selectFindings(sql: SQL): Promise<Finding[]> {
     confidence: r.confidence === null || r.confidence === undefined ? null : Number(r.confidence),
     reason: (r.reason as string | null) ?? null,
     at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
+    olderClosed: r.older_closed === true,
+    newerClosed: r.newer_closed === true,
   }));
 }
 
@@ -782,6 +816,11 @@ export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
       ? "board_findings_posted exists but does not resolve for this role — not on its search_path, or no USAGE on its schema"
       : "migration 087 is not applied, so nothing posted was recorded (cd db && bun migrate.ts --url …)";
   }
+  // The read takes each settle by the pass from 091's column (SMD-2913; review pass 1: a brain at 090 met a raw column error).
+  // Probed as the read resolves it: another schema's table first on the path lacks it too (review pass 2).
+  const [c] = await sql`SELECT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('supersession_proposals')
+                                         AND a.attname = 'pass_settled_at' AND NOT a.attisdropped) AS settles`;
+  if (!c.settles) return "the supersession_proposals on this role's search_path has no pass_settled_at — migration 091 is not applied, or another schema's table comes first (cd db && bun migrate.ts --url …)";
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted,
                                has_table_privilege('supersession_proposals', 'SELECT') AS proposals,
                                has_table_privilege('thoughts', 'SELECT') AND has_table_privilege('thought_facets', 'SELECT') AS read`;
@@ -797,13 +836,21 @@ export async function reportSchemaProblem(sql: SQL): Promise<string | null> {
 export function reportLine(r: FindingRow, days = UNANSWERED_AFTER_DAYS): string {
   const v = findingOutcome(r, days);
   const after = v.answeredS === null ? "" : ` ${ago(v.answeredS)} after`;
+  // A settle between the finding being chosen and posted is timed before the post: 0 (SMD-2913).
+  const backAfter = r.withdrawnS === null ? "" : ` ${ago(Math.max(0, r.withdrawnS))} after`;
   const what =
     v.outcome === "accepted" ? (v.how === "linked" ? `accepted: the board linked them${after}` : `accepted: its proposal was accepted${after}`)
     : v.outcome === "rejected" ? `rejected: its proposal was rejected${after}`
     : v.outcome === "withdrawn"
-      ? r.proposals
-        ? r.proposals.settled > 0 ? `withdrawn: the pass settled its proposal${r.proposals.settledS === null ? "" : ` ${ago(Math.max(0, r.proposals.settledS))} after`}` : "withdrawn: its proposal is gone"
-        : r.withdrawnS === null ? "withdrawn: its relation is gone with a thought" : `withdrawn: the judge stopped saying ${r.word} ${ago(Math.max(0, r.withdrawnS))} after`
+      ? r.withdrawnS === null
+        ? r.proposals
+          // Present but no time kept (091's record bypassed): settled, not gone (review pass 2).
+          ? r.proposals.settled + r.proposals.reopened > 0 ? "withdrawn: the pass settled its proposal" : "withdrawn: its proposal is gone"
+          : "withdrawn: its relation is gone with a thought"
+        // A settle a text move reopened since stays a take-back (SMD-2913); the line says it was reopened.
+        : r.proposals
+          ? `withdrawn: the pass settled its proposal${backAfter}${r.proposals.reopened > 0 ? " (reopened since)" : ""}`
+          : `withdrawn: the judge stopped saying ${r.word}${backAfter}`
     : v.outcome === "unanswered" ? `unanswered: open past ${days} d`
     // A found row is never in the rate, so it has no window to count down (review pass 4).
     : r.origin === "found" ? "open" : `open: ${ago(Math.max(0, days * 86_400 - r.ageS))} before it counts as unanswered`;

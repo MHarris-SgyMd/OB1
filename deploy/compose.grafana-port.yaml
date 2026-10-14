@@ -1,0 +1,36 @@
+# The observability profile's Grafana on a loopback port of its own (SMD-1849
+# PR 3a): http://127.0.0.1:3000/grafana/, an origin apart from the stack's,
+# where /auth signs its operator in. A release ships this file beside
+# compose.yaml; name it on every command, with the stack's other -f files (a
+# release's compose.release.yaml) and `observability` in COMPOSE_PROFILES:
+#
+#   docker compose -f compose.yaml -f compose.grafana-port.yaml up -d
+#
+# Grafana's root URL is the port it is reached on unless GRAFANA_ORIGIN names
+# another (a TLS proxy or tunnel in front of this port): its links name it, and
+# its cookie is Secure only where it is https. GRAFANA_BIND to 0.0.0.0 puts its
+# sign-in on the network; GRAFANA_ORIGIN then names the address the network
+# uses, or its links name 127.0.0.1 and Grafana Live refuses its pages. Named
+# beside compose.grafana-public.yaml, this file's origin is Grafana's.
+# compose.yaml puts lgtm on the internal `mesh` alone, and a container on
+# internal networks alone publishes no port, so `grafana-port` is an outward
+# network of its own for the port, as compose.host-ports.yaml's `postgres-port`
+# is (measured): what Grafana would call by itself is switched off
+# (compose.yaml's lgtm), not cut off, and a data source its admin adds reaches
+# the LAN and the host — on Docker Desktop and a podman machine by
+# host.docker.internal, its loopback ports included; on Linux the host's other
+# listeners, by the network's gateway — as well as every name on `mesh`. Check
+# 28 holds this file — its keys (OVERLAYS), its network (FILE_NETWORKS,
+# SERVICE_NETWORKS) and its one environment key by value (GRAFANA_PORT_LGTM_ENV)
+# — and check 13 its port.
+
+services:
+  lgtm:
+    networks: [grafana-port]
+    ports:
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}"
+
+networks:
+  grafana-port: {}

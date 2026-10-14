@@ -460,7 +460,7 @@ export interface components {
         Refusal: {
             code: string;
             retryable?: boolean;
-            /** @description Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's), so the MCP server says it as it always has (SMD-2287). */
+            /** @description Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's) — a plugin's with its status in it — so the MCP server says it as it always has (SMD-2287). */
             refusal?: Record<string, unknown>;
         } & {
             [key: string]: unknown;

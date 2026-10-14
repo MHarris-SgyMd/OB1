@@ -25,6 +25,7 @@ import { hashKey } from "./auth.ts";
 import { trustAtOrAbove, TRUST } from "./core/filter.ts";
 import { INGESTED_NOTICE } from "./render.ts";
 import { fileURLToPath } from "node:url";
+import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -135,7 +136,15 @@ process.env.OB1_TIER = "canary";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+// index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+const worker = await mcpUnderTest();
+// Through the MCP server as a REST client, a write is the REST core's: its door (api.ts's API_DOOR), with the MCP
+// server named beside it as the request's carrier (`act`, stack.ts's forwarder key) — where index.ts records its own
+// door and no carrier. The sections that read a door read this one (SMD-2287 PR 3b).
+const VIA_CLIENT = mcpTarget() === "client";
+const DOOR = VIA_CLIENT ? "open-brain-api" : "open-brain";
+const CARRIER = VIA_CLIENT ? SUITE_CARRIER : null;
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const H = {
@@ -696,15 +705,18 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
 
 console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
 {
-  // The suite runs the server in-process (not import.meta.main), so index.ts's
-  // startup wiring does not fire — set the sink here, sharing jobs.ts's module
-  // state with the running server. A separate SqlStore on the same database is
+  // The suite runs the server in-process (not import.meta.main), so its entry's
+  // startup wiring (index.ts's, or the REST core's api.ts behind the MCP server)
+  // does not fire — set the sink here, sharing jobs.ts's module state with the
+  // running server. A separate SqlStore on the same database is
   // enough: the durable table is shared. resetJobsForTest() clears the in-memory
   // registry, standing in for a restart.
   const { setJobSink, resetJobsForTest, reconcileDurableJobsLost } = await import("./jobs.ts");
   const { SqlStore } = await import("./store-sql.ts");
   const jobStore = new SqlStore(URL_!);
-  const sink = jobStore.jobSink("open-brain");
+  // The sink with the door of the server that starts the job, as its entry would build it (root.ts). Which door each
+  // entry gives its sink is held where the entry runs as itself: [18] for index.ts, test-rest-sql for api.ts.
+  const sink = jobStore.jobSink(DOOR);
   assert(sink !== null, "the SQL store returns a durable job sink");
   setJobSink(sink);
   const sql = new SQL({ url: URL_, max: 1 });
@@ -723,11 +735,12 @@ console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a rest
   // The terminal write is best-effort/async, so poll the DB for the durable row.
   let dbRow: Record<string, unknown> | undefined;
   for (let i = 0; i < 100; i++) {
-    const rows = await sql`SELECT status, owner_key_hash FROM jobs WHERE id = ${handle.jobId}::uuid`;
+    const rows = await sql`SELECT status, owner_key_hash, door FROM jobs WHERE id = ${handle.jobId}::uuid`;
     if (rows[0]?.status === "succeeded") { dbRow = rows[0]; break; }
     await new Promise((res) => setTimeout(res, 20));
   }
   assert(dbRow?.status === "succeeded" && dbRow?.owner_key_hash === OWNER_HASH, `the terminal row is durable in jobs, owned by the starting key (${dbRow?.status})`);
+  assert(dbRow?.door === DOOR, `…and carries its sink's door, 078's (${dbRow?.door})`);
 
   // A restart: the in-memory registry is gone, but the poll falls back to the
   // durable row and still carries the result.
@@ -744,7 +757,7 @@ console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a rest
 
   // Reconcile: a job left running (its process gone) is marked lost, durably.
   const orphan = crypto.randomUUID();
-  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, door) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running', ${DOOR})`;
   const cut = await reconcileDurableJobsLost();
   assert(cut >= 1, `reconcile marks the orphaned running job lost (${cut})`);
   const lost = (await (await fetch(`${BASE}/jobs/${orphan}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
@@ -1460,11 +1473,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const [row] = await sql`SELECT metadata->>'source' AS origin, derived_from FROM thoughts WHERE id = ${id}::uuid`;
   assert(row?.origin === "claude-code", `metadata.source is the harness the caller named (${row?.origin})`);
   assert(JSON.stringify(row?.derived_from ?? null).includes(retrieved!), `derived_from carries the retrieved thought (${JSON.stringify(row?.derived_from)})`);
-  const [audit] = await sql`SELECT source, actor_name, canonical_agent_id, origin FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
+  const [audit] = await sql`SELECT source, actor_name, canonical_agent_id, origin, actor_context->'act'->>'name' AS act FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
   assert(audit?.source === "claude-code" && audit?.actor_name === "session-hook",
     `the audit row carries the source and the key's name (${audit?.source}, ${audit?.actor_name})`);
   // 046's origin (SMD-1730) comes from the actor's `via`, which the tool sets inline; no suite drove the real server's capture and read it back (seventh review pass).
-  assert(audit?.origin === "open-brain", `…and the door the write came through, 046's origin (${audit?.origin})`);
+  assert(audit?.origin === DOOR && (audit?.act ?? null) === CARRIER, `…and the door the write came through, 046's origin, with its carrier if one carried it (${audit?.origin}, ${audit?.act})`);
   assert(typeof audit?.canonical_agent_id === "string", "…and the hook's agent id — 049 lets the registry record the capture scope, so the write is attributed");
   const [key] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(CAPTURE_KEY)}`;
   assert(key?.scope === "capture", `the registry recorded the scope as presented (${key?.scope})`);
@@ -3194,8 +3207,10 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   // serves (serveHere), and only then does the store's first build reconcile
   // the rows a prior process left live. Its first keyed request builds the
   // store (the registry lookup reads it); the reconcile runs detached after.
-  // It reaches the MCP server's live rows (door open-brain), not the REST
-  // core's (open-brain-api): two servers on one database (078).
+  // It reaches server-portable's live rows (door open-brain), not the REST
+  // core's (open-brain-api): two servers on one database (078). It spawns
+  // index.ts's entry under OB1_MCP_UNDER_TEST=client too: the MCP server holds
+  // no job store, and the REST core's entry is test-rest-sql's to run.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();
@@ -3251,15 +3266,24 @@ console.log("\n[19] A capture's request line names the tool, the key and the tim
   try {
     await call("capture_thought", { content: PLANTED, metadata: { note: "planted-metadata-value" } });
     await call("search_thoughts", { query: "planted-search-words" });
-    for (let i = 0; i < 50 && said.length < 2; i++) await Bun.sleep(20); // a stream's line is written as it ends
+    for (let i = 0; i < 50 && said.length < (VIA_CLIENT ? 4 : 2); i++) await Bun.sleep(20); // a stream's line is written as it ends
   } finally {
     useRequestLog(previous);
   }
   const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
   const captures = lines.filter((l) => l.tool === "capture_thought");
   const captured = captures[0];
-  assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
-    `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
+  if (VIA_CLIENT) {
+    // The MCP server writes no line of its own yet (SMD-2287 PR 4): the lines are the REST core's, one per call it
+    // was sent — each tool call's whoami, then the operation, the tool named on the operation's. No rpc or bytes:
+    // telemetry records those for an MCP or streamed answer, not a REST JSON one.
+    assert(lines.length === 4 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 2
+      && captures.length === 1 && captured?.route === "/v1/thoughts" && captured.outcome === "ok" && captured.status === 201 && typeof captured.ms === "number",
+      `two calls, the REST core's four lines; the capture's: the tool, ok, a duration (${said.join(" / ")})`);
+  } else {
+    assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
+      `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
+  }
   assert(lines.filter((l) => l.tool === "search_thoughts" && l.outcome === "ok").length === 1, "…and one for the search");
   const all = said.join("\n");
   for (const s of ["omega", "never reach", "planted-metadata-value", "planted-search-words", "e2e-key"]) assert(!all.includes(s), `no ${s} in any line`);

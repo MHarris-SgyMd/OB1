@@ -22,7 +22,7 @@ The canary was coupled to stable at runtime for one convenience, a URL on stable
 - **Shared network.** `deploy/compose.canary.yaml` joins the canary's MCP server and REST core to stable's mesh network (SMD-2294 PR 2, #316).
 - **Name collision.** From the canary's containers, `mcp.ob1.internal`, `api.ob1.internal` and `auth.ob1.internal` resolve to stable's containers as well as the canary's own. `compose.canary.yaml` records this, measured on podman.
 - **Shared keys.** The canary accepts stable's access keys (`deploy/canary.sh`). Clients therefore hand an unreleased build raw keys that stable accepts, on a network where stable's REST core answers.
-  - Two conventions keep it from calling there. `compose.canary.yaml`'s rule says anything a canary dials is a rooted `*.canary.ob1.internal` name. And the canary runs with no compose profiles, so its server's one probe by a stable name (OAuth) never runs.
+  - Two conventions keep it from calling there. `compose.canary.yaml`'s rule says anything a canary dials is a rooted `*.canary.ob1.internal` name. And the canary runs with no compose profiles, so its server's one probe by a stable name (OAuth) never runs. One exception is on purpose: with `OTEL_EXPORTER_OTLP_ENDPOINT` in its env file, a path-mode canary sends its telemetry to stable's collector, `lgtm.ob1.internal` (SMD-1849 PR 3a).
   - Neither is a boundary.
 - **Stable carries the canary's routes.** Stable's route table in `compose.yaml` has the routers `canary`, `working` and `tier-off`, the middleware `tier-absent`, and the services `canary` and `working` (SMD-2294 PR 1, #314). Every stable release ships routes for brains it doesn't run.
 - **The canary depends on stable.** Its URL needs stable's proxy, stable's mesh and a stable release that carries the route. It is also exposed wherever stable is: the LAN under stable's `SERVER_BIND`, or a tunnel.
@@ -76,7 +76,8 @@ The results:
   - 5432 (Postgres);
   - 5678 (n8n);
   - 11434 (Ollama);
-  - 8020 (jev, not the `SERVER_PORT=8020` of the second render).
+  - 8020 (jev, not the `SERVER_PORT=8020` of the second render);
+  - 3000 (Grafana, with the observability profile and `compose.grafana-port.yaml`; SMD-1849 PR 3a, after these renders).
 
   A second instance must set each of them.
 
@@ -116,7 +117,8 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
 - **`compose.canary.yaml` and path mode are retired.** Path mode is canary.sh's default today: the canary at `/canary/mcp` on stable's origin, its servers on stable's mesh. canary.sh's existing `--port` mode, which runs the canary behind its own proxy, becomes the only mode. (It too takes stable's keys today, which the last bullet changes.) Retired with them:
   - check 28's entries for the overlay (`FILE_NETWORKS`, `SERVICE_NETWORKS`, `OVERLAYS`) and its eight probes of it;
   - the path-mode `up`s inside CI's "A canary stands beside the stack from deploy/canary.sh", and the path-mode refusals in "The canary's refusals…";
-  - its renders in CI's "Every published port binds loopback" and "The proxy loads only the held route tables".
+  - its renders in CI's "Every published port binds loopback" and "The proxy loads only the held route tables";
+  - a path-mode canary's telemetry to stable's collector (SMD-1849 PR 3a): a canary carried over with `OTEL_EXPORTER_OTLP_ENDPOINT` in its env file says `ENOTFOUND` on stderr, a line a minute per signal, until the endpoint is out of it, or names a collector of its own.
 - **Stable's tier routes are removed:** the routers `canary` and `working`, their services, and the middleware `tier-absent`. Tier routes, where wanted, are the edge's.
   - In the checker, the shared `ROUTE_TIER_PATHS` (defined beside check 27) builds the `canary`, `working` and `tier-off` routers.
   - Check 28's `PROXY_ROUTE_TABLE` stops using it and keeps a `tier-off` router of its own.
