@@ -13,15 +13,16 @@
 # uses, or its links name 127.0.0.1 and Grafana Live refuses its pages. Named
 # beside compose.grafana-public.yaml, this file's origin is Grafana's.
 # compose.yaml puts lgtm on the internal `mesh` alone, and a container on
-# internal networks alone publishes no port, so `grafana-port`
-# is an outward network of its own for the port, as compose.host-ports.yaml's
-# `postgres-port` is (measured): what Grafana would call by itself is switched
-# off (compose.yaml's lgtm), not cut off, and a data source its admin adds
-# reaches the LAN and the host — on Docker Desktop and a podman machine by
+# internal networks alone publishes no port, so `grafana-port` is an outward
+# network of its own for the port, as compose.host-ports.yaml's `postgres-port`
+# is (measured): what Grafana would call by itself is switched off
+# (compose.yaml's lgtm), not cut off, and a data source its admin adds reaches
+# the LAN and the host — on Docker Desktop and a podman machine by
 # host.docker.internal, its loopback ports included; on Linux the host's other
-# listeners, by the network's gateway — as well as every name on `mesh`. Check 28 holds this file — its keys
-# (OVERLAYS), its network (FILE_NETWORKS, SERVICE_NETWORKS) and its one
-# environment key by value (GRAFANA_PORT_LGTM_ENV) — and check 13 its port.
+# listeners, by the network's gateway — as well as every name on `mesh`. Check
+# 28 holds this file — its keys (OVERLAYS), its network (FILE_NETWORKS,
+# SERVICE_NETWORKS) and its one environment key by value (GRAFANA_PORT_LGTM_ENV)
+# — and check 13 its port.
 
 services:
   lgtm:

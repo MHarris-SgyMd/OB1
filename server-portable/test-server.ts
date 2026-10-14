@@ -4730,7 +4730,7 @@ console.log("\n[29] capture_thought's reply says what a re-capture did to a capt
     `a planted name, kind, trust or weighed word is cleaned to one line and the lists (${note.slice(0, 160)})`);
 }
 
-console.log("\n[30] A request the server did not accept sends its span and log record within a budget a minute; its point and line always; a key or a delivery it accepted never held to it (SMD-1849 PR 3a review passes 2–5)");
+console.log("\n[30] A request the server did not accept sends its span and log record within a budget a minute; its point and line always; a key or a delivery it accepted never held to it (SMD-1849 PR 3a review passes 2–8)");
 {
   const { ANONYMOUS_PER_MINUTE, beginRequest, flushTelemetry, requestLine, startTelemetry, stopTelemetry, useBudgetClock } = await import("./telemetry.ts");
   const { setUpTelemetry } = await import("./otel-setup.ts");

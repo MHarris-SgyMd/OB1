@@ -1165,24 +1165,24 @@ and `telemetry.sdk.*` (no host, no process) with whatever
 called which tool, when, and how much came back — so name keys after clients,
 not people (`ob1.agent`), before pointing at a collector elsewhere.
 
-A request the server did not accept — no key, one it refused (revoked,
-busy, outside the door's scopes), a webhook delivery its plugin refused —
-sends its span and log record within 60 a minute per server; past that, its
-point on `http.server.request.duration` and its line still count it, the line
-naming a trace that was not sent, and one line says how many sent neither: at
-the minute's end, by the next minute's first, or at the stop — whether its
-span was sampled or not; one begun before the SDK loaded sends neither. Only the request's own span is held: work it ran
-under it (a refused key's registry lookup, a capture a plugin refused after)
-still sends its spans, without their parent. A keyless flood
-otherwise put about 1 KB a request on a collector's disk (measured on the
-profile below before the budget: 5,000 in under a second, about 5 MB; with it,
-Loki took 28 KB for the same 5,000 and Tempo held 60 of their traces), and its
-Loki and Tempo expire by age alone. A key accepted, or a delivery its plugin
-accepted, is never held to it. A keyed client can
-still fill a batch's queue (a 100-call batch, 101 spans), and while the
-collector lags what is past it is dropped — said as `queue full` — though
-every line is still written. Cloudflare Workers runs the API's no-ops
-alone — `wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
+A request the server did not accept — no key, one it refused (revoked, busy,
+outside the door's scopes), a webhook delivery its plugin refused — sends its
+span and log record within 60 a minute per server; past that, its point on
+`http.server.request.duration` and its line still count it, the line naming a
+trace that was not sent, and one line says how many sent neither: at the
+minute's end, by the next minute's first, or at the stop — whether its span
+was sampled or not; one begun before the SDK loaded sends neither. Only the
+request's own span is held: work it ran under it (a refused key's registry
+lookup, a capture a plugin refused after) still sends its spans, without their
+parent. A keyless flood otherwise put about 1 KB a request on a collector's
+disk (measured on the profile below before the budget: 5,000 in under a
+second, about 5 MB; with it, Loki took 28 KB for the same 5,000 and Tempo held
+60 of their traces), and its Loki and Tempo expire by age alone. A key
+accepted, or a delivery its plugin accepted, is never held to it. A keyed
+client can still fill a batch's queue (a 100-call batch, 101 spans), and while
+the collector lags what is past it is dropped — said as `queue full` — though
+every line is still written. Cloudflare Workers runs the API's no-ops alone —
+`wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
 
 ### The observability profile
 
@@ -1304,22 +1304,22 @@ usage reports, update checks, news feed, gravatars, cloud migration and
 external snapshots, and the backends' usage reports. On `mesh` alone it has no
 outward network; with `compose.grafana-port.yaml` its port's network reaches
 out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
-switches are what keep it quiet. Snapshots, public dashboards and Grafana's own `/metrics` are off: each
-would show data without a sign-in. On `mesh` only Grafana (3000), the
-collector's OTLP (4317, 4318) and its health check (13133, which says only
-that it is up) answer: Prometheus, Tempo, Loki and Pyroscope listen on the
-container's own loopback, server, gRPC and gossip ports alike (each port
-probed from the mesh). Grafana's data-source proxy is held to those four, but
-a data source's own queries are not: Grafana's admin reaches every name on
-`mesh` — the two servers, the authorization server, a joined tier (measured: a
-data source at the REST core) — where the servers ask for a key and the
-authorization server for the operator's password, its discovery and
+switches are what keep it quiet. Snapshots, public dashboards and Grafana's
+own `/metrics` are off: each would show data without a sign-in. On `mesh` only
+Grafana (3000), the collector's OTLP (4317, 4318) and its health check (13133,
+which says only that it is up) answer: Prometheus, Tempo, Loki and Pyroscope
+listen on the container's own loopback, server, gRPC and gossip ports alike
+(each port probed from the mesh). Grafana's data-source proxy is held to those
+four, but a data source's own queries are not: Grafana's admin reaches every
+name on `mesh` — the two servers, the authorization server, a joined tier
+(measured: a data source at the REST core) — where the servers ask for a key
+and the authorization server for the operator's password, its discovery and
 registration aside; with `compose.grafana-port.yaml`, the LAN and the host
 too, through the port's network — on Docker Desktop and a podman machine by
-`host.docker.internal`, its loopback ports included (a host Ollama,
-Postgres's port with the host-ports file); on Linux the host's other
-listeners, by the network's gateway. The image's own sample dashboards (RED
-metrics, JVM) read other names; this stack's dashboard (PR 3c) and the database's own numbers
+`host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
+port with the host-ports file); on Linux the host's other listeners, by the
+network's gateway. The image's own sample dashboards (RED metrics, JVM) read
+other names; this stack's dashboard (PR 3c) and the database's own numbers
 (`pg_stat_statements`, PR 3b) are the next cuts.
 
 A canary at `/canary/mcp` (`deploy/canary.sh`) joins stable's `mesh`, and its
