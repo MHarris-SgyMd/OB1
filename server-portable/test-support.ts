@@ -11,6 +11,29 @@
 /** A server a suite drives: its fetch, as Bun.serve takes it. */
 export type ServerUnderTest = { fetch: (req: Request) => Response | Promise<Response> };
 
+/** The forward-scope key mcp-server/stack.ts adds to MCP_ACCESS_KEYS: the carrier (`act`) on every write through it. */
+export const SUITE_CARRIER = "mcp-server-suite";
+
+/**
+ * Whether the server mcpUnderTest() loaded is the one OB1_MCP_UNDER_TEST names,
+ * read from what the stack leaves behind (its carrier in MCP_ACCESS_KEYS)
+ * against the variable itself, not through mcpTarget(): a suite asserts it, so
+ * a switch that stops switching fails the run instead of testing index.ts
+ * twice (SMD-2287 PR 3b review pass 1).
+ */
+export function servedAsNamed(): boolean {
+  const served = (process.env.MCP_ACCESS_KEYS ?? "").split(",").some((entry) => entry.startsWith(`${SUITE_CARRIER}:`));
+  return served === (process.env.OB1_MCP_UNDER_TEST === "client");
+}
+
+/** Which MCP server a suite drives: OB1_MCP_UNDER_TEST unset, empty or "index" is index.ts, "client" the MCP server as a REST client; anything else is refused. */
+export function mcpTarget(): "index" | "client" {
+  const target = process.env.OB1_MCP_UNDER_TEST;
+  if (target === undefined || target === "" || target === "index") return "index";
+  if (target !== "client") throw new Error(`OB1_MCP_UNDER_TEST must be unset, "index" or "client", not ${JSON.stringify(target)}`);
+  return "client";
+}
+
 /**
  * The MCP server a suite drives (SMD-2287): server-portable's index.ts, or —
  * with OB1_MCP_UNDER_TEST=client — the MCP server as a client of the REST core,
@@ -21,9 +44,7 @@ export type ServerUnderTest = { fetch: (req: Request) => Response | Promise<Resp
  * packages, which its own directory installs.
  */
 export async function mcpUnderTest(): Promise<ServerUnderTest> {
-  const target = process.env.OB1_MCP_UNDER_TEST;
-  if (target === undefined || target === "" || target === "index") return (await import("./index.ts")).default as ServerUnderTest;
-  if (target !== "client") throw new Error(`OB1_MCP_UNDER_TEST must be unset, "index" or "client", not ${JSON.stringify(target)}`);
+  if (mcpTarget() === "index") return (await import("./index.ts")).default as ServerUnderTest;
   const stack = "../mcp-server/stack.ts";
   return (await import(stack)).default as ServerUnderTest;
 }
