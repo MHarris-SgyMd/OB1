@@ -21,9 +21,10 @@ if (import.meta.main && !forwarderKey) {
   process.exit(2);
 }
 
+const baseUrl = env.OB1_REST_URL?.trim() || DEFAULT_REST_URL;
 function restClient() {
   try {
-    return createRestClient({ baseUrl: env.OB1_REST_URL?.trim() || DEFAULT_REST_URL, forwarderKey: forwarderKey || undefined, timeoutMs: REST_TIMEOUT_MS });
+    return createRestClient({ baseUrl, forwarderKey: forwarderKey || undefined, timeoutMs: REST_TIMEOUT_MS });
   } catch (err) {
     if (!import.meta.main) throw err;
     console.error(`OB1_REST_URL or OB1_FORWARDER_KEY will not serve: ${(err as Error).message}`);
@@ -31,8 +32,7 @@ function restClient() {
   }
 }
 const rest = restClient();
-const restUrl = (env.OB1_REST_URL?.trim() || DEFAULT_REST_URL).replace(/\/\/[^/@]*@/, "//…@");
-const app = createMcpApp({ rest, restUrl, edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
+const app = createMcpApp({ rest, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
 
 /** The requests in flight, counted for the stop (SMD-2250): it waits for them within OB1_STOP_GRACE. */
 const calls = createCallCount();

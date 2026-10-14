@@ -201,16 +201,11 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
   /**
-   * The caller of a keyed mirror or /health, its key's standing within
-   * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
-   * standing not had by then — the registry's tables locked — is none, and
-   * the route shows `ok` (review pass 1: it waited out the REST timeout).
-   */
-  /**
-   * A fault finding the caller — this server's forwarder refused, the REST
-   * core away — said at most once a minute per message: /health and the
-   * mirrors show `ok` for it, and the endpoint a 500, so the log is where it
-   * is seen, and seen again if it comes back (review passes 2 and 3).
+   * A fault — finding the caller (this server's forwarder refused, the REST
+   * core away) or a route's throw — said at most once a minute per message,
+   * the REST core's address beside it: /health and the mirrors show `ok` for
+   * it, and the endpoint a 500, so the log is where it is seen, and seen again
+   * if it comes back (review passes 2 to 4).
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
@@ -222,6 +217,12 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
   /** The registry busy on a key between its check and the call: shown `ok`, as index.ts shows a busy key at every keyed route (review pass 3). */
   const busyNow = (a: Answer) => a.status === 503 && (a.body as { code?: string } | null)?.code === "BUSY";
+  /**
+   * The caller of a keyed mirror or /health, its key's standing within
+   * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
+   * standing not had by then — the registry's tables locked — is none, and
+   * the route shows `ok` (review pass 1: it waited out the REST timeout).
+   */
   const standingInTime = async (req: Request, budget: AbortSignal): Promise<Standing> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
@@ -423,8 +424,9 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
   });
 
-  // A throw from a route — the REST core away, this server's forwarder refused — is a 500, as Hono's default answers
-  // it, and one line in the log at most once a minute, not a stack trace per request (review pass 3).
+  // A throw from a route — the REST core away, this server's forwarder refused, a job store's fault — is a 500, as
+  // Hono's default answers it, and one line naming the route at most once a minute, not a stack trace per request;
+  // none for a client already gone, whose abandoned line says it (review passes 3 and 4).
   app.onError((err, c) => {
     if (!c.req.raw.signal.aborted) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
     return c.text("Internal Server Error", 500);
