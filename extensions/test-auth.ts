@@ -1309,9 +1309,12 @@ for (const t of TEXT_ONLY) {
   // vendored servers — held to extensions' versions — pins the v2 MCP packages to
   // SERVER_V2_PINS (the independent truth while it is the sole v2 install), and the
   // v1 MCP packages must be gone. It installs supabase-js beside the stack for its
-  // Workers store (SMD-1847), so its set is a superset (no exact check).
-  {
-    const deps = JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")).dependencies as Record<string, string>;
+  // Workers store (SMD-1847), so its set is a superset (no exact check). The
+  // MCP server as a REST client (mcp-server/, SMD-2287) installs the same
+  // stack, so a tool's schema built with server-portable's zod and the SDK
+  // that validates it agree: held the same way.
+  for (const file of ["server-portable/package.json", "mcp-server/package.json"]) {
+    const deps = JSON.parse(readFileSync(join(ROOT, file), "utf8")).dependencies as Record<string, string>;
     const shared = stack.filter(([name]) => SERVER_STACK.includes(name)); // hono, zod
     const sharedDrift = shared.filter(([name, version]) => deps[name] !== version);
     const v2Drift = Object.entries(SERVER_V2_PINS).filter(([name, version]) => deps[name] !== version);
@@ -1321,7 +1324,7 @@ for (const t of TEXT_ONLY) {
       ...v2Drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`),
       ...stale.map((n) => `${n}: still v1, must be gone`),
     ];
-    assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `server-portable/package.json is on the v2 MCP stack (SMD-2278): hono+zod match extensions, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${STACK.filter((n) => !SERVER_STACK.includes(n)).join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
+    assert(sharedDrift.length === 0 && v2Drift.length === 0 && stale.length === 0, `${file} is on the v2 MCP stack (SMD-2278): hono+zod match extensions, ${Object.keys(SERVER_V2_PINS).join("+")} pinned, ${STACK.filter((n) => !SERVER_STACK.includes(n)).join("+")} gone${detail.length ? ` (${detail.join(", ")})` : ""}`);
   }
 }
 

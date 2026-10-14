@@ -253,7 +253,8 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   // with a query or a fragment puts every path after it, and a forwarder key
   // no header carries as written would throw on every call (review pass 2).
   const why = unfitBase(opts.baseUrl);
-  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(String(opts.baseUrl))} ${why}`);
+  // Quoted with any credentials in it blanked, so the refusal does not print a password (review pass 4 of SMD-2287 PR 3a).
+  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(String(opts.baseUrl).replace(/\/\/[^/@]*@/, "//…@"))} ${why}`);
   // The timeout a whole number of milliseconds a timer can hold: setTimeout fires at once past 2^31 - 1, and AbortSignal.timeout throws on Infinity (review pass 5).
   if (opts.timeoutMs != null && !(Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0 && opts.timeoutMs <= MAX_TIMER_MS)) throw new TypeError(`timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}, or none: ${String(opts.timeoutMs)}`);
   if (opts.forwarderKey != null && (typeof opts.forwarderKey !== "string" || !headerSafe(opts.forwarderKey))) throw new TypeError("forwarderKey is no value a header carries as written (tab, printable ASCII and U+0080–U+00FF alone, no space or tab at either end)");
