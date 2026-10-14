@@ -3315,7 +3315,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(!down.isError && !!id && /Note: saved WITHOUT a vector — the embedding provider at https:\/\/stub\.invalid\/v1 was unavailable \(the connection was refused\)\./.test(down.text),
       `a refused connection: the capture succeeds and says the vector is missing, where and why (${down.text.replace(/\n+/g, " / ").slice(0, 240)})`);
     assert(/findable by exact text \(search_thoughts_keyword\)/.test(down.text) && /re-capture the same text once the provider is back/.test(down.text), "…and how it is reachable meanwhile, and how it gets its vector");
-    assert(/automatic tagging failed \(provider_unreachable\)/.test(down.text), "…and that its tags are placeholders: the chat call met the same closed socket");
+    assert(/Note: no topics, people or type were extracted — the chat provider at https:\/\/stub\.invalid\/v1 was unavailable \(provider_unreachable\)\./.test(down.text), "…and that no tags were made: the chat call met the same closed socket");
     assert(down.sc?.embeddingCall === true && down.sc?.vectorFailed === "provider_unreachable",
       `the typed result says the call was made, and the word for why no vector came of it (${JSON.stringify(down.sc)})`);
     let row = await rowOf(id);
@@ -3324,15 +3324,31 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     const kw = await call("search_thoughts_keyword", { query: "captured while the provider is down" });
     assert(kw.includes(id), "search_thoughts_keyword finds it while the provider is still down");
 
-    // A capture key: saved too, its vector's note without the endpoint (the
-    // tagging note's "check the chat endpoint" is that note's own).
+    // A capture key: saved too, and told neither endpoint (review pass 1: the
+    // tagging note named the chat base, which is the embeddings one here).
     const hook = await captureRaw(CAPTURE_KEY, "[20] a session summary sent while the provider is down");
     const hid = idIn(hook.text)!;
     const vectorNote = hook.text.split("\n\n").find((p: string) => p.startsWith("Note: no vector was made")) ?? "";
-    assert(!hook.isError && !!hid && /the embedding provider was unavailable\./.test(vectorNote) && !vectorNote.includes("stub.invalid") && /This reply does not say which\./.test(vectorNote),
-      `a capture key's capture is saved, its note saying the provider was unavailable without its address, nor whether the text was new (${vectorNote.slice(0, 200)})`);
+    assert(!hook.isError && !!hid && /the embedding provider was unavailable\./.test(vectorNote) && /This reply does not say which\./.test(vectorNote) && /the chat provider was unavailable \(provider_unreachable\)/.test(hook.text) && !hook.text.includes("stub.invalid"),
+      `a capture key's capture is saved, its notes saying both providers were unavailable without an address, nor whether the text was new (${hook.text.replace(/\n+/g, " / ").slice(0, 260)})`);
     assert(hook.sc?.vectorFailed === "provider_unreachable", `…its typed result carries the word (${JSON.stringify(hook.sc)})`);
-    assert((await rowOf(hid))?.bare === true, "…and its row has no vector");
+    const hookRow = await rowOf(hid);
+    assert(hookRow?.bare === true && hookRow?.audited === "provider_unreachable" && hookRow?.failed === "provider_unreachable", `…and its row has no vector, its audit row the word (${JSON.stringify(hookRow)})`);
+
+    // A write key's re-capture of a TAGGED, vectored thought during the outage:
+    // its tags and vector stand, only the marker merges in (review pass 1: the
+    // placeholder tags replaced the real ones), and the reply says the call
+    // failed — and is still the typed vectorFailed, so REST says no vector came.
+    stubDown = null;
+    const tagged = "[20] a tagged thought re-sent while the provider is down";
+    const tid = idIn(await call("capture_thought", { content: tagged }))!;
+    stubDown = "refused";
+    const re = await captureRaw("e2e-key", tagged);
+    const [tRow] = await sql`SELECT embedding IS NOT NULL AS v, metadata FROM thoughts WHERE id = ${tid}::uuid`;
+    assert(!re.isError && idIn(re.text) === tid && tRow?.v === true && JSON.stringify(tRow?.metadata?.topics) === JSON.stringify(["stubbed"]) && tRow?.metadata?.type === "idea" && tRow?.metadata?.metadata_extraction_failed === "provider_unreachable",
+      `a write key's re-capture during the outage keeps the row's vector, topics and type; only the marker merges in (${JSON.stringify(tRow?.metadata)})`);
+    assert(/keeps the vector it had, if it had one\./.test(re.text) && /The existing thought keeps its tags/.test(re.text) && re.sc?.vectorFailed === "provider_unreachable",
+      `…the reply says both stand, and its typed result still says no vector came of this capture (${re.text.replace(/\n+/g, " / ").slice(0, 220)})`);
 
     // A 5xx and a 429 are outages too.
     for (const status of [503, 429]) {

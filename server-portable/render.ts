@@ -989,7 +989,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     // story of a row that may be keeping its vector (second review pass).
     if (!embeddings.allowed) {
       confirmation += existed === true
-        ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
+        ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had, if it had one.`
         : existed === false
           ? `\n\nNote: saved WITHOUT a vector — ${embeddings.reason}. ` +
             `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
@@ -1010,7 +1010,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
       const where = reader ? `the embedding provider at ${base} was unavailable (${detail})` : `the embedding provider was unavailable`;
       const later = `re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts)`;
       confirmation += existed === true
-        ? `\n\nNote: no vector was made for this capture — ${where}. This text was already a thought, and it keeps the vector it had.`
+        ? `\n\nNote: no vector was made for this capture — ${where}. This text was already a thought, and it keeps the vector it had, if it had one.`
         : existed === false
           ? `\n\nNote: saved WITHOUT a vector — ${where}. It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: ${later}.`
           : `\n\nNote: no vector was made for this capture — ${where}. A new thought has no vector — findable by exact text (search_thoughts_keyword) until it is embedded: ${later}; text already captured keeps the vector it had. ` +
@@ -1084,6 +1084,18 @@ export function renderCapture(o: Outcome<Captured>): Reply {
           // `existed` unsaid: a key that cannot read, whose re-capture merges
           // nothing (080, SMD-2539), or a database before 035, which merges.
           : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags${reader ? ", with the refusal marker merged in" : ""}.`;
+    } else if (typeof meta.metadata_extraction_failed === "string" && meta.topics === undefined && meta.type === undefined) {
+      // The marker alone: the chat provider did not answer (metadataUnavailable,
+      // SMD-2888), so no tags were made — none, not placeholders, so a
+      // re-capture during the outage leaves an existing thought's tags as they
+      // were. The endpoint to a reader only, as the vector's note.
+      const word = metaText(meta.metadata_extraction_failed, TYPE_MAX);
+      const why = reader ? `the chat provider at ${chat.base} was unavailable (${word})` : `the chat provider was unavailable (${word})`;
+      confirmation += existed === true
+        ? `\n\nNote: no tags were extracted for this capture — ${why}. The existing thought keeps its tags; its metadata now carries the marker.`
+        : existed === false
+          ? `\n\nNote: no topics, people or type were extracted — ${why}.`
+          : `\n\nNote: no tags were extracted for this capture — ${why}. A new thought has no topics or type; text already captured keeps its tags${reader ? ", with the marker merged in" : ""}.`;
     } else if (typeof meta.metadata_extraction_failed === "string") {
       confirmation +=
         // A key that cannot read is not told whether the text was new, and
@@ -1094,7 +1106,9 @@ export function renderCapture(o: Outcome<Captured>): Reply {
         // The marker is the server's reason code (extractMetadata keeps a
         // model's own out of the tags), on the one line all the same (SMD-2510).
         `(${metaText(meta.metadata_extraction_failed, TYPE_MAX)}) — ${reader ? "topics and people are placeholders" : "a new thought's topics and people are placeholders; text already captured keeps its tags"}. ` +
-        `Check the chat endpoint (${chat.base}), its credential, and the server logs.`;
+        // The endpoint to a reader only: a key that cannot read is not told
+        // the provider's address (rest/app.ts capturedFor; SMD-2888 review pass 1).
+        (reader ? `Check the chat endpoint (${chat.base}), its credential, and the server logs.` : `The operator can check the chat endpoint, its credential, and the server logs.`);
     }
     return confirmation;
   }, captureRefusal, safeCapture);

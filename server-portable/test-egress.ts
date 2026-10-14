@@ -438,10 +438,11 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
   const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
   assert(!cap.isError && !!id && new RegExp(`Note: saved WITHOUT a vector — the embedding provider at http://127\\.0\\.0\\.1:${port}/v1 was unavailable \\(the connection was refused\\)\\.`).test(cap.text),
     `the capture succeeds and says the provider was unavailable, where and why (${cap.text.replace(/\n+/g, " / ").slice(0, 220)})`);
-  assert(/automatic tagging failed \(provider_unreachable\)/.test(cap.text) && !/OB1_EGRESS_POLICY/.test(cap.text), "…its tags are placeholders for the same reason, and no note blames the gate, which allowed both calls");
+  assert(new RegExp(`Note: no topics, people or type were extracted — the chat provider at http://127\\.0\\.0\\.1:${port}/v1 was unavailable \\(provider_unreachable\\)\\.`).test(cap.text) && !/OB1_EGRESS_POLICY/.test(cap.text),
+    "…no tags were made, for the same reason, and no note blames the gate, which allowed both calls");
   const [row] = await sql`SELECT embedding IS NULL AS no_vector, embedding_model, metadata FROM thoughts WHERE id = ${id!}::uuid`;
-  assert(row.no_vector === true && row.embedding_model === null && row.metadata.metadata_extraction_failed === "provider_unreachable" && row.metadata.topics?.[0] === "uncategorized",
-    `the row: no vector, no model label, the placeholder tags under their marker (${JSON.stringify(row.metadata)})`);
+  assert(row.no_vector === true && row.embedding_model === null && row.metadata.metadata_extraction_failed === "provider_unreachable" && row.metadata.topics === undefined && row.metadata.type === undefined,
+    `the row: no vector, no model label, the marker alone — no placeholder tags (${JSON.stringify(row.metadata)})`);
   const [audit] = await sql`SELECT actor_context FROM thought_audit WHERE thought_id = ${id!}::uuid AND action = 'capture'`;
   const ctx = audit.actor_context;
   assert(ctx?.vector_failed === "provider_unreachable" && ctx?.egress?.embeddings?.allowed === true && ctx.egress.embeddings.rule === "allow-term",

@@ -16,7 +16,9 @@
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { DEFAULT_LLM_TIMEOUT_S, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createContext } from "./core/context.ts";
+import { capture } from "./core/writes.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
@@ -836,7 +838,7 @@ console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides wit
   assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
 }
 
-console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, and extractMetadata falls back on Bun's own connection error instead of throwing");
+console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, an outage's tags are the marker alone, a reset after a 200 is an outage, and the core's capture lands the row naming the embeddings endpoint");
 {
   // Bun 1.4.3's own errors, by their fields (measured: a closed port, an unresolved name).
   const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
@@ -866,21 +868,77 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   ] as [string, unknown][])
     assert(providerDown(e) === null, `${what} is not an outage: it still fails the call (${said(e)})`);
 
-  // extractMetadata against a closed port: the fallback, not a throw.
-  const closed = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const port = closed.port;
-  closed.stop(true);
-  const down = await extractMetadata("a thought while the chat endpoint is away", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1" }));
-  assert(down.metadata_extraction_failed === "provider_unreachable" && JSON.stringify(down.topics) === JSON.stringify(["uncategorized"]) && down.type === "observation",
-    `a closed port: the placeholder tags under provider_unreachable (${JSON.stringify(down)})`);
-  // A status is still the ProviderError path it was; a runtime error that is no outage is still thrown.
-  const busy = Bun.serve({ port: 0, fetch: () => new Response("busy", { status: 503 }) });
+  for (const code of ["ETIMEDOUT", "ENETUNREACH", "ETIMEOUT"]) assert(providerDown(Object.assign(new Error("x"), { code }))?.reason === "provider_unreachable", `${code} is an outage`);
+  assert(providerDown(Object.assign(new Error("x"), { syscall: "getaddrinfo" }))?.detail === "its name does not resolve" && providerDown(Object.assign(new Error("x"), { code: "ENOTFOUND" }))?.detail === "its name does not resolve (ENOTFOUND)",
+    "a failed resolution is read by the syscall alone and by the code alone");
+  assert(providerDown(Object.assign(new Error("x"), { code: "ConnectionRefused" }))?.detail === "the connection was refused" && providerDown(Object.assign(new Error("x"), { code: "ENETUNREACH" }))?.detail === "the connection failed (ENETUNREACH)",
+    "Bun's older spelling of a refusal says so; another failure names its code");
+
+  // extractMetadata: an outage the provider answered (a 503) is the marker alone
+  // — no placeholder tags for a re-capture to merge over real ones (review pass
+  // 1); a 400 keeps the placeholders; the runtime's own error is thrown as
+  // before, so board-sync retries the item (the capture path catches it).
+  const answering = (status: number) => Bun.serve({ port: 0, fetch: () => new Response("no", { status }) });
+  const busy = answering(503), bad = answering(400);
   try {
-    const meta = await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${busy.port}/v1`, OB1_LLM_LOCAL: "1" }));
-    assert(meta.metadata_extraction_failed === "provider_503", `a 503 is provider_503, as before (${JSON.stringify(meta)})`);
+    const at = (port: number | undefined) => resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1" });
+    const meta503 = await extractMetadata("x", { kind: "capture" }, at(busy.port));
+    assert(JSON.stringify(meta503) === JSON.stringify({ metadata_extraction_failed: "provider_503" }), `a 503: the marker alone, no placeholder tags (${JSON.stringify(meta503)})`);
+    const meta400 = await extractMetadata("x", { kind: "capture" }, at(bad.port));
+    assert(meta400.metadata_extraction_failed === "provider_400" && JSON.stringify(meta400.topics) === JSON.stringify(["uncategorized"]), `a 400: the placeholders, as before (${JSON.stringify(meta400)})`);
   } finally {
     busy.stop(true);
+    bad.stop(true);
   }
+  const closed = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const closedPort = closed.port;
+  closed.stop(true);
+  let thrown: unknown;
+  try { await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${closedPort}/v1`, OB1_LLM_LOCAL: "1" })); } catch (e) { thrown = e; }
+  assert((thrown as { code?: string } | undefined)?.code === "ECONNREFUSED", `a closed port: extractMetadata throws the runtime's error, as before (${String(thrown)})`);
+
+  // A provider that crashes after its 200 headers resets the socket mid-body:
+  // an outage, not "a body that is not JSON" (review pass 1). Measured on Bun
+  // 1.4.3: the body read throws ECONNRESET. An error status before the reset
+  // keeps its status (the third review of SMD-1021).
+  const halfway = (status: string) => Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+    data(sock) { sock.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{"data":[`); sock.flush(); setTimeout(() => sock.terminate(), 20); },
+  } });
+  const ok200 = halfway("200 OK"), too413 = halfway("413 Payload Too Large");
+  try {
+    const cfgAt = (port: number) => resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1" });
+    let e200: unknown, e413: unknown;
+    try { await providerCall(cfgAt(ok200.port), "/embeddings", { model: "m", input: "x" }, { kind: "capture" }); } catch (e) { e200 = e; }
+    try { await providerCall(cfgAt(too413.port), "/embeddings", { model: "m", input: "x" }, { kind: "capture" }); } catch (e) { e413 = e; }
+    assert(providerDown(e200)?.reason === "provider_unreachable" && !(e200 instanceof ProviderError), `a reset after a 200's headers is an outage (${String(e200)})`);
+    assert(e413 instanceof ProviderError && e413.kind === "http" && e413.status === 413 && providerDown(e413) === null, `a reset after a 413's headers is still the 413, no outage (${String(e413)})`);
+  } finally {
+    ok200.stop(true);
+    too413.stop(true);
+  }
+
+  // The core's capture itself, with chat and embeddings at two endpoints, both
+  // down: the row is written with no vector and the marker alone, the actor
+  // carries vector_failed, and the reply names the EMBEDDINGS endpoint, not
+  // the chat one (review pass 1: every other test used one base for both).
+  const embedPort = closedPort;
+  const chatGone = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const chatPort = chatGone.port;
+  chatGone.stop(true);
+  const written: Record<string, any>[] = [];
+  const store = { captureThought: async (args: Record<string, unknown>) => { written.push(args); return { id: "00000000-0000-4000-8000-0000000000b1", existed: false }; } };
+  const ctx = createContext({
+    env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${chatPort}/v1`, OB1_CHAT_LOCAL: "1" }),
+    store: async () => store as never,
+    door: "test",
+  });
+  const out = await capture(ctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought while both endpoints are down" } as never);
+  const v = out.ok ? out.value : undefined;
+  assert(v?.vectorFailed?.reason === "provider_unreachable" && v.vectorFailed.base === `http://127.0.0.1:${embedPort}/v1`, `the reply names the embeddings endpoint, not the chat one (${JSON.stringify(v?.vectorFailed)})`);
+  assert(written.length === 1 && written[0].embedding === null && written[0].embeddingModel === undefined && JSON.stringify(written[0].chunks) === "[]", "the row is written once, with no vector, no model label and no windows");
+  assert(written[0].payload?.metadata?.metadata_extraction_failed === "provider_unreachable" && written[0].payload.metadata.topics === undefined && written[0].payload.metadata.type === undefined,
+    `the chat call's outage is the marker alone, no placeholder tags (${JSON.stringify(written[0].payload?.metadata)})`);
+  assert(written[0].actor?.vectorFailed === "provider_unreachable", `the actor carries vector_failed (${JSON.stringify(written[0].actor)})`);
 }
 
 report();

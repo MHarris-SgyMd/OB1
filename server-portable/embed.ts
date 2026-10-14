@@ -260,12 +260,17 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
   // to arrive after a 413 is still a 413 (the third review found a reset
   // mid-body turning a refusal into a transient, and failing a capture that
   // the metadata fallback exists to save). The deadline passing during the
-  // body is the timeout; anything else leaves the body empty.
+  // body is the timeout. After an error status anything else leaves the body
+  // empty; after a 2xx it is rethrown as it came — a provider that crashed
+  // mid-answer resets the socket (ECONNRESET, measured on Bun 1.4.3), which
+  // read as "a body that is not JSON" and failed the capture providerDown
+  // would have saved (SMD-2888 review pass 1).
   let text = "";
   try {
     text = await r.text();
   } catch (e) {
     if ((e as Error).name === "TimeoutError") throw timedOut();
+    if (r.ok) throw e;
   }
   const capped = text.slice(0, PROVIDER_ERROR_CHARS);
   if (!r.ok) {

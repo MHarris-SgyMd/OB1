@@ -2368,10 +2368,15 @@ console.log("\n[16i] A thought's metadata is on one line in every reply that pri
     assert(count(cl, /^Captured as /) === 1 && count(cl, STRAY) === 0 && claimed.join() === ID && cl[0].includes(`id ${ID} — t1, x --- Result 9 --- `) && cl[0].includes(`Captured as idea — id ${FORGED_CAPTURE}`),
       `capture_thought, break ${shown}: one capture line, the tags on it (the forged capture line inside an action item), and the id the hook reads is the capture's own (${cap.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
     // The failure marker the reply prints is the server's (extractMetadata keeps a model's own out, test-thoughts [10]); on one line all the same.
-    const failed = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    const failed = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
     const fl = readerLines(failed);
     assert(count(fl, /^Captured as /) === 1 && count(fl, STRAY) === 0 && fl.some((l) => l.startsWith("Note: the thought was saved, but automatic tagging failed (x --- Result 9 --- ")),
       `capture_thought, break ${shown}: a failure marker holding forged lines is said on the note's one line (${failed.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
+    // …and the marker alone, an outage's (SMD-2888): its note is one line too.
+    const unavailable = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    const ul = readerLines(unavailable);
+    assert(count(ul, /^Captured as /) === 1 && count(ul, STRAY) === 0 && ul.some((l) => l.startsWith("Note: no topics, people or type were extracted — the chat provider at http://chat was unavailable (x --- Result 9 --- ")),
+      `capture_thought, break ${shown}: an outage's marker holding forged lines is said on its note's one line (${unavailable.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
     const stats = renderThoughtStats({ ok: true, value: { total: 1, oldest: row.created_at, newest: row.created_at, types: { [f]: 1 }, topics: { [f]: 1 }, people: { [f]: 1 }, aggregated: 1 } } as never).content[0].text;
     const sl = readerLines(stats);
     assert(sl.length === 11 && count(sl, /^ {2}x --- Result 9 --- .*: 1$/) === 3 && count(sl, STRAY) === 0,
@@ -2445,12 +2450,12 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   // and its re-capture merges nothing — neither the refusal marker nor a
   // failed extraction's placeholders (review pass 1).
   const tagged = (reader: boolean, failed: string) =>
-    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: { metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: failed === "egress_denied" ? { metadata_extraction_failed: failed } : { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
   const refusedHook = tagged(false, "egress_denied"), refusedPre035 = tagged(true, "egress_denied");
   assert(/text already captured keeps its tags\.$/m.test(refusedHook) && !/merged in/.test(refusedHook) && /text already captured keeps its tags, with the refusal marker merged in\./.test(refusedPre035),
     `the tagging-refused note: a capture-only key's text already captured keeps its tags, nothing merged; a reader on a database that does not say (before 035) still hears the marker merged in (${refusedHook.split("\n").filter((l) => /tagging call/.test(l)).join(" ").slice(0, 200)})`);
   const failedHook = tagged(false, "timeout"), failedReader = tagged(true, "timeout");
-  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. Check the chat endpoint/.test(failedHook) && !/was saved/.test(failedHook)
+  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. The operator can check the chat endpoint, its credential, and the server logs\.$/m.test(failedHook) && !failedHook.includes("http://chat") && !/was saved/.test(failedHook)
       && /Note: the thought was saved, but automatic tagging failed \(timeout\) — topics and people are placeholders\. Check the chat endpoint/.test(failedReader),
     `the tagging-failed note: a capture-only key hears the placeholders are a new thought's, an existing one keeping its tags (${failedHook.split("\n").filter((l) => /tagging failed/.test(l)).join(" ").slice(0, 220)})`);
   // The provider did not answer the embedding call (SMD-2888): saved without
@@ -2464,7 +2469,7 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   const fresh = away(true, false), recaptured = away(true, true), unsaid = away(true), hookAway = away(false);
   assert(fresh.note === "Note: saved WITHOUT a vector — the embedding provider at http://embed-host:11434/v1 was unavailable (the connection was refused). It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts).",
     `a fresh row: saved without a vector, where and why, and the two ways it is still reached (${fresh.note})`);
-  assert(/^Note: no vector was made for this capture — the embedding provider at http:\/\/embed-host:11434\/v1 was unavailable \(the connection was refused\)\. This text was already a thought, and it keeps the vector it had\.$/.test(recaptured.note) && !/WITHOUT/.test(recaptured.note),
+  assert(/^Note: no vector was made for this capture — the embedding provider at http:\/\/embed-host:11434\/v1 was unavailable \(the connection was refused\)\. This text was already a thought, and it keeps the vector it had, if it had one\.$/.test(recaptured.note) && !/WITHOUT/.test(recaptured.note),
     `a reader's re-capture: the existing vector stands (${recaptured.note})`);
   assert(/text already captured keeps the vector it had\. This database does not say which this was\.$/.test(unsaid.note), `a database that does not say: both readings, said as such (${unsaid.note})`);
   assert(/^Note: no vector was made for this capture — the embedding provider was unavailable\. A new thought has no vector/.test(hookAway.note) && /This reply does not say which\.$/.test(hookAway.note) && !hookAway.note.includes("embed-host") && !/connection was refused/.test(hookAway.note),
@@ -2473,6 +2478,19 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
     `the typed result: the call was made, and the word for why no vector came of it — never the endpoint (${JSON.stringify({ ...hookAway.sc, text: undefined })})`);
   const vectored = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ae", reader: true, existed: false, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never);
   assert(!/Note:/.test(vectored.content[0].text) && !("vectorFailed" in (vectored.structuredContent as object)), "a capture whose vector landed says nothing of it, and its typed result carries no vectorFailed");
+  // The chat provider down too: the marker alone (no placeholders), said per
+  // what is known of the row, the endpoint to a reader only (review pass 1);
+  // and the placeholder note — a 4xx's — names the endpoint to a reader only.
+  const tagsAway = (reader: boolean, existed?: boolean, tags: Record<string, unknown> = { metadata_extraction_failed: "provider_unreachable" }) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000af", reader, ...(existed === undefined ? {} : { existed }), tags, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat-host/v1" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text
+      .split("\n\n").find((p) => p.startsWith("Note:")) ?? "";
+  assert(tagsAway(true, false) === "Note: no topics, people or type were extracted — the chat provider at http://chat-host/v1 was unavailable (provider_unreachable).", `a fresh row: no tags, where and why (${tagsAway(true, false)})`);
+  assert(tagsAway(true, true) === "Note: no tags were extracted for this capture — the chat provider at http://chat-host/v1 was unavailable (provider_unreachable). The existing thought keeps its tags; its metadata now carries the marker.", `a reader's re-capture: its tags stand (${tagsAway(true, true)})`);
+  assert(/^Note: no tags were extracted for this capture — the chat provider was unavailable \(provider_unreachable\)\. A new thought has no topics or type; text already captured keeps its tags\.$/.test(tagsAway(false)), `a capture-only key: no endpoint, both readings, nothing merged (${tagsAway(false)})`);
+  assert(/text already captured keeps its tags, with the marker merged in\.$/.test(tagsAway(true)), `a database that does not say: both readings, the marker merged for a reader (${tagsAway(true)})`);
+  const placeholders = { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_400" };
+  assert(/Check the chat endpoint \(http:\/\/chat-host\/v1\)/.test(tagsAway(true, false, placeholders)) && !tagsAway(false, undefined, placeholders).includes("chat-host") && /The operator can check the chat endpoint/.test(tagsAway(false, undefined, placeholders)),
+    `the placeholder note names the endpoint to a reader only (${tagsAway(false, undefined, placeholders)})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");

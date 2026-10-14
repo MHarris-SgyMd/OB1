@@ -39,6 +39,20 @@ export function metadataRefused(): Record<string, unknown> {
   return { metadata_extraction_failed: "egress_denied" };
 }
 
+/**
+ * What a capture records when the chat provider did not answer (SMD-2888):
+ * providerDown's word under the same key, and — as for a refusal above — no
+ * topics and no type. An outage produced no tags, and with one provider for
+ * both calls it is the common case of a provider down: a write key's
+ * re-capture of a tagged thought during it would otherwise merge placeholder
+ * tags over the real ones (SMD-2888 review pass 1). Placeholders stay for a
+ * fault that is the request's or the model's (a 4xx, a body that is not JSON,
+ * an answer with no content), as before.
+ */
+export function metadataUnavailable(reason: string): Record<string, unknown> {
+  return { metadata_extraction_failed: reason };
+}
+
 /** The keys extractMetadata writes — the tag set a capture gets, `type_raw` (the model's uncoerced type) among them. */
 export const TAG_KEYS = ["people", "action_items", "dates_mentioned", "topics", "type", "type_raw"] as const;
 
@@ -119,17 +133,16 @@ export async function extractMetadata(text: string, subject: EgressSubject, cfg:
     if (e instanceof ProviderError) {
       console.error(`extractMetadata: ${e.message}`);
       if (e.kind === "egress") return metadataRefused();
-      return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
+      // An outage (the deadline, a 5xx, 408 or 429) records the marker alone
+      // (metadataUnavailable); a 4xx or a body that is not JSON keeps the
+      // placeholders.
+      const down = providerDown(e);
+      if (down) return metadataUnavailable(down.reason);
+      return fallback(e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
     }
-    // The runtime's own error for a provider that did not answer — Bun's
-    // fetch on a closed port or an unresolved name — is a fallback too: with
-    // the provider down, this call failed beside the embedding's, and the
-    // capture that lands without its vector must not throw here (SMD-2888).
-    const down = providerDown(e);
-    if (down) {
-      console.error(`extractMetadata: ${cfg.chat.base} did not answer: ${down.detail}`);
-      return fallback(down.reason);
-    }
+    // The runtime's own error (a refused connection, an unresolved name) is
+    // thrown as before: board-sync fails the item and retries it on its next
+    // pass. The capture path catches it itself (core/writes.ts, SMD-2888).
     throw e;
   }
 

@@ -6,7 +6,7 @@
 // REST core (SMD-2284) answers it as JSON.
 
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
-import { extractMetadata, metadataRefused, TAG_KEYS } from "../metadata.ts";
+import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
@@ -270,7 +270,18 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
             return undefined;
           })
         : Promise.resolve(undefined),
-      gate.chat.allowed ? extractMetadata(content, subject, cfg) : Promise.resolve(metadataRefused()),
+      // A chat provider that did not answer at the socket (extractMetadata
+      // throws the runtime's error, so board-sync retries the item) is the
+      // marker alone here: with one provider down, this call fails beside the
+      // embedding's, and the capture lands all the same (SMD-2888).
+      gate.chat.allowed
+        ? extractMetadata(content, subject, cfg).catch((e: unknown) => {
+            const down = providerDown(e);
+            if (!down) throw e;
+            console.error(`capture: the chat provider at ${cfg.chat.base} was unavailable: ${down.detail}`);
+            return metadataUnavailable(down.reason);
+          })
+        : Promise.resolve(metadataRefused()),
       // The genre classifier (SMD-2323): a deterministic pre-signal over the
       // metadata first, then the typed-decision tier when OB1_JEV_BASE_URL names
       // one — opt-in and null-by-default, so a capture pays nothing for it unless
