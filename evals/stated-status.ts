@@ -96,10 +96,16 @@ export function chainRoot(id: string, rows: ReadonlyMap<string, ChainRow>): numb
 export type Status = { name: string; type: string };
 export type Change = Status & { at: number };
 
-/** The status a ticket held at `t`: the last change at or before it; undefined before the first. `timeline` is in recorded order. */
+/**
+ * The status a ticket held at `t`: the last change, in the log's order, whose
+ * time is at or before it; undefined when none is. `timeline` is in the log's
+ * order (060's ob1_thought_events_in_order), which is not always time order —
+ * a row's `at` is its transaction's clock — so every change is read, none
+ * skipped by an early stop.
+ */
 export function statusAt(timeline: readonly Change[], t: number): Status | undefined {
   let s: Status | undefined;
-  for (const c of timeline) { if (c.at > t) break; s = { name: c.name, type: c.type }; }
+  for (const c of timeline) if (c.at <= t) s = { name: c.name, type: c.type };
   return s;
 }
 

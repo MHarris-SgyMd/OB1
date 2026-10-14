@@ -77,10 +77,13 @@
  *   change of rule): the history was read in thought_audit's seq order, and
  *   046's backfill numbered a ticket's older events after newer ones (SMD-1525:
  *   Done at seq 477, Backlog at seq 792), so a status was read as the one
- *   before it. "The status at a time" is now the last event at or before it by
- *   time, seq breaking a tie. Six of moved-session's seven wrong labels among
- *   every graded label it produced were this; the seventh (1f6578b3) is a note
- *   that knew SMD-1998 was Done seconds before board-sync recorded it.
+ *   before it. "The status at a time" is now the last event, in the log's
+ *   order, at or before it — the log's order being 060's one copy of it,
+ *   ob1_thought_events_in_order (seq since 050, (created_at, seq) before);
+ *   the first fix read (created_at, seq) by hand, and the house order (the
+ *   first review pass) moved no label. Before the fix, six of the seven wrong
+ *   labels moved-session then produced were this, and the seventh (1f6578b3)
+ *   a note that knew SMD-1998 was Done seconds before board-sync recorded it.
  *   moved-session qualified on its own sample before the fix too; the run
  *   after it, and the labels the fix changed, are what the verdict below reads.
  *
@@ -89,9 +92,9 @@
  *   useful — and nothing else does: the stated-* candidates are 0.567 and
  *   0.500 precise (reported speech, a status that belongs to a PR or a step),
  *   moved-stored and moved-chain read the wrong time. But over EVERY graded
- *   label moved-session produces, 7 of 68 are wrong (0.897): a sample of 30
- *   missed them, and the registration read the sample alone. All 7 are one
- *   case: a note written 0–18 minutes before board-sync recorded a move its
+ *   label moved-session produces, 7 of 68 are wrong (0.897; after the fix —
+ *   not the seven above): a sample of 30 missed them, and the registration
+ *   read the sample alone. All 7 are one case: a note written 0–18 minutes before board-sync recorded a move its
  *   writer had just made (fab47c58, stored 19:10, SMD-1938 Done at 19:25). So
  *   the first registration's pick does not ship.
  *
@@ -105,8 +108,9 @@
  *   held-out sample. If it does not, the label does not ship as specified.
  *
  *   RESULT of the second registration: it does not qualify, and its held-out
- *   sample was never graded — over every graded label it produces, 4 of 51
- *   are wrong (0.922). Reading "then" an hour late put a move the note never
+ *   sample was never graded as a sample (2 of its 30 items happen to be in
+ *   round 3's) — over every graded label it produces, 4 of 51 are wrong
+ *   (0.922). Reading "then" an hour late put a move the note never
  *   knew of into its claim (45144934: SMD-2294 started a minute after the
  *   session ended, and the label said the note was written while it was In
  *   Progress).
@@ -119,17 +123,38 @@
  * (HELD_OUT_SALT_3, none of it graded in rounds 1–2, two fresh blind graders).
  * DISCLOSED: computed on rounds 1–2's labels before this registration was
  * written, it scored 53 of 54 (0.981) pooled — that number chose the rule, so
- * only the held-out sample and the pooled precision after it are evidence.
+ * the held-out sample is the only independent evidence; the pooled precision
+ * after round 3 still holds those 54.
  *
  *   RESULT of the third registration (round 3, 30 held-out labels, κ 0.714,
  *   4 adjudicated): moved-session-settled QUALIFIES and is chosen — held out
  *   29 of 30 right (0.967) and 21 useful (0.700); pooled over every graded
- *   label it produces, 82 of 84 (0.976); the measured case labelled. On the
- *   corpus: 742 labels on 409 thoughts, 519 estimated useful; one thought's
+ *   label it produces, 82 of 84 (0.976, the 53 of 54 that chose it among
+ *   them); the measured case labelled. On the corpus: 742 labels on 409
+ *   thoughts (274 of the labels on superseded thoughts), 519 estimated useful
+ *   (328 on thoughts nothing supersedes, the sample's own population); one
+ *   thought's
  *   label names up to 12 tickets (3 at p90), so the label needs a cap. Its two
  *   wrong labels are a ticket that moved minutes after the note to a status
  *   that is not its current one (3a37f18b, 1886b600). evals/README.md has the
  *   tables.
+ *
+ * THE RECORD (the first review pass): every sample is drawn from the live
+ * brain, and an item's identity carries the ticket's status now, so a ticket
+ * that moves, or a new labelled thought hashing into a sample, used to turn a
+ * re-run's verdict into "none" — drift read as a failed rule. The gold now
+ * records, per graded item, the samples that drew it and the label sets that
+ * held it, and per candidate its counts and whether it labelled the measured
+ * case (`--record`, merged into the fixture). The verdict is computed from
+ * that record (recordedDecision), the self-check holds its numbers with no
+ * database, and a live run prints how far the brain has moved from it.
+ *
+ * KNOWN HAZARDS for PR 2 (the first review pass; inside the measured
+ * precision, not fixed here): a list step takes a count with the key's digit
+ * count as a ticket (`SMD-2306, 1006 summaries` reads SMD-1006); and a
+ * ticket's history is every row's that carries its key, a superseded or
+ * duplicate ticket row's events among them, while its status now is the
+ * head's.
  *
  * The census: per candidate, how many thoughts and labels, split session
  * summaries / other and superseded / not; how many tickets one thought's label
@@ -144,9 +169,12 @@
  *   podman run --rm --network open-brain_data --env-file <0600 file> \
  *     -v <worktree>:/repo:ro -w /repo/evals oven/bun:1.4.3-alpine bun eval-stated-status.ts
  *
- *   … eval-stated-status.ts --dump-ungraded <file>   every sampled label the
- *        gold lacks, with the excerpt, dates and histories to grade it from
+ *   … eval-stated-status.ts --dump-ungraded <file>   every live sampled label
+ *        the gold lacks, with the excerpt, dates and histories to grade it from
  *        (write it outside the repo)
+ *   … eval-stated-status.ts --record <file>          the live samples, label
+ *        sets and counts, for the gold (refused while a sampled label is
+ *        ungraded; write it outside the repo, then merge)
  *   bun eval-stated-status.ts --self-check           the readings, the
  *        candidates, the sample, the verdict and the gold's provenance; no
  *        database
@@ -179,10 +207,19 @@ export type Grade = (typeof GRADES)[number];
 export const TYPES = ["triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"] as const;
 const KINDS = ["moved", "stated"] as const;
 
-/** One graded label: what it said, the two graders, and the grade kept (one of theirs). */
-export type Item = { id: string; key: string; kind: Label["kind"]; claim: string; now: string; a: Grade; b: Grade; grade: Grade; round: number };
+/** Every candidate, in the registrations' order: the index a recorded membership names. */
+export const ALL: readonly Candidate[] = [...CANDIDATES, ...SECOND, ...THIRD];
+
+/**
+ * One graded label: what it said, the two graders, the grade kept (one of
+ * theirs), and — as recorded when the verdict was read — the candidates whose
+ * registered sample drew it and the candidates whose label set held it.
+ */
+export type Item = { id: string; key: string; kind: Label["kind"]; claim: string; now: string; a: Grade; b: Grade; grade: Grade; round: number; sampled: Candidate[]; pooled: Candidate[] };
 type Round = { generated: string; agreement: { raw: number; kappa: number; adjudicated: number } };
-export type Gold = { items: Item[]; rounds: Round[] };
+/** What the verdict read besides the grades, per candidate (ALL's order): its labels, those on unsuperseded thoughts, and whether it labelled the measured case. */
+export type Recorded = { generated: string; labels: number[]; fresh: number[]; measured: boolean[] };
+export type Gold = { items: Item[]; rounds: Round[]; recorded: Recorded | null };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -193,8 +230,9 @@ const labelKey = (id: string, l: Label) => itemKey(id, { key: l.key, kind: l.kin
 /** The committed gold; a missing file or a malformed entry is an Error naming the file. */
 export function readGold(path = GOLD_PATH): Gold {
   if (!existsSync(path)) throw new Error(`${path}: the gold is missing`);
-  const raw = JSON.parse(readFileSync(path, "utf8")) as { version?: unknown; items?: unknown; rounds?: unknown };
-  if (raw.version !== 1 || !Array.isArray(raw.items) || !Array.isArray(raw.rounds)) throw new Error(`${path}: not a version-1 gold file`);
+  let raw: { version?: unknown; items?: unknown; rounds?: unknown; recorded?: unknown };
+  try { raw = JSON.parse(readFileSync(path, "utf8")); } catch (e) { throw new Error(`${path}: not JSON (${(e as Error).message})`); }
+  if (raw === null || typeof raw !== "object" || raw.version !== 1 || !Array.isArray(raw.items) || !Array.isArray(raw.rounds)) throw new Error(`${path}: not a version-1 gold file`);
   const idx = <T>(list: readonly T[], v: unknown, what: string): T => {
     if (typeof v !== "number" || !Number.isInteger(v) || list[v] === undefined) throw new Error(`${path}: bad ${what}: ${String(v)}`);
     return list[v];
@@ -204,16 +242,35 @@ export function readGold(path = GOLD_PATH): Gold {
     if (typeof r?.generated !== "string" || !ag || typeof ag.raw !== "number" || typeof ag.kappa !== "number" || typeof ag.adjudicated !== "number") throw new Error(`${path}: round ${i + 1} lacks generated or agreement`);
     return { generated: r.generated, agreement: { raw: ag.raw, kappa: ag.kappa, adjudicated: ag.adjudicated } };
   });
+  const members = (v: unknown, what: string): Candidate[] => {
+    if (v === undefined) return [];
+    if (!Array.isArray(v)) throw new Error(`${path}: ${what} must be a list of candidate indices`);
+    return v.map((x) => idx(ALL, x, what));
+  };
   const items = raw.items.map((e: Record<string, unknown>) => {
+    if (e === null || typeof e !== "object") throw new Error(`${path}: an item is not an object`);
     if (typeof e.id !== "string" || !UUID_RE.test(e.id) || typeof e.issue !== "number" || !Number.isInteger(e.issue) || e.issue <= 0) throw new Error(`${path}: bad item ${JSON.stringify(e)}`);
     const round = e.round;
     if (typeof round !== "number" || !Number.isInteger(round) || round < 1 || round > rounds.length) throw new Error(`${path}: item ${e.id} names no round`);
     return {
       id: e.id, key: `${TEAM}-${e.issue}`, kind: idx(KINDS, e.kind, "kind"), claim: idx(TYPES, e.claim, "claim"), now: idx(TYPES, e.now, "now"),
       a: idx(GRADES, e.a, "grade a"), b: idx(GRADES, e.b, "grade b"), grade: idx(GRADES, e.grade, "grade"), round,
+      sampled: members(e.sampled, "sampled"), pooled: members(e.pooled, "pooled"),
     };
   });
-  return { items, rounds };
+  let recorded: Recorded | null = null;
+  if (raw.recorded !== undefined) {
+    const r = raw.recorded as { generated?: unknown; labels?: unknown; fresh?: unknown; measured?: unknown };
+    const counts = (v: unknown, what: string) => {
+      if (!Array.isArray(v) || v.length !== ALL.length || !v.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0)) throw new Error(`${path}: recorded.${what} must hold ${ALL.length} counts`);
+      return v as number[];
+    };
+    if (typeof r?.generated !== "string") throw new Error(`${path}: recorded lacks generated`);
+    const measured = counts(r.measured, "measured");
+    if (!measured.every((x) => x === 0 || x === 1)) throw new Error(`${path}: recorded.measured holds 0 or 1 per candidate`);
+    recorded = { generated: r.generated, labels: counts(r.labels, "labels"), fresh: counts(r.fresh, "fresh"), measured: measured.map((x) => x === 1) };
+  }
+  return { items, rounds, recorded };
 }
 
 /** Cohen's kappa of two graders' grades over the same items: (observed − expected) / (1 − expected). */
@@ -244,8 +301,10 @@ export function sampleOf(labelled: readonly { id: string; label: Label }[], n = 
   return keys.sort((a, b) => fnv1a(salt + a) - fnv1a(salt + b) || (a < b ? -1 : a > b ? 1 : 0)).slice(0, n);
 }
 
-export type Tally = { candidate: Candidate; labels: number; sampled: number; graded: number; wrong: number; useful: number; measured: boolean };
-export type Verdict = { candidate: Candidate; ok: boolean; why: string[]; estimate: number };
+/** A candidate's counts: labels (every lifecycle-less thought), fresh (those nothing supersedes, the sample's population), its sample and the grades in it. */
+export type Tally = { candidate: Candidate; labels: number; fresh: number; sampled: number; graded: number; wrong: number; useful: number; measured: boolean };
+/** `estimate` is the registered one (labels × the sampled useful share); `estimateFresh` the same over the sample's own population, reported beside it. */
+export type Verdict = { candidate: Candidate; ok: boolean; why: string[]; estimate: number; estimateFresh: number };
 
 /** Each candidate against conditions 1(a)–(c), with its estimated useful labels. */
 export function judge(t: Tally): Verdict {
@@ -254,7 +313,8 @@ export function judge(t: Tally): Verdict {
   if (t.graded < t.sampled) why.push(`(b) ${t.sampled - t.graded} of ${t.sampled} sampled labels ungraded`);
   else if (t.graded === 0 || (t.graded - t.wrong) / t.graded < PRECISION_MIN) why.push(`(b) precision ${t.graded ? ((t.graded - t.wrong) / t.graded).toFixed(3) : "n/a"} < ${PRECISION_MIN}`);
   if (t.graded > 0 && t.useful / t.graded < USEFUL_MIN) why.push(`(c) useful share ${(t.useful / t.graded).toFixed(3)} < ${USEFUL_MIN}`);
-  return { candidate: t.candidate, ok: why.length === 0, why, estimate: t.graded ? t.labels * (t.useful / t.graded) : 0 };
+  const share = t.graded ? t.useful / t.graded : 0;
+  return { candidate: t.candidate, ok: why.length === 0, why, estimate: t.labels * share, estimateFresh: t.fresh * share };
 }
 
 /** The salts of the second and third registrations' held-out samples, and the rounds whose items both leave out. */
@@ -283,6 +343,70 @@ export function pick(verdicts: readonly Verdict[]): Candidate | null {
   return stated && stated.estimate >= moved.estimate * (1 + STATED_MARGIN) ? stated.candidate : moved.candidate;
 }
 
+export type Pooled = { graded: number; wrong: number };
+export type Decision = {
+  first: { t: Tally; v: Verdict }[]; firstPick: Candidate | null;
+  second: { t: Tally; v: Verdict }[]; third: { t: Tally; v: Verdict }[]; chosen: Candidate | null;
+  pooled: ReadonlyMap<Candidate, Pooled>;
+};
+
+/** The three registrations' verdicts from each candidate's tally and pooled grades; the chosen one is the third's. */
+export function decide(tallyOf: (c: Candidate) => Tally, pooledOf: (c: Candidate) => Pooled): Decision {
+  const first = CANDIDATES.map((c) => { const t = tallyOf(c); return { t, v: judge(t) }; });
+  const held = (cs: readonly Candidate[]) => cs.map((c) => { const t = tallyOf(c); return { t, v: judgeSecond(t, pooledOf(c)) }; });
+  const third = held(THIRD);
+  return {
+    first, firstPick: pick(first.map((x) => x.v)), second: held(SECOND), third,
+    chosen: third.find((x) => x.v.ok)?.t.candidate ?? null, pooled: new Map(ALL.map((c) => [c, pooledOf(c)])),
+  };
+}
+
+/** The decision the gold records: each candidate's sample and pooled set as recorded, its counts from `recorded`. Null when the gold records none. */
+export function recordedDecision(gold: Gold): Decision | null {
+  const rec = gold.recorded;
+  if (!rec) return null;
+  const at = (c: Candidate) => ALL.indexOf(c);
+  return decide(
+    (c) => {
+      const s = gold.items.filter((it) => it.sampled.includes(c));
+      return { candidate: c, labels: rec.labels[at(c)], fresh: rec.fresh[at(c)], sampled: s.length, graded: s.length, wrong: s.filter((x) => x.grade === "wrong").length, useful: s.filter((x) => x.grade === "useful").length, measured: rec.measured[at(c)] };
+    },
+    (c) => { const p = gold.items.filter((it) => it.pooled.includes(c)); return { graded: p.length, wrong: p.filter((x) => x.grade === "wrong").length }; },
+  );
+}
+
+/** The decision's tables, as the README carries them. */
+function printDecision(d: Decision, listWrong: (c: Candidate) => string[]) {
+  const pct = (n: number, of: number) => (of ? (n / of).toFixed(3) : "—");
+  const row = ({ t, v }: { t: Tally; v: Verdict }, held: boolean) => {
+    const p = d.pooled.get(t.candidate)!;
+    return `| ${t.candidate} | ${t.measured ? "yes" : "no"} | ${t.sampled} | ${t.graded} | ${t.wrong} | ${t.useful} | ${pct(t.graded - t.wrong, t.graded)} | ${pct(t.useful, t.graded)} | ${held ? `${p.graded} | ${p.wrong} | ` : ""}${v.estimate.toFixed(0)} | ${v.estimateFresh.toFixed(0)} | ${v.ok ? "yes" : `no — ${v.why.join("; ")}`} |`;
+  };
+  console.log("\n## The first registration\n");
+  console.log("| candidate | (a) measured | sampled | graded | wrong | useful | precision | useful share | est. useful labels | est. (unsuperseded) | qualifies |");
+  console.log("|---|---|---|---|---|---|---|---|---|---|---|");
+  for (const x of d.first) console.log(row(x, false));
+  console.log("\n| candidate | graded among all its labels | wrong | precision |");
+  console.log("|---|---|---|---|");
+  for (const c of ALL) {
+    const p = d.pooled.get(c)!;
+    console.log(`| ${c} | ${p.graded} | ${p.wrong} | ${pct(p.graded - p.wrong, p.graded)} |`);
+    for (const w of listWrong(c)) console.log(`  wrong: ${w}`);
+  }
+  const fp = d.firstPick;
+  console.log(`\nThe first registration's pick: ${fp ? `${fp} (pooled precision ${pct(d.pooled.get(fp)!.graded - d.pooled.get(fp)!.wrong, d.pooled.get(fp)!.graded)})` : "none"}`);
+  const heldHead = "| candidate | (a) measured | held-out sampled | graded | wrong | useful | precision | useful share | pooled graded | pooled wrong | est. useful labels | est. (unsuperseded) | qualifies |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+  console.log(`\n## The second registration (held-out sample, lag ${LAG_MS / 60000} min)\n\n${heldHead}`);
+  for (const x of d.second) console.log(row(x, true));
+  console.log("\nClosed: its pooled precision failed before its held-out sample was graded, so the sample is not.");
+  console.log(`\n## The third registration (held-out sample, settled within ${LAG_MS / 60000} min)\n\n${heldHead}`);
+  for (const x of d.third) console.log(row(x, true));
+  console.log(`\nChosen: ${d.chosen ?? "none — the label does not ship as specified"}`);
+}
+
+/** What `--record` writes: per graded item key, the samples that drew it and the label sets that held it; per candidate, its counts. */
+export type Record_ = { generated: string; sampled: Record<string, number[]>; pooled: Record<string, number[]>; labels: number[]; fresh: number[]; measured: number[] };
+
 // ── The measurement ──────────────────────────────────────────────────────────
 
 type Row = { id: string; content: string; stored: number; supersedes: string | null; lifecycle: boolean; superseded: boolean };
@@ -294,8 +418,8 @@ const EXCERPT = 300;
 function excerpt(content: string, keys: ReadonlySet<string>): string {
   const spans: [number, number][] = [[0, Math.min(content.length, EXCERPT)]];
   for (const m of mentionsOf(content)) if (keys.has(m.key)) spans.push([Math.max(0, m.start - EXCERPT), Math.min(content.length, m.end + EXCERPT)]);
-  const session = /^Session [0-9a-f-]{36}, .*$/m.exec(content);
-  if (session) spans.push([session.index, session.index + session[0].length]);
+  const session = [...content.matchAll(/^Session [0-9a-f-]{36}, .*$/gm)].at(-1);
+  if (session) spans.push([session.index!, session.index! + session[0].length]);
   spans.sort((a, b) => a[0] - b[0]);
   const merged: [number, number][] = [];
   for (const s of spans) { const last = merged.at(-1); if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]); else merged.push([...s]); }
@@ -305,7 +429,7 @@ const claimText = (l: Label) => l.kind === "moved"
   ? `When this thought's content was written, ${l.key} was ${l.claim.name}; it is now ${l.now.name}.`
   : `This thought states ${l.key} is ${l.claim.name}; it is now ${l.now.name}.`;
 
-async function measure(url: string, dumpPath: string | undefined) {
+async function measure(url: string, dumpPath: string | undefined, recordPath: string | undefined) {
   // A startup parameter, so it holds on every connection the pool opens.
   const sql = new SQL({ url, max: 1, connection: { default_transaction_read_only: "on" } });
 
@@ -320,13 +444,16 @@ async function measure(url: string, dumpPath: string | undefined) {
   }
   if (vocabulary.has("canceled")) vocabulary.set("cancelled", "canceled");
 
+  // The log's order is 060's one copy of it (ob1_thought_events_in_order: by
+  // seq since 050, by (created_at, seq) before), kept through WITH ORDINALITY;
+  // statusAt reads the last event in that order at or before a time.
   const timelines = new Map<string, Change[]>();
   for (const e of await sql`
       SELECT x.md->>'issue' AS issue, (extract(epoch FROM a.created_at) * 1000)::float8 AS at, x.md->>'status' AS status, x.md->>'status_type' AS type
-        FROM thought_audit a
+        FROM ob1_thought_events_in_order(NULL) WITH ORDINALITY AS a
         CROSS JOIN LATERAL (SELECT coalesce(a.diff #> '{metadata,after}', CASE WHEN a.action = 'capture' THEN a.diff -> 'metadata' END) AS md) x
        WHERE a.action IN ('capture', 'update') AND a.diff ? 'metadata' AND x.md ? 'issue' AND x.md ? 'status' AND x.md ? 'status_type'
-       ORDER BY a.created_at, a.seq`) {
+       ORDER BY a.ordinality`) {
     if (!known.has(e.type)) continue;
     const list = timelines.get(e.issue) ?? [];
     list.push({ at: Number(e.at), name: e.status, type: e.type });
@@ -348,7 +475,6 @@ async function measure(url: string, dumpPath: string | undefined) {
   // Every candidate over every row. The guard is the caller's: a row with a
   // lifecycle is skipped, and what the candidate would have said of it is only
   // counted, to show the guard's reach.
-  const ALL: readonly Candidate[] = [...CANDIDATES, ...SECOND, ...THIRD];
   const per = new Map<Candidate, { id: string; label: Label; row: Row }[]>(ALL.map((c) => [c, []]));
   const lifecycleWouldLabel = new Map<Candidate, number>(ALL.map((c) => [c, 0]));
   const noHistory = new Map<Candidate, number>(ALL.map((c) => [c, 0]));
@@ -377,15 +503,15 @@ async function measure(url: string, dumpPath: string | undefined) {
     const counts = [...byThought.values()].sort((a, b) => a - b);
     const p90 = counts.length ? counts[Math.min(counts.length - 1, Math.floor(counts.length * 0.9))] : 0;
     const summ = ls.filter((x) => isSummary(x.row.content)).length;
-    console.log(`| ${c} | ${byThought.size} | ${ls.length} | ${summ} | ${ls.length - summ} | ${ls.filter((x) => x.row.superseded).length} | ${counts.at(-1) ?? 0} (${p90}) | ${c.startsWith("moved-") ? noHistory.get(c) : "—"} | ${lifecycleWouldLabel.get(c)} |`);
+    console.log(`| ${c} | ${byThought.size} | ${ls.length} | ${summ} | ${ls.length - summ} | ${ls.filter((x) => x.row.superseded).length} | ${counts.at(-1) ?? 0} (${p90}) | ${c.startsWith("moved-") && c !== "moved-session-stated" ? noHistory.get(c) : "—"} | ${lifecycleWouldLabel.get(c)} |`);
   }
 
-  // The sample, and what the gold says of it.
-  let gold: Gold = { items: [], rounds: [] };
+  // The live samples, and what the gold says of them.
+  let gold: Gold = { items: [], rounds: [], recorded: null };
   try { gold = readGold(); } catch (e) { console.log(`\n(no gold yet: ${(e as Error).message})`); }
   const graded = new Map(gold.items.map((it) => [itemKey(it.id, it), it]));
   const firstGraded = new Set(gold.items.filter((it) => it.round <= FIRST_ROUNDS).map((it) => itemKey(it.id, it)));
-  const tallies: Tally[] = [];
+  const live = new Map<Candidate, { tally: Tally; sample: string[]; keys: Set<string> }>();
   const toGrade = new Map<string, { id: string; label: Label; row: Row }>();
   for (const c of ALL) {
     const ls = per.get(c)!;
@@ -398,54 +524,58 @@ async function measure(url: string, dumpPath: string | undefined) {
     if (!isSecond) for (const k of sample) if (!graded.has(k)) toGrade.set(k, byKey.get(k)!);
     const g = sample.map((k) => graded.get(k)).filter((x): x is Item => x !== undefined);
     const measured = ls.some((x) => x.id === MEASURED && x.label.key === MEASURED_KEY && x.label.claim.type === "started" && x.label.now.type === "completed");
-    tallies.push({ candidate: c, labels: ls.length, sampled: sample.length, graded: g.length, wrong: g.filter((x) => x.grade === "wrong").length, useful: g.filter((x) => x.grade === "useful").length, measured });
+    live.set(c, {
+      tally: { candidate: c, labels: ls.length, fresh: fresh.length, sampled: sample.length, graded: g.length, wrong: g.filter((x) => x.grade === "wrong").length, useful: g.filter((x) => x.grade === "useful").length, measured },
+      sample: isSecond ? [] : sample, keys: new Set(ls.map((x) => labelKey(x.id, x.label))),
+    });
   }
-
-  console.log("\n## The first registration\n");
-  console.log("| candidate | (a) measured | sampled | graded | wrong | useful | precision | useful share | est. useful labels | qualifies |");
-  console.log("|---|---|---|---|---|---|---|---|---|---|");
-  const first = tallies.filter((t) => (CANDIDATES as readonly Candidate[]).includes(t.candidate));
-  const verdicts = first.map(judge);
-  for (const [i, t] of first.entries()) {
-    const v = verdicts[i];
-    console.log(`| ${t.candidate} | ${t.measured ? "yes" : "no"} | ${t.sampled} | ${t.graded} | ${t.wrong} | ${t.useful} | ${t.graded ? ((t.graded - t.wrong) / t.graded).toFixed(3) : "—"} | ${t.graded ? (t.useful / t.graded).toFixed(3) : "—"} | ${v.estimate.toFixed(0)} | ${v.ok ? "yes" : `no — ${v.why.join("; ")}`} |`);
-  }
-  // Every graded label a candidate produces, its own sample or another's: a
-  // wider read of its precision than its SAMPLE alone (reported, not decided on).
-  console.log("\n| candidate | graded among all its labels | wrong | precision |");
-  console.log("|---|---|---|---|");
-  const pooled = new Map<Candidate, { graded: number; wrong: number }>();
-  for (const c of ALL) {
-    const g = per.get(c)!.map((x) => graded.get(labelKey(x.id, x.label))).filter((x): x is Item => x !== undefined);
-    const w = g.filter((x) => x.grade === "wrong");
-    pooled.set(c, { graded: g.length, wrong: w.length });
-    console.log(`| ${c} | ${g.length} | ${w.length} | ${g.length ? ((g.length - w.length) / g.length).toFixed(3) : "—"} |`);
-    if (process.argv.includes("--list-wrong")) for (const x of w) console.log(`  wrong: ${x.id.slice(0, 8)} ${x.key} ${x.kind} ${x.claim} → ${x.now}`);
-  }
-  const chosen = pick(verdicts);
-  const pooledOf = (c: Candidate) => { const p = pooled.get(c)!; return p.graded ? ((p.graded - p.wrong) / p.graded).toFixed(3) : "n/a"; };
-  console.log(`\nThe first registration's pick: ${chosen ? `${chosen} (pooled precision ${pooledOf(chosen)})` : "none"}`);
-
-  console.log(`\n## The second registration (held-out sample, lag ${LAG_MS / 60000} min)\n`);
-  console.log("| candidate | (a) measured | held-out sampled | graded | wrong | useful | precision | useful share | pooled graded | pooled wrong | est. useful labels | qualifies |");
-  console.log("|---|---|---|---|---|---|---|---|---|---|---|---|");
-  const heldOut = (cs: readonly Candidate[]) => {
-    const rows = tallies.filter((t) => cs.includes(t.candidate)).map((t) => ({ t, v: judgeSecond(t, pooled.get(t.candidate)!) }));
-    for (const { t, v } of rows) {
-      const p = pooled.get(t.candidate)!;
-      console.log(`| ${t.candidate} | ${t.measured ? "yes" : "no"} | ${t.sampled} | ${t.graded} | ${t.wrong} | ${t.useful} | ${t.graded ? ((t.graded - t.wrong) / t.graded).toFixed(3) : "—"} | ${t.graded ? (t.useful / t.graded).toFixed(3) : "—"} | ${p.graded} | ${p.wrong} | ${v.estimate.toFixed(0)} | ${v.ok ? "yes" : `no — ${v.why.join("; ")}`} |`);
-    }
-    return rows.find((x) => x.v.ok)?.t.candidate ?? null;
+  const livePooled = (c: Candidate): Pooled => {
+    const g = [...live.get(c)!.keys].map((k) => graded.get(k)).filter((x): x is Item => x !== undefined);
+    return { graded: g.length, wrong: g.filter((x) => x.grade === "wrong").length };
   };
-  heldOut(SECOND);
-  console.log("\nClosed: its pooled precision fails whatever its held-out sample says, so the sample is not graded.");
-  console.log(`\n## The third registration (held-out sample, settled within ${LAG_MS / 60000} min)\n`);
-  console.log("| candidate | (a) measured | held-out sampled | graded | wrong | useful | precision | useful share | pooled graded | pooled wrong | est. useful labels | qualifies |");
-  console.log("|---|---|---|---|---|---|---|---|---|---|---|---|");
-  const third = heldOut(THIRD);
-  console.log(`\nChosen: ${third ?? "none — the label does not ship as specified"}`);
+  const wrongOf = (c: Candidate, inSet: (it: Item) => boolean) => process.argv.includes("--list-wrong")
+    ? gold.items.filter((it) => inSet(it) && it.grade === "wrong").map((x) => `${x.id.slice(0, 8)} ${x.key} ${x.kind} ${x.claim} → ${x.now}`) : [];
+
+  // The verdict is the gold's: what it recorded when the verdict was read. A
+  // live run says how far the brain has moved from that record, and never
+  // turns drift into a verdict.
+  const rec = recordedDecision(gold);
+  if (rec) {
+    console.log(`\nThe verdict as recorded on ${gold.recorded!.generated} (from the gold; a live run does not re-decide it):`);
+    printDecision(rec, (c) => wrongOf(c, (it) => it.pooled.includes(c)));
+    console.log("\n## Drift since the record\n");
+    console.log("| candidate | labels (recorded → live) | sample items not in the record | recorded sample items gone | pooled (recorded → live) | measured |");
+    console.log("|---|---|---|---|---|---|");
+    let drift = 0;
+    for (const c of ALL) {
+      const l = live.get(c)!, i = ALL.indexOf(c);
+      const recSample = new Set(gold.items.filter((it) => it.sampled.includes(c)).map((it) => itemKey(it.id, it)));
+      const added = l.sample.filter((k) => !recSample.has(k)).length, gone = [...recSample].filter((k) => !l.sample.includes(k)).length;
+      const rp = rec.pooled.get(c)!, lp = livePooled(c);
+      drift += added + gone + Math.abs(lp.graded - rp.graded);
+      console.log(`| ${c} | ${gold.recorded!.labels[i]} → ${l.tally.labels} | ${added} | ${gone} | ${rp.graded - rp.wrong}/${rp.graded} → ${lp.graded - lp.wrong}/${lp.graded} | ${gold.recorded!.measured[i] ? "yes" : "no"} → ${l.tally.measured ? "yes" : "no"} |`);
+    }
+    console.log(drift ? "\nThe brain has moved since the record: grade what --dump-ungraded writes and re-record before deciding again." : "\nThe live run matches the record.");
+  } else {
+    console.log("\n(the gold records no verdict yet: deciding from the live samples)");
+    printDecision(decide((c) => live.get(c)!.tally, livePooled), (c) => wrongOf(c, (it) => live.get(c)!.keys.has(itemKey(it.id, it))));
+  }
   if (gold.rounds.length) for (const [i, r] of gold.rounds.entries()) console.log(`Round ${i + 1} (${r.generated}): raw agreement ${r.agreement.raw.toFixed(3)}, kappa ${r.agreement.kappa.toFixed(3)}, ${r.agreement.adjudicated} adjudicated`);
-  console.log(`Ungraded sampled labels: ${toGrade.size}`);
+  console.log(`Ungraded live sample labels: ${toGrade.size}`);
+
+  if (recordPath) {
+    // What the verdict reads, for the gold: refused while any sampled label is ungraded.
+    if (toGrade.size) { console.error(`--record: ${toGrade.size} sampled labels are ungraded; grade them first`); process.exit(1); }
+    const out: Record_ = { generated: new Date().toISOString().slice(0, 10), sampled: {}, pooled: {}, labels: [], fresh: [], measured: [] };
+    for (const c of ALL) {
+      const l = live.get(c)!, i = ALL.indexOf(c);
+      for (const k of l.sample) (out.sampled[k] ??= []).push(i);
+      for (const k of l.keys) if (graded.has(k)) (out.pooled[k] ??= []).push(i);
+      out.labels.push(l.tally.labels); out.fresh.push(l.tally.fresh); out.measured.push(l.tally.measured ? 1 : 0);
+    }
+    writeFileSync(recordPath, JSON.stringify(out, null, 1));
+    console.log(`Wrote the record to ${recordPath}`);
+  }
 
   if (dumpPath) {
     // One entry per thought, its labels numbered; the grader sees no candidate.
@@ -500,6 +630,8 @@ function selfCheck() {
   // Status at a time; the stated status.
   const tl: Change[] = [{ at: 100, name: "Backlog", type: "backlog" }, { at: 200, name: "In Progress", type: "started" }, { at: 300, name: "Done", type: "completed" }];
   ok(statusAt(tl, 99) === undefined && statusAt(tl, 100)?.name === "Backlog" && statusAt(tl, 250)?.type === "started" && statusAt(tl, 9e9)?.type === "completed", "statusAt: undefined before the first change, the last at or before t after");
+  const inverted: Change[] = [{ at: 100, name: "Backlog", type: "backlog" }, { at: 300, name: "Done", type: "completed" }, { at: 200, name: "In Progress", type: "started" }];
+  ok(statusAt(inverted, 250)?.name === "In Progress" && statusAt(inverted, 400)?.name === "In Progress", "statusAt reads the log's order, not time order: a later event whose clock is earlier still wins (060's rule), and no early stop skips it");
   const vocab = new Map([["backlog", "backlog"], ["in progress", "started"], ["done", "completed"], ["canceled", "canceled"], ["cancelled", "canceled"]]);
   ok(statedAfter(dd, dd.indexOf("2306 is") + 4, vocab)?.type === "started", "statedAfter: `2306 is in progress` states started");
   ok(statedAfter(dd, dd.indexOf("2306;") + 4, vocab) === undefined, "statedAfter: a clause end stops the window");
@@ -526,8 +658,10 @@ function selfCheck() {
   ok(has2306(labelsOf("moved-session-stated", real(sess("2026-10-03 03:02"), stored10_08))), "moved-session-stated keeps SMD-2306: its bare repeat is followed by a stated status");
   ok(!labelsOf("moved-session-stated", real(sess("2026-10-03 03:02"), stored10_08)).some((l) => l.key === "SMD-2287") && labelsOf("moved-stored", rd(dd, 500)).every((l) => l.key !== "SMD-2287"), "moved-session-stated drops a ticket the text says nothing of; an unmoved ticket is never labelled");
   ok(has2306(labelsOf("stated-lists", rd(dd, 0))) && !has2306(labelsOf("stated-keys", rd(dd, 0))), "stated-lists reads the bare 2306's in progress; stated-keys, keys alone, cannot");
-  ok(labelsOf("moved-stored", rd(dd, 50)).length === 0, "no history at the written time: no label (SMD-2382's first event is later)");
+  ok(labelsOf("moved-stored", rd(dd, 50)).length === 0, "no history at the written time: no label (every ticket's first event is later than 50)");
   ok(labelsOf("stated-keys", rd("SMD-2306 is done; SMD-2287 is in progress", 0)).length === 0, "stated statuses that match now carry no label (the drop-the-comparison mutant labels both)");
+  const twice = labelsOf("stated-keys", rd("SMD-2306 is backlog. SMD-2306 is in progress", 0));
+  ok(twice.length === 1 && twice[0].claim.type === "backlog", "stated-*: one label per ticket, the first contradicting mention's");
   const quoted = "It says SMD-2286 is In Progress. In fact it is not.";
   ok(labelsOf("stated-keys", rd(quoted, 0)).map((l) => l.key).join() === "SMD-2286", "the reported-speech trap, by construction: stated-* reads `It says SMD-2286 is In Progress` as the thought's own claim (the gold grades it wrong)");
 
@@ -537,13 +671,16 @@ function selfCheck() {
   const many = Array.from({ length: 50 }, (_, i) => ({ id: "00000000-0000-4000-8000-0000000000" + String(i).padStart(2, "0"), label: lbl("SMD-1") }));
   const s1 = sampleOf(many), s2 = sampleOf([...many].reverse());
   ok(s1.length === SAMPLE && s1.join() === s2.join(), "sampleOf: SAMPLE items, the same whatever the input order");
-  const t = (c: Candidate, over: Partial<Tally>): Tally => ({ candidate: c, labels: 100, sampled: 30, graded: 30, wrong: 0, useful: 20, measured: true, ...over });
+  const t = (c: Candidate, over: Partial<Tally>): Tally => ({ candidate: c, labels: 100, fresh: 50, sampled: 30, graded: 30, wrong: 0, useful: 20, measured: true, ...over });
   ok(judge(t("moved-session", {})).ok && judge(t("moved-session", { wrong: 1 })).ok && !judge(t("moved-session", { wrong: 2 })).ok, "(b): 29/30 qualifies (0.967), 28/30 does not (0.933)");
   ok(!judge(t("moved-session", { graded: 29 })).ok && !judge(t("moved-session", { measured: false })).ok, "(b) every sampled label graded; (a) the measured case");
   ok(judge(t("moved-session", { useful: 15 })).ok && !judge(t("moved-session", { useful: 14 })).ok, "(c): half the graded labels useful qualifies, under half does not");
+  ok(judge(t("moved-session", { sampled: 20, graded: 20, wrong: 1, useful: 10 })).ok, "(b) at the line: 19 of 20 (0.950) qualifies");
   ok(Math.abs(judge(t("moved-session", { labels: 90, useful: 20 })).estimate - 60) < 1e-9, "the estimate: labels × useful share");
   const vs = (xs: [Candidate, number][]) => xs.map(([c, labels]) => judge(t(c, { labels })));
   ok(pick(vs([["moved-session", 100], ["stated-lists", 119]])) === "moved-session" && pick(vs([["moved-session", 100], ["stated-lists", 120]])) === "stated-lists", "pick: a stated-* candidate needs STATED_MARGIN over the best moved-*");
+  const whole = (xs: [Candidate, number][]) => xs.map(([c, labels]) => judge(t(c, { labels, useful: 30 })));
+  ok(pick(whole([["moved-session", 100], ["stated-lists", 120]])) === "stated-lists" && pick(whole([["moved-session", 100], ["stated-lists", 119]])) === "moved-session", "pick: exactly STATED_MARGIN over is enough, on estimates with no rounding (useful share 1)");
   ok(pick(vs([["moved-chain", 100], ["moved-session", 100]])) === "moved-chain" && pick(vs([["moved-chain", 100], ["moved-session", 101]])) === "moved-session", "pick: the most estimated useful labels; a tie keeps the earlier");
   ok(pick([judge(t("moved-session", { measured: false }))]) === null && pick([judge(t("stated-keys", {}))]) === "stated-keys", "pick: none qualifying is null; a stated-* alone qualifying is chosen");
   // The second registration.
@@ -557,14 +694,22 @@ function selfCheck() {
   const mid = (content: string): Reading => ({ ...rd(content, stored10_08), timeline: (k) => tlsMid.get(k) ?? [] });
   const midLabel = labelsOf("moved-session-settled", mid(sess("2026-10-02 21:59"))).find((l) => l.key === "SMD-2306");
   ok(midLabel?.claim.type === "backlog" && labelsOf("moved-session-lag", mid(sess("2026-10-02 21:59"))).find((l) => l.key === "SMD-2306")?.claim.type === "started", "a move within the hour to a status that is not the current one: settled keeps the written time's Backlog, lag would claim the later In Progress");
+  ok(sampleOf(many, SAMPLE, HELD_OUT_SALT_3).join() !== s1.join() && sampleOf(many, SAMPLE, HELD_OUT_SALT_3).join() !== sampleOf(many, SAMPLE, HELD_OUT_SALT).join(), "each salt orders the sample its own way, with nothing excluded");
+  // A ticket whose status NAME changed within the hour but whose type is already the current one is settled.
+  const tlsType = new Map<string, Change[]>([["SMD-2306", [{ at: T("2026-10-01T12:00:00Z"), name: "Backlog", type: "backlog" }, { at: T("2026-10-03T03:30:00Z"), name: "In Review", type: "started" }]]]);
+  const headsType = new Map<string, Status>([["SMD-2306", { name: "In Progress", type: "started" }]]);
+  const typed = (content: string): Reading => ({ ...rd(content, stored10_08), head: (k) => headsType.get(k), timeline: (k) => tlsType.get(k) ?? [] });
+  ok(labelsOf("moved-session-settled", typed(sess("2026-10-03 03:02"))).length === 0 && labelsOf("moved-session", typed(sess("2026-10-03 03:02"))).length === 1, "moved-session-settled compares status types: In Review within the hour already holds In Progress's type — no label");
   const excl = new Set(s1.slice(0, 5));
   const h1 = sampleOf(many, SAMPLE, HELD_OUT_SALT, excl);
   ok(h1.length === SAMPLE && h1.every((k) => !excl.has(k)) && h1.join() !== s1.join(), "the held-out sample: another hash order, none of the excluded items");
+  ok(!judgeSecond(t("moved-session-lag", {}), { graded: 0, wrong: 0 }).ok, "judgeSecond: nothing pooled is no evidence");
   ok(judgeSecond(t("moved-session-lag", {}), { graded: 60, wrong: 3 }).ok && !judgeSecond(t("moved-session-lag", {}), { graded: 60, wrong: 4 }).ok && !judgeSecond(t("moved-session-lag", { wrong: 2 }), { graded: 60, wrong: 2 }).ok, "judgeSecond: pooled 57/60 qualifies, 56/60 does not; the held-out (b) still applies");
   ok(kappa([["useful", "useful"], ["noise", "noise"]]).kappa === 1 && kappa([]).n === 0, "kappa: perfect agreement is 1; no items is none");
 
   // The gold.
   ok(throws(() => readGold(join(HERE, "fixtures", "no-such-gold.json"))), "readGold refuses a missing file");
+  ok(existsSync(GOLD_PATH), "the gold is committed");
   if (existsSync(GOLD_PATH)) {
     const g = readGold();
     ok(g.items.every((it) => it.grade === it.a || it.grade === it.b), "every kept grade is one grader's — adjudication picks, it does not invent");
@@ -580,7 +725,16 @@ function selfCheck() {
       ok(Math.abs(r.agreement.raw - k.raw) < 1e-9 && Math.abs(r.agreement.kappa - k.kappa) < 1e-9 && r.agreement.adjudicated === its.filter((it) => it.a !== it.b).length,
         `round ${i + 1}: the recorded agreement is the graders' own (${its.length} items, raw ${k.raw.toFixed(3)}, kappa ${k.kappa.toFixed(3)})`);
     }
-  } else console.log("(no gold committed yet)");
+    // The recorded verdict, from the gold alone: what the README and the header report.
+    const d = recordedDecision(g);
+    const row = (xs: { t: Tally }[], c: Candidate) => xs.find((x) => x.t.candidate === c)!.t;
+    const third = d && row(d.third, "moved-session-settled"), ms = d && row(d.first, "moved-session");
+    ok(d !== null && d.chosen === "moved-session-settled" && d.firstPick === "moved-session" && !d.second[0].v.ok, "the recorded verdict: the third registration chooses moved-session-settled; the first picked moved-session; the second is closed");
+    ok(third !== null && third.sampled === 30 && third.wrong === 1 && third.useful === 21 && d!.pooled.get("moved-session-settled")!.graded === 84 && d!.pooled.get("moved-session-settled")!.wrong === 2 && third.labels === 742,
+      "the recorded numbers: held out 1 of 30 wrong, 21 useful; pooled 2 of 84 wrong; 742 labels");
+    ok(ms !== null && ms.wrong === 0 && d!.pooled.get("moved-session")!.wrong === 8 && d!.pooled.get("moved-session")!.graded === 98, "the first pick's own sample was clean (0 of 30) and its pooled precision was not (8 of 98 wrong)");
+    ok(g.items.every((it) => it.sampled.every((c) => c !== "moved-session-lag")), "the second registration's sample is recorded as never graded");
+  }
 
   if (failed) { console.error(`self-check: ${failed} FAILED`); process.exit(1); }
   console.log("self-check: OK");
@@ -591,14 +745,16 @@ function selfCheck() {
 if (import.meta.main) {
   if (process.argv.includes("--self-check")) selfCheck();
   else {
-    let dump: string | undefined;
-    const i = process.argv.indexOf("--dump-ungraded");
-    if (i > 0) {
-      dump = process.argv[i + 1];
-      if (dump === undefined || dump.startsWith("--")) { console.error("--dump-ungraded needs a file path (outside the repo)"); process.exit(2); }
-    }
+    const pathAfter = (flag: string) => {
+      const i = process.argv.indexOf(flag);
+      if (i < 0) return undefined;
+      const p = process.argv[i + 1];
+      if (p === undefined || p.startsWith("--")) { console.error(`${flag} needs a file path (outside the repo)`); process.exit(2); }
+      return p;
+    };
+    const dump = pathAfter("--dump-ungraded"), record = pathAfter("--record");
     const url = process.env.DATABASE_URL;
     if (!url) { console.error("DATABASE_URL required (from a 0600 env file, never argv) — or --self-check"); process.exit(2); }
-    await measure(url, dump);
+    await measure(url, dump, record);
   }
 }
