@@ -115,8 +115,9 @@ console.log("\n[1] Manifests: the tree's are sound, and a malformed one is refus
   assert(/its output schema transforms/.test(manifestProblems([transformed]).join()), "an output schema that transforms is refused: MCP holds the answer to it again");
   assert(manifestProblems([withOp("crm", "get", { path: "/items/{id}", input: { id: z.string().uuid() }, output: { at: z.string().default("now") } })]).length === 0, "a string path field with a format, and an output default, are sound");
   // Review pass 1 of SMD-2287 PR 4a: what the MCP server, calling the REST core, would answer otherwise than index.ts.
-  const plusOne = withOp("crm", "bump", { method: "POST", input: { n: z.number().transform((x) => x + 1) } });
-  assert(/its input schema transforms/.test(manifestProblems([plusOne]).join()), "an input schema that transforms is refused: parsed by the MCP server and again by the REST core, it would run twice");
+  const plusOne = withOp("crm", "bump", { method: "POST", input: { n: z.number().transform((x) => x + 1), at: z.preprocess((v) => v, z.string()) } });
+  assert(manifestProblems([plusOne]).length === 0, `an input that transforms is sound: the MCP server sends what its client sent, parsed once by the REST core (review pass 2) (${manifestProblems([plusOne]).join()})`);
+  assert(/its input schema cannot be stated as JSON Schema/.test(manifestProblems([withOp("crm", "when", { method: "POST", input: { at: z.date() } })]).join()), "an input JSON Schema cannot state (a date) is refused, as tools/list states it");
   for (const [label, input, want] of [
     ["a nullable number", { n: z.number().nullable().optional() }, /its query field n is not text, a number or a boolean/],
     ["a union", { u: z.union([z.number(), z.string()]) }, /its query field u is not text, a number or a boolean/],

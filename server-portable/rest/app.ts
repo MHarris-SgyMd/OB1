@@ -534,7 +534,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // operation's group, by the rule mayCall applies — tools.ts's unlocks), the
   // input held to its schema, and its answer — a value its output schema
   // holds, a refusal at its status, a fault as FAILED.
-  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/*", async (c) => {
+  // Matched by a parameter that takes a line break too: Hono's `*` does not, so a path field holding one fell to the
+  // 405 that names the very method it was sent with (SMD-2287 PR 4a review pass 2).
+  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/:rest{[\\s\\S]+}", async (c) => {
     const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
     const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
     if (!found) {

@@ -443,6 +443,17 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
         input: { text: z.string() }, output: { pinned: z.string() },
         async handler(_ctx, input) { return pluginOk({ pinned: input.text }); },
       }),
+      // Steps that would not give the same value parsed twice, or refuse their own output (review pass 2).
+      shape: operation({
+        title: "Shape", description: "Echoes what its steps made.", scope: "read", method: "POST", path: "/shape",
+        input: { n: z.preprocess((v) => Number(v) + 1, z.number()), flag: z.stringbool(), word: z.string().overwrite((w) => `${w}!`) }, output: { n: z.number(), flag: z.boolean(), word: z.string() },
+        async handler(_ctx, input) { return pluginOk({ n: input.n, flag: input.flag, word: input.word }); },
+      }),
+      seek: operation({
+        title: "Seek", description: "A GET's steps.", scope: "read", method: "GET", path: "/seek",
+        input: { n: z.preprocess((v) => Number(v) + 1, z.number()), flag: z.stringbool() }, output: { n: z.number(), flag: z.boolean() },
+        async handler(_ctx, input) { return pluginOk({ n: input.n, flag: input.flag }); },
+      }),
     },
   });
   const other = definePlugin({
@@ -476,7 +487,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const listOf = async (key: string) => ((await ask("tools/list", {}, key)).result?.tools ?? []) as Listed[];
   const read = await listOf("read-raw");
   const names = read.map((t) => t.name);
-  assert(same(names, [...names.filter((n) => !n.startsWith("probe_kit_")), "probe_kit_item"]) && names.includes("search"), `a read key: the core's tools, then its plugin operation, as index.ts lists them (${names.slice(-2).join(", ")})`);
+  assert(same(names, [...names.filter((n) => !n.startsWith("probe_kit_")), "probe_kit_item", "probe_kit_shape", "probe_kit_seek"]) && names.includes("search"), `a read key: the core's tools, then its plugin operations in the manifest's order, as index.ts lists them (${names.slice(-3).join(", ")})`);
   const item = read.find((t) => t.name === "probe_kit_item");
   assert(item?.annotations?.readOnlyHint === true && item.outputSchema?.properties !== undefined && "item_id" in item.outputSchema.properties, "…with the manifest's read-only hint and output schema");
   assert(!names.includes("other_kit_look"), "a plugin the REST core runs and this server was not given: no tool here");
@@ -503,6 +514,10 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   got = await callTool("probe_kit_item", { item_id: "boom" });
   // index.ts says a plugin's throw as say.failed of the error it caught.
   assert(thrown && expectReply(got, say.failed(new Error("the plugin's own fault"))), `a throw: the tool's fault as index.ts says it (${got.text.slice(0, 80)})`);
+  for (const [key, args] of [["shape", { n: 1, flag: "yes", word: "a", stray: "an argument the schema does not name" }], ["seek", { n: 1, flag: "true" }]] as const) {
+    got = await callTool(`probe_kit_${key}`, args);
+    assert(expectReply(got, await inProcess(key, args)) && !got.isError, `${key}: a preprocess, a codec and an overwrite run once, as in process; a stray argument dropped as the SDK drops it (${got.text})`);
+  }
   got = await callTool("probe_kit_pin", { text: "hello" }, "write-raw");
   assert(expectReply(got, await inProcess("pin", { text: "hello" }, "write")) && sentPaths.includes("POST /v1/plugins/probe-kit/pins"), `a write: its body sent, its value said (${got.text})`);
   const refusedCall = await ask("tools/call", { name: "probe_kit_pin", arguments: { text: "x" } }, "read-raw");

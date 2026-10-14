@@ -124,6 +124,22 @@ export function pluginOutcomeOf(a: Answer): Outcome {
   return a.ok ? { ok: true, value: a.body } : outcomeOf(a);
 }
 
+/** Each tools/call's arguments as its client sent them, by the request's JSON-RPC id (JSON-written): a body of one message or a batch. */
+export type RawArguments = ReadonlyMap<string, Record<string, unknown>>;
+export function argumentsById(body: string | null): RawArguments {
+  const out = new Map<string, Record<string, unknown>>();
+  let parsed: unknown;
+  try { parsed = body ? JSON.parse(body) : null; } catch { return out; }
+  for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
+    const msg = m as { id?: unknown; method?: unknown; params?: { arguments?: unknown } } | null;
+    const args = msg?.params?.arguments;
+    if (msg?.method !== "tools/call" || msg.id === undefined || args === null || typeof args !== "object" || Array.isArray(args)) continue;
+    const key = JSON.stringify(msg.id);
+    if (!out.has(key)) out.set(key, args as Record<string, unknown>);
+  }
+  return out;
+}
+
 /**
  * How each tool says its answer (render.ts), and its fault — server-portable
  * index.ts's registrations, the call made over REST — in index.ts's order,
@@ -169,9 +185,9 @@ const WORDS: Record<ToolName, Words> = {
  * render.ts. `endpoint`: the path the request came to, no trailing slash —
  * a scan's job links go under it, as server-portable's do.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[]): McpServer {
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
-  const register = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never) => Promise<say.Reply>) => unknown;
+  const register = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   for (const name of Object.keys(WORDS) as ToolName[]) {
     if (!caller.operations.has(name)) continue;
     const words = WORDS[name];
@@ -199,11 +215,17 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   // names it among the caller's operations, the SDK holding its input and its
   // answer to the manifest's schemas, called on the REST core by its route and
   // said by render.ts's renderPlugin — a fault as index.ts says a plugin's.
+  // The input sent is the one the client sent, its fields the operation's, not
+  // the SDK's parse of it: the REST core parses it once, as index.ts's SDK does,
+  // so a step of the schema runs once (review pass 2: a preprocess, an
+  // overwrite or a codec ran twice, or refused its own output).
   for (const op of ops) {
     if (!caller.operations.has(op.tool)) continue;
-    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input: never) => {
+    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (input: never, ctx) => {
       try {
-        const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, input as Record<string, unknown>, { key: caller.key }));
+        const given = raw.get(JSON.stringify(ctx?.mcpReq?.id));
+        const sent = given ? Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field))) : input as Record<string, unknown>;
+        const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
         return "fault" in outcome ? say.failed(outcome.fault) : say.renderPlugin(outcome as never);
       } catch (err) {
         return say.failed(err);
@@ -231,7 +253,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     for (const name of operations) {
       if (untooled.has(name) || name in WORDS || opsHere().some((op) => op.tool === name)) continue;
       untooled.add(name);
-      warn(`mcp-server: the REST core runs ${name}, which is no tool here: give this server the REST core's OB1_PLUGINS`);
+      // A plugin the REST core runs and this server was not given, or a core tool of a newer REST core: the name cannot say which.
+      warn(`mcp-server: the REST core runs ${name}, which is no tool here: run this server from the REST core's build, with its OB1_PLUGINS`);
     }
   };
 
@@ -455,7 +478,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);
       label = requestLabel(rawBody);
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere());
+      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody));
       const transport = new WebStandardStreamableHTTPServerTransport();
       await server.connect(transport);
       const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));

@@ -157,13 +157,14 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
           }
         }
       }
-      // An input is parsed twice through the MCP server as a REST client — by
-      // its SDK, then by the REST core it sends the parsed input to — so a
-      // transform would run twice (review pass 1: n + 1 arrived as n + 2).
+      // tools/list states the input as JSON Schema: a type it cannot state (a
+      // date, a bigint, a map) is a tool no client could be shown. A transform
+      // is fine — the MCP server as a REST client sends the input its client
+      // sent, which the REST core parses once (SMD-2287 PR 4a review pass 2).
       try {
-        z.toJSONSchema(z.object(op.input ?? {}), { io: "output" });
+        z.toJSONSchema(z.object(op.input ?? {}), { io: "input" });
       } catch {
-        problems.push(`${where}: its input schema transforms, which the MCP server and the REST core would each run`);
+        problems.push(`${where}: its input schema cannot be stated as JSON Schema, which tools/list shows`);
       }
       // The output is held to its schema once, here, and the MCP SDK holds the
       // held value to it again: a transform would answer REST and fail MCP.

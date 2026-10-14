@@ -513,6 +513,10 @@ console.log("\n[12] A plugin's operation by its route (callPath): its path fille
     `a GET: the path field filled and decoded, the rest read from the query by the operation's schema (${a.status} ${JSON.stringify(a.body)})`);
   assert(url.pathname === "/v1/plugins/probe-kit/items/a%20b%2Fc" && url.searchParams.get("verbose") === "true" && url.searchParams.get("limit") === "3" && !url.searchParams.has("item_id"),
     `…sent as the route with the field encoded, the rest as the query (${url.pathname}${url.search})`);
+  for (const brk of ["\n", "\r", "\u2028", "\u2029"]) {
+    a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: `a${brk}b` }, { key: "write-raw" });
+    assert(a.status === 200 && (a.body as { item_id?: string }).item_id === `a${brk}b`, `a path field holding ${JSON.stringify(brk)}: routed and answered, not the 405 naming its own method (review pass 2) (${a.status})`);
+  }
   a = await client.callPath("POST", "/v1/plugins/probe-kit/notes/{note_id}", { note_id: "n1", text: "hello", tags: ["x"] }, { key: "write-raw" });
   const body = await sent.at(-1)!.text();
   assert(a.status === 200 && same(a.body, { saved: true }) && same(JSON.parse(body), { text: "hello", tags: ["x"] }) && new URL(sent.at(-1)!.url).pathname === "/v1/plugins/probe-kit/notes/n1",
