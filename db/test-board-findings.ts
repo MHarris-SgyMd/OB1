@@ -21,7 +21,7 @@ import { acceptance, FINDING_OUTCOMES_SQL, findingOutcome, findingsValue, type F
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { egressRefusal } from "./worker-bootstrap.ts";
 import {
-  commentBody, DEFAULT_CAP, findingGate, findingLine, FINDING_UNITS, findingSubject, groupFindings, groupWords,
+  commentBody, DEFAULT_CAP, findingGate, findingLine, findingLines, FINDING_UNITS, findingSubject, groupFindings, groupWords,
   boardOf, emptyReport, findingsWanted, reportLine, withoutFindingTerms, markerLine, markerWords, onlyWords, outcomes, passCode, readCap, summaryLine, type Finding, type FindingsReport,
 } from "./board-findings.ts";
 
@@ -82,6 +82,25 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(lines[0] === "**Open Brain found something about SMD-2 and SMD-1**, two tickets this board does not link.", `the comment opens by naming the ticket it is on and the other (${lines[0]})`);
   ok(/changed nothing on this board/.test(body) && lines[lines.length - 1] === "ob1-finding SMD-1 SMD-2 outdates related", "it says it changed nothing, and its marker is the last line");
   ok(lines.filter((l) => l.startsWith("- ")).length === 2 && lines.filter((l) => /^ob1-finding /.test(l)).length === 1, "one bullet per finding, and one marker line");
+
+  // SMD-2930: the judge relates rows, and a ticket's sections are rows of their own — one relation, one bullet.
+  const rows = groupFindings([
+    f({ id: "r1", older: "SMD-1", newer: "SMD-2", confidence: 0.84 }), f({ id: "r2", older: "SMD-1", newer: "SMD-2", confidence: 0.99 }),
+    f({ id: "r3", older: "SMD-2", newer: "SMD-1", confidence: 0.93 }), f({ id: "r4", older: "SMD-1", newer: "SMD-2", confidence: 0.97 }),
+    f({ id: "e1", word: "evolves", older: "SMD-1", newer: "SMD-2", confidence: 0.7 }), f({ id: "e2", word: "evolves", older: "SMD-2", newer: "SMD-1", confidence: 0.6 }),
+    f({ id: "e3", word: "evolves", older: "SMD-1", newer: "SMD-2", confidence: 0.5 }),
+    p, { ...p, id: "p2", confidence: 0.6 },
+  ])[0];
+  const bullets = findingLines(rows);
+  ok(bullets.length === 5
+      && bullets.filter((b) => /is related to/.test(b)).length === 1 && bullets.some((b) => /^- \*\*SMD-2 is related to SMD-1\*\* \(confidence 0\.99, best of 4 row pairs\)\./.test(b))
+      && bullets.some((b) => /^- \*\*SMD-2 evolves from SMD-1\*\* \(confidence 0\.70, best of 2 row pairs\)\./.test(b)) && bullets.some((b) => /^- \*\*SMD-1 evolves from SMD-2\*\* \(confidence 0\.60\)\./.test(b))
+      && bullets.filter((b) => /A pending supersession proposal/.test(b)).length === 2,
+    `a relation is one bullet at its best confidence, saying how many row pairs back it — related either way round, evolves by direction; each proposal its own (${bullets.join(" / ")})`);
+  const rowsBody = commentBody(rows);
+  ok(rowsBody.split("\n").filter((l) => l.startsWith("- ")).length === 5 && rowsBody.endsWith("ob1-finding SMD-1 SMD-2 related outdates evolves")
+      && rows.findings.length === 9 && JSON.stringify(findingLines({ findings: [f({ id: "x", older: "SMD-1", newer: "SMD-2", confidence: null }), f({ id: "y", older: "SMD-1", newer: "SMD-2", confidence: null })] })) === JSON.stringify(["- **SMD-2 is related to SMD-1** (best of 2 row pairs). If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them."]),
+    "the comment carries the collapsed bullets and the same marker; the group still names every finding, which the record keeps; no confidence, only the count");
 }
 
 // ---------------------------------------------------------------------------

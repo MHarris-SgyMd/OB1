@@ -44,6 +44,10 @@
  * something else about it. The comment carries the two identifiers, the word
  * and its direction, the judge's confidence, a proposal's one-line reason (a
  * code span: a link or a mention in it is shown, not rendered) and its id.
+ * The judge relates thoughts, and a ticket's dated sections are rows of their
+ * own, so a relation between two tickets can stand on several row pairs: it
+ * is one line, at its best confidence, saying how many row pairs back it
+ * (SMD-2930) — a proposal stays a line of its own, its own decision.
  * It proposes only: no link is added, no status moved, no description
  * edited. A proposal is decided in the brain (consolidate.ts --accept /
  * --reject); a relation by linking the tickets on the board, which
@@ -188,7 +192,11 @@ export function onlyWords(g: FindingGroup, words: ReadonlySet<FindingWord>): Fin
   return findings.length ? { ...g, findings } : null;
 }
 
-const conf = (c: number | null) => (c === null ? "" : ` (confidence ${c.toFixed(2)})`);
+/** The confidence, and how many row pairs a collapsed relation stands for (SMD-2930). */
+const conf = (c: number | null, rows = 1) => {
+  const parts = [...(c === null ? [] : [`confidence ${c.toFixed(2)}`]), ...(rows > 1 ? [`best of ${rows} row pairs`] : [])];
+  return parts.length ? ` (${parts.join(", ")})` : "";
+};
 /**
  * A reason as one code span, bounded: on one line, so it cannot start a line
  * of its own (a marker), and inside backticks, so a link, an image, a mention
@@ -199,8 +207,8 @@ const reasonSpan = (s: string) => {
   return `\`${flat.length > REASON_CHARS ? `${flat.slice(0, REASON_CHARS - 1)}…` : flat}\``;
 };
 
-/** One finding's bullet. */
-export function findingLine(f: Finding): string {
+/** One finding's bullet; `rows` the row pairs a collapsed relation stands for. */
+export function findingLine(f: Finding, rows = 1): string {
   if (f.kind === "proposal") {
     const says = f.verdict === "newer_supersedes_older" ? `**${f.newer} outdates ${f.older}**`
       : f.verdict === "older_supersedes_newer" ? `**${f.older} outdates ${f.newer}**`
@@ -216,8 +224,31 @@ export function findingLine(f: Finding): string {
   // duplicate_of does not — 079 leaves it to the judge — so only this post
   // stops (review pass 1: the comment said the brain stops pairing them).
   return f.word === "duplicate"
-    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
-    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+    ? `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows)}. If so, mark one a duplicate of the other here; board-sync brings the link back on its next pass, and the pair is not posted again.`
+    : `- **${f.newer} ${verb} ${f.older}**${conf(f.confidence, rows)}. If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them.`;
+}
+
+/**
+ * A group's bullets, in rank order: a proposal each — its own pending
+ * decision, with its own id — and a relation once per word, at its best
+ * confidence, saying how many row pairs back it. The judge relates thoughts,
+ * and a ticket's dated sections are rows of their own, so one ticket pair
+ * can carry the same relation several times; a comment printed it once per
+ * row pair (SMD-2930). `related` and `duplicate` read the same either way
+ * round, so they collapse by word alone (the group is one ticket pair);
+ * `evolves` keeps its direction. The record still names every id.
+ */
+export function findingLines(g: Pick<FindingGroup, "findings">): string[] {
+  const kept: { f: Finding; rows: number }[] = [];
+  const at = new Map<string, number>();
+  for (const f of g.findings) {
+    const key = f.kind !== "relation" ? null : f.word === "evolves" ? `evolves\u0000${f.newer}\u0000${f.older}` : f.word;
+    const i = key === null ? undefined : at.get(key);
+    if (i !== undefined) { kept[i].rows++; continue; }
+    if (key !== null) at.set(key, kept.length);
+    kept.push({ f, rows: 1 });
+  }
+  return kept.map(({ f, rows }) => findingLine(f, rows));
 }
 
 /**
@@ -237,7 +268,7 @@ export function commentBody(g: FindingGroup): string {
   return [
     `**Open Brain found something about ${g.on} and ${other}**, two tickets this board does not link.`,
     "",
-    ...g.findings.map(findingLine),
+    ...findingLines(g),
     "",
     "Posted by the brain's consolidation pass; it proposes only, and changed nothing on this board.",
     "",
