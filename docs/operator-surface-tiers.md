@@ -46,7 +46,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
                  │   /mcp        → mcp.ob1.internal        │
                  │   /dashboard  → app.ob1.internal        │
                  │   /auth       → auth.ob1.internal       │
-                 │   /grafana    → lgtm (SMD-1849 profile) │
+                 │   /grafana    → lgtm.ob1.internal (opt-in, off by default)
                  │   /api        → api.ob1.internal  (opt-in, off by default)
                  │   /health     → mcp.ob1.internal  (keyed; plain "ok" without a key)
                  │   /hooks/<name> → api.ob1.internal (a plugin's webhook; off by default, per plugin)
@@ -70,7 +70,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/mcp` | MCP server (SMD-2287) |
   | `/dashboard` | operator GUI (SMD-2280) |
   | `/auth` | authorization server (SMD-2285) |
-  | `/grafana` | SMD-1849 |
+  | `/grafana` | Grafana (SMD-1849), off by default |
   | `/api` | REST core (SMD-2284), off by default |
   | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
   | `/hooks/<name>` | a plugin's inbound webhook, served by the REST core. Off by default and turned on per plugin, like `/api` (decision 9). There is no `/ext/<name>`: extensions are plugins, not servers |
@@ -108,6 +108,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Path-based public routes carry obligations:**
   - The GUI sets SvelteKit's `paths.base` and scopes its cookie to `Path=/dashboard`, so the cookie never reaches another route.
   - The authorization server's issuer is `${OB1_PUBLIC_ORIGIN}/auth`, set from configuration and never derived from request headers (SMD-2382).
+  - Grafana serves from `/grafana` with `${OB1_PUBLIC_ORIGIN}/grafana/` as its root URL, its Content-Security-Policy on and its cookie `Secure` under https. A page of its that ran a script would run as the origin `/auth` signs in on, so its route is opt-in (`deploy/compose.grafana-public.yaml`, SMD-1849 PR 3a). By default Grafana is reached nowhere; a loopback port of its own, a separate origin, is the other way (`deploy/compose.grafana-port.yaml`, a release asset).
 
 ## Identity
 
@@ -159,7 +160,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
 - **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
-  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. On stable's mesh it would also resolve stable's `auth.ob1.internal`, which settles how a tier reaches the one authorization server across projects; until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles, advertises none and dials no `*.ob1.internal` name of stable's. `deploy/compose.tiers.yaml`, the three tiers as one stack, gives each tier its MCP server and REST core and puts one proxy in front, with `/mcp`, `/canary/mcp`, `/working/mcp` and stable's `/health` the only public paths; no tier publishes a port of its own. The GUI per tier waits on SMD-2280.
+  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. On stable's mesh it would also resolve stable's `auth.ob1.internal`, which settles how a tier reaches the one authorization server across projects; until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles, advertises none and dials no `*.ob1.internal` name of stable's but one: with `OTEL_EXPORTER_OTLP_ENDPOINT` in its env file it sends its telemetry to stable's collector, `lgtm.ob1.internal` (SMD-1849 PR 3a), which carries no key and no text and names the canary by its tier. `deploy/compose.tiers.yaml`, the three tiers as one stack, gives each tier its MCP server and REST core and puts one proxy in front, with `/mcp`, `/canary/mcp`, `/working/mcp` and stable's `/health` the only public paths; no tier publishes a port of its own. The GUI per tier waits on SMD-2280.
 
 ## Contributions and plugins
 

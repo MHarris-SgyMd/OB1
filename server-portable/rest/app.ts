@@ -587,6 +587,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       return answerError(c, { code: "FAILED", retryable: false }, 500);
     }
     const { status, text } = answer;
+    // A delivery the plugin accepted is its verified sender's, not held to the anonymous budget (telemetry.ts, review pass 3).
+    if (status < 400) {
+      const accepted = traceOf(c.req.raw);
+      if (accepted) accepted.hookAccepted = true;
+    }
     if (status === 204 || text === null) return c.body(null, 204);
     // A handler's own refusal: its code for the line, from the JSON text runHook checked.
     if (status >= 400) {

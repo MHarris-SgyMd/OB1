@@ -266,10 +266,11 @@ canary_compose() {
 # What the canary's env file leaves out of stable's: its database password,
 # which is its own, and the secrets of the profiles the canary never runs
 # (the authorization server's, n8n's, the import runner's, the workers' key,
-# board-sync's Linear keys), in any letter case. Linear's by prefix, as the
+# board-sync's Linear keys, the observability profile's Grafana password), in
+# any letter case. Linear's by prefix, as the
 # others: an exact LINEAR_API_KEY let SMD-2681's LINEAR_COMMENT_API_KEY, a key
 # that can comment, through to the canary's file (SMD-2882).
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*'
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift.
 CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY_STABLE_MESH'
@@ -731,9 +732,18 @@ for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
     if host and "." not in host and ":" not in host and host != "localhost":
         print(f"{k}={env[k]}")
 print("ORIGIN=" + (env.get("OB1_PUBLIC_ORIGIN") or ""))
+print("OTLP=" + (env.get("OTEL_EXPORTER_OTLP_ENDPOINT") or ""))
 ')" || { echo "could not read the canary's configuration through \`$RUNTIME compose config --format json\` (Docker Compose v2): $(head -c 400 "$CONFIG_ERR")" >&2; exit 2; }
-unreachable="$(grep -v '^ORIGIN=' <<<"$said" || true)"
+unreachable="$(grep -v -e '^ORIGIN=' -e '^OTLP=' <<<"$said" || true)"
 PUBLIC_ORIGIN="$(sed -n 's/^ORIGIN=//p' <<<"$said")"
+# Stable's observability collector, by its name on stable's mesh (SMD-1849
+# PR 3a), in any case: a canary on a port of its own (--port, read here
+# before MODE is chosen below) is not on that mesh, so each of its servers
+# would say ENOTFOUND once a minute per signal.
+OTLP_ENDPOINT="$(sed -n 's/^OTLP=//p' <<<"$said")"
+case "$(tr '[:upper:]' '[:lower:]' <<<"$OTLP_ENDPOINT")" in
+  *lgtm.ob1.internal*) [ -z "$PORT" ] || say "note: the canary's servers would send their telemetry to $OTLP_ENDPOINT, stable's collector, which a canary on a port of its own cannot reach — each would say ENOTFOUND once a minute per signal; OTEL_EXPORTER_OTLP_ENDPOINT= deploy/canary.sh --port $PORT up, an empty one in the shell, keeps it out" ;;
+esac
 [ -z "$unreachable" ] || {
   echo "the canary's server would dial $(tr '\n' ' ' <<<"$unreachable")— a bare name, which on the canary's network resolves to nothing: stable's compose services (a profile's ollama or jev) are on stable's network. Name an endpoint it can reach for the canary alone, in the shell, which wins over the env file for the canary's server and leaves stable's as it is: OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1 deploy/canary.sh … up for an Ollama on the host (podman: host.containers.internal), a host's full name for one on the LAN. It must serve the brain's embedding model. A remote provider also needs OB1_LLM_LOCAL= cleared there, or the egress gate takes it for local." >&2
   exit 2
