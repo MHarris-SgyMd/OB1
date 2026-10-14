@@ -109,6 +109,11 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   signal already aborted sends nothing, and an answer that arrives after the abort is
   cancelled unread. On an open stream, the caller's signal aborts the request, which
   ends the body of a fetch that heeds it, as `globalThis.fetch` does.
+- **`callPath(method, path, input, init)`** calls an enabled plugin's operation
+  (SMD-2310), which no committed document names, by its method and its manifest's
+  route: `/v1/plugins/<name>/…` with `{field}` segments. Its input is sent and its
+  answer read as `call`'s are, local refusals and the timeout included. A route of
+  any other shape, or another method, rejects.
 - **`raw`** is the openapi-fetch client, for a caller that names a path itself. It
   carries the forwarder slot and the extra headers, but no timeout: bound it with
   your own `signal`.
@@ -129,5 +134,5 @@ bumps, so the generated files carry `snapshot` in its place.
 ## Test
 
 ```bash
-bun test-client.ts   # 128 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query, a timeout a timer holds, a query name a URL carries
+bun test-client.ts   # 148 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query, a timeout a timer holds, a query name a URL carries; a plugin's operation by its route, its path filled, the rest in the query or the body, a forwarded refusal whole, a path field holding a line break, a route or method no plugin's rejected
 ```
