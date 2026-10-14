@@ -50,8 +50,8 @@
  * earlier UTC date. It joins as well once extraction holds nothing but
  * thoughts that SLEEP_STALLED_JOIN (3) or more long hard stops in a row took
  * with no window saved between, and none saved since (migration 089's
- * `stalled` and `gained`, SMD-2694; long: the thought held a minute, or its
- * slowest window, so short sleeps count none): a single window longer than
+ * `stalled` and `gained`, SMD-2694; long: the thought held a minute,
+ * provider pauses aside, so short sleeps count none): a single window longer than
  * every long sleep — or a stop
  * that keeps landing past the last window, in the decider's call or the
  * write — which would otherwise hold consolidation back for as long as the
@@ -657,7 +657,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // No read here: the first awake stamp reads them, as does the first asleep poll.
   let saidStalled = false;
   const stalledUnread = (e: Error): void => {
-    if (!saidStalled) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once extraction is drained until the scheduler is restarted with it readable`);
+    if (!saidStalled) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once extraction is drained while it stays unreadable; every poll reads it again`);
     saidStalled = true;
   };
   /** The row's end, the held thoughts read first: an operator's hand run since may have finished one. */
@@ -964,7 +964,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // brain keeps waking (SMD-2694). A newer thought judged meanwhile
           // misses its pair with one of them, as consolidate.ts's header says
           // of an unextracted neighbour; extraction goes on beside it.
-          out(`  extraction holds only ${pools.extract.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more hard stops in a row took with no window gained — consolidating beside it`);
+          out(`  extraction holds only ${pools.extract.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating beside it`);
           start("consolidate");
           consolidating = true;
         } else if (!FOLLOW && pools.consolidate && drained(pools.extract) && drained(pools.consolidate)) {

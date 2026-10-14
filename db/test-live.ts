@@ -11940,7 +11940,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       await pollUntil(async () => (heldAfter = (await beat())?.held) === undefined, 10_000);
     };
     const b = await wokenEvery(joinedPast, 7, finishes);
-    assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more hard stops in a row took with no window gained — consolidating beside it/.test(l)),
+    assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more long hard stops in a row took with no window gained — consolidating beside it/.test(l)),
       `a single window longer than every sleep: consolidation joins past it while it is still pending (reached ${b.reached} in ${b.sleeps} sleep(s), the thought ${stuckStatus}, ${judged.length} judgement(s))`);
     assert(Number(prog?.stalled) >= 3 && Number(prog?.stops) >= 3 && b.sleeps >= 4,
       `…after three stalled stops at least, the fourth sleep the first it could join in (stops ${prog?.stops}, stalled ${prog?.stalled}, ${b.sleeps} sleep(s))`);

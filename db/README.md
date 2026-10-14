@@ -2909,8 +2909,8 @@ resume](#extract-entitiests)), so one longer than every sleep advances by the
 windows each sleep finishes, and is done once its last is. Consolidation also
 joins once extraction holds nothing but thoughts that three or more long hard
 stops in a row took with no window saved between, and none saved since (089's
-`stalled` and `gained`, SMD-2694; long: the thought held a minute, or its
-slowest window, so a busy day's short sleeps count none) — a single window
+`stalled` and `gained`, SMD-2694; long: the thought held a minute, provider
+pauses aside, so a busy day's short sleeps count none) — a single window
 longer than every long sleep,
 or a stop that keeps landing past the last window, in the decider's call or
 the write — which would otherwise hold it back for as long as the brain keeps
