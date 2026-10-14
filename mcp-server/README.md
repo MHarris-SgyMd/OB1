@@ -23,7 +23,7 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 | File | What it is |
 |---|---|
 | `app.ts` | `createMcpApp`: the MCP endpoint, `/health`, the keyed worker mirrors, the job routes, the method guard and discovery |
-| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, PORT, OB1_STOP_GRACE |
+| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_STOP_GRACE |
 | `stack.ts` | This server with the REST core behind it in one process, for server-portable's suites |
 | `test-mcp.ts` | The suite |
 
@@ -58,6 +58,20 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   same text upserts the row (migration 073), so a capture that landed before the
   connection dropped is not duplicated. A scan's job links are put under the endpoint
   the call came to, as `atEndpoint` puts server-portable's.
+- **Plugin tools** (SMD-2310). The entry reads `OB1_PLUGINS` as the REST core does, for
+  each enabled plugin's operations: their names, schemas and routes. An operation is
+  a tool, `<plugin>_<operation>`, after the core's, where whoami names it among the
+  caller's operations. The SDK holds its input and answer to the manifest's schemas;
+  the arguments its client sent go to its route through `rest-client`'s `callPath`, for
+  the REST core to parse once as `index.ts`'s SDK does (none is `{}`; two calls of a
+  batch under one id are refused, their arguments no one's to pick), and its answer is
+  said by `render.ts`'s `renderPlugin`: a value, the refusal the forwarder slot
+  carries whole, or a fault. Give this server and the REST core the same
+  `OB1_PLUGINS` and the same build of each plugin: a plugin the REST core runs and
+  this server was not given is no tool here (said once in the log, by operation, as is
+  a core tool of a newer REST core), and
+  one whose route or schema differs between the two builds answers a fault. A name
+  that is no plugin stops the entry, exit 2 in words, as it stops the REST core.
 - **`/health`** is plain `ok` without a key. With a key, the first key the REST core
   knows decides, as `index.ts` authenticates the first, and the route shows the REST
   core's keyed `/health`: the brain's record on the health surface, for a key that may read it and
@@ -80,8 +94,7 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 **Known differences from `index.ts` (the parity runs below):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
   `act` (the forwarder key's name), where server-portable records `open-brain`.
-- **Not yet, SMD-2287 PR 4:**
-  - plugin tools (`<plugin>_<operation>`): tools/list holds the core tools alone;
+- **Not yet, SMD-2287 PR 4b and 4c:**
   - the MCP request line and its spans (`door: "mcp"`, SMD-1849): only the REST core's
     lines are written;
   - the stop's drain of an answer's stream past its handler: today the stop counts
@@ -97,7 +110,7 @@ says no pool was opened. A base it cannot serve exits 2 in words.
 
 ```bash
 cd mcp-server && bun install
-OB1_REST_URL=http://api.ob1.internal.:8000 OB1_FORWARDER_KEY=<a forward-scope key> bun index.ts
+OB1_REST_URL=http://api.ob1.internal.:8000 OB1_FORWARDER_KEY=<a forward-scope key> OB1_PLUGINS=<the REST core's> bun index.ts
 ```
 
 The forwarder key is minted with `cd server-portable && bun keygen.ts <name> --scope
@@ -108,15 +121,17 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 ## Test
 
 ```bash
-bun test-mcp.ts                                                  # 73 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; the method guard
+bun test-mcp.ts                                                  # 95 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the method guard
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
 cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 571 — the whole server over MCP on real Postgres, held to this server the same way
+cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-plugins.ts   # 282 — plugins in the contract, an enabled plugin's operation as this server's tool
+cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
 ```
 
 `OB1_MCP_UNDER_TEST=client` makes a server-portable suite drive this server through
 `stack.ts` in place of `index.ts` (`server-portable/test-support.ts`'s `mcpUnderTest`); each
 suite first asserts that the server it got is the one the variable names.
-CI runs test-auth and test-e2e-sql both ways. Where the two servers differ, test-e2e-sql
+CI runs test-auth, test-e2e-sql, test-plugins and test-plugins-sql both ways. Where the two servers differ, test-e2e-sql
 says which it expects: a write through this server records the REST core's door,
 `open-brain-api`, with this server as its carrier (`act`); the request lines are the
 REST core's, one per call it is sent, until this server writes its own (PR 4). [18]

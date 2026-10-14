@@ -229,6 +229,15 @@ jobs:
           OB1_MCP_UNDER_TEST: client
         run: bun test-auth.ts
 
+      # An enabled plugin's operation as the MCP server's tool, called on the
+      # REST core by its route (SMD-2287 PR 4a); its request line is the REST
+      # core's until PR 4b.
+      - name: Plugins in the contract, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-plugins.ts
+
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
       # them: SMD-1903 gave getEmbedding a required argument, the compiler fixed
@@ -778,6 +787,15 @@ jobs:
         run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The example's operations read back through the MCP server as a REST
+      # client (SMD-2287 PR 4a), on the installs above.
+      - name: Plugin tables, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-plugins-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
 
       # The fully local path: both model calls go to a configured endpoint with no
       # credential, and a wrong-width vector is refused rather than stored.

@@ -11,6 +11,7 @@ import { hashKey, routable } from "../server-portable/auth.ts";
 import { createRestClient } from "../rest-client/index.ts";
 import { SUITE_CARRIER } from "../server-portable/test-support.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
+import { plugins } from "../server-portable/root.ts";
 
 const forwarderKey = randomBytes(32).toString("hex");
 process.env.MCP_ACCESS_KEYS = [process.env.MCP_ACCESS_KEYS, `${SUITE_CARRIER}:forward:${hashKey(forwarderKey)}`].filter(Boolean).join(",");
@@ -22,7 +23,8 @@ const rest = createRestClient({
   forwarderKey,
   timeoutMs: REST_TIMEOUT_MS,
 });
-const app = createMcpApp({ rest, edge: () => edgeFrom({ COMPOSE_PROFILES: process.env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: process.env.OB1_PUBLIC_ORIGIN }) });
+// The plugins the REST core in process runs (root.ts's, read once), so this server's tools are its operations'.
+const app = createMcpApp({ rest, plugins, edge: () => edgeFrom({ COMPOSE_PROFILES: process.env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: process.env.OB1_PUBLIC_ORIGIN }) });
 
 export default {
   // A request whose URL will not parse, rebuilt so it is routed and refused, not a 500 (SMD-2535).
