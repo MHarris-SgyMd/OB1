@@ -46,7 +46,7 @@
 --                          set-returning RPC behind PostgREST is cut at
 --                          db-max-rows, silently, from the newest statuses.
 --     The reader takes the last status in the log's order at or before a time.
---     A head with no status is left out.
+--     A head, or a history element, with no status is left out.
 --   * ob1_thought_events_in_order, 060's, redefined to return the same rows in
 --     the same order with a list read by thought_audit_thought_id_idx: its one
 --     filter, `p_thoughts IS NULL OR thought_id = ANY(p_thoughts)`, read the
@@ -174,8 +174,9 @@ AS $f$
     FROM ev e, want w
    WHERE e.issue = ANY(w.issues)
      AND e.status_type = ANY(node_lifecycle_types())
+     AND coalesce(e.status, '') <> ''
    GROUP BY e.issue
 $f$;
 
 COMMENT ON FUNCTION ticket_status_inputs(uuid[], text[]) IS
-  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type and a status, its status now; kind history — one row per such ticket with every status its rows held, one element per capture or update event carrying it (at in ms since the epoch, status, status_type), in the log''s order (060''s ob1_thought_events_in_order, never thought_audit''s seq alone). A NULL or empty list reads nothing. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; node_state reads thought_sources and the order reads ob1_config, so a role without either soft grant fails the call and the server shows no label. Migration 092 / SMD-2540.';
+  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type and a status, its status now; kind history — one row per such ticket with every status its rows held, one element per capture or update event carrying it (at in ms since the epoch, status, status_type), in the log''s order (060''s ob1_thought_events_in_order, never thought_audit''s seq alone). A NULL or empty list of tickets reads no ticket, of ids no hit. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; node_state reads thought_sources and the order reads ob1_config, so a role without either soft grant fails the call and the server shows no label. Migration 092 / SMD-2540.';

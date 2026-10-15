@@ -1441,8 +1441,8 @@ known lifecycle type, a head with no status left out), and one row per ticket
 with every status its rows held — one element per capture or update event,
 `at` in ms — in 060's `ob1_thought_events_in_order` order, never `seq` alone,
 which 046's backfill breaks. One row per ticket so PostgREST's db-max-rows
-cannot cut the newest statuses. A NULL or empty list reads nothing
-(`node_state(NULL)` would read every thought). It redefines 060's
+cannot cut the newest statuses. A NULL or empty list of tickets reads no
+ticket, of ids no hit (`node_state(NULL)` would read every thought). It redefines 060's
 `ob1_thought_events_in_order` to the same rows in the same order, its list read
 by `thought_audit_thought_id_idx` whatever the plan: the old `p_thoughts IS
 NULL OR …` filter read the whole log when the body was not inlined. The label is read in

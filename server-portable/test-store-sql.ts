@@ -1425,6 +1425,13 @@ console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits wi
   assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
       && throwsOn([{ kind: "event", issue: "SMD-1" }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: [{ at: "x", status: "Done", status_type: "completed" }] }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: {} }]),
     "the normaliser keeps a history in the order 092 gives it, parses one sent as text, and throws on a kind or a status 092 does not return");
+  // A changed function surfaces through the store, not read as a brain without 092.
+  await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
+    RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
+    AS $$ SELECT 'event'::text, NULL::uuid, 'SMD-17001'::text, 'Done'::text, 'completed'::text, NULL::jsonb $$`);
+  let surfaced = "";
+  try { await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch (e) { surfaced = (e as Error).message; }
+  assert(/unknown kind "event"/.test(surfaced), `a row 092 does not return throws through the store rather than reading as a brain without it (${surfaced.slice(0, 80)})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 092: null — the label is left off, the search goes on");
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("092") });
