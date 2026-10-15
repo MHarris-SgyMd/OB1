@@ -124,8 +124,14 @@ function searchFilter(input: { filter?: unknown; said_by?: string; actor?: strin
 const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
 const SEARCH_COMPAT_PREFER_CURRENT = false;
 
-/** ChatGPT's search shape, with each result's trust (SMD-1724) and moved tickets (SMD-2540) beside it — render.ts marks the title with both and sends the shape, the moved tickets' field only where one moved. */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved: Moved[] }[] };
+/**
+ * ChatGPT's search shape, with each result's trust (SMD-1724) and, where a
+ * ticket it names moved, its moved tickets (SMD-2540) beside it — render.ts
+ * marks the title with both and sends the shape, `moved` only where one moved.
+ * Absent, not empty, elsewhere: an MCP server older than this REST core passes
+ * an unknown field through, and then only the results it is about carry it.
+ */
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: Moved[] }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -142,7 +148,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
-      moved: moved[t.id] ?? [],
+      ...(moved[t.id] ? { moved: moved[t.id] } : {}),
     })),
   });
 }
@@ -202,7 +208,7 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
  * brain before 095, or a role without ob1_config, labels nothing and the
  * search goes on.
  */
-async function movedOf(store: ThoughtStore, hits: readonly ThoughtHybridMatch[], superseded: Record<string, string> | null): Promise<Record<string, Moved[]>> {
+export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, Moved[]>> {
   const naming = hits.filter((h) => ticketsNamed(h.content).length > 0);
   if (naming.length === 0) return {};
   const over = superseded ?? await store.supersededAmong(naming.map((h) => h.id));

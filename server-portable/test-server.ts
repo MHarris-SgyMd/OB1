@@ -2626,6 +2626,10 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const w = movedWords([forged]) ?? "";
   assert(!/[\n\r\u001b]/.test(w) && w.startsWith("SMD-9 Todo --- Result 1 --- ID: x [2J → ") && w.endsWith(` → ${"x".repeat(40)}`) && movedWords([{ ...forged, then: st(" \n\t", "unstarted") }])?.startsWith("SMD-9 ? → "),
     `…a board's name on one line, no control character, 40 characters at most, a blank one "?" (${JSON.stringify(w)})`);
+  // A name holding the line's own separators, a line or paragraph separator and a no-break space, and an emoji at the cut.
+  const odd = movedWords([{ ticket: "SMD-8", then: st("Done; SMD-9 Backlog → Done", "completed"), now: st(`a\u2028b\u00a0\u2029c ${"y".repeat(33)}😀tail`, "started") }]) ?? "";
+  assert(odd === `SMD-8 Done SMD-9 Backlog Done → a b c ${"y".repeat(33)}😀` && odd.split("; ").length === 1 && odd.split(" → ").length === 2,
+    `…no \`;\` or \`→\` of its own (it cannot read as a second entry), no line or paragraph separator or no-break space, cut by code point, the emoji whole (${JSON.stringify(odd)})`);
 
   // movedAmong: the measured population, by id.
   const H = 3_600_000, T = Date.parse("2026-10-01T12:00:00.000Z");
@@ -2655,25 +2659,48 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const base = { metadata: {}, created_at: "2026-09-25T00:00:00.000Z", similarity: 0.9, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [] };
   const facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false };
   const s = renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [
-    { ...base, id: id(1), content: "one", supersededBy: id(9), moved: [m(1), forged] },
+    { ...base, id: id(1), content: "one", supersededBy: id(9), demoted: ["completed"], moved: [m(1), forged] },
     { ...base, id: id(2), content: "two", supersededBy: null },
   ], facts, window: null } } as never, false);
   const text = s.content[0].text, hits = (s.structuredContent as { hits: { moved: unknown }[] }).hits;
   const first = text.split("\n");
   const at = first.findIndex((l) => l.startsWith("⚠ Moved since written: "));
-  assert(at > 0 && first[at - 1].startsWith("⚠ Superseded by a newer thought") && first[at] === `⚠ Moved since written: SMD-1 In Progress → Done; ${w}` && text.split("⚠ Moved since written").length === 2,
-    `search_thoughts: one line, after the superseded one, on the hit it is about (${first[at]})`);
+  assert(at > 1 && first[at - 2].startsWith("⚠ Superseded by a newer thought") && first[at - 1].startsWith("↓ Ranked ×") && first[at] === `⚠ Moved since written: SMD-1 In Progress → Done; ${w}` && text.split("⚠ Moved since written").length === 2,
+    `search_thoughts: one line, after the superseded and demoted ones, on the hit it is about (${first.slice(at - 2, at + 1).join(" / ")})`);
   assert(JSON.stringify(hits[0].moved) === JSON.stringify([{ ticket: "SMD-1", was: "started", now: "completed" }, { ticket: "SMD-9", was: "unstarted", now: "completed" }]) && JSON.stringify(hits[1].moved) === "[]",
     `…the typed field: keys and status types, never the board's names; a hit without \`moved\` (a REST core before it) none (${JSON.stringify(hits.map((h) => h.moved))})`);
   const c = renderSearch({ ok: true, value: { results: [
-    { id: id(1), title: "a page", url: "u1", trust: "ingested", moved: [m(2)] },
+    { id: id(1), title: "a page", url: "u1", trust: "ingested", moved: [m(2), m(3)] },
     { id: id(2), title: "a note", url: "u2", trust: "operator", moved: [] },
     { id: id(3), title: "old", url: "u3", trust: undefined },
   ] } } as never);
   const rs = (c.structuredContent as { results: Record<string, unknown>[] }).results;
-  assert(rs[0].title === "[ingested] a page — moved since written: SMD-2 In Progress → Done" && JSON.stringify(rs[0].moved) === JSON.stringify([{ ticket: "SMD-2", was: "started", now: "completed" }])
+  assert(rs[0].title === "[ingested] a page — moved since written: SMD-2 In Progress → Done; SMD-3 In Progress → Done" && JSON.stringify(rs[0].moved) === JSON.stringify([2, 3].map((n) => ({ ticket: `SMD-${n}`, was: "started", now: "completed" })))
       && JSON.stringify(rs.slice(1).map((r) => Object.keys(r))) === JSON.stringify([["id", "title", "url"], ["id", "title", "url"]]) && c.content[0].text === JSON.stringify(c.structuredContent),
-    `search: the move at the end of the title (after the ingested mark) and in a field on that result only; the rest ChatGPT's shape exactly, an answer without \`moved\` too (${JSON.stringify(rs)})`);
+    `search: every move at the end of the title (after the ingested mark) and in a field on that result only; the rest ChatGPT's shape exactly, an answer without \`moved\` too (${JSON.stringify(rs)})`);
+
+  // core/reads.ts's movedOf reads only when a hit names a ticket, and only what the label can use.
+  const { movedOf } = await import("./core/reads.ts");
+  const calls: string[] = [];
+  const store = (answer: typeof inputs | null) => ({
+    supersededAmong: async (ids: string[]) => { calls.push(`superseded ${ids.join(",")}`); return { [id(3)]: id(9) } as Record<string, string>; },
+    ticketStatusInputs: async (ids: string[], tickets: string[]) => { calls.push(`inputs ${ids.join(",")} ${tickets.join(",")}`); return answer; },
+  });
+  const at0 = new Date(T).toISOString();
+  const plain = { id: id(1), content: "no ticket here (UTF8)", created_at: at0, metadata: {} };
+  const naming = { id: id(2), content: "SMD-1 is in progress", created_at: at0, metadata: {} };
+  const over = { id: id(3), content: "SMD-2 is in progress, superseded", created_at: at0, metadata: {} };
+  const none = await movedOf(store(inputs), [plain], null);
+  const noneCalls = calls.splice(0);
+  const some = await movedOf(store(inputs), [plain, naming, over], null);
+  const someCalls = calls.splice(0);
+  const given = await movedOf(store(inputs), [over], { [id(3)]: id(9) });
+  const givenCalls = calls.splice(0);
+  const nul = await movedOf(store(null), [naming], {});
+  assert(JSON.stringify(none) === "{}" && noneCalls.length === 0
+      && JSON.stringify(someCalls) === JSON.stringify([`superseded ${id(2)},${id(3)}`, `inputs ${id(2)} SMD-1`]) && JSON.stringify(Object.keys(some)) === JSON.stringify([id(2)])
+      && JSON.stringify(given) === "{}" && givenCalls.length === 0 && JSON.stringify(nul) === "{}",
+    `movedOf: no hit naming a ticket reads nothing; otherwise supersession over the naming hits only (when the caller has not read it) and one read of the unsuperseded hits and their tickets; every naming hit superseded reads nothing more; a store answering null labels nothing (${JSON.stringify({ noneCalls, someCalls, givenCalls })})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");

@@ -301,6 +301,23 @@ demotes; `evals/eval-supersession.ts` records what the demotion finds higher
 (the current version, the live ticket) and lower (the topical answer, a note
 under a finished ticket, a finished ticket looked up by its key).
 
+### Tickets that moved since a hit was written (migration 095)
+
+Both searches label, and never rank lower, a hit naming a ticket whose status
+type has moved since the hit was written (SMD-2540): `search_thoughts` prints
+`⚠ Moved since written: SMD-2306 In Progress → Done; …` after the superseded
+and demoted lines, every moved ticket by key, and lists them in each hit's
+`moved` (`{ticket, was, now}` in status types; the REST answer carries each
+status's name and type); `search` ends that result's title `— moved since
+written: …` and gives it `moved`. Written is the session's end the hook's last
+line records, else the row's stored time, and a ticket that already held its
+current type an hour later is the writer's own move, not labelled — the
+reading `evals/eval-stated-status.ts` measured (`server-portable/stated-status.ts`).
+A superseded hit, a ticket row and a note filed under a ticket are not read, so
+an empty `moved` makes no claim. The inputs are one call to 095's
+`ticket_status_inputs`, made only when a hit names a ticket; a brain before
+095, or a role without `ob1_config`, labels nothing and searches as before.
+
 ## Steps
 
 ### 1. Install

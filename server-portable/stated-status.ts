@@ -120,8 +120,14 @@ export function movedAmong(hits: readonly { id: string; content: string; created
   return out;
 }
 
-/** A status name as a reply prints it: the board's free text on one line, no control character, at most 40 characters. */
-const said = (name: string) => name.replace(/[\p{C}\s]+/gu, " ").trim().slice(0, 40) || "?";
+/**
+ * A status name as a reply prints it: the board's free text on one line — no
+ * control character, line or paragraph separator, or run of spaces — without
+ * the line's own separators (`;` between tickets, `→` between statuses, so a
+ * name cannot read as a second entry), at most 40 characters, cut by code
+ * point (never half an emoji).
+ */
+const said = (name: string) => Array.from(name.replace(/[\p{C}\p{Z}\s;→]+/gu, " ").trim()).slice(0, 40).join("").trimEnd() || "?";
 
 /**
  * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one,
