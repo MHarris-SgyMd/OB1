@@ -3048,6 +3048,61 @@ gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
 
+### bench-live.ts
+
+What a background pass costs a live call (SMD-3024). The sleep scheduler stops
+extraction and consolidation on the first live call to protect live latency; this
+measures that latency with and without a pass running. It times `search_thoughts`
+and `capture_thought` end to end, as a client calls them through a brain's MCP
+endpoint, with one client and each call waiting for the last. It also times a query
+embedding and a capture's metadata call directly, through the server's own
+`embed.ts` and `metadata.ts`, against the same provider. The call kinds are
+interleaved and never overlap, and one untimed call of each kind comes first, so no
+timed call loads a model.
+
+```bash
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
+OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
+  bun bench-live.ts --label baseline --out /private/tmp/live.jsonl --ids /private/tmp/probe-ids.txt
+bun bench-live.ts --self-check   # the answer reader, the ok rule, the schedule, the flags; what CI runs
+```
+
+Captures are real writes, so run it against the canary or a scratch brain, never
+stable. Each probe starts `SMD-3024 latency probe`, its id goes to `--ids` as it
+lands, and the run deletes its own probes at the end (`--keep-probes` keeps them).
+It uses the stable connector's key from `~/.claude.json`, which the canary also
+accepts; `--key-from` names another entry. Two brains on one model server load each
+other: each brain's sleep yields only to its own traffic (SMD-3034), so check the
+other brain's work queue before a run.
+
+The first run, on 2026-10-15:
+- **Setup:** the canary at 2,211 thoughts, with qwen2.5:7b at `-np 3` on one
+  Apple-silicon GPU.
+- **States:** the canary's sleep stopped, then the `workers` profile's `extract`
+  follower (which never yields) at one and two containers, against a baseline
+  taken before and after.
+
+| beside | the 7B call (a capture's metadata) | a search |
+|---|---|---|
+| one extraction stream | +13–21% | +27 ms |
+| two | +55–90% | +22 ms |
+
+A capture is its metadata call plus 10–12 ms, and everything but the model stayed
+within ±2 ms across states. At this size, a pass costs a live call through the
+model, not the database.
+
+What the columns are not:
+- **The direct embeds are not a search's own embedding time.** The provider keeps
+  each slot's last prompt cached (llama-server's prefix cache; the embedder has
+  one slot), so an embedding's time depends on the call before it. The direct
+  embeds use their own queries, so each is an embedding with a warm instruction
+  prefix. Ollama's log has a search's own embedding time per request.
+- **p95 prints only from 20 samples up.** Below that, nearest rank makes it the
+  single slowest call.
+- **The `workers` profile measures a pass that never yields.** Under the sleep
+  scheduler, a pass overlaps only the first call or two of a burst, before its
+  hard stop.
+
 ### bench-querylog.ts
 
 The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
