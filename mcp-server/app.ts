@@ -75,8 +75,10 @@ export interface McpDeps {
  * routes said it four ways, one as the caller refused).
  */
 export class ForwarderRefused extends Error {
+  /** The operator's fix, for the log alone: a client is told the forwarder was refused, never this server's settings (review pass 6). */
+  readonly hint = "set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds";
   constructor(status: number, code: string | undefined) {
-    super(`the REST core refused this server's forwarder key (${status} ${code ?? "?"}): set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds`);
+    super(`the REST core refused this server's forwarder key (${status} ${code ?? "?"})`);
   }
 }
 
@@ -223,7 +225,7 @@ const WORDS: Record<ToolName, Words> = {
  * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
  * client sent them (argumentsById), which a plugin tool sends on.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>): McpServer {
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250).
@@ -234,8 +236,12 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
     recordCall(record, outcome, reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined);
     return reply;
   };
-  /** A fault's reply as the call's end — and a fault reply that itself throws is still an error, counted (index.ts's registerOp). */
-  const faulted = (say_: () => say.Reply): say.Reply => {
+  /**
+   * A fault's reply as the call's end — and a fault reply that itself throws is still an error, counted (index.ts's
+   * registerOp); this server's forwarder refused mid-call said in the log too, as on every route (review pass 6).
+   */
+  const faulted = (err: unknown, say_: () => say.Reply): say.Reply => {
+    if (err instanceof ForwarderRefused) tell(err);
     try {
       return ended(say_(), "error");
     } catch (err) {
@@ -253,7 +259,7 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
       // uncoded error).
       try {
         let outcome = outcomeOf(await rest.call(name as never, input, { key: caller.key }));
-        if ("fault" in outcome) return faulted(() => words.fault((outcome as { fault: Error }).fault, input));
+        if ("fault" in outcome) return faulted(outcome.fault, () => words.fault((outcome as { fault: Error }).fault, input));
         if (name === "scan_thoughts" && outcome.ok) {
           // The handle's links under this server's endpoint, as atEndpoint puts them (jobs.ts): its /jobs routes, not the REST core's /v1/jobs.
           const handle = outcome.value as { jobId: string };
@@ -262,7 +268,7 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
         const reply = words.render(outcome as never, input);
         return ended(reply, reply.isError ? "refused" : "ok");
       } catch (err) {
-        return faulted(() => words.fault(err, input));
+        return faulted(err, () => words.fault(err, input));
       }
     });
   }
@@ -279,16 +285,16 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
       try {
         const id = JSON.stringify(ctx?.mcpReq?.id);
         const given = raw.get(id);
-        if (given === AMBIGUOUS) return faulted(() => say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`)));
+        if (given === AMBIGUOUS) return faulted(null, () => say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`)));
         // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
-        if (!given) return faulted(() => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)));
+        if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)));
         const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
         const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
-        if ("fault" in outcome) return faulted(() => say.failed(outcome.fault));
+        if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault));
         const reply = say.renderPlugin(outcome as never);
         return ended(reply, reply.isError ? "refused" : "ok");
       } catch (err) {
-        return faulted(() => say.failed(err));
+        return faulted(err, () => say.failed(err));
       }
     });
   }
@@ -366,7 +372,10 @@ export function createMcpApp(deps: McpDeps): Hono {
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
-    const line = `mcp-server: ${lead}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}`;
+    // This server's forwarder refused is one misconfiguration, said in one line whichever route met it (review pass 6).
+    const said = err instanceof ForwarderRefused ? "this server is misconfigured" : lead;
+    const hint = err instanceof ForwarderRefused ? `: ${err.hint}` : "";
+    const line = `mcp-server: ${said}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}${hint}`;
     const now = Date.now();
     if (now - (lastSaid.get(line) ?? -Infinity) < 60_000) return;
     lastSaid.set(line, now);
@@ -432,7 +441,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
   /** A route that faulted: its line `error` FAILED, its kind on the span; a mirror's 200 {error} answer as index.ts's, or (`shownOk`) liveness. */
   const faultedAt = (c: Context, err: unknown, shownOk = false) => {
-    if (err instanceof ForwarderRefused) sayOnce(err, "this server is misconfigured");
+    if (err instanceof ForwarderRefused) sayOnce(err);
     const trace = traceOf(c.req.raw);
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(err); }
     return shownOk ? c.text("ok", 200, corsHeaders) : c.json({ error: (err as Error).message }, 200, corsHeaders);
@@ -465,7 +474,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     // 4b). A key's record is asked once every key before it is found unknown — the first that could decide, as index.ts
     // reads the first key that matches, never one more (review pass 5: each valid key asked cost a read and a lookup).
     // The REST core's registry runs one lookup per key at a time (agents.ts), so a read shares its key's whoami lookup;
-    // the edge's view starts beside them, as index.ts starts it with its read.
+    // the edge's view starts beside them, for any key presented — index.ts starts it once a key matches its hash, at
+    // once; its probe is cached 30 s.
     type Read = { a: Answer | null; fault: unknown };
     const early = new AbortController();
     const signal = AbortSignal.any([budget, early.signal]);
@@ -482,7 +492,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       early.abort();
       return caller;
     }
-    ask(caller.key);
+    ask(caller.key); // defensive: the deciding key's record is asked by now, every key before it unknown
     const { a, fault } = await reads.get(caller.key)!;
     early.abort();
     // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
@@ -597,7 +607,7 @@ export function createMcpApp(deps: McpDeps): Hono {
         if (upstream.status >= 500 && upstream.status !== 503) throw new Error(`the REST core answered the job stream ${upstream.status}`);
         // This server's forwarder refused or revoked there: its misconfiguration, a 500 said once, as at the poll (review pass 5 of PR 4b).
         if (refusal?.credential === "forwarder") throw new ForwarderRefused(401, refusal.code);
-        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : refusal?.code === "REVOKED" && refusal.credential !== "forwarder" ? { status: "revoked" } : null);
+        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : refusal?.code === "REVOKED" ? { status: "revoked" } : null);
       }
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
       // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
@@ -708,7 +718,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       label = requestLabel(rawBody);
       read(rawBody);
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track);
+      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err));
       const transport = new WebStandardStreamableHTTPServerTransport();
       await server.connect(transport);
       const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));

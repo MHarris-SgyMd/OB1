@@ -384,8 +384,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // lock, and the forwarder's answer is the agent cache's for its TTL in
       // any case (SMD-2287 PR 3a review pass 2, not taken).
       const carried = await deps.resolve(carrier);
-      // The caller, resolved, named beside the forwarder's own refusal, for the forwarder's line (SMD-2287 PR 4b review pass 5).
-      if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder", name: principal.name }, { "WWW-Authenticate": "Bearer" });
+      // The caller, resolved, named beside the forwarder's busy registry, for the forwarder's line (SMD-2287 PR 4b review
+      // pass 5); a revoked forwarder is the server's misconfiguration, whose line names no caller.
+      if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
       if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder", name: principal.name }, RETRY_AFTER);
       principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
     }

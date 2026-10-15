@@ -398,7 +398,8 @@ console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy m
   assert(same(statuses, [500, 500, 500]) && lines.length === 1 && /forwarder/.test(lines[0]) && errors.length === 0, `a forwarder refused at the endpoint: three 500s, one line, no stack (${statuses}; ${lines.length} lines, ${errors.length} errors)`);
   // A route's throw is said as a route's, with the REST core's address (review pass 4).
   const named: string[] = [];
-  const brokenNamed = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async () => json(401, { code: "UNAUTHORIZED", credential: "forwarder" }) }), edge: () => ({ configured: false, origin: null }), warn: (l) => named.push(l), restUrl: "http://api.test:8000" });
+  // A REST core that answers whoami 500: a route's throw, said as the route's (a forwarder refused is said as the misconfiguration, review pass 6 of PR 4b).
+  const brokenNamed = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async () => json(500, { code: "FAILED", message: "the registry threw" }) }), edge: () => ({ configured: false, origin: null }), warn: (l) => named.push(l), restUrl: "http://api.test:8000" });
   await (await brokenNamed.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }))).text();
   assert(named.length === 1 && named[0].includes("POST a route failed") && named[0].includes("(REST core at http://api.test:8000)"), `a route's throw: named as a route's, the REST core's address beside it (${named[0]?.slice(0, 90)})`);
   // A client gone while its key is asked: the abandoned line's, not a fault line (review pass 4).
@@ -693,6 +694,10 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
     // This server's forwarder revoked mid-call is its misconfiguration, as standingOf reads it — not the caller's key (review pass 4).
     afterWhoami = { code: "REVOKED", credential: "forwarder" };
     countingWarned.length = 0;
+    // A tool call first: its fault said in the log too (review pass 6: a tool's was never said).
+    const fwdTool = await counting.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }));
+    const toolText = await fwdTool.text();
+    const toolSaid = [...countingWarned];
     const fwdAt = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
     await fwdAt.text();
     const fwdLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
@@ -704,8 +709,10 @@ console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fau
     await fwdStream.text();
     const fwdStreamLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
     afterWhoami = null;
-    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED" && fwdSaid.length === 1 && /misconfigured.*forwarder key/.test(fwdSaid[0]),
-      `a forwarder revoked after whoami: \`error\` FAILED, said once as this server's misconfiguration (review pass 5) (${fwdSaid.join(" | ")})`);
+    assert(toolSaid.length === 1 && /this server is misconfigured.*forwarder key.*OB1_FORWARDER_KEY/.test(toolSaid[0]), `a forwarder revoked during a tool call: said in the log as this server's misconfiguration, the fix beside it (review pass 6) (${toolSaid.join(" | ")})`);
+    assert(toolText.includes("forwarder key") && !toolText.includes("OB1_FORWARDER_KEY") && !toolText.includes("MCP_ACCESS_KEYS"), `…the client told the forwarder was refused, never this server's settings (${toolText.replace(/\s+/g, " ").slice(0, 160)})`);
+    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED" && fwdSaid.length === 1, `…at a mirror \`error\` FAILED, and no second line: one misconfiguration, one line (${fwdSaid.join(" | ")})`);
+    assert(countingWarned.length === 1, `…the poll and the stream adding none, every route saying it in the one line (${countingWarned.join(" | ")})`);
     assert(fwdPoll.status === 500 && fwdPollLine.outcome === "error", `…a 500 \`error\` at the job poll (${fwdPoll.status} ${JSON.stringify(fwdPollLine)})`);
     assert(fwdStreamLine.outcome === "error" && fwdStreamLine.status === 500, `…and at the stream, a 500 \`error\` as at the poll, not the caller's key refused (review pass 5) (${JSON.stringify(fwdStreamLine)})`);
     // A record asked for the first key that could decide alone, as index.ts reads the first key that matches (review pass 5):
