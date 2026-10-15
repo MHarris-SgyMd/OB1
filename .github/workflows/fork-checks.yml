@@ -2403,7 +2403,7 @@ jobs:
           if [ "$rc" != 0 ] || ! grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-diff.out || ! grep -F 'what moved: nothing' /tmp/tier-diff.out; then cat /tmp/tier-diff.out >&2; echo "the --diff of a canary just refreshed from stable did not pass (exit $rc)" >&2; exit 1; fi
           rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8010/canary/mcp --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
           if [ "$rc" != 3 ] || ! grep -F 'logged no searches in the window' /tmp/tier-empty.out; then cat /tmp/tier-empty.out >&2; echo "a --diff that compared nothing exited $rc, not 3" >&2; exit 1; fi
-          if grep -qF -- "$OB1_SMOKE_KEY" /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
