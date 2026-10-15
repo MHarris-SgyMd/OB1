@@ -3085,45 +3085,65 @@ the header of `migrations/011_text_search_trgm.sql`.
 ### bench-live.ts
 
 What a background pass costs a live call (SMD-3024). The sleep scheduler stops
-extraction and consolidation on the first live call to protect live latency; this
-measures that latency with and without a pass running. It times `search_thoughts`
-and `capture_thought` end to end, as a client calls them through a brain's MCP
-endpoint, with one client and each call waiting for the last. It also times a query
-embedding and a capture's metadata call directly, through the server's own
-`embed.ts` and `metadata.ts`, against the same provider. The call kinds are
-interleaved and never overlap, and one untimed call of each kind comes first, so no
-timed call loads a model.
+extraction and consolidation once it sees a live call recorded, to protect live
+latency; this measures that latency with and without a pass running. It times
+`search_thoughts` and `capture_thought` end to end, as a client calls them through a
+brain's MCP endpoint, with one client and each call waiting for the last. It also
+times a query embedding and a capture's metadata call directly, through the
+server's own `embed.ts` and `metadata.ts`, against the same provider. The call kinds
+are interleaved and never overlap, and one untimed call of each kind comes first, so
+no timed call loads a model; a warm-up that fails is said.
 
 ```bash
 OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
 OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
-  bun bench-live.ts --label baseline --out /private/tmp/live.jsonl --ids /private/tmp/probe-ids.txt
-bun bench-live.ts --self-check   # the answer reader, the ok rule, the schedule; what CI runs
+  bun bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids.txt
+bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the schedule, the tier guard; what CI runs
 ```
 
-Captures are real writes, so run it against the canary or a scratch brain, never
-stable. Each probe starts `SMD-3024 latency probe`, its id goes to `--ids` as it
-lands, and the run deletes its own probes at the end (`--keep-probes` keeps them).
-It uses the stable connector's key from `~/.claude.json`, which the canary also
-accepts; `--key-from` names another entry. Two brains on one model server load each
-other: each brain's sleep yields only to its own traffic (SMD-3034), so check the
-other brain's work queue before a run.
+The five variables are the canary's model settings: for another brain they must
+mirror that server's, and the banner prints what was resolved. `--mcp` names the
+endpoint; its default is this Mac's canary on stable's origin
+(`http://127.0.0.1:8010/canary/mcp`), and a stack of its own serves on port 8000. The
+key is the stable connector's from `~/.claude.json`, which the canary also accepts;
+`--key-from` names another entry.
+
+Captures are real writes:
+- **Which brain:** it runs only against a brain whose `brain_info` says tier
+  `canary` or `working` (`OB1_TIER`). Stable is refused before anything is written.
+- **Cleanup:** each probe starts `SMD-3024 latency probe`, and its id goes to `--ids`
+  as it lands. The run deletes its own probes whatever ends it: a normal end, Ctrl-C,
+  or an error. It exits 1 if any is left, and a second Ctrl-C stops at once and
+  leaves them. A call that hangs ends at three times the provider's call timeout.
+- **After a run that died, or with `--keep-probes`:** delete each id in `--ids` with
+  `delete_thought`. Then confirm with `search_thoughts_keyword "SMD-3024 latency probe"`,
+  which also finds a probe whose id never reached the file. The audit trail and the
+  query log keep the probes' text until the brain's next refresh.
+- **The other brain on the same model server:** each brain's sleep yields only to
+  its own traffic (SMD-3034). Stop the other brain's sleep for the run
+  (`podman compose -p <project> --profile sleep stop sleep`, and start it after), or
+  confirm its pools are empty (`extract-entities.ts` and `consolidate.ts` with
+  `--status`). Afterwards, check Ollama's log for requests the harness didn't make.
 
 The first run, on 2026-10-15:
-- **Setup:** the canary at 2,211 thoughts, with qwen2.5:7b at `-np 3` on one
-  Apple-silicon GPU.
+- **Setup:** the canary at 2,211 thoughts, with qwen2.5:7b at `-np 3` and
+  qwen3-embedding:4b on one Apple-silicon GPU.
 - **States:** the canary's sleep stopped, then the `workers` profile's `extract`
   follower (which never yields) at one and two containers, against a baseline
   taken before and after.
+- **Counts:** 40 searches, 12 captures, 30 embeds and 8 metadata calls per state;
+  the defaults are now 60, 30, 40 and 20.
+- **The figures:** medians of paired ratios against both baselines. Their bootstrap
+  95% intervals are in `changes/smd-3024.md`, computed outside the harness.
 
-| beside | the 7B call (a capture's metadata) | a search |
-|---|---|---|
-| one extraction stream | +13–21% | +27 ms |
-| two | +55–90% | +22 ms |
+| beside | a capture | the 7B metadata call | a search |
+|---|---|---|---|
+| one extraction stream | +15% | +21% | +27 ms |
+| two | +58% | +90% | +22 ms |
 
-A capture is its metadata call plus 10–12 ms, and everything but the model stayed
-within ±2 ms across states. At this size, a pass costs a live call through the
-model, not the database.
+A capture is its own metadata call plus ~10–12 ms at the median, and everything but
+the model stayed within ±2 ms at the median across states. At this size, a pass
+costs a live call through the model, not the database.
 
 What the columns are not:
 - **The direct embeds are not a search's own embedding time.** The provider keeps
@@ -3131,11 +3151,16 @@ What the columns are not:
   one slot), so an embedding's time depends on the call before it. The direct
   embeds use their own queries, so each is an embedding with a warm instruction
   prefix. Ollama's log has a search's own embedding time per request.
+- **The direct metadata call is not the capture's own.** It is a separate call of
+  the same size: in the first run, about 0.1 s faster than the capture's at
+  baseline, and about 0.6 s slower beside two streams (8 samples).
 - **p95 prints only from 20 samples up.** Below that, nearest rank makes it the
   single slowest call.
 - **The `workers` profile measures a pass that never yields.** Under the sleep
-  scheduler, a pass overlaps only the first call or two of a burst, before its
-  hard stop.
+  scheduler, a pass runs beside a burst until the scheduler's next poll sees the
+  burst's first recorded call: up to `--poll` (5 s) after that call ends. That is
+  a capture or two, or a few dozen searches; reads wake it only with
+  `OB1_QUERY_LOG=on`. That window was not measured here.
 
 ### bench-querylog.ts
 
