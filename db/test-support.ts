@@ -44,6 +44,8 @@ const TABLES = [
   "thought_facets",
   "thought_audit",
   "thought_chunks",
+  // 093's kept windows (SMD-2694): a foreign key to the claims, so before them.
+  "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
   "ob1_entity_edges",
@@ -138,6 +140,8 @@ const FUNCTIONS = [
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
   "renew_claims(text, text, int)",
+  "save_extraction_window(uuid, text, text, text, text, int, int, jsonb)",
+  "note_extraction_stop(uuid, text, text, text, text, boolean)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",
@@ -325,6 +329,9 @@ const FUNCTIONS = [
   "ob1_weigh_recapture(uuid, text, jsonb, text)",
   // 091 (SMD-2913): the trigger that keeps each settle by the pass.
   "ob1_keep_proposal_settles()",
+  // 092 (SMD-2708): 082's log read by name, and the chain.
+  "ob1_capture_taken_by_log(uuid)",
+  "ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)",
 ];
 
 /**

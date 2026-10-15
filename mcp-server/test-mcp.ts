@@ -273,6 +273,19 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
     const want = say.renderCapture(ok(captured) as never);
     assert(!got.isError && expectReply(got, want), `${key}: the capture said as in-process (${got.text.slice(0, 70)})`);
   }
+  // A capture saved without its vector because the provider did not answer (SMD-2888): the forwarded value says it as in-process, for both keys.
+  // Each key with its own value, as the REST core hands it: a capture key's (reader false), a write key's (reader true, existed false).
+  const vf = { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" };
+  for (const [key, away, words] of [
+    ["cap-raw", { ...captured, vectorFailed: vf }, /the embedding provider was unavailable\./],
+    ["write-raw", { ...captured, reader: true, existed: false, vectorFailed: vf }, /saved WITHOUT a vector — the embedding provider at http:\/\/ollama:11434\/v1 was unavailable \(the connection was refused\)/],
+  ] as const) {
+    answer = (n) => (n === "capture" ? ok(away) : ok({}));
+    const got = await tool("capture_thought", { content: "Session summary", source: "claude-code" }, key);
+    const want = say.renderCapture(ok(away) as never);
+    assert(!got.isError && expectReply(got, want) && words.test(got.text) && got.sc.vectorFailed === "provider_unreachable",
+      `${key}: a capture saved without its vector said as in-process (${got.text.split("\n\n").find((p) => /vector/.test(p))?.slice(0, 90)})`);
+  }
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
   answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
   const unsayable = await tool("thought_stats", {});
@@ -313,17 +326,30 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
 
 console.log("\n[8c] Review pass 2: /health's one deadline, a job stream's answers, a misconfigured forwarder said once");
 {
-  // A registry that answers each lookup in 1.5 s: the key's standing and the record's own check, one after the other,
-  // would be 3 s; one deadline over both answers `ok` at it, as index.ts's one race does.
+  // A registry that answers each lookup in 1.5 s: the key's standing and the record asked together, as index.ts starts
+  // its read with the registry's check, so the record comes at about 1.5 s, not 3 (PR 4b review pass 3: one after the
+  // other, they ran past the deadline together); past the deadline, one deadline over both answers `ok` at it.
   answer = () => ({ version: "1.0.0" });
   resolveDelayMs = 1_500;
-  const t0 = performance.now();
+  let t0 = performance.now();
   const slow = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
-  const took = performance.now() - t0;
+  let took = performance.now() - t0;
   const slowText = await slow.text();
+  assert(slowText.includes('"version":"1.0.0"') && took < 2_200, `a registry at 1.5 s: /health's record, the key's check and the read together (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  // A key the core does not know before the one that decides: its record asked from the start too (review pass 4).
+  t0 = performance.now();
+  const second = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "bogus-raw", "x-access-key": "read-raw" } }));
+  took = performance.now() - t0;
+  const secondText = await second.text();
+  assert(secondText.includes('"version":"1.0.0"') && took < 2_200, `an unknown key before a read key, the registry at 1.5 s: the read key's record, asked from the start (${Math.round(took)} ms, ${secondText.slice(0, 30)})`);
+  resolveDelayMs = 2_700;
+  t0 = performance.now();
+  const past = await app.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+  took = performance.now() - t0;
+  const pastText = await past.text();
   resolveDelayMs = 0;
   answer = () => ok({});
-  assert(slowText === "ok" && took < 2_900, `a slow registry: /health answers ok within its one deadline (${Math.round(took)} ms, ${slowText.slice(0, 30)})`);
+  assert(pastText === "ok" && took < 2_900, `a registry past the deadline: /health answers ok within its one deadline (${Math.round(took)} ms, ${pastText.slice(0, 30)})`);
   // A job stream's answers from the REST core, each as index.ts answers it.
   const streamApp = (status: number) => createMcpApp({
     rest: createRestClient({
@@ -385,7 +411,8 @@ console.log("\n[8d] Review pass 3: the forwarder's busy key, the registry busy m
   assert(same(statuses, [500, 500, 500]) && lines.length === 1 && /forwarder/.test(lines[0]) && errors.length === 0, `a forwarder refused at the endpoint: three 500s, one line, no stack (${statuses}; ${lines.length} lines, ${errors.length} errors)`);
   // A route's throw is said as a route's, with the REST core's address (review pass 4).
   const named: string[] = [];
-  const brokenNamed = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async () => json(401, { code: "UNAUTHORIZED", credential: "forwarder" }) }), edge: () => ({ configured: false, origin: null }), warn: (l) => named.push(l), restUrl: "http://api.test:8000" });
+  // A REST core that answers whoami 500: a route's throw, said as the route's (a forwarder refused is said as the misconfiguration, review pass 6 of PR 4b).
+  const brokenNamed = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async () => json(500, { code: "FAILED", message: "the registry threw" }) }), edge: () => ({ configured: false, origin: null }), warn: (l) => named.push(l), restUrl: "http://api.test:8000" });
   await (await brokenNamed.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: "{}" }))).text();
   assert(named.length === 1 && named[0].includes("POST a route failed") && named[0].includes("(REST core at http://api.test:8000)"), `a route's throw: named as a route's, the REST core's address beside it (${named[0]?.slice(0, 90)})`);
   // A client gone while its key is asked: the abandoned line's, not a fault line (review pass 4).
@@ -600,6 +627,177 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const npCode = await noPlugin.exited;
   const npSaid = await new Response(noPlugin.stderr).text();
   assert(npCode === 2 && /OB1_PLUGINS/.test(npSaid) && /no-such-plugin/.test(npSaid) && !/\n\s+at /.test(npSaid), `OB1_PLUGINS naming no plugin: exit 2, in words (${npCode}: ${npSaid.trim().slice(0, 90)})`);
+}
+
+console.log("\n[8e2] A keyed route's line (review passes 1 to 3 of PR 4b): a fault is `error` FAILED, not a key refused; a keyed HEAD asks the REST core nothing, a keyless one at a mirror is `refused`");
+{
+  const { useRequestLog } = await import("../server-portable/telemetry.ts");
+  const said: string[] = [];
+  const before = useRequestLog((l) => said.push(l));
+  let sent = 0;
+  let healthDown = false;
+  let turnedAfterWhoami = false;
+  let afterWhoami: Record<string, unknown> | null = null;
+  let healthBody: string | null = null;
+  const healthAsked: string[] = [];
+  const countingWarned: string[] = [];
+  const counting = createMcpApp({
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => {
+      sent++;
+      const path = new URL(req.url).pathname;
+      if (path === "/health") healthAsked.push(req.headers.get("x-brain-key") ?? "?");
+      if (restDown || (healthDown && path === "/health")) throw new TypeError("fetch failed: connection refused");
+      // A streamed body, as a socket's is: one a cancel disturbs, where a string's survives it.
+      const streamed = (body: unknown) => new Response(new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode(JSON.stringify(body))); ctl.close(); } }), { status: 401, headers: { "content-type": "application/json" } });
+      if (turnedAfterWhoami && path !== "/v1/whoami") return streamed({ code: "REVOKED" });
+      if (afterWhoami && path !== "/v1/whoami") return streamed(afterWhoami);
+      if (healthBody !== null && path === "/health") return new Response(healthBody, { status: 200, headers: { "content-type": "application/json" } });
+      return restApp.fetch(req);
+    } }),
+    edge: () => ({ configured: false, origin: null }),
+    warn: (l) => countingWarned.push(l),
+  });
+  try {
+    restDown = true;
+    const r = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
+    const answered = await r.text();
+    restDown = false;
+    const line = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(r.status === 200 && answered === "ok" && line.outcome === "error" && line.code === "FAILED" && line.route === "/worker-status",
+      `the REST core away at a mirror: shown \`ok\`, its line \`error\` FAILED, not \`refused\` (${said.at(-1)})`);
+    sent = 0;
+    const head = await counting.fetch(new Request("http://mcp/health", { method: "HEAD", headers: { "x-brain-key": "read-raw" } }));
+    const headLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(head.status === 200 && sent === 0 && headLine.method === "HEAD" && headLine.outcome === "ok" && headLine.route === "/health",
+      `a keyed HEAD at /health: liveness at once, nothing sent to the REST core, its line \`ok\` (${sent} sent; ${said.at(-1)})`);
+    // The mirrors' keyed HEADs the same, as index.ts answers them before the key's check (review pass 2).
+    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"], ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream"]] as const) {
+      sent = 0;
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method: "HEAD", headers: { "x-brain-key": "read-raw" } }));
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && sent === 0 && l.outcome === "ok" && l.route === route, `a keyed HEAD at ${route}: liveness at once, nothing sent (${sent} sent; ${said.at(-1)})`);
+    }
+    // A keyless HEAD at a mirror is a caller shown nothing, `refused`, as index.ts's (review pass 3: no test held it).
+    for (const [path, route] of [["/worker-status", "/worker-status"], ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id"], ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream"]] as const) {
+      sent = 0;
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method: "HEAD" }));
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && sent === 0 && l.outcome === "refused" && l.route === route && !("agent" in l), `a keyless HEAD at ${route}: shown nothing, \`refused\`, no key named (${said.at(-1)})`);
+    }
+    // A key the registry revoked between its check and the call: `refused` REVOKED, shown `ok`, as index.ts reads it — never a fault, nor a poll's 500 (review pass 3).
+    turnedAfterWhoami = true;
+    for (const [path, route, method, key] of [
+      ["/worker-status", "/worker-status", "GET", "read-raw"],
+      ["/jobs/00000000-0000-4000-8000-000000000009", "/jobs/:id", "GET", "read-raw"],
+      ["/jobs/00000000-0000-4000-8000-000000000009/stream", "/jobs/:id/stream", "GET", "read-raw"],
+      ["/worker-retry-failed", "/worker-retry-failed", "POST", "write-raw"],
+    ] as const) {
+      const r = await counting.fetch(new Request(`http://mcp${path}`, { method, headers: { "x-brain-key": key, ...(method === "POST" ? { "content-type": "application/json" } : {}) }, ...(method === "POST" ? { body: "{}" } : {}) }));
+      const text = await r.text();
+      const l = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+      assert(r.status === 200 && text === "ok" && l.outcome === "refused" && l.code === "REVOKED" && l.route === route, `a key revoked after whoami at ${route}: \`refused\` REVOKED, shown \`ok\` (${r.status} ${said.at(-1)})`);
+    }
+    turnedAfterWhoami = false;
+    // The stream's other 401s: an unknown key `refused` with no code, never the 500 a body read after its cancel gave (review pass 4).
+    afterWhoami = { code: "UNAUTHORIZED" };
+    const unknownAt = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009/stream", { headers: { "x-brain-key": "read-raw" } }));
+    await unknownAt.text();
+    const unknownLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(unknownAt.status === 200 && unknownLine.outcome === "refused" && !("code" in unknownLine), `a 401 UNAUTHORIZED at the stream after whoami: \`refused\`, no code, no 500 (${unknownAt.status} ${said.at(-1)})`);
+    // This server's forwarder revoked mid-call is its misconfiguration, as standingOf reads it — not the caller's key (review pass 4).
+    afterWhoami = { code: "REVOKED", credential: "forwarder" };
+    countingWarned.length = 0;
+    // A tool call first: its fault said in the log too (review pass 6: a tool's was never said).
+    const fwdTool = await counting.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }));
+    const toolText = await fwdTool.text();
+    const toolSaid = [...countingWarned];
+    const fwdAt = await counting.fetch(new Request("http://mcp/worker-status", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdAt.text();
+    const fwdLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    const fwdSaid = [...countingWarned];
+    const fwdPoll = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdPoll.text();
+    const fwdPollLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    const fwdStream = await counting.fetch(new Request("http://mcp/jobs/00000000-0000-4000-8000-000000000009/stream", { headers: { "x-brain-key": "read-raw" } }));
+    await fwdStream.text();
+    const fwdStreamLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    afterWhoami = null;
+    assert(toolSaid.length === 1 && /this server is misconfigured.*forwarder key.*OB1_FORWARDER_KEY/.test(toolSaid[0]), `a forwarder revoked during a tool call: said in the log as this server's misconfiguration, the fix beside it (review pass 6) (${toolSaid.join(" | ")})`);
+    assert(toolText.includes("forwarder key") && !toolText.includes("OB1_FORWARDER_KEY") && !toolText.includes("MCP_ACCESS_KEYS"), `…the client told the forwarder was refused, never this server's settings (${toolText.replace(/\s+/g, " ").slice(0, 160)})`);
+    assert(fwdLine.outcome === "error" && fwdLine.code === "FAILED" && fwdSaid.length === 1, `…at a mirror \`error\` FAILED, and no second line: one misconfiguration, one line (${fwdSaid.join(" | ")})`);
+    assert(countingWarned.length === 1, `…the poll and the stream adding none, every route saying it in the one line (${countingWarned.join(" | ")})`);
+    assert(fwdPoll.status === 500 && fwdPollLine.outcome === "error", `…a 500 \`error\` at the job poll (${fwdPoll.status} ${JSON.stringify(fwdPollLine)})`);
+    assert(fwdStreamLine.outcome === "error" && fwdStreamLine.status === 500, `…and at the stream, a 500 \`error\` as at the poll, not the caller's key refused (review pass 5) (${JSON.stringify(fwdStreamLine)})`);
+    // A record asked for the first key that could decide alone, as index.ts reads the first key that matches (review pass 5):
+    // two valid keys, one read; an unknown key first, its read and the next key's.
+    healthAsked.length = 0;
+    await (await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw", "x-access-key": "write-raw" } }))).text();
+    const twoValid = [...healthAsked];
+    healthAsked.length = 0;
+    await (await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "bogus-raw", "x-access-key": "read-raw" } }))).text();
+    const unknownFirst = [...healthAsked];
+    assert(same(twoValid, ["read-raw"]) && same(unknownFirst, ["bogus-raw", "read-raw"]), `/health's record asked for the first key that could decide alone (two valid: ${twoValid.join()}; unknown first: ${unknownFirst.join()})`);
+    // /health answered with no record: `error` FAILED, not a string's characters served as fields (review pass 3).
+    healthBody = JSON.stringify("garbage");
+    const junk = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+    const junkText = await junk.text();
+    healthBody = null;
+    const junkLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(junkText === "ok" && junkLine.outcome === "error" && junkLine.code === "FAILED", `/health answered with no record: liveness, its line \`error\` FAILED (${junkText.slice(0, 30)}; ${said.at(-1)})`);
+    // /health's record call after the key cleared: the REST core gone between the two is `error` FAILED, not the key refused (review pass 2).
+    healthDown = true;
+    const torn = await counting.fetch(new Request("http://mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+    const tornText = await torn.text();
+    healthDown = false;
+    const tornLine = JSON.parse(said.at(-1) ?? "{}") as Record<string, unknown>;
+    assert(torn.status === 200 && tornText === "ok" && tornLine.outcome === "error" && tornLine.code === "FAILED" && tornLine.agent === "chatgpt",
+      `/health's record call faulting after whoami cleared the key: liveness, its line \`error\` FAILED, the key named (${said.at(-1)})`);
+  } finally {
+    restDown = false;
+    healthDown = false;
+    turnedAfterWhoami = false;
+    afterWhoami = null;
+    healthBody = null;
+    useRequestLog(before);
+  }
+}
+
+console.log("\n[8f] The entry's stop: it waits for a tool call past its client's request, then cuts it, its line `cut` (SMD-2287 PR 4b)");
+{
+  // A REST core whose every operation hangs, and the entry in front of it with a short grace: the stop finds a tool call running.
+  const hangingCore = new Proxy({}, { get: () => () => new Promise(() => {}) }) as unknown as Core;
+  const hangingRest = createRestApp({
+    core: hangingCore,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-1" }),
+    track: (run) => run(),
+    log: () => {},
+  });
+  const restServer = Bun.serve({ port: 0, fetch: (req) => hangingRest.fetch(req) });
+  const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = holder.port;
+  holder.stop(true);
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
+  let up = false;
+  for (let i = 0; i < 100 && !up; i++) {
+    up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
+    if (!up) await Bun.sleep(50);
+  }
+  const pending = fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }).then((r) => r.text()).catch(() => "gone");
+  await Bun.sleep(300);
+  entry.kill("SIGTERM");
+  const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);
+  const code = await entry.exited;
+  clearTimeout(hung);
+  await pending;
+  restServer.stop(true);
+  const out = await new Response(entry.stdout).text();
+  const err = await new Response(entry.stderr).text();
+  const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
+  const cut = lines.filter((l) => l.door === "mcp" && l.tool === "thought_stats");
+  assert(up && cut.length === 1 && cut[0].outcome === "cut" && /SIGTERM: no longer accepting; .*1 tool call running/.test(out) && /cut off by the server's stop/.test(err),
+    `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
 }
 
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");

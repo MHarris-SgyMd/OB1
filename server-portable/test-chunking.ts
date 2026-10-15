@@ -159,7 +159,8 @@ console.log("[0] A whole-content call that fails transiently is said in the repl
   // passes while its body is still arriving is recorded as the timeout it is,
   // not as a body that was not JSON.
   const slow = await call("capture_thought", { content: "A slowchat note about nothing much." });
-  assert(/automatic tagging failed \(provider_timeout\)/.test(slow), "a metadata call whose body never ends is recorded as a timeout, and the reply says so");
+  // An outage: the marker alone, no placeholder tags (SMD-2888 review pass 1).
+  assert(/no topics, people or type were extracted — the chat provider at \S+ was unavailable \(provider_timeout\)/.test(slow), "a metadata call whose body never ends is recorded as a timeout, and the reply says so");
 }
 
 console.log("\n[1] A capture longer than the batch is stored without truncation errors");
