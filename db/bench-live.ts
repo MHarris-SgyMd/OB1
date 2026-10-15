@@ -11,8 +11,8 @@
  *     provider, with the same settings.
  * The kinds are interleaved across the run, so a background pass that speeds
  * up or slows down meets each kind alike, and never overlap, so the harness
- * does not contend with itself. One untimed call of each kind comes first, so
- * no timed call loads a model; a warm-up that fails is said.
+ * does not contend with itself. One untimed call of each kind the run times
+ * comes first, so no timed call loads a model; a warm-up that fails is said.
  *
  * What the numbers are, and are not (the first run's reviews, 2026-10-15):
  *   - A capture is its own metadata call plus ~10–12 ms (median). The direct
@@ -27,28 +27,40 @@
  *     search's own embedding time; Ollama's log has that per request.
  *   - The database's share is not timed here (this script does not reach the
  *     database). Measured end to end minus the model's time, everything but
- *     the model stayed within ±2 ms at the median across states in the first run.
+ *     the model stayed in a 4 ms band (10–14 ms) at the median across states
+ *     in the first run.
+ *   - Percentiles are of the ok calls: a capture whose tagging timed out under
+ *     load, or a call cut off at its deadline, drops out of them and shows in
+ *     the n and ok columns and the failures line.
  *   - p95 is printed only from 20 samples up: below that, nearest rank makes it
  *     the single slowest call.
  *
- *   bun db/bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids.txt
+ *   bun db/bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
  *   --mcp URL (http://127.0.0.1:8010/canary/mcp)   --key-from NAME (open-brain: ~/.claude.json's mcpServers entry)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
- *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the schedule, the tier guard — no brain, no provider
+ *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard — no brain, no provider
  *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
  *
  * The provider and models come from the variables the server reads
  * (OB1_LLM_BASE_URL, OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_METADATA_MODEL,
- * OB1_LLM_LOCAL, …), resolved by the server's own function; they must mirror
- * the benched server's, and the banner prints what was resolved.
+ * OB1_LLM_LOCAL, OB1_LLM_TIMEOUT, OB1_CHUNK_CONTEXT, OB1_JEV_*, …), resolved by
+ * the server's own functions; they must mirror the benched server's, and the
+ * banner prints what was resolved. An MCP call ends at the server's own bound
+ * on a capture (captureCallSeconds) plus a minute; one that makes no model
+ * call (initialize, brain_info and the cleanup's) at 30 s.
  *
  * Captures are real writes, so it runs only against a brain whose brain_info
- * says tier canary or working (OB1_TIER) — stable runs with no tier, and is
- * refused. Each probe starts "SMD-3024 latency probe"; its id is appended to
- * --ids as it lands, and the run deletes its own probes whatever ends it — a
- * normal end, Ctrl-C (a second Ctrl-C stops at once and leaves them) or a
- * throw — exiting 1 if any is left. A call that hangs ends at three times the
- * provider's call timeout. The key is read from ~/.claude.json and never printed.
+ * says tier canary or working (OB1_TIER): stable (tier stable, or none) is
+ * refused before any probe is written. Each probe starts "SMD-3024 latency
+ * probe (<label> #<i>, <instant>)", and its id is appended to --ids as it
+ * lands. Whatever ends the run (a normal end, a throw, or SIGINT, SIGTERM or
+ * SIGHUP; a second signal stops at once and leaves them), it deletes the
+ * probes it recorded, then searches the brain for this run's probes whose ids
+ * never came back (a capture cut off at its deadline, or whose connection
+ * dropped, can still land) and deletes those. It exits 1 if a probe is left,
+ * or if a capture got no answer and was not found, since it may land yet;
+ * else 128 + the signal's number if a signal cut the run short. The key is
+ * read from ~/.claude.json and never printed.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -57,19 +69,29 @@ import { join } from "node:path";
 import { commandLine } from "./cli.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable } from "../server-portable/metadata.ts";
-import { renderCapture } from "../server-portable/render.ts";
+import { INGESTED_NOTICE, renderCapture } from "../server-portable/render.ts";
+import { captureCallSeconds } from "../server-portable/core/writes.ts";
+import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { ok as okOutcome, refuse } from "../server-portable/core/refusal.ts";
 import type { EgressSubject } from "../server-portable/egress.ts";
 
 type Kind = "search" | "capture" | "embed" | "metadata";
 type Sample = { label: string; kind: Kind; i: number; ts: string; ms: number; ok: boolean; status?: number; error?: string };
 type Outcome = { ok: boolean; status?: number; error?: string };
+type Answer = { status: number; msg: Record<string, any> | null };
 
 /** The content every probe starts with; search_thoughts_keyword on it finds any left behind. */
 export const PROBE_PREFIX = "SMD-3024 latency probe";
 
-/** The endpoint when --mcp is not given: this Mac's canary, on stable's origin (a stack of its own serves on port 8000). */
+/** The endpoint when --mcp is not given: this Mac's canary, on stable's origin (a stack's own endpoint is /mcp on its SERVER_PORT, 8000 by default). */
 export const DEFAULT_MCP = "http://127.0.0.1:8010/canary/mcp";
+
+/** The deadline of an MCP call that makes no model call: initialize, brain_info, and the cleanup's deletes, search and reads. */
+const QUICK_MS = 30_000;
+
+/** The signals that stop a run, by number: one that cuts the run short makes it exit 128 + that, as a shell reports a process a signal ended. */
+const SIGNALS = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const;
+type Signal = keyof typeof SIGNALS;
 
 /** The searches' queries: the kinds of question the brain is asked. */
 export const QUERIES = [
@@ -107,6 +129,28 @@ export function probeText(label: string, i: number): string {
     "and that every search embeds its query on the same GPU. It listed what to measure: search and capture latency with nothing running, with extraction at one and two workers, and with consolidation, " +
     "each split into model and database time. It recorded that the canary carries a real extraction backlog from the change records ingested earlier in the day, so the background load is genuine. " +
     "Next steps: run each state long enough for a stable median, keep the client to one call at a time, and delete these probes afterwards.";
+}
+
+/** What search_thoughts_keyword is asked for a run's probes: every probe of the label, its warm-up's included, contains it. */
+export function probeQuery(label: string): string {
+  return `${PROBE_PREFIX} (${label} `;
+}
+
+const escaped = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Whether a thought's text is a probe this run wrote: from its first
+ * character, the prefix, this run's label (or its warm-up's), an index and the
+ * instant the probe was made, no earlier than the run's start. Exact case (the
+ * keyword search that found it ignores case), so a thought that only quotes a
+ * probe (a change record, a session summary) is never one, nor is an earlier
+ * run's leftover under the same label. The text fetch returns for an ingested
+ * thought starts with the notice, which is read past.
+ */
+export function isRunProbe(text: string, label: string, since: number): boolean {
+  const body = text.startsWith(`${INGESTED_NOTICE}\n\n`) ? text.slice(INGESTED_NOTICE.length + 2) : text;
+  const m = new RegExp(`^${escaped(PROBE_PREFIX)} \\(${escaped(label)} (?:warm-up )?#\\d+, (\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z)\\)\\. `).exec(body);
+  return m !== null && Date.parse(m[1]) >= since;
 }
 
 /** p-th percentile by nearest rank; NaN for no samples. */
@@ -169,7 +213,14 @@ export function outcomeOf(status: number, msg: Record<string, any> | null, tool:
   return { ok: true, status, id };
 }
 
-/** Why a brain may not be benched, or null: only one whose brain_info says tier canary or working. Stable runs with no OB1_TIER, so no tier is refused too. */
+/** A thrown error as a run prints it: its name and code, never its message or its properties — Bun's failed fetch carries the URL, a ?key= and all, in `path`. */
+export function errorKind(e: unknown): string {
+  const o = (typeof e === "object" && e !== null ? e : {}) as { name?: unknown; code?: unknown };
+  const name = typeof o.name === "string" && o.name !== "" ? o.name : typeof e;
+  return typeof o.code === "string" && o.code !== "" ? `${name} ${o.code}` : name;
+}
+
+/** Why a brain may not be benched, or null: only one whose brain_info says tier canary or working. Stable (tier stable, or none) is refused, as is any brain with no tier. */
 export function tierRefusal(tier: unknown): string | null {
   if (tier === "canary" || tier === "working") return null;
   return `this brain reports ${typeof tier === "string" && tier !== "" ? `tier ${tier}` : "no tier"}; the run writes probe captures, so it benches only a brain whose OB1_TIER is canary or working`;
@@ -243,49 +294,98 @@ async function main(): Promise<void> {
 
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
   const embedder = createEmbedder(() => cfg);
-  // A call that hangs ends here, not at the runtime's idle timeout after the server's keepalives stop (~15 min).
-  const callMs = 3 * cfg.timeoutMs;
-  console.error(`  ${label}: ${want.search} searches, ${want.capture} captures over ${shownUrl(mcp)}; ${want.embed} embeds and ${want.metadata} metadata calls direct`);
+  // A search or capture ends at the server's own bound on a capture's model calls (core/index.ts's captureSeconds: the
+  // embedding, the metadata call and the decision tier at once, two rounds with chunk context), plus a minute for the
+  // database — not at the runtime's idle timeout once the server's keepalives stop (~15 min).
+  const boundS = captureCallSeconds(cfg, resolveJevConfig(process.env as JevEnv));
+  const callMs = (boundS + 60) * 1000;
+  console.error(`  ${label}: ${want.search} searches, ${want.capture} captures over ${shownUrl(mcp)}, each ending at ${callMs / 1000} s (the server's capture bound, ${boundS} s, plus 60); ${want.embed} embeds and ${want.metadata} metadata calls direct`);
   console.error(`  direct: embeddings ${cfg.embeddingModel} @ ${cfg.embeddingDim} via ${shownUrl(cfg.embeddings.base)}; metadata ${cfg.metadataModel} via ${shownUrl(cfg.chat.base)}; ${cfg.timeoutMs / 1000} s per call`);
 
   let seq = 0;
-  const rpc = async (method: string, params: Record<string, unknown>) => {
+  const rpc = async (method: string, params: Record<string, unknown>, ms = callMs): Promise<Answer> => {
     const id = ++seq;
     const res = await fetch(mcp, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": key },
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-      signal: AbortSignal.timeout(callMs),
+      signal: AbortSignal.timeout(ms),
     });
     return { status: res.status, msg: answerTo(await res.text(), id) };
   };
-  const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "bench-live", version: "1" } });
-  if (init.status !== 200 || !init.msg?.result) {
-    console.error(`bench-live.ts: initialize was refused (HTTP ${init.status}${init.msg?.error ? `: ${JSON.stringify(init.msg.error).slice(0, 120)}` : ""}).`);
+
+  // The brain and its tier, before any probe is written. A failure is said by the endpoint's origin and path and the
+  // error's kind: an uncaught one would print Bun's message, whose `path` is the URL as given, ?key= and all.
+  let info: Answer;
+  try {
+    const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "bench-live", version: "1" } }, QUICK_MS);
+    if (init.status !== 200 || !init.msg?.result) {
+      console.error(`bench-live.ts: ${shownUrl(mcp)} refused initialize (HTTP ${init.status}${init.msg?.error ? `: ${JSON.stringify(init.msg.error).slice(0, 120)}` : ""}); no probe was written.`);
+      process.exit(2);
+    }
+    info = await rpc("tools/call", { name: "brain_info", arguments: {} }, QUICK_MS);
+  } catch (e) {
+    console.error(`bench-live.ts: ${shownUrl(mcp)} did not answer (${errorKind(e)}); no probe was written.`);
     process.exit(2);
   }
-  const info = await rpc("tools/call", { name: "brain_info", arguments: {} });
+  const asked = outcomeOf(info.status, info.msg, "brain_info");
+  if (!asked.ok) {
+    console.error(`bench-live.ts: brain_info failed at ${shownUrl(mcp)} (${asked.error}); the run benches only a brain that says its tier, so no probe was written.`);
+    process.exit(2);
+  }
   const refusal = tierRefusal(info.msg?.result?.structuredContent?.tier);
   if (refusal) {
     console.error(`bench-live.ts: ${refusal}.`);
     process.exit(2);
   }
 
-  const probes: string[] = [];
-  let stopping = false;
-  process.on("SIGINT", () => {
-    if (stopping) {
-      console.error(`  stopped at once: up to ${probes.length} probe(s) may remain — their ids are in ${ids}`);
-      process.exit(130);
-    }
-    stopping = true;
-    console.error("  stopping: the call in hand finishes, then this run's probes are deleted (Ctrl-C again stops at once and leaves them)");
-  });
+  const since = Date.now(); // every probe of this run is made from here on (isRunProbe)
+  const probes: string[] = []; // the ids that came back, in order
+  const deleted = new Set<string>();
+  let made = 0; // capture calls made, the warm-up's included
+  let unanswered = 0; // captures that ended with no answer (a throw, a non-200, no JSON-RPC answer): each may have landed
+  let inHand = false; // a capture is in flight
+  let stopping: Signal | null = null;
+  const hint = `search_thoughts_keyword ${JSON.stringify({ query: probeQuery(label), limit: 100 })} finds them: delete only a hit whose text starts with that query`;
+  for (const sig of Object.keys(SIGNALS) as Signal[]) {
+    process.on(sig, () => {
+      if (stopping) {
+        const recorded = probes.filter((id) => !deleted.has(id)).length;
+        const unrecorded = unanswered + (inHand ? 1 : 0);
+        console.error(`  ${sig}: stopped at once. ${recorded} recorded probe(s) may remain (ids in ${ids})${unrecorded ? `, and ${unrecorded} capture(s) that got no answer may land unrecorded` : ""}; ${hint}`);
+        process.exit(128 + SIGNALS[sig]);
+      }
+      stopping = sig;
+      console.error(`  ${sig}: stopping. The call in hand finishes, then this run's probes are ${keep ? "kept (--keep-probes)" : "deleted"}; a second signal stops at once${keep ? "" : " and leaves them"}`);
+    });
+  }
 
+  let idsWarned = false;
+  const record = (id: string) => {
+    probes.push(id);
+    try {
+      appendFileSync(ids, id + "\n");
+    } catch (e) {
+      if (!idsWarned) console.error(`  could not append to ${ids} (${errorKind(e)}): the run still deletes its probes, but one that dies now leaves no list of them; ${hint}`);
+      idsWarned = true;
+    }
+  };
   const call = (tool: string, args: Record<string, unknown>) => async (): Promise<Outcome> => {
-    const { status, msg } = await rpc("tools/call", { name: tool, arguments: args });
-    const o = outcomeOf(status, msg, tool);
-    if (o.id) { probes.push(o.id); appendFileSync(ids, o.id + "\n"); }
+    const capture = tool === "capture_thought";
+    let a: Answer;
+    if (capture) made++;
+    inHand = capture;
+    try {
+      a = await rpc("tools/call", { name: tool, arguments: args });
+    } catch (e) {
+      if (capture) unanswered++;
+      return { ok: false, error: `no answer (${errorKind(e)})` };
+    } finally {
+      inHand = false;
+    }
+    if (capture && (a.status !== 200 || !a.msg)) unanswered++;
+    const o = outcomeOf(a.status, a.msg, tool);
+    if (o.id) record(o.id);
     return { ok: o.ok, status: o.status, error: o.error };
   };
   const embedOne = (query: string) => async (): Promise<Outcome> => {
@@ -309,8 +409,76 @@ async function main(): Promise<void> {
     appendFileSync(out, JSON.stringify(s) + "\n");
   };
 
+  // The run's probes go, whatever ended it: first those it recorded, then any whose ids never came back.
+  const cleanUp = async () => {
+    const left: string[] = [];
+    let down: string | null = null; // the first cleanup call that got no answer: the brain is gone, so the rest are not tried
+    for (const id of probes) {
+      if (down) { left.push(`${id} (not tried)`); continue; }
+      try {
+        const a = await rpc("tools/call", { name: "delete_thought", arguments: { id } }, QUICK_MS);
+        const o = outcomeOf(a.status, a.msg, "delete_thought");
+        if (o.ok) deleted.add(id);
+        else left.push(`${id} (${o.error})`);
+      } catch (e) {
+        down = errorKind(e);
+        left.push(`${id} (no answer: ${down})`);
+      }
+    }
+    // A capture cut off at its deadline, or whose connection dropped, may have landed without its id coming back: the
+    // server finishes a call its client abandoned. Search by content, read each hit back, and delete the ones whose text
+    // is this run's probe (isRunProbe), never a thought that only quotes one.
+    let found = 0;
+    let problem: string | null = null;
+    if (!down && made > 0) {
+      try {
+        const candidates: string[] = [];
+        for (let offset = 0; ; offset += 100) {
+          const a = await rpc("tools/call", { name: "search_thoughts_keyword", arguments: { query: probeQuery(label), limit: 100, offset } }, QUICK_MS);
+          const o = outcomeOf(a.status, a.msg, "search_thoughts_keyword");
+          if (!o.ok) { problem = `the search for unrecorded probes failed (${o.error})`; break; }
+          const sc = a.msg?.result?.structuredContent ?? {};
+          const hits: unknown[] = Array.isArray(sc.hits) ? sc.hits : [];
+          for (const h of hits) {
+            const id = (h as { id?: unknown })?.id;
+            if (typeof id === "string" && !probes.includes(id)) candidates.push(id);
+          }
+          if (hits.length < 100 || offset + hits.length >= Number(sc.total)) break;
+          if (offset >= 900) { problem = `the search for unrecorded probes read the first 1,000 of ${sc.total} matches only`; break; }
+        }
+        for (const id of candidates) {
+          const f = await rpc("tools/call", { name: "fetch", arguments: { id } }, QUICK_MS);
+          const text = outcomeOf(f.status, f.msg, "fetch").ok ? f.msg?.result?.structuredContent?.text : undefined;
+          if (typeof text !== "string" || !isRunProbe(text, label, since)) continue;
+          found++;
+          const d = await rpc("tools/call", { name: "delete_thought", arguments: { id } }, QUICK_MS);
+          const o = outcomeOf(d.status, d.msg, "delete_thought");
+          if (o.ok) deleted.add(id);
+          else left.push(`${id}, found by content (${o.error})`);
+        }
+      } catch (e) {
+        problem = `the search for unrecorded probes got no answer (${errorKind(e)})`;
+      }
+    }
+
+    const recordedGone = probes.filter((id) => deleted.has(id)).length;
+    const foundGone = deleted.size - recordedGone;
+    console.log(`  probes deleted: ${recordedGone} of ${probes.length} recorded${found ? `, and ${foundGone} of ${found} found by content, whose ids never came back` : ""}`);
+    if (left.length) {
+      console.log(`  NOT deleted: ${left.join(", ")} — delete each with delete_thought (recorded ids are in ${ids})`);
+      process.exitCode = 1;
+    }
+    if (down) console.log(`  the brain stopped answering (${down}): the rest were not tried, and the search for unrecorded probes was not run`);
+    if (problem) console.log(`  ${problem}`);
+    if (unanswered > found) {
+      console.log(`  ${unanswered - found} capture(s) got no answer and were not found: each may land yet; later, ${hint}`);
+      process.exitCode = 1;
+    }
+  };
+
+  let cut: Signal | null = null; // the signal that cut the run short, if one did
   try {
-    // Warm-up, untimed: each kind once, so no timed call loads a model; a failure is said, not hidden.
+    // Warm-up, untimed: each kind the run times, once, so no timed call loads a model; a failure is said, not hidden.
     const warmFailures: string[] = [];
     const warm = async (kind: Kind, fn: () => Promise<Outcome>) => {
       try {
@@ -320,21 +488,25 @@ async function main(): Promise<void> {
         warmFailures.push(`${kind}: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
       }
     };
-    await warm("search", call("search_thoughts", { query: "warm-up query for the latency harness", limit: 10 }));
-    await warm("embed", embedOne("warm-up embedding for the latency harness"));
-    await warm("capture", call("capture_thought", { content: probeText(`${label} warm-up`, 0) }));
-    await warm("metadata", metadataOne(probeText(`${label} warm-up`, 1)));
+    if (!stopping && want.search > 0) await warm("search", call("search_thoughts", { query: "warm-up query for the latency harness", limit: 10 }));
+    if (!stopping && want.embed > 0) await warm("embed", embedOne("warm-up embedding for the latency harness"));
+    if (!stopping && want.capture > 0) await warm("capture", call("capture_thought", { content: probeText(`${label} warm-up`, 0) }));
+    if (!stopping && want.metadata > 0) await warm("metadata", metadataOne(probeText(`${label} warm-up`, 1)));
     if (warmFailures.length) console.error(`  warm-up failed — the first timed calls may load a model: ${warmFailures.join("; ")}`);
 
-    for (const { kind, i } of schedule(want)) {
+    const order = schedule(want);
+    let ran = 0;
+    for (const { kind, i } of order) {
       if (stopping) break;
       if (kind === "search") await timed(kind, i, call("search_thoughts", { query: QUERIES[i % QUERIES.length], limit: 10 }));
       else if (kind === "embed") await timed(kind, i, embedOne(EMBED_QUERIES[i % EMBED_QUERIES.length]));
       else if (kind === "capture") await timed(kind, i, call("capture_thought", { content: probeText(label, i) }));
       else await timed(kind, i, metadataOne(probeText(label, 1000 + i)));
+      ran++;
     }
+    cut = ran < order.length ? stopping : null;
 
-    console.log(`\n  ${label.padEnd(16)}  n   ok   p50 ms   p90 ms   p95 ms   max ms${stopping ? "   (stopped early)" : ""}`);
+    console.log(`\n  ${label.padEnd(16)}  n   ok   p50 ms   p90 ms   p95 ms   max ms   (of the ok calls)${cut ? "   (stopped early)" : ""}`);
     for (const kind of ["search", "capture", "embed", "metadata"] as Kind[]) {
       const mine = samples.filter((s) => s.kind === kind);
       const ok = mine.filter((s) => s.ok).map((s) => s.ms).sort((a, b) => a - b);
@@ -344,28 +516,13 @@ async function main(): Promise<void> {
     const failed = samples.filter((s) => !s.ok);
     if (failed.length) console.log(`  failures: ${failed.map((s) => `${s.kind}#${s.i} ${s.status ?? ""} ${s.error ?? ""}`.trim()).join("; ")}`);
   } finally {
-    // This run's probes go, whatever ended it: a normal end, Ctrl-C, or a throw.
     if (keep) {
-      console.log(`  probes kept: ${probes.length} (ids in ${ids})`);
+      console.log(`  probes kept: ${probes.length} recorded (ids in ${ids})${unanswered ? `; ${unanswered} capture(s) got no answer and may have landed unrecorded: ${hint}` : ""}`);
     } else {
-      const left: string[] = [];
-      for (const id of probes) {
-        try {
-          const { status, msg } = await rpc("tools/call", { name: "delete_thought", arguments: { id } });
-          const o = outcomeOf(status, msg, "delete_thought");
-          if (!o.ok) left.push(`${id} (${o.error})`);
-        } catch (e) {
-          left.push(`${id} (${String((e as Error)?.message ?? e).slice(0, 80)})`);
-        }
-      }
-      if (left.length) {
-        console.log(`  probes deleted: ${probes.length - left.length} of ${probes.length}; NOT deleted: ${left.join(", ")} — delete each with delete_thought (ids in ${ids})`);
-        process.exitCode = 1;
-      } else {
-        console.log(`  probes deleted: ${probes.length} of ${probes.length}`);
-      }
+      await cleanUp();
     }
-    if (stopping && process.exitCode === undefined) process.exitCode = 130;
+    // A probe left beats the signal: exit 1 says there is something to clean up.
+    if (cut && process.exitCode === undefined) process.exitCode = 128 + SIGNALS[cut];
   }
 }
 
@@ -401,25 +558,44 @@ export function selfCheck(): number {
   };
   const replyBody = (reply: unknown) => `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: 7, result: reply })}\n\n`;
   const captured = (over: Record<string, unknown>) => replyBody(renderCapture(okOutcome({ ...base, ...over } as never)));
-  // [case, reply body, ok, the id comes back for deletion]
+  const gate = { allowed: false, base: "http://provider/v1", reason: "the egress gate refuses the chat endpoint" };
+  // [case, reply body, ok, the id comes back for deletion]. Each of TAGGING_FAILED's four wordings decides one case alone.
   const captures: [string, string, boolean, boolean][] = [
     ["a capture, tagged", captured({}), true, true],
     ["tagging timed out (SMD-2888)", captured({ tags: metadataUnavailable("provider_timeout") }), false, true],
     ["tagging got a 503", captured({ tags: metadataUnavailable("provider_503") }), false, true],
     ["tagging got a 429, to a key that cannot read", captured({ tags: metadataUnavailable("provider_429"), existed: undefined, reader: false }), false, true],
-    ["tagging refused by the egress gate", captured({ tags: metadataRefused(), chat: { allowed: false, base: "http://provider/v1", reason: "the egress gate refuses the chat endpoint" } }), false, true],
+    ["tagging refused by the egress gate", captured({ tags: metadataRefused(), chat: gate }), false, true],
+    ["tagging refused by the egress gate, to a key that cannot read", captured({ tags: metadataRefused(), chat: gate, existed: undefined, reader: false }), false, true],
     ["tagging fell back to placeholders", captured({ tags: { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_400" } }), false, true],
     ["saved without a vector: the call refused", captured({ embeddings: { allowed: false, reason: "egress off" } }), false, true],
     ["saved without a vector: the provider failed (SMD-2888)", captured({ vectorFailed: { reason: "provider_timeout", detail: "timed out", base: "http://provider/v1" } }), false, true],
     ["a re-capture of text already held", captured({ existed: true }), false, false],
     ["a re-capture whose tagging failed", captured({ tags: metadataUnavailable("provider_unreachable"), existed: true }), false, false],
     ["saved, but its vector did not attach (a refusal)", replyBody(renderCapture(refuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id, detail: "store error" }) as never)), false, true],
+    ["a capture answered without an id", replyBody({ content: [{ type: "text", text: "Captured." }], structuredContent: { embeddingCall: true, chunks: 0, contextFailures: 0, text: "Captured." } }), false, false],
   ];
   for (const [name, body, expectOk, expectId] of captures) {
     const o = outcomeOf(200, answerTo(body, 7), "capture_thought");
     ok(o.ok === expectOk, `${name}: ok is ${o.ok}, expected ${expectOk}`);
     ok((o.id === id) === expectId, `${name}: the id ${expectId ? "comes back for deletion" : "is never deleted"}`);
     if (name.startsWith("a re-capture")) ok(/^a re-capture/.test(o.error ?? ""), `${name}: the failure says it was a re-capture, kept rather than deleted`);
+  }
+
+  // The probes the cleanup deletes by content: this run's, never a thought that quotes one, another label's or an earlier run's.
+  const since = Date.now();
+  const mine = probeText("baseline", 3);
+  ok(isRunProbe(mine, "baseline", since), "this run's probe is one");
+  ok(isRunProbe(probeText("baseline warm-up", 0), "baseline", since), "so is its warm-up's");
+  ok(isRunProbe(`${INGESTED_NOTICE}\n\n${mine}`, "baseline", since), "so is one that fetch returns with the ingested notice");
+  ok(!isRunProbe(probeText("extract1", 3), "baseline", since), "another label's probe is not");
+  ok(!isRunProbe(probeText("baseline2", 3), "baseline", since), "nor one whose label only starts with this run's");
+  ok(!isRunProbe(`Notes on the run: ${mine}`, "baseline", since), "nor a thought that quotes a probe");
+  ok(!isRunProbe(mine.replace(PROBE_PREFIX, PROBE_PREFIX.toLowerCase()), "baseline", since), "nor one in another case (the search ignores case)");
+  ok(!isRunProbe(mine, "baseline", since + 60_000), "nor one made before the run started (an earlier run's leftover)");
+  ok(isRunProbe(probeText("a+b (x)", 1), "a+b (x)", since) && !isRunProbe(probeText("aab (x)", 1), "a+b (x)", since), "a label is matched as text, not as a pattern");
+  for (const label of ["baseline", "a+b (x)"]) {
+    ok(probeText(label, 3).includes(probeQuery(label)) && probeText(`${label} warm-up`, 0).includes(probeQuery(label)), `the search for ${label}'s probes finds its probes and its warm-up's`);
   }
 
   // Percentiles by nearest rank, and the p95 a summary prints.
@@ -451,12 +627,15 @@ export function selfCheck(): number {
     ok(at[0] < full.length * 0.1 && at[at.length - 1] > full.length * 0.9, `${k} starts in the run's first tenth and ends in its last`);
   }
 
-  // The tier guard and the banner.
+  // The tier guard, the banner, and what a failed call prints.
   ok(tierRefusal("canary") === null && tierRefusal("working") === null, "the canary and a working brain may be benched");
-  ok(tierRefusal("stable") !== null && tierRefusal(null) !== null && tierRefusal(undefined) !== null && tierRefusal("") !== null, "stable, and a brain with no tier (how stable runs), are refused");
+  ok(tierRefusal("stable") !== null && tierRefusal(null) !== null && tierRefusal(undefined) !== null && tierRefusal("") !== null, "stable (tier stable, or none) is refused, as is any brain with no tier");
   ok(shownUrl("http://127.0.0.1:8010/canary/mcp?key=SECRET") === "http://127.0.0.1:8010/canary/mcp", "the banner never prints a URL's query");
   ok(shownUrl("http://user:SECRET@host:8000/mcp") === "http://host:8000/mcp", "the banner never prints a URL's userinfo");
   ok(shownUrl("not a url") === "(an endpoint that does not parse)", "an endpoint that does not parse is not echoed");
+  const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED", path: "http://127.0.0.1:9/mcp?key=SECRET", errno: 0 });
+  ok(errorKind(refused) === "TypeError ECONNREFUSED", "a call that failed is said by its kind, never its message or its path (Bun's carries the URL, ?key= and all)");
+  ok(errorKind(new DOMException("The operation timed out.", "TimeoutError")) === "TimeoutError", "a call cut off at its deadline is said as TimeoutError");
 
   // The probes and the queries. (The flags are cli.ts's, held by test-cli.ts.)
   ok(probeText("x", 1).startsWith(PROBE_PREFIX), "every probe starts with the prefix a keyword search finds");
