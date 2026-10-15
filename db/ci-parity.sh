@@ -191,6 +191,7 @@ main() {
   nodb db                 ingest-markdown.ts --self-check
   nodb db                 ingest-items.ts --self-check
   nodb db                 ingest-records.ts --self-check
+  nodb db                 bench-live.ts --self-check
   nodb db                 test-replay.ts
   nodb db                 test-brain-compare.ts
   nodb db                 test-cli.ts
