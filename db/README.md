@@ -3708,7 +3708,8 @@ and are counted apart, not replayed. Both verbs print `--compare`'s report, then
 the window and how many searches were replayed and skipped. A window that
 replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
 ranking that moved or a step that failed (stable's log unread, or a search one
-brain failed), 2 a usage error or a refusal (SMD-2182).
+brain failed, or a refusal such as a missing key), 2 a malformed command line,
+a `postgres://` side included (SMD-2182).
 
 Until SMD-2875 they read both databases, from one container on both brains'
 networks holding both superuser passwords, and diffed the canary against the ids

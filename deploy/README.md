@@ -1869,8 +1869,9 @@ A `--diff` or `--replay` replays what stable logged on both brains, so:
 
 Both print the window and how many searches were replayed and skipped. A
 `--diff` that replayed none says `nothing to compare` and exits 3, where a
-pass is 0, a moved ranking or a failed step 1, and a usage error or refusal
-2 (SMD-2182).
+pass is 0, a moved ranking or a failed step 1 (a refusal such as a missing
+key included), and a malformed command line 2, a `postgres://` side included
+(SMD-2182).
 
 ### Compare two live brains
 

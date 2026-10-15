@@ -706,7 +706,12 @@ export async function compareBrains(
       if (ra.status === "fulfilled" && rb.status === "fulfilled") {
         rows.push(diffRow(query, arm, ra.value, rb.value));
       } else {
-        const why = (r: PromiseSettledResult<string[]>, ep: BrainEndpoint) => (r.status === "rejected" ? `${ep.label}: ${(r.reason as Error).message}` : null);
+        // A search's error already starts with its brain's label (callTool's).
+        const why = (r: PromiseSettledResult<string[]>, ep: BrainEndpoint) => {
+          if (r.status !== "rejected") return null;
+          const msg = (r.reason as Error).message;
+          return msg.startsWith(`${ep.label}:`) ? msg : `${ep.label}: ${msg}`;
+        };
         const reason = [why(ra, a), why(rb, b)].filter(Boolean).join("; ");
         const failedOn = ra.status === "fulfilled" ? "b" : rb.status === "fulfilled" ? "a" : undefined;
         rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: reason, ...(failedOn ? { failedOn } : {}) });
@@ -875,7 +880,7 @@ export function renderComparison(c: Comparison): string {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
-        ? `  nothing compared — all ${skipped.length} replay${skipped.length === 1 ? "" : "s"} were skipped.`
+        ? skipped.length === 1 ? "  nothing compared — the one replay was skipped." : `  nothing compared — all ${skipped.length} replays were skipped.`
         : `  no delta — b returns the same ids as a for every replay${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
@@ -1014,14 +1019,18 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
   const verdict = replayVerdict(r);
   if (verdict === "unread") return [`nothing replayed: the log of ${labels.stable} could not be read.`];
   const ran = r.rows.filter((row) => !row.skipped);
-  const skipped = r.rows.length - ran.length;
+  // A skip is a search both brains failed; one failed on one brain alone is counted apart (review pass 3).
+  const oneSided = r.rows.filter((row) => row.failedOn !== undefined).length;
+  const skipped = r.rows.length - ran.length - oneSided;
   // The window as stable's log gives it: --since's, else its most recent page.
   const window = since !== undefined ? `since ${since} (--since)` : `in the most recent page of ${labels.stable}'s log`;
   // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on.
-  const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${noArm ? `; ${noArm} more logged with no arm, before migration 045, not replayed` : ""})`];
+  const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${noArm ? `; ${noArm} more logged with no arm, before migration 045, not replayed` : ""})`];
+  const moved = ran.filter((row) => row.changed).length;
   if (verdict === "failed") {
     const on = (side: "a" | "b") => r.rows.filter((row) => row.failedOn === side).length;
     const parts = [on("b") ? `${labels.canary} failed ${on("b")} that ${labels.stable} answered` : "", on("a") ? `${labels.stable} failed ${on("a")} that ${labels.canary} answered` : ""].filter(Boolean);
+    if (moved) lines.push(`what moved: ${moved} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
     lines.push(`failed: ${parts.join(", and ")} (under Retrieval, above) — not a pass.`);
   } else if (verdict === "empty") {
     lines.push(r.queries === 0
@@ -1033,7 +1042,7 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
     const scope = skipped ? `the ${ran.length} replayed (${skipped} skipped, not compared)` : ran.length === 1 ? "the one replayed" : `all ${ran.length} replayed`;
     lines.push(gate ? `what moved: nothing — ${labels.canary} returns ${labels.stable}'s ids on ${scope}.` : `no ranking moved on ${scope}.`);
   } else {
-    lines.push(`what moved: ${ran.filter((row) => row.changed).length} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
+    lines.push(`what moved: ${moved} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
   }
   return lines;
 }

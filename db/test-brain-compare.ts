@@ -669,7 +669,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try {
     const c = await compareBrains(a.ep, b.ep, { queries: ["only"] });
     const out = renderComparison(c);
-    ok(/nothing compared — all 1 replay/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
+    ok(/nothing compared — the one replay was skipped\./.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
@@ -923,8 +923,13 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   const canaryFails = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
   ok(canaryFails.code === 1 && /failed: localhost:\d+ failed 1 that localhost:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
     `--diff fails when the canary fails a search stable answered, the rest unmoved (${canaryFails.code}: ${canaryFails.out.split("\n").slice(-1)})`);
-  ok(canaryFails.out.includes("✗ [hybrid] \"q\": b failed, a answered") && canaryFails.out.includes("1 replay failed on one brain and answered on the other — a delta.") && !canaryFails.out.includes("no delta"),
+  ok(canaryFails.out.includes("✗ [hybrid] \"q\": b failed, a answered") && canaryFails.out.includes("1 replay failed on one brain and answered on the other — a delta.") && !canaryFails.out.includes("no delta")
+      && !canaryFails.out.includes("~ [hybrid]") && canaryFails.out.includes("replayed 1 of 2 distinct logged searches in the most recent page of") && /\(0 skipped, 1 failed on one brain\)/.test(canaryFails.out) && !/localhost:(\d+): localhost:\1:/.test(canaryFails.out),
     `the report shows the one-sided failure apart and does not call it no delta (${canaryFails.out.split("\n").filter((l) => l.includes("✗") || l.includes("delta")).join(" | ")})`);
+  // A one-sided failure beside a moved ranking: both are said.
+  const failedAndMoved = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2), uid(3)] } }, { hits: { q: [uid(1)], r: [uid(3), uid(2)] }, refuse: ["q"] });
+  ok(failedAndMoved.code === 1 && failedAndMoved.out.includes("what moved: 1 of 1 replayed searches returned different ids") && /^failed: /m.test(failedAndMoved.out),
+    `a one-sided failure beside a moved ranking says both (${failedAndMoved.out.split("\n").slice(-2).join(" | ")})`);
   const canaryFailsReplay = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] }, refuse: ["q"] }, { gate: false });
   ok(canaryFailsReplay.code === 1, `--replay exits 1 on it too: a failed step, not a report (${canaryFailsReplay.code})`);
   const stableFails = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] } });
