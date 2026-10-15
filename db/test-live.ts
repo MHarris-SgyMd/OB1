@@ -11821,6 +11821,11 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const extracts: { marker: string; part: string; at: number }[] = [];
   /** Run as each extraction call begins, before its answer: a write the test makes mid-sleep at a known point (SMD-3008). */
   let onExtract: ((marker: string) => Promise<void>) | null = null;
+  /** A judge on its own model (OB1_JUDGE_MODEL), its probes answering 500 while `judgeProbeDown` and its judgements 404 "not found" while `judgeMissing` (SMD-3008). */
+  const JUDGE = "stub-judge";
+  let judgeProbeDown = false, judgeMissing = false;
+  /** Run as each judgement arrives, before its answer. */
+  let onJudge: (() => void) | null = null;
   const judged: number[] = [];
   /** When each judgement's answer went back, and when each call for the stuck window began: the slot's order (review pass 5). */
   const judgedEnd: number[] = [];
@@ -11843,17 +11848,22 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
-      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/<thought_a>/.test(prompt)) {
+        onJudge?.();
+        if (body.model === JUDGE && judgeMissing) return Response.json({ error: { message: `model "${JUDGE}" not found, try pulling it first` } }, { status: 404 });
         judged.push(Date.now());
         await Bun.sleep(judgeHold38b);
         judgedEnd.push(Date.now());
         return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
       }
-      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : /midnote-one/.test(prompt) ? "mid1" : /midnote-two/.test(prompt) ? "mid2" : /We bill/.test(prompt) ? "pair" : "short";
+      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : /midnote-one/.test(prompt) ? "mid1" : /midnote-two/.test(prompt) ? "mid2" : /judgenote/.test(prompt) ? "judgenote" : /We bill/.test(prompt) ? "pair" : "short";
       extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole", at: Date.now() });
       await onExtract?.(marker);
       if (marker === "stuck") stuckStarts.push(Date.now());
@@ -12130,6 +12140,66 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
     assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
       `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+
+    // While consolidation waits for a judge that does not answer, extraction
+    // takes the newer work and leaves the stalled thought to wait for it: the
+    // judge's pool never drained, and parked extraction got nothing for the
+    // sleep (SMD-3008). The judge on its own model, as a judge that will not
+    // load beside a serving extraction model is; at its start (a probe
+    // answering 500) and mid-pass (judgements answering "not found", a missing
+    // model, which a follower waits out at once rather than after its pauses).
+    const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
+    const COJ = consolidateKey(JUDGE);
+    const judgeCase = async (mid: boolean) => {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${COJ})`;
+      extracts.length = 0;
+      judged.length = 0;
+      stuckStarts.length = 0;
+      stuckCalls.length = 0;
+      const stalledJ = await capture("The stuckdoc note, behind a judge that does not answer.", 0, 18);
+      const [{ fpj }] = await sql`SELECT content_fingerprint AS fpj FROM thoughts WHERE id = ${stalledJ}::uuid`;
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
+      await capture("We bill monthly, decided in March.", 3, 0);
+      await capture("We bill annually now.", 0, 0);
+      // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
+      judgeProbeDown = !mid;
+      judgeMissing = false;
+      onJudge = mid ? () => { judgeMissing = true; judgeProbeDown = true; onJudge = null; } : null;
+      const jl: { l: string; at: number }[] = [];
+      let stopJ: PassStop | null = null;
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
+      // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
+      const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
+      await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
+      if (!mid) await Bun.sleep(1500);
+      const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
+      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      const flipAt = Date.now();
+      judgeProbeDown = false;
+      judgeMissing = false;
+      const resumed = await pollUntil(async () => judged.length > 0 && seen(/consolidation drained — extracting beside it/) < Infinity, 60_000);
+      (stopJ as PassStop | null)?.();
+      await (stopJ as PassStop | null)?.();
+      await Promise.race([runJ, Bun.sleep(15_000)]);
+      onJudge = null;
+      const joinJ = seen(/consolidating first/), unparkJ = seen(/consolidation waits for its provider — extracting the 1 newer thought\(s\) meanwhile/);
+      const reparkJ = seen(/set aside again until consolidation drains/), resumeJ = seen(/consolidation drained — extracting beside it/);
+      const noteCall = extracts.find((e) => e.marker === "judgenote")?.at ?? Infinity;
+      const rel = (t: number) => (t === Infinity ? "never" : `+${t - joinJ} ms`);
+      // Claimed after the note, by its place, the stalled thought is set aside
+      // at the next poll: its call cut within a poll, and none begun after.
+      const stuckAside = stuckCalls.filter(([a, b]) => a > unparkJ && a < resumeJ && (b - a > 1500 || a > reparkJ)).length;
+      assert(noteDone && unparkJ > joinJ && noteCall > unparkJ && noteCall < flipAt && reparkJ > noteCall && reparkJ < flipAt,
+        `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
+      assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
+        `…the stalled thought waits for consolidation: claimed after the note, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
+    };
+    await judgeCase(false);
+    await judgeCase(true);
+    judgeProbeDown = false;
+    judgeMissing = false;
 
     // A kept row speaks for the thought only at its text and windowing now:
     // one of other text (an edit since) or another windowing is not counted
