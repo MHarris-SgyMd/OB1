@@ -532,8 +532,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-2681), 088 (update_thought answers what it did, SMD-2744), 089 (the
   // 1.8.0 cut's schema_version, SMD-1804), 090 (a re-capture says what it
   // did to a capture-only key's label, SMD-2898), 091 (each settle by the
-  // pass kept on its proposal, SMD-2913) and 093 (a long thought's
-  // extraction windows kept, SMD-2694)
+  // pass kept on its proposal, SMD-2913), 092 (another key's pointer
+  // takes a capture-only key's thought, SMD-2708) and 093 (a long
+  // thought's extraction windows kept, SMD-2694)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -649,14 +650,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ob1_config.schema_version for the 1.8.0 cut, needing only 006's table; 090 adds the
   // weighing that answers and redefines 086's restamp as a call of it,
   // refusing by name without 085 or 086 ([20ak]); 091 adds a column and
-  // its trigger to 029's table, refusing by name without 067 ([20al]); 093
-  // adds a table and two functions over 015's claims ([20an]) — all
+  // its trigger to 029's table, refusing by name without 067 ([20al]); 092
+  // redefines 082's taken read, lapse and check and adds the chain, refusing
+  // by name without 082 ([20am]); 093 adds a table and two functions over
+  // 015's claims ([20an]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 63, `030 is among the last sixty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 64, `030 is among the last sixty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4037,6 +4040,51 @@ console.log("\n[20al] Migration 091: refused by name without 067; onto a populat
   assert(JSON.stringify(await sql`SELECT id, status, pass_settled_at::text FROM supersession_proposals ORDER BY id`) === beforeReapply
       && Number((await sql`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'supersession_proposals_keep_settles'`)[0].n) === 1,
     "a re-apply of 091 is a no-op: one trigger, no settle moved");
+  await sql.close();
+}
+
+console.log("\n[20am] Migration 092: refused by name without 082; onto a populated brain at the file before it — another key's pointer among the takers and the lapse firing on it, no row and no audit row moved; after it, an accept made before reads taken while the hook's pointer written before stands (no sweep); a re-apply a no-op (SMD-2708)");
+{
+  const the092 = MIGRATIONS.find((f) => f.endsWith("_pointer_takes_capture_thought.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "082" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 092 needs 082 (ob1_takes_thought, ob1_capturer_of, ob1_lapse_capture_pointers, ob1_check_capture_pointer, ob1_note_recapture); this schema lacks it",
+    `092 on a schema stopped before 082 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the092 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-key", agent_id: await agentOf("5", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const WRITER = { name: "writer-key", agent_id: await agentOf("4", "writer-key", "write"), via: "open-brain" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string }).id;
+  const taken = async (id: string) => ((await sql`SELECT ob1_thought_taken(${id}::uuid) AS t`)[0] as { t: boolean }).t;
+  const pointerOf = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null }).s;
+  const W = await cap("upgrade 092: the writer's rota, weekly", WRITER);
+  const C = await cap("upgrade 092: the hook's rota, daily", HOOK);
+  const N = await cap("upgrade 092: the hook's next word on the rota", HOOK, C);
+  const pid = ((await sql`SELECT record_supersession_proposal(${W}::uuid, ${C}::uuid, 'newer_supersedes_older', 0.9, '[20am]', 0.9, 'consolidate:stub@p92') AS id`)[0] as { id: string }).id;
+  const accepted = ((await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${{ name: "consolidate", via: "consolidate" }}::jsonb, false) AS r`)[0] as { r: { ok: boolean } }).r;
+  assert(accepted.ok === true && (await taken(C)) === false && (await pointerOf(N)) === C,
+    "[20am] setup: before 092 an accept making the hook's thought current takes nothing, and the hook's pointer onto it stands");
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 });
+  const [trg] = await sql`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`;
+  assert(/'supersedes'/.test(String(trg?.d)) && (await rows()) === before && (await audits()) === auditBefore, "092 applied: the lapse fires on a pointer too, and no row or audit row moved");
+  assert((await taken(C)) === true && (await pointerOf(N)) === C,
+    "after it, the accept made before reads as a taking — the hook's pointer written before it stands, no sweep (the documented gap)");
+  let refusal = "written";
+  try { await cap("upgrade 092: the hook's unreviewed word", HOOK, C); } catch (e) { refusal = (e as Error).message; }
+  assert(/ob1_check_capture_pointer/.test(refusal), `…and a new pointer from the hook onto it is refused at the write (${refusal.slice(0, 80)})`);
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 092 is a no-op: no row or audit row moved");
   await sql.close();
 }
 
