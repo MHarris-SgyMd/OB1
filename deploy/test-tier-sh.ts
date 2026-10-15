@@ -146,47 +146,61 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
   ok(!existsSync(join(root, `run${runN}`, "ob1-tier-env")) && Bun.spawnSync(["sh", "-c", `ls ${join(root, `run${runN}`)} | grep -c ob1-tier`]).stdout.toString().trim() === "0", "no temporary env file is left");
 }
 
-// The copy rule on a checkout of its own (review pass 5): every tracked file
-// under the directories, an untracked one only when it is code, never an env
-// file's name nor a directory whole (a nested repository's .env and .git), and
-// a tracked file deleted in the work tree, listed last, left out without
-// failing the copy.
+// The copy rule on a checkout of its own (review passes 5–6): every tracked
+// file under the directories, but never an env file's name (a tracked
+// .env.example passes) nor a directory (a submodule's gitlink: its .env and
+// .git would ride a recursing tar); an untracked one only when it is code, its
+// SQL only in a migrations directory; and a tracked file deleted in the work
+// tree, listed last, left out without failing the copy.
 {
   const scratch = join(root, "checkout");
-  const sh = (cmd: string[]) => Bun.spawnSync(cmd, { cwd: scratch, env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1" } });
-  for (const d of ["deploy", "db", "evals", "plugins/demo", "scripts/nested", "server-portable"]) Bun.spawnSync(["mkdir", "-p", join(scratch, d)]);
+  const gitEnv = { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (cwd: string, args: string[]) => Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always", ...args], { cwd, env: gitEnv });
+  for (const d of ["deploy", "db/migrations", "evals", "plugins/demo", "scripts/nested", "server-portable"]) Bun.spawnSync(["mkdir", "-p", join(scratch, d)]);
   writeFileSync(join(scratch, "deploy/tier.sh"), readFileSync(TIER_SH, "utf8"));
   writeFileSync(join(scratch, "db/tier.Dockerfile"), "FROM scratch\n");
   for (const f of ["db/tier.ts", "evals/e.ts", "plugins/demo/index.ts", "server-portable/zz.ts"]) writeFileSync(join(scratch, f), "// tracked\n");
-  sh(["git", "init", "-q"]);
-  sh(["git", "add", "-A"]);
-  sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "t"]);
-  rmSync(join(scratch, "server-portable/zz.ts"));
-  writeFileSync(join(scratch, "db/092_new.sql"), "-- untracked migration\n");
-  writeFileSync(join(scratch, "db/notes.json"), "{}\n");
-  writeFileSync(join(scratch, "db/.env.test"), "POSTGRES_PASSWORD=leak\n");
-  Bun.spawnSync(["git", "init", "-q"], { cwd: join(scratch, "scripts/nested") });
+  writeFileSync(join(scratch, "db/.env.test"), "POSTGRES_PASSWORD=tracked-leak\n");
+  writeFileSync(join(scratch, "db/.env.example"), "POSTGRES_PASSWORD=\n");
+  writeFileSync(join(scratch, ".gitignore"), "node_modules/\n");
+  // A repository inside, committed and added as a gitlink, with a .env of its own.
   writeFileSync(join(scratch, "scripts/nested/.env"), "SECRET=leak\n");
   writeFileSync(join(scratch, "scripts/nested/tool.ts"), "// a nested repository's file\n");
-  const dir = join(root, `run${++runN}`);
-  Bun.spawnSync(["mkdir", "-p", dir]);
-  const logFile = join(dir, "log");
-  writeFileSync(logFile, "");
-  const env: Record<string, string> = { PATH: `${bin}:/usr/bin:/bin`, HOME: root, TMPDIR: dir, STUB_LOG: logFile, STUB_DIR: dir };
-  const r = Bun.spawnSync(["bash", join(scratch, "deploy/tier.sh"), "--runtime", "docker", ...CANARY], { env, stdout: "pipe", stderr: "pipe" });
-  let files: string[] = [];
-  try { files = readFileSync(join(dir, "code.cid1"), "utf8").split("\n").filter(Boolean).sort(); } catch { /* none */ }
-  ok(r.exitCode === 0, `a checkout with a tracked file deleted last in git's list still copies (exit ${r.exitCode}: ${r.stderr.toString().trim().split("\n").pop()})`);
-  ok(JSON.stringify(files) === JSON.stringify(["db/092_new.sql", "db/tier.Dockerfile", "db/tier.ts", "evals/e.ts", "plugins/demo/index.ts"]),
-    `only the tracked files and the untracked migration go in: no .json, no env file, nothing of a nested repository, no deleted file (${files.join(", ")})`);
+  git(join(scratch, "scripts/nested"), ["init", "-q"]);
+  git(join(scratch, "scripts/nested"), ["add", "-A"]);
+  git(join(scratch, "scripts/nested"), ["commit", "-qm", "nested"]);
+  git(scratch, ["init", "-q"]);
+  git(scratch, ["add", "-A"]);
+  git(scratch, ["commit", "-qm", "t"]);
+  rmSync(join(scratch, "server-portable/zz.ts"));
+  writeFileSync(join(scratch, "db/migrations/092_new.sql"), "-- untracked migration\n");
+  writeFileSync(join(scratch, "db/backup.sql"), "-- a stray dump\n");
+  writeFileSync(join(scratch, "db/notes.json"), "{}\n");
+  writeFileSync(join(scratch, "db/.env.ts"), "// an env file's name, code's extension\n");
+  Bun.spawnSync(["mkdir", "-p", join(scratch, "db/node_modules/pkg")]);
+  writeFileSync(join(scratch, "db/node_modules/pkg/index.ts"), "// ignored: an installed package\n");
+  const gitlink = git(scratch, ["ls-files", "-s", "scripts/nested"]).stdout.toString();
+  const run = () => {
+    const dir = join(root, `run${++runN}`);
+    Bun.spawnSync(["mkdir", "-p", dir]);
+    writeFileSync(join(dir, "log"), "");
+    const env: Record<string, string> = { PATH: `${bin}:/usr/bin:/bin`, HOME: root, TMPDIR: dir, STUB_LOG: join(dir, "log"), STUB_DIR: dir };
+    const r = Bun.spawnSync(["bash", join(scratch, "deploy/tier.sh"), "--runtime", "docker", ...CANARY], { env, stdout: "pipe", stderr: "pipe" });
+    let files: string[] = [];
+    try { files = readFileSync(join(dir, "code.cid1"), "utf8").split("\n").filter(Boolean).sort(); } catch { /* none */ }
+    return { code: r.exitCode, err: r.stderr.toString().trim().split("\n").pop(), files };
+  };
+  const first = run();
+  ok(/^160000 /.test(gitlink), `the fixture's nested repository is a gitlink (${gitlink.trim().slice(0, 20)})`);
+  ok(first.code === 0, `a checkout with a tracked file deleted last in git's list still copies (exit ${first.code}: ${first.err})`);
+  ok(JSON.stringify(first.files) === JSON.stringify(["db/.env.example", "db/migrations/092_new.sql", "db/tier.Dockerfile", "db/tier.ts", "evals/e.ts", "plugins/demo/index.ts"]),
+    `the tracked files and the untracked migration go in, and nothing else: no tracked or untracked env file's name, no submodule, no ignored file, no stray .sql, no .json, no deleted file (${first.files.join(", ")})`);
   // With no untracked code, the deleted tracked file is the last thing listed:
   // the loop must not take its absence as its status (pipefail would fail the copy).
-  rmSync(join(scratch, "db/092_new.sql"));
-  const dir2 = join(root, `run${++runN}`);
-  Bun.spawnSync(["mkdir", "-p", dir2]);
-  writeFileSync(join(dir2, "log"), "");
-  const r2 = Bun.spawnSync(["bash", join(scratch, "deploy/tier.sh"), "--runtime", "docker", ...CANARY], { env: { ...env, TMPDIR: dir2, STUB_LOG: join(dir2, "log"), STUB_DIR: dir2 }, stdout: "pipe", stderr: "pipe" });
-  ok(r2.exitCode === 0, `…and copies when that deleted file is the last one git lists (exit ${r2.exitCode}: ${r2.stderr.toString().trim().split("\n").pop()})`);
+  rmSync(join(scratch, "db/migrations/092_new.sql"));
+  rmSync(join(scratch, "db/.env.ts"));
+  const second = run();
+  ok(second.code === 0, `…and copies when that deleted file is the last one git lists (exit ${second.code}: ${second.err})`);
 }
 
 // A failed source half stops the run: no hand-off, no target, its status.
@@ -222,6 +236,7 @@ for (const flag of ["--network", "--project", "--from-network", "--from-project"
 }
 refused("--diff", ["--env-file", envB, "--diff", "--from", "a", "--to", "b"], /--diff runs over HTTP now/);
 refused("--diff ahead of a list of networks (an old command line)", ["--env-file", envB, "--network", "a_data,b_data", "--diff", "--from", "a", "--to", "b"], /--diff runs over HTTP now/);
+refused("--from-project with --from-network", ["--env-file", envB, "--from-env-file", envA, "--project", "pb", "--from-project", "pa", "--from-network", "pa_data", "--refresh", "--from", "postgres", "--to", "postgres"], /--from-project and --from-network both name/);
 refused("--from-env-file with both sides on one network (a canary file naming no project)", ["--env-file", envB, "--from-env-file", envA, "--refresh", "--from", "postgres", "--to", "postgres"], /--from-env-file names another brain, but both sides come out on stubproject_data/);
 refused("no verb", ["--env-file", envB, "--from", "postgres", "--to", "postgres"], /tier\.sh runs one of --refresh and --promote/);
 refused("POSTGRES_PASSWORD in the shell beside --from-env-file", CANARY, /POSTGRES_PASSWORD is set in the shell/, { POSTGRES_PASSWORD: "x" });

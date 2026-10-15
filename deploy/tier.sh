@@ -88,8 +88,8 @@
 # knobs a migration reads (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM,
 # OB1_EMBEDDING_DIMENSIONS, OB1_TRGM_INDEX, OB1_BACKFILL_LIMIT,
 # OB1_CHUNK_CONTEXT, OB1_PLUGINS and the plugin role's OB1_PLUGIN_DB_PASSWORD),
-# OB1_TIER, and POSTGRES_PASSWORD, which builds the URL. Every other OB1_* stays behind: the
-# provider keys, the worker keys, OB1_COMPARE_KEY (which `tier.ts --diff`
+# OB1_TIER, and POSTGRES_PASSWORD, which builds the URL. Every other OB1_*
+# stays behind: the provider keys, the worker keys, OB1_COMPARE_KEY (which `tier.ts --diff`
 # reads from the shell, and compose's reading carries) and the authorization
 # server's OB1_AUTH_* settings (SMD-2285, SMD-2875); so do access keys,
 # OPENROUTER_API_KEY, LINEAR_API_KEY and the rest. The source half gets its URL
@@ -261,7 +261,10 @@ IMAGE="$PROJECT-tier:latest"
 TO_NET_WHERE=""
 [ -n "$NETWORK" ] || { NETWORK="${PROJECT}_data"; TO_NET_WHERE="the project $PROJECT, from $TO_WHERE"; }
 # The --from side: its own project's when --from-env-file or --from-project
-# names one, else the --to side's network.
+# names one, else the --to side's network. --from-project names nothing but
+# the network on this side (the image is --to's), so with --from-network it
+# would be ignored: refused (review pass 6).
+case "$SEEN" in *" --from-project "*) case "$SEEN" in *" --from-network "*) echo "--from-project and --from-network both name the --from side's network: give one." >&2; exit 2 ;; esac ;; esac
 FROM_NET_WHERE=""
 if [ -z "$FROM_NETWORK" ]; then
   if [ -n "$FROM_PROJECT" ]; then FROM_WHERE="--from-project"
@@ -311,7 +314,14 @@ code_list() {
   {
     git -C "$REPO" ls-files -z -c -- "${CODE_DIRS[@]}"
     git -C "$REPO" ls-files -z -o --exclude-standard -- "${CODE_DIRS[@]}" \
-      | while IFS= read -r -d '' f; do case "$f" in *.ts|*.mjs|*.sql) printf '%s\0' "$f" ;; esac; done
+      | while IFS= read -r -d '' f; do
+          # Code alone, and SQL only where migrate.ts reads it: a stray dump
+          # elsewhere stays out (review pass 6). A new .mts, .json or .js is
+          # left out too: nothing tier.ts or migrate.ts reads is one.
+          case "$f" in
+            *.ts|*.mjs|db/migrations/*.sql|plugins/*/migrations/*.sql) printf '%s\0' "$f" ;;
+          esac
+        done
   } | while IFS= read -r -d '' f; do
     case "/$f" in */.env|*/.env.*|*.env) case "$f" in *.example) ;; *) continue ;; esac ;; esac
     # An if, not `[ … ] &&`: as the loop's last command a false test would be

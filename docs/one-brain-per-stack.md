@@ -26,9 +26,9 @@ The canary was coupled to stable at runtime for one convenience, a URL on stable
   - Neither is a boundary.
 - **Stable carries the canary's routes.** Stable's route table in `compose.yaml` has the routers `canary`, `working` and `tier-off`, the middleware `tier-absent`, and the services `canary` and `working` (SMD-2294 PR 1, #314). Every stable release ships routes for brains it doesn't run.
 - **The canary depends on stable.** Its URL needs stable's proxy, stable's mesh and a stable release that carries the route. It is also exposed wherever stable is: the LAN under stable's `SERVER_BIND`, or a tunnel.
-- **The tier tool joins both brains.**
-  - `deploy/tier.sh` runs `db/tier.ts` in one container, connected to each network it is given. `canary.sh`'s refresh gives it both brains' data networks. tier.sh's documented `--diff` adds stable's egress.
-  - It builds each database URL with the superuser, so that one container holds both brains' passwords.
+- **The tier tool joined both brains** (until SMD-2875).
+  - `deploy/tier.sh` ran `db/tier.ts` in one container, connected to each network it was given. `canary.sh`'s refresh gave it both brains' data networks, and tier.sh's documented `--diff` added stable's egress.
+  - It built each database URL with the superuser, so that one container held both brains' passwords.
 - **Guarding it costs.** Check 28 holds `compose.canary.yaml`'s networks and names exactly, with eight probes of its own. SMD-2685 added holds against a second key into stable's mesh. CI renders the overlay in two steps and stands it up through `canary.sh` in two more, and `canary.sh` checks stable's proxy and mesh before it joins.
 - **`deploy/compose.tiers.yaml` goes furthest** (SMD-2294 PR 3, #320): three brains in one project, with one proxy, one Ollama, shared networks and one `down`. Check 27 generates the stack it should be from `compose.yaml` (`tierStack()`) and holds the file to it, value for value.
 
@@ -46,7 +46,7 @@ Validation needs a second brain to compare against. Federation needs brains that
 | 6 | **The edge reaches each brain through the brain's published port.** | proposed; SMD-2876 settles it (open question 1) | the edge joining the brains' networks |
 | 7 | **The edge holds no key and injects no credential or identity.** A client's own key passes through, unchanged, to the brain the client names. | proposed; SMD-2876 | the edge as an authenticating gateway for several brains |
 | 8 | **An instance is its env file**: `COMPOSE_PROJECT_NAME`, `SERVER_PORT`/`SERVER_BIND` and the profile ports, all in the one file. `compose.yaml` stays one file for every instance. | proposed; SMD-2873 (measured to work today) | a compose file per instance; `name:` edited per copy |
-| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump streamed from stable's project into the canary's; replay and diff over HTTP; promote's read through the canary's project and its write through stable's. | built: replay and diff over HTTP (SMD-2875 PR 1), refresh and promote one half per project (PR 2) | the joined container |
+| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump passed from a container on stable's network to one on the canary's; replay and diff over HTTP; promote's read through the canary's project and its write through stable's. | built: replay and diff over HTTP (SMD-2875 PR 1), refresh and promote one half per project (PR 2) | the joined container |
 | 10 | **Each brain has its own access keys.** A brain calling another is an HTTP client with a key the other issued, and a canary is an instance with its own port and keys. | proposed here; SMD-2874 for the canary. It doesn't follow from row 1: the canary takes stable's keys because `canary.sh` copies them into its env file, which needs no shared network. | the canary accepting stable's keys |
 
 Some answers to the open questions would amend a row:
