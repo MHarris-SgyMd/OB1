@@ -24,12 +24,19 @@
 # that brain's project.
 #
 #   # the canary deploy/canary.sh stood up, from stable, each a `postgres` on
-#   # its own network: --env-file is the canary's file (its password, its
-#   # project, the settings), --from-env-file stable's (its password, its project)
+#   # its own network: --env-file is the canary's file (its password, the
+#   # settings), --from-env-file stable's (its password, its project), and
+#   # --project names the canary's project, which a canary file from before
+#   # SMD-2873 does not (canary.sh passes it too)
 #   deploy/tier.sh --env-file ~/stack/deploy/.env.canary.local --from-env-file ~/stack/deploy/.env \
-#     --refresh --from postgres --to postgres --tier canary
-#   # the three-tier stack: one project, so both halves on its own network
-#   deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
+#     --project open-brain-canary --refresh --from postgres --to postgres --tier canary
+#   # after a soak, the canary's version onto stable: the sides swap, so
+#   # --env-file is stable's and --from-env-file the canary's
+#   deploy/tier.sh --env-file ~/stack/deploy/.env --from-env-file ~/stack/deploy/.env.canary.local \
+#     --from-project open-brain-canary --promote --from postgres --to postgres
+#   # the three-tier stack: one project, so both halves on its network, and its
+#   # image its own
+#   deploy/tier.sh --project open-brain-tiers --refresh --from stable-postgres --to canary-postgres
 #
 # (deploy/canary.sh runs the canary's --refresh itself.) --promote's --from is
 # the canary and its --to stable, so there --env-file is stable's. --replay and
@@ -96,10 +103,14 @@
 # passed (the container is removed then), on this CLI's pipe, and in the
 # target's container until the EXIT trap removes it.
 #
-# Nothing else reaches a container's environment: the checkout is mounted, and
-# its own .env files (evals/.env, .env, deploy/.env, which db/env.ts would read,
-# and whatever Bun auto-loads from a working directory) are switched off —
-# OB1_ENV_FILES=off, `bun --no-env-file`, and a working directory outside it.
+# Nothing else reaches a container: the checkout is not mounted. Each half is
+# handed, by `cp`, the files git lists under the directories tier.ts imports
+# from (db, evals, scripts, server-portable: tracked, or new and not ignored),
+# so no env file, which git ignores, is in either container, and neither
+# brain's file can be read from the other's half (SMD-2875 review pass 4: the
+# read-only mount carried both brains' env files into both halves). So tier.sh
+# runs from a git checkout. OB1_ENV_FILES=off, `bun --no-env-file` and a
+# working directory outside the code stay, so nothing would load one anyway.
 #
 # A short-form --to gets OB1_ALLOW_REMOTE_DB=1: tier.ts refuses to reset a
 # non-loopback --to without it, and from a container every other container is
@@ -115,10 +126,7 @@
 # The client major, 16, must be at least both servers' (pg_dump reads the
 # source, and --to for the probe before the reset): refreshToolsReady refuses
 # the refresh otherwise, and bumping the stack's Postgres means bumping
-# the package in db/tier.Dockerfile with it. On a host with SELinux enforcing
-# (Fedora, RHEL — podman's default there), the read-only mount of the checkout
-# needs a label the container may read; relabel the checkout once (`chcon -Rt
-# container_file_t <checkout>`) — this script does not relabel it for you.
+# the package in db/tier.Dockerfile with it.
 #
 # Exit status is the first half's to fail, else the target half's; 1 when the
 # hand-off cannot be passed or a half's container never ran (start's own
@@ -134,6 +142,16 @@ usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
   exit 2
 }
+
+# --replay and --diff first, before any other flag is read: an old command line
+# (a list of networks, say) must hear where they went, not about the list.
+for arg in "$@"; do
+  case "$arg" in
+    --replay|--diff)
+      echo "$arg runs over HTTP now, each brain at its own URL with its own key, and needs no container (SMD-2875): bun --no-env-file db/tier.ts $arg --from <stable's MCP URL or connector> --to <the canary's>, with a read key in OB1_COMPARE_KEY or the connector." >&2
+      exit 2 ;;
+  esac
+done
 
 NETWORK=""
 PROJECT=""
@@ -154,7 +172,7 @@ while [ $# -gt 0 ]; do
       # An empty network or project would fall through to the env file's project.
       case "$1" in --network|--project|--from-network|--from-project) [ -n "${2//[[:space:]]/}" ] || { echo "$1 takes a value." >&2; exit 2; } ;; esac
       # One network a half: a container on two would reach both brains (SMD-2875).
-      case "$1" in --network|--from-network) case "$2" in *,*|*[[:space:]]*) echo "$1 takes one network name, with no comma or space: each half runs on its own side's network alone (SMD-2875). '$2'" >&2; exit 2 ;; esac ;; esac
+      case "$1" in --network|--from-network) case "$2" in *,*|*[[:space:]]*) echo "$1 takes one network name, with no comma or space: each half runs on its own side's network alone (SMD-2875) — name --from's with --from-network (or --from-env-file) and --to's with --network. '$2'" >&2; exit 2 ;; esac ;; esac
       case "$SEEN" in *" $1 "*) echo "$1 given twice." >&2; exit 2 ;; esac
       SEEN="$SEEN$1 "
       case "$1" in
@@ -172,9 +190,6 @@ while [ $# -gt 0 ]; do
     --network=*|--project=*|--from-network=*|--from-project=*|--env-file=*|--from-env-file=*|--runtime=*|--from=*|--to=*)
       echo "give ${1%%=*} VALUE, not ${1%%=*}=VALUE: the wrapper reads its flags apart from their values." >&2; exit 2 ;;
     -h|--help) usage ;;
-    --replay|--diff)
-      echo "$1 runs over HTTP now, each brain at its own URL with its own key, and needs no container (SMD-2875): bun db/tier.ts $1 --from <stable's MCP URL or connector> --to <the canary's>." >&2
-      exit 2 ;;
     --refresh|--promote) VERBS+=("$1"); PASS+=("$1"); shift ;;
     --handoff|--handoff=*) echo "--handoff is tier.sh's own: each half's container has its hand-off at /tmp/handoff." >&2; exit 2 ;;
     *) PASS+=("$1"); shift ;;
@@ -222,9 +237,10 @@ project_of() {
     [ -z "$name" ] || break
   done
   if [ -z "$name" ]; then
-    sed $'s/\x1b\\[[0-9;]*m//g' "$errf" | grep -v -E 'Executing external compose provider|^Error: executing .*compose|^[[:space:]]*$' | tail -n 1 >&2 || true
+    # Compose's words are not relayed: they can quote a value of the file, a
+    # password among them (SMD-2875 review pass 4). The command shows them.
     rm -f "$errf"
-    echo "could not read the stack's project from $1 through compose (its reason above); name it with $2." >&2; exit 2
+    echo "could not read the stack's project from $1 through compose; name it with $2, or run \`$RUNTIME compose --env-file $1 -f deploy/compose.yaml config --quiet\` to see compose's reason." >&2; exit 2
   fi
   rm -f "$errf"
   printf '%s' "$name"
@@ -259,6 +275,15 @@ if [ -z "$FROM_NETWORK" ]; then
   fi
 fi
 
+# --from-env-file names another brain, so the two sides must be two networks:
+# on one, the --to half would dial the --from side's server with --to's
+# password (review pass 4: a canary file from before SMD-2873 names no
+# project, so both read as open-brain). --project, --network or the file's
+# COMPOSE_PROJECT_NAME tells them apart.
+if [ -n "$FROM_ENV_FILE" ] && [ "$FROM_NETWORK" = "$NETWORK" ]; then
+  echo "--from-env-file names another brain, but both sides come out on $NETWORK (the --to project, from $TO_WHERE): name --to's project with --project (or COMPOSE_PROJECT_NAME in $ENV_FILE), or its network with --network." >&2; exit 2
+fi
+
 # Before anything is built: a mistyped network (open-brain_data against
 # open-brain-tiers_data) is a usage error, not the runtime's 125 at the end.
 missing_network() {
@@ -269,6 +294,17 @@ missing_network() {
 }
 missing_network "$NETWORK" --to "$TO_NET_WHERE" "--project or --network"
 missing_network "$FROM_NETWORK" --from "$FROM_NET_WHERE" "--from-project or --from-network"
+
+# The code each half runs, as git lists it (see the header): checked before
+# anything is made.
+CODE_DIRS=(db evals scripts server-portable)
+git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "tier.sh runs from a git checkout: it hands each half the files git lists under ${CODE_DIRS[*]}, never the directory (an env file would go with it)." >&2; exit 2; }
+code_tar() {
+  # A tracked file deleted in the work tree is listed and absent: left out.
+  git -C "$REPO" ls-files -z -co --exclude-standard -- "${CODE_DIRS[@]}" \
+    | while IFS= read -r -d '' f; do [ -e "$REPO/$f" ] && printf '%s\0' "$f"; done \
+    | COPYFILE_DISABLE=1 tar -C "$REPO" --null -T - -cf -
+}
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 TMP_ENV_FROM="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env-from.XXXXXX")"
@@ -298,9 +334,11 @@ resolve_env() {
   for c in "$RUNTIME" docker podman; do
     command -v "$c" >/dev/null 2>&1 || continue
     if out="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$1" -f - config --environment 2>"$COMPOSE_ERR_FILE")" && [ -n "$out" ]; then printf '%s\n' "$out"; return; fi
-    [ -n "$err" ] || err="$c compose said: $(cat "$COMPOSE_ERR_FILE")"
+    [ -n "$err" ] || err="$c"
   done
-  printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment".\n%s\n' "$1" "$err" >&2
+  # Compose's words are not relayed: they can quote a value of the file, a
+  # password among them (SMD-2875 review pass 4). The command shows them.
+  printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment". `%s compose --env-file %s -f deploy/compose.yaml config --quiet` shows compose'"'"'s reason.\n' "$1" "${err:-$RUNTIME}" "$1" >&2
   exit 2
 }
 RESOLVED="$(resolve_env "$ENV_FILE")"
@@ -421,7 +459,6 @@ SRC_CID="$("$RUNTIME" create --init \
   --label ob1.tier-half=source \
   --network "$FROM_NETWORK" \
   --env-file "$TMP_ENV_FROM" \
-  -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
   sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --handoff /tmp/handoff' tier ${PASS[@]+"${PASS[@]}"})"
@@ -432,11 +469,14 @@ DST_CID="$("$RUNTIME" create --init \
   --label ob1.tier-half=target \
   --network "$NETWORK" \
   --env-file "$TMP_ENV" \
-  -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
   sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --handoff /tmp/handoff --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"})"
 rm -f "$TMP_ENV"
+# Each half's code, into /repo (the image's own directory), before it starts.
+for cid in "$SRC_CID" "$DST_CID"; do
+  code_tar | "$RUNTIME" cp - "$cid:/repo" || { echo "could not hand a tier half its code (${CODE_DIRS[*]} as git lists them)." >&2; exit 1; }
+done
 
 # Start one half attached and wait for its end; the script ends there unless
 # it ended 0. CID

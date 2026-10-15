@@ -1829,8 +1829,10 @@ progress lines (`pool:`, `before:`) still come with each sleep's work.
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
 (`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `<project>-tier:latest`, the `--to` side's project, and runs this
-checkout's `tier.ts` in it, mounted read-only, as two halves, each in a
-container of its own (SMD-2875):
+checkout's `tier.ts` in it as two halves, each in a container of its own
+(SMD-2875). Neither mounts the checkout: each is handed, by `cp`, the files git
+lists under `db`, `evals`, `scripts` and `server-portable`, so no env file (git
+ignores them) is in either container. So `tier.sh` runs from a git checkout.
 - **the source half**, on the `--from` side's `data` network alone, with
   `--from`'s password alone: a refresh's facts and its dump, or a promote's
   read of the canary;
@@ -1863,12 +1865,18 @@ OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff \
   --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8000/canary/mcp
 # stable into the canary deploy/canary.sh stood up (canary.sh runs this itself):
 # each side a `postgres` on its own network, --env-file the canary's file and
-# --from-env-file stable's
+# --from-env-file stable's; --project names the canary's project, which a
+# canary file from before SMD-2873 does not (tier.sh refuses both sides on one
+# network)
 deploy/tier.sh --env-file ~/OB1/deploy/.env.canary.local --from-env-file ~/OB1/deploy/.env \
-  --refresh --from postgres --to postgres --tier canary
+  --project open-brain-canary --refresh --from postgres --to postgres --tier canary
+# after a soak, the canary's version onto stable: the sides swap, so --env-file
+# is stable's and --from-env-file the canary's
+deploy/tier.sh --env-file ~/OB1/deploy/.env --from-env-file ~/OB1/deploy/.env.canary.local \
+  --from-project open-brain-canary --promote --from postgres --to postgres
 # the three-tier stack's own database network and services: one project, so
-# both halves on its network
-deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
+# both halves on its network, and the image its own (open-brain-tiers-tier)
+deploy/tier.sh --project open-brain-tiers --refresh --from stable-postgres --to canary-postgres
 ```
 
 A working copy on stable's server is a scratch database for a branch's
@@ -2007,10 +2015,13 @@ shows (SMD-2119). The hand-off holds the source's whole dump: it is in the
 source half's container until the hand-off is passed (that container is
 removed then), on the CLI's pipe, and in the target's container until the
 wrapper removes it. A `--handoff` given to `tier.ts` itself must not exist yet:
-it is made mode 700. The checkout's own `.env` files are mounted with the code and
-switched off: `OB1_ENV_FILES=off` stops `db/env.ts` reading them, and
-`bun --no-env-file`, run from a working directory outside the checkout, stops
-Bun's auto-load. So only the stack's environment reaches `tier.ts`.
+it is made mode 700. No `.env` file reaches a half: each is handed git's list
+of the code, not the checkout (until review pass 4 the checkout was mounted
+read-only, and both brains' env files with it). `OB1_ENV_FILES=off` and
+`bun --no-env-file`, run from a working directory outside the code, stay, so
+nothing would load one anyway. So only the half's own environment reaches
+`tier.ts`. A failure of compose's to read an env file is named with the
+command that shows compose's own words, which can quote a value of the file.
 
 From a container every database is remote, so a short-form `--to` gets
 `OB1_ALLOW_REMOTE_DB=1`. A `--to` given as a URL does not, so export
@@ -2074,10 +2085,7 @@ networks. Through the canary's first refresh, the canary step samples the
 tier halves' containers: none is on both brains' data networks, and neither
 holds the other side's password. The canary step then diffs the canary against stable
 over HTTP (`tier.ts --diff`, exit 0), and over a window after every search
-(exit 3). On a host with SELinux enforcing (Fedora and RHEL,
-where podman labels by default), the container can read the mounted checkout
-only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
-script does not relabel it for you.
+(exit 3).
 
 The dump carries no database-level settings (`ALTER DATABASE … SET`), so the
 refresh copies `--from`'s onto `--to` itself before migrating it, and resets

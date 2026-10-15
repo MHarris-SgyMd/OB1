@@ -487,9 +487,15 @@ async function readRefreshSource(fromUrl: string): Promise<{ source: RefreshSour
     if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
     // A CASE, since AND need not stop before pg_has_role, which errors on a
     // role that does not exist (before PostgreSQL 14); taking a role by SET
-    // ROLE is the 'SET' privilege from 16, membership before it.
+    // ROLE is the 'SET' privilege from 16, membership before it. And not where
+    // the role reads less than the login: pg_read_all_data does not bypass
+    // row-level security, which pg_dump refuses to dump under, nor read large
+    // objects (review pass 4: either refused the whole refresh, which ran
+    // before as the login).
     const [{ readOnly }] = await src<{ readOnly: boolean }[]>`
       SELECT CASE WHEN pg_catalog.to_regrole('pg_read_all_data') IS NULL THEN false
+                  WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relrowsecurity AND relkind IN ('r', 'p')) THEN false
+                  WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata) THEN false
                   WHEN current_setting('server_version_num')::int >= 160000 THEN pg_catalog.pg_has_role(session_user, 'pg_read_all_data', 'SET')
                   ELSE pg_catalog.pg_has_role(session_user, 'pg_read_all_data', 'MEMBER') END AS "readOnly"`;
     return {
@@ -538,9 +544,11 @@ async function requireRefreshTools(sourceMaj: number, targetMaj: number = source
  * followed PGHOSTADDR/PGSERVICE past the guards (connect.ts toolTarget,
  * SMD-2317). --no-password: a missing password fails rather than waits on a
  * prompt. As pg_read_all_data when the login may take it (a superuser, or a
- * member; PostgreSQL 14+): the dump reads every table and sequence and can
- * write nothing (SMD-2875; measured on a migrated brain, the same contents as
- * the superuser's dump).
+ * member; PostgreSQL 14+) and that role reads all the login would: the dump
+ * reads every table and sequence and can write nothing (SMD-2875; measured on
+ * a migrated brain, the same contents as the superuser's dump). Where a table
+ * has row-level security or a large object exists, which the role cannot
+ * dump, it runs as the login, as before.
  */
 async function dumpSource(fromUrl: string, fromAs: { database: string; user: string }, readOnly: boolean, file: string): Promise<void> {
   const fromTool = toolTarget(fromUrl, fromAs);
@@ -689,7 +697,8 @@ export function parseRefreshSource(v: unknown): RefreshSource | null {
   // The names are written into ALTER DATABASE … SET, so each must be one
   // databaseSettings would have read; never the refresh mark, the target's own.
   for (const [name, value] of Object.entries(settings)) {
-    if (!SETTING_NAME.test(name) || name === "ob1.refresh_target" || typeof value !== "string") return null;
+    // Postgres folds a setting's name to lower case, so the mark in any case is the mark.
+    if (!SETTING_NAME.test(name) || name.toLowerCase() === "ob1.refresh_target" || typeof value !== "string") return null;
   }
   return { identity: o.identity, major: o.major as number, settings: settings as Record<string, string> };
 }

@@ -3686,7 +3686,8 @@ no image the stack runs has both — the pgvector image has the client and no Bu
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
 stack server's major) as `<project>-tier` and runs this checkout's `tier.ts` in
-it, so a refresh migrates forward with the tree it was run from —
+it (the code as git lists it, copied in, never mounted), so a refresh migrates
+forward with the tree it was run from —
 `deploy/README.md` has the commands. `--refresh` and `--promote` each run as two halves that share a
 directory (`--handoff <dir>`), and tier.sh runs each in a container of its own
 on one brain's network with that brain's password (SMD-2875): the source half
@@ -4224,7 +4225,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2783 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1283 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1285 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

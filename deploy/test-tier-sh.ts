@@ -59,7 +59,14 @@ case "$1" in
   wait) cat "$STUB_DIR/exit.$last"; exit 0 ;;
   # The source argument decides (cp -a - CID:/tmp/ reads the pipe): a receiver
   # that left it unread could exit first and SIGPIPE the sender (review pass 3).
-  cp) if [ "\${@: -2:1}" = - ]; then cat > /dev/null; else echo tarbytes; fi; exit 0 ;;
+  cp)
+    if [ "\${@: -2:1}" = - ]; then
+      case "$last" in
+        *:/repo) tar -tf - > "$STUB_DIR/code.\${last%%:*}" 2>/dev/null || cat > /dev/null ;;
+        *) cat > /dev/null ;;
+      esac
+    else echo tarbytes; fi
+    exit 0 ;;
   rm) exit 0 ;;
 esac
 exit 0
@@ -117,12 +124,21 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
     `the target half gets the settings a migration reads, by name, and no key (${tNames.join(",")})`);
   ok(/sh -c .* tier --refresh --tier canary$/.test(src ?? "") && /sh -c .* tier --refresh --tier canary$/.test(dst ?? ""), "both halves get the arguments the wrapper does not read (a bad one is refused before the dump)");
   ok(/--label ob1\.tier-half=source/.test(src ?? "") && /--label ob1\.tier-half=target/.test(dst ?? ""), "each half is labelled with its side");
+  // The checkout is not mounted: each half is handed git's list of the code,
+  // which no env file is on (review pass 4: the mount carried both brains').
+  ok(!creates(r).some((l) => / -v | --volume |--mount /.test(l)), "no create mounts anything (the checkout's env files would ride a mount)");
+  const code = (cid: string) => { try { return readFileSync(join(root, `run${runN}`, `code.${cid}`), "utf8").split("\n").filter(Boolean); } catch { return []; } };
+  for (const cid of ["cid1", "cid2"]) {
+    const files = code(cid);
+    ok(files.includes("db/tier.ts") && files.includes("db/migrate.ts") && files.some((f) => f.startsWith("server-portable/")) && !files.some((f) => /(^|\/)\.env($|\.)/.test(f) && !/\.example$/.test(f)) && !files.some((f) => f.startsWith("deploy/")),
+      `${cid} is handed the code tier.ts runs, from git's list, and no env file (${files.length} files)`);
+  }
   ok(/ build .*-t pb-tier:latest/.test(argvLines(r).find((l) => l.startsWith("ARGV build ")) ?? "") && /\bpb-tier:latest\b/.test(src ?? ""), "the image is the --to side's project's, pb-tier");
   const order = argvLines(r).map((l) => l.replace(/^ARGV /, "")).filter((l) => /^(start|cp|rm)\b/.test(l));
   const at = (re: RegExp) => order.findIndex((l) => re.test(l));
   // The two cp's are one pipe's halves, so their order between them is the
   // scheduler's; both come after the source half and before its removal.
-  ok(at(/^start -a cid1$/) < at(/^cp cid1:/) && at(/^start -a cid1$/) < at(/^cp -a - cid2:\/tmp\/$/)
+  ok(at(/^cp - cid1:\/repo$/) < at(/^start -a cid1$/) && at(/^cp - cid2:\/repo$/) < at(/^start -a cid1$/) && at(/^start -a cid1$/) < at(/^cp cid1:/) && at(/^start -a cid1$/) < at(/^cp -a - cid2:\/tmp\/$/)
       && Math.max(at(/^cp cid1:/), at(/^cp -a - cid2:\/tmp\/$/)) < at(/^rm -f cid1$/) && at(/^rm -f cid1$/) < at(/^start -a cid2$/),
     `the source half runs, its hand-off passes, its container goes, then the target starts (${order.join(" ; ")})`);
   ok(!/pa0a|pb0b/.test(r.out + r.err), "no password on tier.sh's output");
@@ -134,7 +150,7 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
 {
   const r = run(CANARY, { STUB_EXIT_cid1: "3" });
   const lines = argvLines(r);
-  ok(r.code === 3 && !lines.some((l) => /^ARGV cp /.test(l)) && !lines.some((l) => l === "ARGV start -a cid2"), `a source half that fails ends the run with its status, before the hand-off and the target (exit ${r.code})`);
+  ok(r.code === 3 && !lines.some((l) => /^ARGV cp (cid1:\/tmp\/handoff|-a )/.test(l)) && !lines.some((l) => l === "ARGV start -a cid2"), `a source half that fails ends the run with its status, before the hand-off and the target (exit ${r.code})`);
   ok(lines.some((l) => /^ARGV rm -f cid1/.test(l)) && lines.some((l) => /^ARGV rm -f .*cid2|^ARGV rm -f cid2/.test(l)), "…and both containers are removed");
 }
 // A target half that never ran says so.
@@ -162,6 +178,8 @@ for (const flag of ["--network", "--project", "--from-network", "--from-project"
   refused(`${flag}=VALUE`, ["--env-file", envB, "--refresh", "--from", "postgres", "--to", "postgres", `${flag}=x`], new RegExp(`give ${flag} VALUE, not ${flag}=VALUE`));
 }
 refused("--diff", ["--env-file", envB, "--diff", "--from", "a", "--to", "b"], /--diff runs over HTTP now/);
+refused("--diff ahead of a list of networks (an old command line)", ["--env-file", envB, "--network", "a_data,b_data", "--diff", "--from", "a", "--to", "b"], /--diff runs over HTTP now/);
+refused("--from-env-file with both sides on one network (a canary file naming no project)", ["--env-file", envB, "--from-env-file", envA, "--refresh", "--from", "postgres", "--to", "postgres"], /--from-env-file names another brain, but both sides come out on stubproject_data/);
 refused("no verb", ["--env-file", envB, "--from", "postgres", "--to", "postgres"], /tier\.sh runs one of --refresh and --promote/);
 refused("POSTGRES_PASSWORD in the shell beside --from-env-file", CANARY, /POSTGRES_PASSWORD is set in the shell/, { POSTGRES_PASSWORD: "x" });
 {

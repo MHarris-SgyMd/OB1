@@ -7388,6 +7388,23 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
           `the source half writes its facts (mode 600) and its dump into a directory it made mode 700, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
         assert(/--handoff: .* already exists; name a directory this run can make, mode 700/.test(await refusedBy(() => refreshSource(URL_!, handDir))),
           "the source half refuses a hand-off directory that exists (it keeps its own mode, and the dump goes in it)");
+        // pg_read_all_data does not bypass row-level security, under which
+        // pg_dump refuses to dump: with a table that has it, the dump runs as
+        // the login, as before (review pass 4: the role failed the refresh).
+        {
+          const rlsDir = join(handDir, "..", `ob1-tier-handoff-rls-${process.pid}`);
+          writeFileSync(argsLog, "");
+          await sql`CREATE TABLE ob1_tier_rls_probe (id int)`;
+          try {
+            await sql`ALTER TABLE ob1_tier_rls_probe ENABLE ROW LEVEL SECURITY`;
+            await refreshSource(URL_!, rlsDir);
+            const rlsArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(rlsArgs) && !/--role=/.test(rlsArgs), `with a table under row-level security the dump runs as the login, not pg_read_all_data (${rlsArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`DROP TABLE IF EXISTS ob1_tier_rls_probe`;
+            rmSync(rlsDir, { recursive: true, force: true });
+          }
+        }
         // The identity's three parts each decide (the halves cannot ask each other's server).
         const me = facts.identity;
         assert(sameDatabase(me, { ...me }) && !sameDatabase(me, { ...me, system: `${me.system}1` }) && !sameDatabase(me, { ...me, started: `${me.started}1` }) && !sameDatabase(me, { ...me, database: `${me.database}x` }),
@@ -7399,6 +7416,7 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
         for (const [what, bad] of [
           ["a setting name no database has", { ...facts, settings: { "x; DROP SCHEMA public": "1" } }],
           ["the refresh mark, the target's own", { ...facts, settings: { "ob1.refresh_target": "canary" } }],
+          ["the refresh mark in capitals, which Postgres folds", { ...facts, settings: { "OB1.Refresh_Target": "canary" } }],
           ["a major that is not a number", { ...facts, major: "16" }],
           ["no identity", { ...facts, identity: undefined }],
           ["a setting value that is not text", { ...facts, settings: { "hnsw.ef_search": 5 } }],
