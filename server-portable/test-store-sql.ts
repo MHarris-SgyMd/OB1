@@ -1403,6 +1403,29 @@ console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture
   await raw.close();
 }
 
+console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 092 answers null and the search goes on (SMD-2540)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  const ticket = await store.captureThought({ content: "ticket SMD-17001 for the label", payload: { metadata: { source: "linear", issue: "SMD-17001", status: "Backlog", status_type: "backlog" } }, embedding: unit(3) });
+  for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await raw`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${ticket.id}::uuid`;
+  const note = await store.captureThought({ content: "a session note naming SMD-17001", payload: { metadata: {} }, embedding: unit(4) });
+  const got = await store.ticketStatusInputs([ticket.id, note.id, "not-a-uuid"], ["SMD-17001", "smd-17001", "SMD-17404", "x"]);
+  assert(got !== null && got.lifecycle.has(ticket.id) && !got.lifecycle.has(note.id) && got.lifecycle.size === 1,
+    "lifecycle: the ticket row, not the note; a malformed id dropped");
+  const h = got?.history.get("SMD-17001") ?? [];
+  assert(got !== null && got.heads.get("SMD-17001")?.type === "completed" && got.heads.get("SMD-17001")?.name === "Done" && got.heads.size === 1
+      && JSON.stringify(h.map((c) => c.name)) === JSON.stringify(["Backlog", "In Progress", "Done"]) && h.every((c) => Number.isFinite(c.at) && c.at > 0),
+    `heads and history: SMD-17001 Done now, Backlog → In Progress → Done in the log's order, each with its time; a lower-cased or unknown key reads nothing (${JSON.stringify(h)})`);
+  const empty = await store.ticketStatusInputs([], []);
+  assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0, "nothing asked: an empty answer, no query");
+  await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 092: null — the label is left off, the search goes on");
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("092") });
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "092 re-applied: answers again");
+  await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
+  await raw.close();
+}
+
 await store.close();
 
 report();

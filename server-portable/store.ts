@@ -32,6 +32,7 @@ import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
+import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 
 export type ThoughtMatch = {
@@ -755,6 +756,38 @@ export type ChangeFilters = {
   actions?: string[] | null;
   limit: number;
 };
+
+/**
+ * What migration 092's ticket_status_inputs gives the stated-status label
+ * (SMD-2540): the hits with a lifecycle of their own (never labelled), and per
+ * ticket its status now and every status its rows held, in the log's order.
+ */
+export type TicketStatusInputs = { lifecycle: Set<string>; heads: Map<string, Status>; history: Map<string, Change[]> };
+
+/** A ticket key as a store sends it: 077's TEAM-123 shape, each once. */
+export function ticketList(tickets: string[]): string[] {
+  return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
+}
+
+/** ticket_status_inputs's rows → TicketStatusInputs; both stores map through here so neither drifts. Events are put in `ord` order whatever order the rows came in. */
+export function normaliseTicketStatusInputs(rows: Record<string, unknown>[]): TicketStatusInputs {
+  const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
+  const events: { issue: string; ord: number; change: Change }[] = [];
+  for (const r of rows) {
+    const kind = String(r.kind);
+    if (kind === "lifecycle") out.lifecycle.add(String(r.thought_id).toLowerCase());
+    else if (kind === "head") out.heads.set(String(r.issue), { name: String(r.status), type: String(r.status_type) });
+    else if (kind === "event") events.push({ issue: String(r.issue), ord: Number(r.ord), change: { at: Date.parse(isoTimestamp(r.at)), name: String(r.status), type: String(r.status_type) } });
+    // 092 returns three kinds; a fourth is a changed function.
+    else throw new Error(`ticket_status_inputs returned an unknown kind ${JSON.stringify(kind)}`);
+  }
+  for (const e of events.sort((a, b) => a.ord - b.ord)) {
+    const list = out.history.get(e.issue) ?? [];
+    list.push(e.change);
+    out.history.set(e.issue, list);
+  }
+  return out;
+}
 
 const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
 
@@ -1583,6 +1616,16 @@ export interface ThoughtStore {
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   /**
+   * What the stated-status label reads (migration 092, SMD-2540): which of
+   * these hits carry a lifecycle of their own, and each named ticket's status
+   * now and history in the log's order. One query. Best-effort, as
+   * supersededAmong: a database before 092, or a role without node_state's
+   * thought_sources grant, returns null — the hits go unlabelled and the
+   * search goes on.
+   */
+  ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
+
+  /**
    * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
    * judged to conflict, in one status (null for every status), most confident
    * first, each with both thoughts. Read-only — accepting or rejecting is the
@@ -1772,7 +1815,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 

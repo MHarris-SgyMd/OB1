@@ -325,6 +325,7 @@ const FUNCTIONS = [
   "ob1_weigh_recapture(uuid, text, jsonb, text)",
   // 091 (SMD-2913): the trigger that keeps each settle by the pass.
   "ob1_keep_proposal_settles()",
+  "ticket_status_inputs(uuid[], text[])",
 ];
 
 /**

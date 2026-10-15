@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -59,6 +59,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  TicketStatusInputs,
   PluginSql,
   UpdateProvenance,
   UpdateResult,
@@ -867,6 +868,21 @@ export class SqlStore implements ThoughtStore {
       return out;
     } catch {
       return {};
+    }
+  }
+
+  async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
+    const valid = idList(ids), keys = ticketList(tickets);
+    if (valid.length === 0 && keys.length === 0) return normaliseTicketStatusInputs([]);
+    // Best-effort, as supersededAmong: before 092, or without node_state's
+    // thought_sources grant, the label is left off and the search goes on.
+    try {
+      const rows = await this.sql`
+        SELECT kind, thought_id::text AS thought_id, issue, ord, at, status, status_type
+          FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
+      return normaliseTicketStatusInputs(rows as Record<string, unknown>[]);
+    } catch {
+      return null;
     }
   }
 

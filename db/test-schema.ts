@@ -14022,6 +14022,70 @@ console.log("\n[81] Migration 091: every time the consolidation pass settled a p
   await db.exec(`DELETE FROM derivations`);
 }
 
+console.log("\n[82] Migration 092: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and every status its rows held in the log's order (060's, not seq's); an unknown status type left out; a NULL list is none, never every thought; a re-apply a no-op (SMD-2540)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The contract.
+  const [fn] = await q<{ args: string; result: string; vol: string; lang: string; definer: boolean; acl: string | null }>(
+    `SELECT pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proacl::text AS acl
+       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname = 'ticket_status_inputs'`);
+  assert(fn && fn.args === "p_ids uuid[], p_issues text[]" && fn.result === "TABLE(kind text, thought_id uuid, issue text, ord bigint, at timestamp with time zone, status text, status_type text)"
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && lastDefinerOf("ticket_status_inputs").startsWith("092") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, EXECUTE for everyone; 092 defines it (${JSON.stringify(fn)})`);
+
+  // Ticket rows moved as board-sync moves them: in place, each status an audit event.
+  const put = async (content: string, metadata: Record<string, unknown>) =>
+    (await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { type: "note", ...metadata } }), unit(0)]))[0].r.id;
+  const stamp = (id: string, keys: Record<string, unknown>) => db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify(keys)]);
+  const ticket = async (key: string, ...statuses: [string, string][]) => {
+    const id = await put(`ticket ${key}`, { kind: "ticket" });
+    for (const [status, status_type] of statuses) await stamp(id, { source: "linear", issue: key, status, status_type, linear_updated_at: new Date().toISOString() });
+    return id;
+  };
+  const t1 = await ticket("SMD-1", ["Backlog", "backlog"], ["In Progress", "started"], ["Done", "completed"]);
+  await stamp(t1, { priority: "High" }); // a move of another facet: an event carrying the same status again
+  await ticket("SMD-2", ["Backlog", "backlog"]);
+  await ticket("SMD-9", ["Backlog", "backlog"], ["Odd", "weird"]);
+  await ticket("SMD-7", ["Todo", "unstarted"]);
+  const note = await put("Session summary — SMD-1, 2 and SMD-9 are moving", {});
+  const filed = await put("a note filed under a ticket", { ticket: "SMD-2" });
+
+  type R = { kind: string; thought_id: string | null; issue: string | null; ord: string | null; at: string | null; status: string | null; status_type: string | null };
+  const inputs = (ids: string[] | null, issues: string[] | null) => q<R>(`SELECT * FROM ticket_status_inputs($1::uuid[], $2::text[])`, [ids, issues]);
+  const rows = await inputs([t1, note, filed], ["SMD-1", "SMD-2", "SMD-9", "SMD-404"]);
+  const lifecycle = rows.filter((r) => r.kind === "lifecycle").map((r) => r.thought_id).sort();
+  assert(JSON.stringify(lifecycle) === JSON.stringify([t1, filed].sort()) && rows.every((r) => r.kind !== "lifecycle" || (r.issue === null && r.ord === null)),
+    `lifecycle: the ticket row and the note filed under a ticket (node_state's open IS NOT NULL), not the session note (${lifecycle.join(", ")})`);
+  const heads = rows.filter((r) => r.kind === "head").map((r) => `${r.issue}:${r.status_type}`).sort();
+  assert(JSON.stringify(heads) === JSON.stringify(["SMD-1:completed", "SMD-2:backlog"]),
+    `head: each ticket named with a known type — SMD-9's "weird" left out, SMD-7 not named, SMD-404 held by no row (${heads.join(" ")})`);
+  const ev = rows.filter((r) => r.kind === "event");
+  const evOf = (k: string) => ev.filter((r) => r.issue === k).sort((a, b) => Number(a.ord) - Number(b.ord)).map((r) => r.status);
+  assert(JSON.stringify(evOf("SMD-1")) === JSON.stringify(["Backlog", "In Progress", "Done", "Done"]) && JSON.stringify(evOf("SMD-9")) === JSON.stringify(["Backlog"]) && !ev.some((r) => r.issue === "SMD-7"),
+    `event: every status a named ticket's row held, oldest first, a facet move repeating it; SMD-9's "weird" event left out, its Backlog kept; SMD-7 not named (${JSON.stringify(ev.map((r) => [r.issue, r.status, r.ord]))})`);
+  // The order is the log's: ord is the place 060's function gives the event.
+  const logOrder = await q<{ status: string }>(
+    `SELECT coalesce(a.diff #> '{metadata,after}', a.diff -> 'metadata')->>'status' AS status
+       FROM ob1_thought_events_in_order(ARRAY[$1::uuid]) a
+      WHERE a.action IN ('capture', 'update') AND coalesce(a.diff #> '{metadata,after}', a.diff -> 'metadata') ? 'status'`, [t1]);
+  assert(JSON.stringify(logOrder.map((r) => r.status)) === JSON.stringify(evOf("SMD-1")), "the events' ord is 060's ob1_thought_events_in_order, the fold's order");
+  assert(ev.every((r) => r.at !== null && Number.isFinite(Date.parse(r.at)) && r.thought_id === null), "every event carries its time and no thought id");
+
+  // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
+  const none = [...(await inputs(null, null)), ...(await inputs([], [])), ...(await inputs(null, ["SMD-404"]))];
+  assert(none.length === 0, `a NULL or empty list reads nothing (${none.length} rows)`);
+  assert((await inputs([note], [])).length === 0 && (await inputs([], ["SMD-1"])).every((r) => r.kind !== "lifecycle"), "ids alone give only their lifecycle rows, tickets alone only heads and events");
+
+  // A re-apply moves nothing.
+  const before = JSON.stringify(await inputs([t1, note, filed], ["SMD-1", "SMD-2", "SMD-9"]));
+  await reapply("092");
+  assert(JSON.stringify(await inputs([t1, note, filed], ["SMD-1", "SMD-2", "SMD-9"])) === before && (await functionsNamed("ticket_status_inputs")) === 1, "092 re-applied: one function, the same rows");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite
