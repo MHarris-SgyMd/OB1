@@ -332,7 +332,12 @@ const FUNCTIONS = [
   // 092 (SMD-2708): 082's log read by name, and the chain.
   "ob1_capture_taken_by_log(uuid)",
   "ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)",
-  // 094 (SMD-2540): what the stated-status label reads.
+  // 094 (SMD-2707): whether a thought's text is a capture-only key's alone, whether an accept would take it and what it would lapse, and each listed proposal's writers.
+  "ob1_capture_only_text(uuid)",
+  "ob1_accept_takes(uuid, uuid)",
+  "ob1_accept_lapses(uuid, uuid)",
+  "list_proposal_writers(uuid[])",
+  // 095 (SMD-2540): what the stated-status label reads.
   "ticket_status_inputs(uuid[], text[])",
 ];
 
