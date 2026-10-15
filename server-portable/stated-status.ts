@@ -1,8 +1,9 @@
 /**
  * stated-status.ts — which tickets a search hit no longer tells right
  * (SMD-2540): the reading evals/eval-stated-status.ts measured and chose,
- * moved-session-settled. No imports: the core calls it over a hit's text and
- * migration 093's ticket_status_inputs, and the eval's self-check holds it to
+ * moved-session-settled. No imports: the search reply will call it (SMD-2540
+ * PR 2b) over a hit's text and migration 093's ticket_status_inputs; the
+ * eval's self-check holds it to
  * evals/stated-status.ts's labelsOf("moved-session-settled", …) on hand cases
  * and a fuzz, so the label shipped is the label measured.
  *
@@ -34,9 +35,6 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
-/** How many moved tickets a hit's text line names before "+N more" (3 is the measured p90 per labelled thought; the structured field carries all). */
-export const MOVED_SHOWN = 3;
-
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
   const out = new Set<string>();
@@ -80,8 +78,9 @@ export type Moved = { ticket: string; then: Status; now: Status };
  * The tickets `text` names that moved since it was written (moved-session-
  * settled), sorted by key. `head` is a ticket's status now, undefined when
  * the brain holds no head with a known type; `history` its changes in the
- * log's order. The caller never asks for a thought with a lifecycle of its
- * own: its status is its own.
+ * log's order. Not for a thought with a lifecycle of its own (a ticket row,
+ * a note filed under one): its status is its own, and the measurement never
+ * labelled one.
  */
 export function movedSince(text: string, stored: number, head: (ticket: string) => Status | undefined, history: (ticket: string) => readonly Change[]): Moved[] {
   const written = writtenAt(text, stored);
@@ -95,12 +94,4 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
     out.push({ ticket, then, now });
   }
   return out;
-}
-
-/** The hit's text line: `⚠ Moved since written: SMD-2306 In Progress → Done; … (+N more)`, or null when nothing moved. */
-export function movedLine(moved: readonly Moved[]): string | null {
-  if (moved.length === 0) return null;
-  const shown = moved.slice(0, MOVED_SHOWN).map((m) => `${m.ticket} ${m.then.name} → ${m.now.name}`).join("; ");
-  const more = moved.length - MOVED_SHOWN;
-  return `⚠ Moved since written: ${shown}${more > 0 ? ` (+${more} more)` : ""}`;
 }

@@ -1192,9 +1192,12 @@ console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits wi
   // Over PostgREST a later function answering one object, not a row set, is read as no rows — never a throw.
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   await raw.unsafe(`CREATE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[]) RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT '{"kind": "head", "issue": "SMD-17001"}'::jsonb $$`);
+  // The shim reads a function's return type once per connection URL for the process, and the swap
+  // changed it: a URL of its own (the same database) reads the swapped function afresh.
+  const fresh = new PostgrestStore("unused", "unused", createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=stated-status-swap`) as never);
   let single: Awaited<ReturnType<typeof store.ticketStatusInputs>> | "threw" = "threw";
-  try { single = await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { single = "threw"; }
-  assert(single !== "threw" && (single === null || (single.heads.size === 0 && single.history.size === 0)),
+  try { single = await fresh.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { single = "threw"; }
+  assert(single !== "threw" && single !== null && single.heads.size === 0 && single.history.size === 0,
     `a later function answering one object over PostgREST is read as no rows, not a throw (${single === "threw" ? "threw" : JSON.stringify(single && { heads: single.heads.size })})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 093: null — the label is left off, the search goes on");

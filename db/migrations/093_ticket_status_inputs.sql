@@ -72,7 +72,8 @@
 --     toward the ticket the event itself names — not every audit row that ever
 --     carried a key. Board-sync deletes and re-keys no ticket row. The eval
 --     read every event carrying the key; on stable the two give the same
---     history for every ticket (0 of 1,032 differ, the first review pass).
+--     history for every ticket named (0 of the 1,032 keys named across its
+--     thoughts differ, the first review pass).
 --   * A history element with no status (JSON null or empty) is left out, as a
 --     head with none is. The eval kept such an element; stable holds none
 --     (all 5,172 statuses are text), so no measured label moves.

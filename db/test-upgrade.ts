@@ -653,7 +653,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // its trigger to 029's table, refusing by name without 067 ([20al]); 092
   // redefines 082's taken read, lapse and check and adds the chain, refusing
   // by name without 082 ([20am]); 093 adds one read function and redefines
-  // 060's order over its own body, refusing by name without 068 or 060
+  // 060's order over its own signature, refusing by name without 068 or 060
   // ([20an]) — all
   // recorded by the
   // baseline with their

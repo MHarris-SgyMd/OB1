@@ -14285,7 +14285,9 @@ console.log("\n[83] Migration 093: what the stated-status label reads, in one ca
   // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
   const none = [...(await inputs(null, null)), ...(await inputs([], [])), ...(await inputs(null, ["SMD-404"]))];
   assert(none.length === 0, `a NULL or empty list reads nothing (${none.length} rows)`);
-  assert((await inputs([note], [])).length === 0 && (await inputs([], ["SMD-1"])).every((r) => r.kind !== "lifecycle"), "ids alone give only their lifecycle rows, tickets alone only heads and histories");
+  const idsAlone = await inputs([t1, note], []);
+  assert(idsAlone.length === 1 && idsAlone[0].kind === "lifecycle" && idsAlone[0].thought_id === t1 && (await inputs([], ["SMD-1"])).every((r) => r.kind !== "lifecycle"),
+    "ids alone give only their lifecycle rows — the ticket row's one, the note none — and tickets alone only heads and histories");
 
   // A re-apply moves nothing.
   const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));

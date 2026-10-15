@@ -1476,19 +1476,20 @@ with every status its rows held — one element per capture or update event,
 `at` in ms — in 060's `ob1_thought_events_in_order` order, never `seq` alone,
 which 046's backfill breaks. One row per ticket so PostgREST's db-max-rows
 cannot cut the newest statuses. A NULL or empty list of tickets reads no
-ticket, of ids no hit (`node_state(NULL)` would read every thought). It redefines 060's
-`ob1_thought_events_in_order` to the same rows in the same order, its list read
-by `thought_audit_thought_id_idx` whatever the plan: the old `p_thoughts IS
-NULL OR …` filter read the whole log when the body was not inlined. The label is read in
-the server (`server-portable/stated-status.ts`, the reading
-`evals/eval-stated-status.ts` measured and chose, held to it by the eval's
-self-check), so no search function changes and no rank moves. No grant: the
-server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
+ticket, of ids no hit (`node_state(NULL)` would read every thought).
+
+It redefines 060's `ob1_thought_events_in_order` to the same rows in the same
+order, its list read by `thought_audit_thought_id_idx` whatever the plan: the
+old `p_thoughts IS NULL OR …` filter read the whole log when the body was not
+inlined. The label is read in the server (`server-portable/stated-status.ts`,
+the reading `evals/eval-stated-status.ts` measured and chose, held to it by the
+eval's self-check), so no search function changes and no rank moves. No grant:
+the server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
 `ob1_superseded_by` already, and a role without the order's `ob1_config` gets
 no label rather than a failed search (`node_state`'s `thought_sources` is not
-read when only `open` is). It
-refuses to apply without 068 or 060. test-schema [83], test-upgrade [20an],
-server-portable/test-store-sql and test-store-postgrest.
+read when only `open` is). It refuses to apply without 068 or 060. test-schema
+[83], test-live [43] (the plans), test-upgrade [20an], server-portable's
+test-store-sql and test-store-postgrest [17].
 
 ## What changed relative to the guide
 
@@ -4259,7 +4260,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2818 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1282 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

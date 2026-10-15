@@ -776,14 +776,15 @@ export function ticketList(tickets: string[]): string[] {
  * a kind it does not know is skipped, and a head or a history it cannot read
  * leaves that ticket out (no label for it) — so a server older than its
  * brain's function, an ordinary state through an upgrade, loses labels and
- * never a search (the third review pass; the label is an enhancement, as
- * supersededAmong's).
+ * never a search (SMD-2540 PR 2a's third review pass; the label is an
+ * enhancement, as supersededAmong's).
  */
 export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
   const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
   // A later function may answer one object, a scalar or a list holding nulls
-  // over PostgREST (the fourth review pass): no list is no rows, no object no row.
+  // over PostgREST (SMD-2540 PR 2a's fourth review pass): no list is no rows,
+  // no object no row.
   if (!Array.isArray(rows)) return out;
   for (const r of rows as Record<string, unknown>[]) {
     if (!r || typeof r !== "object") continue;

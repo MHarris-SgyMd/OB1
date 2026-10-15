@@ -202,7 +202,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MOVED_SHOWN, movedLine, movedSince, SETTLE_MS } from "../server-portable/stated-status.ts";
+import { movedSince, SETTLE_MS } from "../server-portable/stated-status.ts";
 import { CANDIDATES, chainRoot, keysOf, LAG_MS, labelsOf, mentionsOf, SECOND, sessionEnd, statedAfter, statusAt, THIRD, writtenAt, type Candidate, type ChainRow, type Change, type Label, type Reading, type Status } from "./stated-status.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -807,12 +807,6 @@ function selfCheck() {
     fuzzed++;
     if (shipped(x) !== measured(x)) differ++;
   }
-  // The shipped text line: none when nothing moved; the first MOVED_SHOWN by key, then how many more.
-  const mv = (ticket: string): { ticket: string; then: Status; now: Status } => ({ ticket, then: { name: "In Progress", type: "started" }, now: { name: "Done", type: "completed" } });
-  ok(movedLine([]) === null && movedLine([mv("SMD-1")]) === "⚠ Moved since written: SMD-1 In Progress → Done"
-      && MOVED_SHOWN === 3 && movedLine(["SMD-1", "SMD-2", "SMD-3"].map(mv)) === "⚠ Moved since written: SMD-1 In Progress → Done; SMD-2 In Progress → Done; SMD-3 In Progress → Done"
-      && movedLine(["SMD-1", "SMD-2", "SMD-3", "SMD-4", "SMD-5"].map(mv)) === "⚠ Moved since written: SMD-1 In Progress → Done; SMD-2 In Progress → Done; SMD-3 In Progress → Done (+2 more)",
-    "movedLine: null when nothing moved; up to three tickets, then (+N more)");
   ok(fuzzed === 2000 && differ === 0, `the shipped reading equals the measured one on a seeded fuzz (${differ} of ${fuzzed} differ), out-of-order histories included`);
 
   // The gold.
