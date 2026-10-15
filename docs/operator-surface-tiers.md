@@ -1,6 +1,6 @@
 # Three servers and an authorization server behind the proxy (SMD-2282)
 
-An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16). Amended 2026-10-01: the authorization server keeps its state in SQLite in its own volume, not in a database on the brain's Postgres (SMD-2285, "What else this touches"). Amended 2026-10-10 by SMD-2872 (`docs/one-brain-per-stack.md`): each brain is its own stack, so decision 14 becomes one authorization server per brain, and the passages here that put the tiers on paths of one origin (`/canary/...`) are superseded; that ADR lists them.
+An architecture decision record. **Decided 2026-09-27 by the maintainer.** Amended 2026-09-29 with the authorization server's selection and identity rules (SMD-2285, decisions 13–16). Amended 2026-10-01: the authorization server keeps its state in SQLite in its own volume, not in a database on the brain's Postgres (SMD-2285, "What else this touches"). Amended 2026-10-10 by SMD-2872 (`docs/one-brain-per-stack.md`): each brain is its own stack, so decision 14 becomes one authorization server per brain, and the passages here that put the tiers on paths of one origin (`/canary/...`) are superseded; that ADR lists them. Amended 2026-10-13 (SMD-2928): the two passages that route n8n, the `db/` worker containers and a tools container over the mesh say which networks each is on as built (SMD-2583).
 
 The brain's deployed surface becomes three servers and an authorization server, all behind one reverse proxy:
 
@@ -46,7 +46,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
                  │   /mcp        → mcp.ob1.internal        │
                  │   /dashboard  → app.ob1.internal        │
                  │   /auth       → auth.ob1.internal       │
-                 │   /grafana    → lgtm (SMD-1849 profile) │
+                 │   /grafana    → lgtm.ob1.internal (opt-in, off by default)
                  │   /api        → api.ob1.internal  (opt-in, off by default)
                  │   /health     → mcp.ob1.internal  (keyed; plain "ok" without a key)
                  │   /hooks/<name> → api.ob1.internal (a plugin's webhook; off by default, per plugin)
@@ -70,7 +70,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   | `/mcp` | MCP server (SMD-2287) |
   | `/dashboard` | operator GUI (SMD-2280) |
   | `/auth` | authorization server (SMD-2285) |
-  | `/grafana` | SMD-1849 |
+  | `/grafana` | Grafana (SMD-1849), off by default |
   | `/api` | REST core (SMD-2284), off by default |
   | `/health` | MCP server: keyed BrainInfo JSON read from the REST core, plain `ok` without a key (today's contract) |
   | `/hooks/<name>` | a plugin's inbound webhook, served by the REST core. Off by default and turned on per plugin, like `/api` (decision 9). There is no `/ext/<name>`: extensions are plugins, not servers |
@@ -92,7 +92,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
     - **n8n is on `egress` alone, not the mesh.** It reaches `server:8000` and `orchestration-runner:8090` there. `egress` is per project, so no tier's `server` answers it there, which the mesh cannot promise.
 
     A container on internal networks alone publishes no port, and its DNS forwards no name it does not hold (both measured on podman 6). So the proxy is on internal networks alone, `front` and `mesh`, and a name it dials that nothing holds never reaches the host's resolvers. The published port is a forwarder's, on `edge` (outward, nothing else on it) and `front`: a TCP forwarder of ours, inline in compose.yaml, that dials the proxy only at an address on `front` (its own lookup reaches the host's resolvers while the proxy is down) and opens each connection with the PROXY protocol's line naming the client, which the proxy trusts from the private ranges, so the authorization server's per-address limits still see each client (SMD-2583's second part). `compose.host-ports.yaml` gives Postgres a lone outward network, `postgres-port`, for its loopback port. CI's "Postgres answers on the data network alone" shows that a container on `egress` cannot open a connection to Postgres, by name or by address.
-- **Postgres from the host** stays an operator opt-in: `deploy/compose.host-ports.yaml` publishes it on loopback (SMD-1844). A host-run `db/` script or recipe uses that overlay, or runs in a tools container on the mesh (SMD-1869).
+- **Postgres from the host** stays an operator opt-in: `deploy/compose.host-ports.yaml` publishes it on loopback (SMD-1844). A host-run `db/` script or recipe uses that overlay, or runs in a tools container on the mesh (SMD-1869); as built, on `data`, where Postgres is, and on `egress` too when it calls a provider, the two networks `deploy/tier.sh` gives its container (SMD-2583).
 - **The REST core's own `/health` is internal only.** Brain identity and ledger freshness reach the public side through the MCP server's `/health`, the one probe URL for `smoke.sh`, the image healthcheck and `db/brain-compare.ts`.
 - **`/.well-known/` stays a 404 except three routed paths, and those only while the `auth` profile is configured:**
   - `/.well-known/oauth-protected-resource/mcp` goes to the MCP server (RFC 9728).
@@ -108,6 +108,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Path-based public routes carry obligations:**
   - The GUI sets SvelteKit's `paths.base` and scopes its cookie to `Path=/dashboard`, so the cookie never reaches another route.
   - The authorization server's issuer is `${OB1_PUBLIC_ORIGIN}/auth`, set from configuration and never derived from request headers (SMD-2382).
+  - Grafana serves from `/grafana` with `${OB1_PUBLIC_ORIGIN}/grafana/` as its root URL, its Content-Security-Policy on and its cookie `Secure` under https. A page of its that ran a script would run as the origin `/auth` signs in on, so its route is opt-in (`deploy/compose.grafana-public.yaml`, SMD-1849 PR 3a). By default Grafana is reached nowhere; a loopback port of its own, a separate origin, is the other way (`deploy/compose.grafana-port.yaml`, a release asset).
 
 ## Identity
 
@@ -143,7 +144,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard uses for the key today.
   - Sign-in is a passkey with a password fallback while configured (decision 15), and a key when not.
   - Break-glass key sign-in stays available on a separate port published only on `127.0.0.1`. Neither the source IP nor `Host` can tell local from public, because every documented tunnel dials `127.0.0.1`.
-- **Clients inside compose** (n8n, the `db/` worker containers) call the REST core directly on the mesh with an access key.
+- **Clients inside compose** (n8n, the `db/` worker containers) call the REST core directly on the mesh with an access key; as built, neither joins the mesh, so n8n reaches it as `api:8000` on `egress` and a worker container as `api:8000` on `data` or `egress` (SMD-2583).
 - **Clients on the host** cannot reach the mesh: the session-capture hook (`OB1_BRAIN_URL`), `db/brain-compare.ts`, Claude Code's MCP entries and `db/` scripts run from the host.
   - They keep keys and may use the loopback URL. OAuth needs the public origin, which is a different resource from `http://127.0.0.1…/mcp` (SMD-2382).
   - `/api` is available where the operator has turned it on.
@@ -159,7 +160,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **Prose, `structuredContent`, refusal envelopes, SSE keepalive, notification handling and the scope-filtered `tools/list`** belong to the MCP server alone.
 - **Telemetry:** each server emits OTLP spans with the SMD-1849 allow-list. The MCP span is the parent of the REST span through `traceparent`. Grafana owns storage and presentation.
 - **Brain tiers** (stable / canary / working): one REST core per tier, with the MCP server and the GUI per tier behind `/canary/...`. The exact split is settled in SMD-2294.
-  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. On stable's mesh it would also resolve stable's `auth.ob1.internal`, which settles how a tier reaches the one authorization server across projects; until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles, advertises none and dials no `*.ob1.internal` name of stable's. `deploy/compose.tiers.yaml`, the three tiers as one stack, gives each tier its MCP server and REST core and puts one proxy in front, with `/mcp`, `/canary/mcp`, `/working/mcp` and stable's `/health` the only public paths; no tier publishes a port of its own. The GUI per tier waits on SMD-2280.
+  - **As built (SMD-2294):** the canary stays a compose project of its own (`deploy/canary.sh`), with its own Postgres. `deploy/compose.canary.yaml` puts its MCP server and REST core on stable's mesh as `mcp.canary.ob1.internal` and `api.canary.ob1.internal`, under those names alone, and stable's proxy routes `/canary/mcp` to the first. On stable's mesh it would also resolve stable's `auth.ob1.internal`, which settles how a tier reaches the one authorization server across projects; until a tier has OAuth of its own (SMD-2286) the canary runs with no compose profiles, advertises none and dials no `*.ob1.internal` name of stable's but one: with `OTEL_EXPORTER_OTLP_ENDPOINT` in its env file it sends its telemetry to stable's collector, `lgtm.ob1.internal` (SMD-1849 PR 3a), which carries no key and no text and names the canary by its tier. `deploy/compose.tiers.yaml`, the three tiers as one stack, gives each tier its MCP server and REST core and puts one proxy in front, with `/mcp`, `/canary/mcp`, `/working/mcp` and stable's `/health` the only public paths; no tier publishes a port of its own. The GUI per tier waits on SMD-2280.
 
 ## Contributions and plugins
 

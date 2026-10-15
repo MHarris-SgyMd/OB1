@@ -2410,6 +2410,10 @@ export const ROLE_GRANTS = Object.freeze({
     // unread, preflight's proposals row names this grant and the listing tool
     // is refused; a capture and every other read go on. The writes stay the worker group's.
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),          since: "029" }),
+    // brain_info reads what became of the findings board-sync posted to the
+    // board (SMD-2682). Soft as the rest: without it the Findings row says
+    // the table is not readable by this role, and nothing else changes.
+    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT"]),           since: "087" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's
@@ -2453,10 +2457,10 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
     Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
     // A long thought's answered windows, kept across a claim that does not
-    // finish (089, SMD-2694): read at a claim, written per window and per hard
-    // stop through 089's functions (an upsert, so UPDATE too), deleted at a
+    // finish (092, SMD-2694): read at a claim, written per window and per hard
+    // stop through 092's functions (an upsert, so UPDATE too), deleted at a
     // succeeded release. Without it the worker keeps nothing and says so once.
-    Object.freeze({ table: "extraction_progress", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "089" }),
+    Object.freeze({ table: "extraction_progress", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "092" }),
   ]),
   // A structured pass — sync-linear.ts, the ingest adapters' structure step
   // (ingest-structure.ts) — additionally records the thought's source row and

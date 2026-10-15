@@ -34,6 +34,8 @@
  * listing over the durable table, and a second replica, remain fast-follows.
  */
 
+import { withSpan, type HistogramSpec, type WorkSpan } from "./spans.ts";
+
 /** Who owns a job — the fields index.ts's Principal carries that this module needs. */
 export interface JobPrincipal {
   /** The SHA-256 of the presented key: the ownership token (a job is visible only to the key that started it). */
@@ -185,6 +187,13 @@ interface Sub {
 interface JobRecord {
   id: string;
   kind: string;
+  /**
+   * The body's span while it runs (SMD-1849 PR 2d), so the record's own
+   * failure ends it as the record ends: its timer's `JOB_TIMEOUT`, or a
+   * `markRunningLost` that runs first — the servers' stops cut every open span
+   * before it, so there the span is `cut` already.
+   */
+  span?: WorkSpan;
   status: JobStatus;
   ownerKeyHash: string;
   actor: string;
@@ -300,6 +309,11 @@ function finish(rec: JobRecord, status: Exclude<JobStatus, "pending" | "running"
   if (isTerminal(rec.status)) return;
   rec.status = status;
   rec.endedAt = rec.now();
+  // The record's failure is the span's, as it happens: a body that returns after its timer failed it, or that the
+  // timer's abort ends quietly, would otherwise end it `ok` (review pass 1). A span already ended — a body that
+  // threw, the stop's cut — keeps how it ended.
+  if (status !== "succeeded") rec.span?.end("error", patch.error?.code ?? status);
+  rec.span = undefined;
   if (patch.result !== undefined) rec.result = patch.result;
   if (patch.error !== undefined) rec.error = patch.error;
   if (rec.maxRunTimer) {
@@ -327,12 +341,31 @@ function finish(rec: JobRecord, status: Exclude<JobStatus, "pending" | "running"
   rec.retentionTimer.unref?.();
 }
 
+/** A job's kind as the code names one (`scan_thoughts`); `?` for anything else. */
+const JOB_KIND = /^[a-z][a-z0-9_]{0,47}$/;
+
+/** A job's run, in seconds, to its end or the record's: a tenth of a second to an hour, past the 30 minutes a job is given (review pass 3). */
+const JOB_DURATION: HistogramSpec = {
+  unit: "s",
+  description: "How long each job's body ran, to its end, its timer or the stop (SMD-1849)",
+  bounds: [0.1, 0.5, 1, 5, 10, 30, 60, 300, 600, 1800, 3600],
+};
+
 /**
  * Start a detached job and return its handle at once. `run` is invoked with a
  * JobContext and NOT awaited by the caller — its resolution moves the job to
  * `succeeded` (its value the result) and its rejection to `failed` (its message
  * the error). `run` should check `ctx.signal` at its own boundaries so a stop
  * or a timeout ends it promptly.
+ *
+ * `run` starts a trace of its own (SMD-1849 PR 2d): a span `job <kind>`,
+ * linked to the tool call that started it rather than its child, so the
+ * provider calls and store operations of a body that runs on for minutes are
+ * not hung under a call that answered at once. A body that throws ends it as
+ * an error, its fault's kind and code on it; a job its timer fails, as an error
+ * by the record's code (`JOB_TIMEOUT`) as the timer fires; one still running
+ * at the stop is ended `cut`. Each is one point on `ob1.job.duration`, by its
+ * kind and how it failed.
  */
 export function startJob(
   principal: JobPrincipal,
@@ -399,7 +432,11 @@ export function startJob(
     broadcast(rec, frame("status", toPublic(rec)));
     persist(rec); // the running-transition (SMD-2318)
     try {
-      const result = await run(ctx);
+      const name = JOB_KIND.test(kind) ? kind : "?";
+      const result = await withSpan(`job ${name}`, { root: true, attributes: { "ob1.job.kind": name }, metric: { name: "ob1.job.duration", spec: JOB_DURATION, labels: { "ob1.job.kind": name } } }, (span) => {
+        rec.span = span;
+        return run(ctx);
+      });
       finish(rec, "succeeded", { result });
     } catch (e) {
       finish(rec, "failed", { error: { message: (e as Error).message } });

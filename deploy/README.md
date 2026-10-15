@@ -36,8 +36,47 @@ now ordinary environment variables your platform's secret store supplies.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+# the check first: up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
+
+`instance.ts check` renders the stack as compose will: the same env files, `-f`
+files, profiles and project name (`--env-file`, `-f`, `--profile` and `-p` as
+for compose). With no `--env-file`, it reads `COMPOSE_ENV_FILES`, else the
+`.env` beside the first compose file, as compose does; a `COMPOSE_FILE` in the
+env file or the shell needs the same files given with `-f`. It runs only under
+`bun --no-env-file`, and never beside a Bun `--env-file`, since Bun would load a
+`.env` in the working directory into the check, where compose reads it as the
+shell's; otherwise it refuses, naming the command.
+
+It refuses an env file whose project was made from other env files (the ones
+compose records for `--env-file` or `COMPOSE_ENV_FILES`, or the project
+directory's `.env` where none was given), since that `up` would recreate the
+other brain's containers with this file's settings; an env file that only moved
+is recreated from with `up -d --force-recreate`. Then, for each host port the
+brain would publish, it says whether the port is free, already the same
+service's own, or held: by another brain's container (a stopped one included,
+which takes its port back when it starts; Docker's read from its port bindings),
+by another of this brain's services, by a second mapping of this brain's, or by
+a process on the host. A port this brain's service holds now is its own (a
+stopped container that also asks for it is named); a port its stopped service
+will take back is tried first, in case a process took it meanwhile. A refusal
+names the setting to change (`SERVER_PORT`, and the others "One env file is one
+brain" lists).
+
+It only reads, so it is safe beside a running brain: run it before every `up`.
+Each line is `✓` (free, or this brain's own), `✗` (a refusal, naming what to
+change), `?` (unknown: a stopped container's ports could not be read) or `·` (a
+note). Any exit but 0 means do not `up`: 2 is a refusal, a usage error or
+compose's own. It never prints compose's words, which can quote an env file's
+values: it says what failed from a line number, a setting's name and its own
+reading of the files (a quote left open, a port that is none), and names the
+`compose … config --quiet` command that prints them.
+
+It reads every container runtime on the PATH, docker and podman both
+(`--runtime` names one). Where compose's own bind failure, at the end of an
+`up`, names no setting, its refusal names the one to change (SMD-2873).
 
 The profile is the stack's own Ollama, where the server's model endpoint
 defaults; drop it when `deploy/.env` names another provider (an Ollama on the
@@ -97,7 +136,7 @@ client that resolves `localhost` to `::1` first without falling back is refused
 
 The stack above builds `server` and `migrate` from the checkout, pins
 `postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
-`compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder` and `n8n` by digest in
+`compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder`, `n8n` and `lgtm` by digest in
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the job
 `.github/workflows/release.yml` (SMD-1860) runs on the tag a cut is named by —
 `v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
@@ -105,7 +144,7 @@ publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
 `ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
 creates the GitHub release with a compose overlay that names the two by tag and
 digest and `ollama` by the digest its tag resolved to when the job ran, beside
-`compose.yaml`, `.env.example`, `compose.api-public.yaml` and `compose.hooks-public.yaml` from the same tag, the change files the release
+`compose.yaml`, `.env.example`, `compose.api-public.yaml`, `compose.hooks-public.yaml`, `compose.grafana-public.yaml` and `compose.grafana-port.yaml` from the same tag, the change files the release
 numbered and `scripts/mechanism-yield.ts`'s table. Before the release existed, the
 job brought a stack up from the *pulled* images and held it to this file's checks
 (the `Full stack, no Supabase` lines, `smoke.sh`, no Supabase binary) and to
@@ -120,6 +159,8 @@ curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/comp
 curl -fsSL -o .env https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/env.example
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.api-public.yaml   # optional: /api on the proxy, a third -f ("The REST core" below)
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.hooks-public.yaml   # optional: plugins' webhooks at /hooks, another -f ("Plugins' webhooks" below)
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.grafana-port.yaml   # optional: Grafana on 127.0.0.1:3000, another -f ("The observability profile" below)
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.grafana-public.yaml   # optional: Grafana at /grafana on the stack's origin, another -f (the same)
 # fill in .env as step 1 says, then:
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
@@ -143,6 +184,75 @@ repository's visibility is, and `pull` on a clean machine then wants a login —
 make `ob1-server` and `ob1-migrate` public in the package settings if they are
 not.
 
+## One env file is one brain
+
+A brain is its env file (SMD-2873, under the one-brain-per-stack decision,
+[`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)). Any number run
+on one machine, each from its own file, all from the one `compose.yaml`:
+
+- **`COMPOSE_PROJECT_NAME`** names it. Unset, the project is `compose.yaml`'s
+  `name:`, `open-brain`. The value in the env file wins over that, as the shell's
+  and `-p` do. Everything the project makes carries its name: containers are
+  `<project>-<service>-1`, networks `<project>_data`, `<project>_egress` and
+  the rest, the database volume `<project>_pgdata`, and the server image
+  `<project>-server`. Two instances share no network, volume, image tag or
+  container name (measured, the decision's "Measured").
+- **Its own secrets**: a `POSTGRES_PASSWORD` and `MCP_ACCESS_KEYS` of its own
+  (step 1). A key opens only the brains whose `MCP_ACCESS_KEYS` lists its hash.
+- **Its host ports.** These are the only thing two instances collide on. With no
+  profile that is the forwarder's, `SERVER_PORT` (8000; `SERVER_BIND`
+  127.0.0.1). Each profile or overlay an instance runs adds its own:
+  - `N8N_PORT` for `--profile orchestration`;
+  - `POSTGRES_PORT`, `OLLAMA_PORT` and `JEV_PORT` for `compose.host-ports.yaml`,
+    each with its `_BIND`.
+
+  Set each one in the second instance's file. `bun --no-env-file
+  deploy/instance.ts check --env-file deploy/.env.<name>.local -f
+  deploy/compose.yaml`, with the same `-f` files and `--profile`s as its `up`,
+  says before that `up` which one is still taken, and by what; compose's own
+  bind failure names no setting.
+
+A second brain beside the first:
+
+```bash
+cp deploy/.env.example deploy/.env.ob1b.local   # .env.*.local: the root .gitignore ignores it
+# deploy/.env.ob1b.local: its own POSTGRES_PASSWORD and MCP_ACCESS_KEYS, as in step 1, and
+#   COMPOSE_PROJECT_NAME=ob1b
+#   SERVER_PORT=8040
+bun --no-env-file deploy/instance.ts check --env-file deploy/.env.ob1b.local -f deploy/compose.yaml &&
+  docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
+OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
+```
+
+Name an instance's file `.env.<name>.local`, the form the root `.gitignore`
+ignores (it does not ignore `.env.<name>`); the fork's checks refuse a tracked
+env file.
+`--env-file` replaces `deploy/.env` for that command, so give it on every
+compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
+env file names the canary's project, but its port, tier and mesh are
+`canary.sh`'s to set: stand it up and take it down with `canary.sh`, and give
+compose its file only to look (`ps`, `logs`). The three-brain stack reads
+`deploy/.env` too, so a `COMPOSE_PROJECT_NAME` there puts it in that brain's
+project ("What is reachable from where", below). The scripts
+take the brain the same way:
+- `deploy/canary.sh --env-file deploy/.env.ob1b.local up` stands `ob1b`'s canary. Its
+  project is `ob1b-canary`, its connector `ob1b-canary`, and its env file
+  `.env.ob1b-canary.local`. `--stable-project` overrides the project the env
+  file names.
+- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data` and
+  `ob1b_egress`. `--project` overrides the project, and `--network` names the
+  networks outright.
+
+**Local models.** An instance on `--profile local-models` runs its own Ollama
+and `ollama` volume, so both models are pulled, and held in memory, once per
+instance. The alternative is one Ollama on the host that every instance names
+(`deploy/.env.example`, Option B):
+- Under podman machine, a container reaches the host's loopback, so `ollama
+  serve` on its 127.0.0.1 default serves every instance (measured).
+- On Docker on Linux, a container does not reach a port the host binds to
+  loopback, so that Ollama must listen on the bridge address (SETUP.md) or on
+  every interface. The second exposes it on the LAN.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
@@ -156,9 +266,10 @@ the repo root, with whatever `-f` files the stack was started with.
 Inside the stack, each service is on the networks it needs and no other
 (SMD-2583; the ADR's "Two networks", `docs/operator-surface-tiers.md`), and
 nothing is on compose's default network:
-- `mesh`, internal: the proxy, the MCP server, the REST core and the
-  authorization server, each called by its `*.ob1.internal` name; a tier of
-  another project joins it under its own (`compose.canary.yaml`).
+- `mesh`, internal: the proxy, the MCP server, the REST core, the
+  authorization server and the observability profile's collector, each called
+  by its `*.ob1.internal` name; a tier of another project joins it under its
+  own (`compose.canary.yaml`).
 - `data`, internal: Postgres, and only what connects to it — the migrator,
   the two servers, board-sync, the workers, the sleep scheduler, the import
   runner and its role's one-shot. No other project joins it.
@@ -177,12 +288,14 @@ nothing is on compose's default network:
 
 An internal network has no route out, and a container on internal networks
 alone publishes no port, so `compose.host-ports.yaml` gives Postgres one more
-network of its own, `postgres-port`, for its loopback port.
+network of its own, `postgres-port`, for its loopback port, and
+`compose.grafana-port.yaml` the observability profile's Grafana one,
+`grafana-port`; each reaches out.
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
 | `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
-| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the server as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, a canary or working tier's server as `mcp.canary.ob1.internal:8000` or `mcp.working.ob1.internal:8000` while one has joined the mesh (SMD-2294), and — with `compose.api-public.yaml` named — `api.ob1.internal:8000` | Nothing of its own: the forwarder's port | Through the forwarder |
+| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the server as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, a canary or working tier's server as `mcp.canary.ob1.internal:8000` or `mcp.working.ob1.internal:8000` while one has joined the mesh (SMD-2294), and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
 | `server` | `server:8000` on `egress` — n8n; `mcp.ob1.internal` on `mesh` — the proxy, and from where it probes the authorization server's `/healthz` (SMD-2382). It dials `postgres:5432` on `data` and the model provider on `egress`: the ADR has it on the mesh alone, which waits on its calls going through the REST core (SMD-2287) | Nothing of its own: the proxy's port, at `/mcp` (SMD-1846) | Through the proxy |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the two servers, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
@@ -193,6 +306,7 @@ network of its own, `postgres-port`, for its loopback port.
 | `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name, all on `egress`. Not the mesh, where a tier of another project's server is `server` too | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
+| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network alone: the two servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing by itself — a data source its admin adds reaches any name on `mesh` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
@@ -235,7 +349,7 @@ every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which
 service publishes from which file — the forwarder and the profile's n8n from
-`compose.yaml`, the database and Ollama from the host-ports file — so a new published port is
+`compose.yaml`, the database, Ollama and Jev from the host-ports file and Grafana from `compose.grafana-port.yaml` — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
 
@@ -278,7 +392,8 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
-| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, SMD-2294). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
+| `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
+| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` does, SMD-2294). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal` or, with `--profile observability`, `lgtm.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins and telemetry included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
 | any other path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404, so a client given a tier's URL with anything changed after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
@@ -632,7 +747,8 @@ summary line counts them).
 Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 `http://127.0.0.1:8000/health` at the origin root or `…/mcp/health` under the
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
-is the `HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 75).
+is the comment above `server-portable/index.ts`'s `/health` route, whose test is
+`mcp-edge.ts`'s `HEALTH_PATH` (FORK.md change 75).
 The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
 through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
 platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
@@ -710,7 +826,8 @@ What comes back after the host, the Docker daemon or a podman machine
 restarts is each container's restart policy; compose is not involved. In
 `compose.yaml` what serves is `unless-stopped`: Postgres, the two servers,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
-orchestration runner and the authorization server. What runs once is `"no"`: the migrator, `ollama-pull` and the
+orchestration runner, the authorization server and the observability
+profile's `lgtm`. What runs once is `"no"`: the migrator, `ollama-pull` and the
 runner's role job. `board-sync`, the two workers, the sleep scheduler and `jev` are
 `on-failure:3`, so that a configuration a restart does not fix stops them
 rather than loops; count on neither runtime to start those at boot. The
@@ -782,6 +899,7 @@ it joined the boot list at once (measured). `podman update` takes one
 container at a time; `docker update --restart unless-stopped` takes several.
 
 ```bash
+# the default project's names; another brain's are <project>-… ("One env file is one brain")
 podman update --restart unless-stopped open-brain-postgres-1
 podman update --restart unless-stopped open-brain-canary-postgres-1   # a canary's (deploy/canary.sh)
 podman update --restart unless-stopped open-brain-ollama-1            # with --profile local-models
@@ -912,7 +1030,8 @@ keys after the client or device they are for (`laptop`, `claude-desktop`), not
 after a person, so the log stays free of names and addresses.
 
 ```bash
-# every request that did not end `ok`, on either server
+# every request that did not end `ok`, on either server (the default project's
+# containers; another brain's are <project>-server-1 and <project>-api-1)
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 ```
@@ -934,15 +1053,17 @@ nothing here).
 Each request is also an OpenTelemetry span, and each tool call (an MCP
 `tools/call`, a REST operation, a plugin's) a span under it (SMD-1849 PR 2b);
 each request is also a point on the request-duration histogram and a log
-record (PR 2c). All three are recorded and sent only when the server's
-environment names a collector. `OTEL_EXPORTER_OTLP_ENDPOINT` sends all three,
+record (PR 2c); each provider call and store operation a span under the work
+that made it and a point of its own, and a job's body and a webhook's deferred
+work a trace of their own (PR 2d). All three signals are recorded and sent
+only when the server's environment names a collector. `OTEL_EXPORTER_OTLP_ENDPOINT` sends all three,
 the key's name among a log record's fields; `OTEL_METRICS_EXPORTER=none` and
 `OTEL_LOGS_EXPORTER=none` keep it to traces — for a collector that takes only
 traces, which would refuse the rest and have their losses said every minute.
 
 | Variable | What it does |
 | -- | -- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP/HTTP base URL (`http://lgtm:4318`): spans go to `<it>/v1/traces`, metrics to `<it>/v1/metrics` and log records to `<it>/v1/logs`, as JSON. With none of these endpoint variables set — the default — nothing is recorded or sent, and a request's span and point cost the server well under a microsecond. Each endpoint is read trimmed. One that is no http(s) URL, holds whitespace, or has a query string or a fragment (which `/v1/…` would follow), sends nothing, and the server says so at start |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP/HTTP base URL (`http://lgtm.ob1.internal.:4318`, the observability profile's): spans go to `<it>/v1/traces`, metrics to `<it>/v1/metrics` and log records to `<it>/v1/logs`, as JSON. With none of these endpoint variables set — the default — nothing is recorded or sent, and a request's span and point cost the server well under a microsecond. Each endpoint is read trimmed. One that is no http(s) URL, holds whitespace, or has a query string or a fragment (which `/v1/…` would follow), sends nothing, and the server says so at start |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `…_METRICS_ENDPOINT`, `…_LOGS_ENDPOINT` | one signal's URL itself, used as given (a query string kept), over the base: set alone, only that signal is sent |
 | `OTEL_TRACES_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none` | that signal off, the others still sent; said at start. Only `otlp` and `none` are read, and a list that names `none` is off: another value (`console`, `prometheus`) is said at start, and the signal goes over OTLP all the same |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` (or a signal's own) | not read: every signal goes as OTLP/HTTP JSON, which a collector's port 4318 takes; a value other than `http/json` is said at start |
@@ -956,13 +1077,22 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | how often the metrics are sent (60 s; a value under 1 s is ignored for the 60 s, one past 2,147,483,647 ms held there) and each export's timeout (30 s, at most the interval) |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | cumulative by default; `delta` for a backend that wants it |
 | `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server) or `open-brain-api` |
-| `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment=canary`); a key it names wins, `service.version` included |
+| `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
 | `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id. Under `always_off` a line names a trace no span was exported for |
 
-In `deploy/`'s compose stacks the server's and the REST core's environments
-are listed, and no `OTEL_*` variable is among them until the `observability`
-profile (SMD-1849 PR 3) brings a collector and the variables with it; until
-then, name them in a second `-f` file.
+In `deploy/`'s compose stacks the server and the REST core take
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_RESOURCE_ATTRIBUTES`, the three `OTEL_*_EXPORTER` switches,
+`OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER` and its `_ARG`, and
+`OTEL_METRIC_EXPORT_INTERVAL` from `deploy/.env` (`x-otel-env`), each empty
+— read as unset — where the file names none; the workers take none. Not
+`OTEL_SERVICE_NAME`, which would give both servers one name, nor the per-signal
+endpoints, the batch and protocol settings or `OB1_OTEL_TRUST_TRACEPARENT`
+(no proxy in the stack sets a `traceparent`): name those in a second `-f` file.
+The `observability` profile below is a collector for them on the stack's own
+machine. A pipeline tier's brain (`OB1_TIER`, SMD-1806) adds
+`deployment.environment.name` with its tier to its resource, so a canary that
+sends to stable's collector is told apart by name.
 
 At start the server says where each signal goes — the variable, the
 endpoint's origin and the service's name (held to printable ASCII), so a
@@ -1043,35 +1173,289 @@ has, its `ts` the record's own time — named `ob1.request`, at `INFO` for an
 one, and carrying its span's trace and span ids, so a collector has the line
 without reading a container's log. stdout's line is written all the same.
 
+Inside a tool call, each call to the embedding or chat provider is a client
+span under the GenAI conventions' names — `embeddings <model>` or
+`chat <model>`, with `gen_ai.operation.name`, `gen_ai.request.model`, the
+endpoint's `server.address` and `server.port` (never its userinfo or path),
+and `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` where the
+answer says them; no `gen_ai.provider.name`, since an OpenAI-compatible
+endpoint does not say whose it is — and a point on
+`gen_ai.client.operation.duration`, in seconds on the conventions' bounds and
+on to 327.68 s, labelled with the operation, the model, the host and port and,
+for a call that failed, its `error.type`: the provider's status (`503`;
+`_OTHER` outside 300–599, so a provider cannot mint a series per status),
+`timeout`, `invalid_body` (a 2xx that is no JSON), or the runtime's code
+(`ECONNREFUSED`). A call the egress gate refuses is never made, and has none.
+
+Each operation the core calls on the store is a client span named for the
+operation (`matchThoughts`, `captureThought`) — one span per operation, not
+per query: no query's text is read, so a span cannot name its SQL, and
+`pg_stat_statements` (PR 3b) times each SQL function — with `db.system.name`
+(`postgresql`), `db.operation.name` and `ob1.store` (`sql` or `postgrest`),
+and a point on `db.client.operation.duration` labelled with the same, on
+bounds finer than the conventions advise and on to 60 s. On the SQL store a
+fault's SQLSTATE is its `error.type` and `db.response.status_code`
+(any other fault's code or kind its `error.type`), and its time includes the
+pool's wait; the PostgREST store's faults are plain errors, `Error` — but for
+the key's registry lookup, which carries its SQLSTATE — and its time is an
+HTTP call's. No query or parameter is on either. A plugin's transaction is an
+internal span, `pluginTx`, with `ob1.plugin`, and no point: its time is the
+plugin's own code and SQL, and the operations it calls are spans and points
+of their own. The key's registry lookup (`resolveAgent`) runs before
+any tool call, so its span is under the request's.
+
+A job's body (`scan_thoughts`) starts a trace of its own, `job <kind>`, linked
+to the tool call that started it rather than under it, since it runs on for
+minutes after that call has answered; its provider calls and store operations
+are its children. A job its timer fails ends its span then, an error with the
+job's code (`JOB_TIMEOUT`). Each job is one point on `ob1.job.duration`, in
+seconds to an hour, by `ob1.job.kind` and how it failed. A webhook's deferred
+work, which runs after its answer, is a trace of its own the same way:
+`defer <plugin>`, linked to its delivery's request, with `ob1.defer` (`work`);
+a failed delivery's undoing of it (`discard`) runs before its 500, so it is
+that request's child. The stop ends whatever of these is still open as `cut`,
+with its request — after a drain that finished too, for work the drain does
+not count (a store call outside any request). The pool's connections in use
+are not counted here: Bun's client does not say them, and PR 3b's Postgres
+exporter reads them from the database. Nor is the workers' traffic: `db/`'s
+passes (entity extraction, the consolidation judge, the re-embeds) make the
+heaviest provider and database calls, and install no OpenTelemetry, so a
+provider-latency panel shows the servers' calls alone (SMD-2910).
+
+`bun preflight.ts --deep` makes each provider probe a span and a point under
+the same names, marked `ob1.probe` (`preflight`) so a backend tells them from
+the server's calls — a probe's time is to the answer's headers, its error the
+status or, where no answer came, the runtime's code, and it carries no token
+counts — and sends them before it reports, as `open-brain-preflight` unless
+`OTEL_SERVICE_NAME` (or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`) names
+it. Its `telemetry` row says, within 5 s, whether they went: `ok` with where,
+naming spans, points or both by what is sent; a warning for an export not
+sent, or for an endpoint that is no URL or an SDK that would not start (the
+server would share either); a skip when no collector is named, when spans and
+points are both turned off or the SDK is disabled, or when no probe ran. A
+plain preflight, the one each container start runs, starts no telemetry, so a
+stack no one has used yet has a first point only from `--deep`.
+
 Never the URL, a query string, another header, a key, a body, an argument or
 any text — `test-server.ts` [22] sends each and looks for it in every span's
 name, attributes, events, status, trace state and resource, and a real
 `bun index.ts` looks for the key, the query string and the text in all it
 exports; [25] looks for a planted query string in every point's labels and
-log record, and for a key's name on any point; `test-rest.ts` [12] sends a key, query strings (one a `query=` at
-`/v1/search`) and a fault's message and looks in each span's name, attributes,
-events and status, and in what a real `bun api.ts` exports.
+log record, and for a key's name on any point; [26] sends planted text to a
+provider and a store and a base's userinfo, and looks in every span and point;
+`test-plugins.ts` [16] looks for a deferred fault's message;
+`test-preflight.ts` [11] looks in what `--deep` sends; `test-rest.ts` [12]
+sends a key, query strings (one a `query=` at `/v1/search`) and a fault's
+message and looks in each span's name, attributes, events and status, and in
+what a real `bun api.ts` exports.
 
 Where the signals go is the operator's decision: the brain is personal data,
 and a collector off this machine is a place it then goes; the `observability`
-profile (SMD-1849 PR 3) will keep them on it. What leaves is usage metadata:
+profile below keeps them on it. What leaves is usage metadata:
 per request `http.request.method`, `http.route`, `http.response.status_code`,
 `http.response.body.size`, `mcp.method.name`, `gen_ai.operation.name`,
 `gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
 `ob1.outcome`, `ob1.code` and `error.type`, a fault's `exception.type` and
 `ob1.fault.code`, and the line's fields again in its log record; per tool call
-`gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; the
-histogram's points by the labels above; the trace, span and linked ids, each
-span's name, kind and status, its parent's id and a link's flags, timestamps
-to the nanosecond, and a resource of `service.name`, `service.version` and
-`telemetry.sdk.*` (no host, no process) with whatever
+`gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; per provider
+call the model, the provider's host and port, its token counts and how it
+failed; per store operation its name, the store's kind and a SQLSTATE; per
+plugin transaction and deferred work its plugin's name (and `ob1.defer`); per
+job its kind; on each of these `db.system.name` where it is the store's, its
+`ob1.outcome` and `error.type`, and a fault's `exception.type` and
+`ob1.fault.code`; the histograms' points by the labels above; the trace, span
+and linked ids, each span's name, kind and status, its parent's id and a
+link's flags, timestamps to the nanosecond, and a resource of `service.name`,
+`service.version`, `service.instance.id` (a UUID fresh at each start, so the
+MCP server and the REST core under one name, or two tiers, are two series;
+each start so begins new series, and `OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<name>`
+pins one), a pipeline tier's `deployment.environment.name` (`OB1_TIER`)
+and `telemetry.sdk.*` (no host, no process) with whatever
 `OTEL_RESOURCE_ATTRIBUTES` adds. Together they are a timeline of which client
 called which tool, when, and how much came back — so name keys after clients,
-not people (`ob1.agent`), before pointing at a collector elsewhere. Any client
-can fill a batch's queue (a keyless flood, or a 100-call batch, 101 spans), and
-while the collector lags what is past it is dropped — said as `queue full` —
-though every line is still written. Cloudflare Workers runs the API's no-ops
-alone — `wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
+not people (`ob1.agent`), before pointing at a collector elsewhere.
+
+A request the server did not accept — no key, one it refused (revoked, busy,
+outside the door's scopes), a webhook delivery its plugin refused — sends its
+span and log record within 60 a minute per server; past that, its point on
+`http.server.request.duration` and its line still count it, the line naming a
+trace that was not sent, and one line says how many sent neither: at the
+minute's end, by the next minute's first, or at the stop — whether its span
+was sampled or not; one begun before the SDK loaded sends neither. Only the
+request's own span is held: work it ran under it (a refused key's registry
+lookup, a capture a plugin refused after) still sends its spans, without their
+parent. A keyless flood otherwise put about 1 KB a request on a collector's
+disk (measured on the profile below before the budget: 5,000 in under a
+second, about 5 MB; with it, Loki took 28 KB for the same 5,000 and Tempo held
+60 of their traces), and its Loki and Tempo expire by age alone. A key
+accepted, or a delivery its plugin accepted, is never held to it. A keyed
+client can still fill a batch's queue (a 100-call batch, 101 spans), and while
+the collector lags what is past it is dropped — said as `queue full` — though
+every line is still written. Cloudflare Workers runs the API's no-ops alone —
+`wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
+
+### The observability profile
+
+The `observability` profile (SMD-1849 PR 3a) runs one more container, `lgtm`:
+Grafana's otel-lgtm image, pinned by digest — an OpenTelemetry collector
+taking OTLP on 4318, and Prometheus, Tempo, Loki, Pyroscope and Grafana behind
+it — on the stack's machine, on the internal `mesh` network alone. Three lines
+in `deploy/.env` turn it on:
+
+```
+COMPOSE_PROFILES=observability      # beside any already there on this one line (auth,observability): a second line replaces the first
+GRAFANA_ADMIN_PASSWORD=<openssl rand -hex 24>
+OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318
+```
+
+and one more `-f` file, on every command, is where Grafana is reached
+(below) — from a release, beside `compose.release.yaml`:
+
+```bash
+docker compose -f compose.yaml -f compose.grafana-port.yaml up -d      # Grafana on http://127.0.0.1:3000/grafana/
+```
+
+`COMPOSE_PROFILES` counts only when no `--profile` is on the command line
+(measured: with `--profile local-models` there, `lgtm` is not run), so name
+every profile in that one line. A hex password needs no quoting; one with a
+`$` goes in single quotes, which docker compose otherwise reads as a variable
+and cuts short. Spans reach Tempo within seconds of a request, metrics within
+a minute (`OTEL_METRIC_EXPORT_INTERVAL`). The profile alone runs a collector
+nothing sends to; the endpoint alone sends to a name nothing holds, which each
+server says on stderr, a line a minute per signal (`ENOTFOUND`, measured) —
+and asks the host's resolvers for it, since the servers are on `egress`. An
+`OTEL_*` variable set in the shell compose runs from wins over
+`deploy/.env`'s, as every variable does.
+
+Grafana signs in `admin` with `GRAFANA_ADMIN_PASSWORD`. Anonymous access is
+off — the image's own default would sign anyone in as Admin — and the
+container refuses to start, at every start, with that password under 12
+characters (spaces aside) or `admin` (in any case), saying why in its log and
+exiting 30 s later, so its restart policy retries at that pace. Grafana keeps
+the password it first started with in its database, on the volume: changing
+the variable later changes nothing until the operator changes it in Grafana —
+its profile page, or from a file holding the new one, kept off the command
+line, and deleted after: `compose exec -T -e GF_PATHS_DATA=/data/grafana/data
+lgtm /otel-lgtm/grafana/bin/grafana cli --homepath /otel-lgtm/grafana admin
+reset-admin-password --password-from-stdin < new-password` (measured). Keep no
+credential in a Grafana data source: Grafana encrypts one under its default
+key, on the volume.
+
+Where Grafana is reached is the operator's choice, and by default it is
+nowhere:
+- **On loopback, an origin of its own** — `-f compose.grafana-port.yaml`, a
+  release asset: `http://127.0.0.1:3000/grafana/` (`GRAFANA_BIND`,
+  `GRAFANA_PORT`), on a network of its own beside `mesh`, which reaches out
+  (below). Grafana's root URL is that port, so its links name it and its
+  cookie is not `Secure` over the plain http; behind a TLS proxy or tunnel to
+  the port, `GRAFANA_ORIGIN` names its https origin instead. Browse to the
+  address the root URL names: Grafana Live (Explore's live tail, dashboards'
+  live updates) refuses a page from any other (measured: `localhost:3000`
+  refused, `127.0.0.1:3000` open). Its own origin keeps Grafana's scripts
+  from the stack's pages, not from its cookies: a browser sends a cookie of
+  `127.0.0.1`'s to every port there, so with `/auth` used on the stack's
+  loopback origin a script in a Grafana page could still send requests that
+  carry `/auth`'s session (it could not read their answers). Naming it
+  recreates `lgtm` alone.
+- **At `/grafana` on the stack's origin** — `-f compose.grafana-public.yaml`,
+  reached wherever the stack is: the LAN under `SERVER_BIND`, a tunnel to
+  `OB1_PUBLIC_ORIGIN`. Grafana's root URL is then `OB1_PUBLIC_ORIGIN` (unset,
+  the stack's loopback origin, so a link Grafana writes to itself names
+  127.0.0.1, and Grafana Live refuses a page from any other address; its
+  redirects are paths, measured) at `/grafana/`, its cookie `Secure` where
+  that is https: over a tunnel, set it to the tunnel's https origin (an http
+  one must be loopback, as the authorization server holds it), and name this
+  file without the loopback one, whose origin wins when both are named.
+  Grafana then shares the origin with `/auth`, the authorization server's
+  sign-in and consent, and with `/mcp`: a script that ran in one of Grafana's
+  pages would run as the origin, and while the operator's `/auth` session
+  lasted it could consent a client of its own, which would then read and write
+  the brain. So it is not the default. Without the file `/grafana` is the
+  proxy's 404.
+
+Either way Grafana's cookie is `Path=/grafana` (measured), and it sends its
+Content-Security-Policy, which narrows which scripts a page runs, not what one
+that runs can do.
+
+What it holds, from the two servers (the workers send nothing, SMD-2910):
+- **Traces** in Tempo: one per request, `tools/call capture_thought` and the
+  like, under `service.name` `open-brain` (the MCP server) or `open-brain-api`
+  (the REST core), with each tool call, provider call and store operation
+  beneath it, and each job's body a trace of its own.
+- **Metrics** in Prometheus, under this pin's OTLP names, underscored with
+  their unit: `http_server_request_duration_seconds`,
+  `gen_ai_client_operation_duration_seconds`,
+  `db_client_operation_duration_seconds` and `ob1_job_duration_seconds`, each
+  a classic histogram (`_bucket`, `_count`, `_sum`), each label the attribute
+  underscored (`ob1_tool`, `gen_ai_request_model`, `error_type`); `job` is the
+  service's name, `instance` its `service.instance.id`, new at each start, and
+  a pipeline tier's `deployment_environment_name` its tier.
+- **Log records** in Loki: each request's, its body the line's fields, under
+  `service_name`.
+
+The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
+All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
+and Loki 14 (its retention switched on: the image's default keeps every record
+for ever), each read back from the running backend. A keyless request is
+about 1 KB there, and a request the server did not accept is held to 60 a
+minute per server ("Traces, metrics and log records" above): at most about
+1.2 GB per server over the 14 days. `compose exec lgtm sh -c 'du -sh /data/*'`
+says what each backend holds. Its health is each backend's own ready URL:
+one that dies leaves `lgtm` unhealthy in `compose ps` (measured: Loki killed,
+unhealthy within a minute), not restarted, since neither Docker nor Podman
+restarts an unhealthy container by default — `compose restart lgtm` brings it
+back. Idle, the container held 463 MiB of memory and
+was ready 4 s after it started (measured on podman 6, macOS); its image is
+2.6 GB on disk.
+
+It calls out to nothing by itself: what it would call is off — Grafana's
+plugin fetches, signing keys and preinstalled apps (so no Drilldown apps),
+usage reports, update checks, news feed, gravatars, cloud migration and
+external snapshots, and the backends' usage reports. On `mesh` alone it has no
+outward network; with `compose.grafana-port.yaml` its port's network reaches
+out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
+switches are what keep it quiet. Snapshots, public dashboards and Grafana's
+own `/metrics` are off: each would show data without a sign-in. On `mesh` only
+Grafana (3000), the collector's OTLP (4317, 4318) and its health check (13133,
+which says only that it is up) answer: Prometheus, Tempo, Loki and Pyroscope
+listen on the container's own loopback, server, gRPC and gossip ports alike
+(each port probed from the mesh). Grafana's data-source proxy is held to those
+four, but a data source's own queries are not: Grafana's admin reaches every
+name on `mesh` — the two servers, the authorization server, a joined tier
+(measured: a data source at the REST core) — where the servers ask for a key
+and the authorization server for the operator's password, its discovery and
+registration aside; with `compose.grafana-port.yaml`, the LAN and the host
+too, through the port's network — on Docker Desktop and a podman machine by
+`host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
+port with the host-ports file); on Linux the host's other listeners, by the
+network's gateway. The image's own sample dashboards (RED metrics, JVM) read
+other names; this stack's dashboard (PR 3c) and the database's own numbers
+(`pg_stat_statements`, PR 3b) are the next cuts.
+
+A canary at `/canary/mcp` (`deploy/canary.sh`) joins stable's `mesh`, and its
+env file is made from stable's at its first `up`: with the endpoint in
+stable's by then, its servers send to stable's collector too, their signals
+carrying `deployment.environment.name` `canary`; set later, it reaches the
+canary by an edit to the canary's own file, which `up` names as a difference.
+One on a `--port` of its own is not on stable's mesh, and says `ENOTFOUND`
+until the endpoint is out of its file (`OTEL_EXPORTER_OTLP_ENDPOINT=
+deploy/canary.sh --port <n> up`, an empty one in the shell, keeps it out of
+the canary's servers without an edit); `up` says so. `GRAFANA_*` is never
+carried. The three-brain stack (`compose.tiers.yaml`) runs no collector and
+passes the servers none of these variables.
+
+**Turning it off**: take `observability` and the endpoint out of
+`deploy/.env` and `compose up -d` without the Grafana `-f` files, then
+`compose rm -sf lgtm` (measured: it takes `lgtm` with the profile no longer
+named) — `up` leaves a service of a profile no longer named running, as it
+does the workers' — and `docker network rm
+<project>_grafana-port`, which outlives the file (measured); remove its volume
+by its exact name
+when its data should go too, `docker volume rm <project>_lgtm-data` (never a
+prune), which takes Grafana's password with it: the next start reads
+`GRAFANA_ADMIN_PASSWORD` afresh, the way to start over from a forgotten one.
+**Rolling back** to a release from before it needs `up -d --remove-orphans`,
+or `lgtm` runs on as an orphan, on `mesh` and on its port.
 
 ## Keeping the board in the brain
 
@@ -1542,8 +1926,11 @@ alive.
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
 the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
-as given. `--network` defaults to `open-brain_data,open-brain_egress` (a
-stack from before SMD-2583 has one, `open-brain_default`), and `--runtime` is
+as given. `--network` defaults to the stack's `<project>_data,<project>_egress`
+(`open-brain_data,open-brain_egress` for the default project; a stack from
+before SMD-2583 has one, `<project>_default`). The project is the one
+`--env-file` names, `COMPOSE_PROJECT_NAME` as compose reads it, else
+`open-brain`, or `--project NAME` (SMD-2873; not with `--network`). `--runtime` is
 `docker` or `podman` (docker when it is on the PATH). `--from-env-file PATH`
 takes a short-form `--from`'s password from another env file, when `--from`
 is another stack's with a password of its own (the canary's refresh names
@@ -1659,26 +2046,44 @@ deploy/canary.sh --env-file ~/OB1/deploy/.env up --connect
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
-The canary is `compose.yaml` again under the project `open-brain-canary`, with
-its own Postgres, volume, networks and images, `OB1_TIER=canary`, and two
+The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
+`open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
+env file names `COMPOSE_PROJECT_NAME=ob1b`. Stable's project is the one its env
+file names, as compose reads it, unless `--stable-project` names another.
+`canary.sh names` prints stable's project, the canary's, the connector and the
+canary's env file, and changes nothing. The read sees `COMPOSE_PROJECT_NAME`
+(the env file's, or the shell's, which wins); a stable brought up with `-p`, or
+with a `COMPOSE_FILE` overlay carrying a `name:` of its own, needs
+`--stable-project`. A canary stood beside such a stable before SMD-2873 is
+`open-brain-canary`, whatever `--stable-project` said: take it down first with
+`--stable-project open-brain down`, since the next `up` stands `<stable>-canary`
+beside it, under the same names on stable's mesh; the old canary's
+`.env.canary.local` is then no canary's, and can be deleted. The
+canary has its own Postgres, volume, networks and images, `OB1_TIER=canary`, and two
 servers: the MCP server and the REST core. It needs Docker Compose v2
 (`config --format json`, `up --wait`), which is what `docker compose` is and
 what `podman compose` runs when it is installed; the Python podman-compose is
 not enough.
 
-It runs on an env file of its own (SMD-2583): `.env.canary.local` beside
-stable's (`--canary-env-file` names another, never stable's own file). The
+It runs on an env file of its own (SMD-2583): `.env.<canary>.local` beside
+stable's, named for the canary's project so two brains' canaries in one
+directory stay apart (SMD-2873), and `.env.canary.local` for
+`open-brain-canary`, the name it had before (`--canary-env-file` names
+another, never stable's own file). The
 root `.gitignore` has ignored `.env.*.local` since before this, so stable's
 checkout ignores it whatever its age, and the temporary file it is written
 in, `.env.canary-<pid>-<n>.local`, which is removed however `up` ends. The
 first `up` writes it from stable's file as compose reads it, mode 600: every
-setting, each with the value compose read, quoted afresh, but for three kinds:
+setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
   the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
   `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
   comment; SMD-2882);
+- **stable's `COMPOSE_PROJECT_NAME`**: the file names the canary's own
+  project instead, `COMPOSE_PROJECT_NAME="<canary>"`, so compose given that file
+  alone acts on the canary, never on stable (SMD-2873);
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the
@@ -1766,8 +2171,8 @@ stable is redeployed:
      back to the `local-models` profile's `ollama`, and the jev profile's
      setup is `http://jev:8020`. Name an endpoint the canary can reach for
      the canary alone, in the shell, which wins over the env file for the
-     canary and leaves stable as it is (or in `.env.canary.local`, once `up` has
-     made it):
+     canary and leaves stable as it is (or in the canary's env file, once `up`
+     has made it):
      `OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1 deploy/canary.sh
      … up` for an Ollama on the host, or a host's full name for one on the
      LAN. It must serve the brain's embedding model. A remote provider also
@@ -1782,15 +2187,20 @@ stable is redeployed:
      lost that stable does not hold. A process on the host listening there is
      refused too;
    - `--connect` finds another connector under the name (below);
-   - stable's Postgres, found by its compose labels (`--stable-project`,
-     default `open-brain`), is stamped `canary` or `working`, or carries a
+   - stable's project cannot be read from its env file, or is not a compose
+     project name, or ends in `-canary`: that is a canary's own project, so a
+     brain named so has no canary of its own (SMD-2873);
+   - stable's Postgres, found by its compose labels (stable's project), is
+     stamped `canary` or `working`, or carries a
      refresh's mark (`canary`, `working`): that is a copy, not the record.
      A mark of `stable` or `off`, an operator's protection, is not one;
    - stable's Postgres is on neither `<stable>_data` nor `<stable>_default`,
      where the refresh would reach it (SMD-2583);
    - the canary's env file, when it has one, holds no `POSTGRES_PASSWORD` of
      its own, or one built from the shell or spanning lines, or holds
-     stable's database password anywhere (above).
+     stable's database password anywhere (above), or names a project other
+     than the canary's (SMD-2873). One that names none, made before SMD-2873,
+     is let through with a note to add `COMPOSE_PROJECT_NAME=<canary>`.
 
    Stable with no tier stamp is stamped `tier=stable`. When stable's server
    runs without `OB1_TIER=stable` it says so; set that in the env file and
@@ -1839,8 +2249,9 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke and needs no key.
-5. With `--connect` it registers the Claude Code connector
-   `open-brain-canary` (`--name`) at user scope, under the same key; a new
+5. With `--connect` it registers the Claude Code connector named for the
+   canary's project, `open-brain-canary` beside the default stable (`--name`
+   names another), at user scope, under the same key; a new
    session sees its tools. The URL is the canary's: `/canary/mcp` on
    stable's origin, or `/mcp` on `--port`.
 
@@ -1876,10 +2287,10 @@ refuses to replace it. `--volumes` also deletes the canary's database, and
 only once it says it is a canary: stamped `canary`, marked by a refresh, or
 holding nothing, which is what a first refresh that died before its mark
 leaves. A refusal puts the canary's Postgres back as it found it. The volume
-is looked for by name (`open-brain-canary_pgdata`), which is how `compose
-down --volumes` removes it. With none there is nothing to delete, and nothing
-is started to find out. Neither touches stable: `down` acts on the project
-`open-brain-canary` alone.
+is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
+beside the default stable), which is how `compose down --volumes` removes it.
+With none there is nothing to delete, and nothing is started to find out.
+Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing

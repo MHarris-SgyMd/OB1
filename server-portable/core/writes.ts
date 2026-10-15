@@ -11,7 +11,7 @@ import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
 import { decideCalls, type EgressSubject } from "../egress.ts";
-import { UUID_RE, type ActorStamp, type Citation, type ThoughtStore } from "../store.ts";
+import { UUID_RE, type ActorStamp, type Citation, type RecaptureLabel, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
 import { META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
@@ -115,6 +115,8 @@ export type Captured = {
   headWindow: HeadWindow | null;
   /** A re-capture that named pointers it could not write (035): what was named, and what stands. Reader only. */
   recapture: { derivedNamed: boolean; given?: string; current: string | null } | null;
+  /** What the re-capture did to a capture-only key's label (090, SMD-2898). Reader only, on a re-capture; absent before 090. */
+  label?: RecaptureLabel;
 };
 
 /**
@@ -399,6 +401,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       contextFailures,
       headWindow: headWindowOf(embedded),
       recapture,
+      // 090 (SMD-2898): the label's fate, under the existence-oracle rule —
+      // the stores weigh only a reader's re-capture, and `existed` above is
+      // a reader's alone.
+      ...(existed === true && captured.label ? { label: captured.label } : {}),
     });
   } catch (err: unknown) {
     const msg = (err as Error)?.message ?? "";

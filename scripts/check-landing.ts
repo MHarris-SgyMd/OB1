@@ -14,7 +14,7 @@
  * as a PR).
  *
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
- * db/migrations/, server-portable/, plugins/, evals/ or jev/ ships a changes/smd-NNNN.md
+ * db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ ships a changes/smd-NNNN.md
  * fragment — added, or extended when a ticket lands in slices (SMD-1806 did);
  * a deleted one is not shipped. The one exception is a release cut (SMD-1860):
  * it adds the migration that writes the version and deletes the fragments it
@@ -43,7 +43,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export type Change = [status: string, path: string];
 
 /** The directories whose change is a change to the fork itself, as CONTRIBUTING.md names them. */
-export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "plugins/", "evals/", "jev/"];
+export const FRAGMENT_DIRS = ["db/migrations/", "server-portable/", "rest-client/", "mcp-server/", "plugins/", "evals/", "jev/"];
 /** Inside those directories, what asks no fragment: a test file in the tree's spelling (`test-x.ts`, `x.test.ts`) or a Markdown file. */
 export const FRAGMENT_EXEMPT = /(?:^|\/)(?:test-[^/]+|[^/]+\.test)\.(?:ts|mjs|js|py|sh)$|\.md$/i;
 /** A fragment, as changes/README.md names one — a numbered `changes/NNN-slug.md` is the release step's, and ships with no PR. */
@@ -100,6 +100,8 @@ export const LANDING_PROBES: [why: string, changes: Change[], says: string | nul
   ["docs alone", [["M", "server-portable/README.md"], ["M", "evals/README.md"]], null],
   ["db/ outside migrations", [["M", "db/migrate.ts"], ["M", "db/config.mjs"]], null],
   ["a lockfile pin in the server", [["M", "server-portable/bun.lock"]], "touches server-portable/bun.lock"],
+  ["the REST client the MCP server calls the brain through (SMD-2287)", [["M", "rest-client/index.ts"], ["M", "rest-client/test-client.ts"]], "touches rest-client/index.ts"],
+  ["the MCP server as a client of the REST core (SMD-2287)", [["M", "mcp-server/app.ts"], ["M", "mcp-server/test-mcp.ts"]], "touches mcp-server/app.ts"],
   ["a fixture — data an eval reads is not a test file", [["M", "evals/fixtures/replay.json"]], "touches evals/fixtures/replay.json"],
   ["a directory-shaped name that only starts like one", [["M", "evals-old/x.ts"], ["M", "server-portable-docs/x.ts"]], null],
   ["a release cut — the version migration added, the fragments it numbered deleted, the manifest written", [["A", "db/migrations/048_schema_version.sql"], ["M", "db/version.mjs"], ["D", "changes/smd-1804.md"], ["A", "changes/018-long-captures-stay-searchable.md"], ["M", "CHANGELOG.md"], ["M", "releases.json"]], null],

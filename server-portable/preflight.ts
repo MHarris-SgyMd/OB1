@@ -17,7 +17,8 @@
  * Run it as a deploy gate, an init container, or a readiness probe:
  *
  *   bun preflight.ts             # config + connectivity + schema
- *   bun preflight.ts --deep      # also calls the embedding and chat providers (costs a token per model)
+ *   bun preflight.ts --deep      # also calls the embedding and chat providers (costs a token per model),
+ *                                # each call a span and a point where a collector is named (SMD-1849)
  *   bun preflight.ts --json      # machine-readable, for a pipeline step
  *
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
@@ -28,6 +29,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
+import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, SLEEP_STALLED_JOIN } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
@@ -47,6 +49,9 @@ type Check = { name: string; status: Status; detail: string; fix?: string };
 
 const args = process.argv.slice(2);
 const deep = args.includes("--deep");
+/** The service --deep's spans and points are sent as (OTEL_SERVICE_NAME, set, names it instead), and how long their send is waited for. */
+const PREFLIGHT_SERVICE = "open-brain-preflight";
+const PREFLIGHT_FLUSH_MS = 5_000;
 const asJson = args.includes("--json");
 
 const results: Check[] = [];
@@ -4762,6 +4767,35 @@ function rejectedRemedy(at: ProviderEndpoint, keyKnob: string, baseKnob: string)
   if (at.userinfo) return `The user and password in ${baseKnob} are rejected. Check them.`;
   return `It wants a credential and none was sent: set ${keyKnob}, or a user and password in ${baseKnob}.`;
 }
+
+// --deep's probes as the server's calls are measured (SMD-1849 PR 2d): each a
+// span and a point on gen_ai.client.operation.duration, sent where a collector
+// is named, so a stack no one has used yet already has a first point. Loaded
+// under --deep alone: a plain preflight, the one every container start runs,
+// starts no SDK. What the start says, and how the send went, is the telemetry
+// row's.
+const telemetry = deep ? await import("./telemetry.ts") : undefined;
+const telemetrySaid: string[] = [];
+/** The provider probes made, for the telemetry row: a flush that found nothing left is no proof none ran (the span batch may have sent them). */
+let probes = 0;
+const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line)) : false;
+
+/**
+ * A probe as a provider call's span and point, marked `ob1.probe` so a backend
+ * tells it from the server's calls when both carry one service's name: its
+ * time to the answer's headers, its error the status a provider refused with
+ * (statusType's, as providerCall's) or the runtime's code where no answer came (providerCall's also reads the
+ * body, and names a timeout and a body that is no JSON), and no token counts.
+ */
+async function probed(operation: "embeddings" | "chat", model: string, base: string, call: () => Promise<Response>): Promise<Response> {
+  probes += 1;
+  return withProviderSpan(operation, model, base, async (span) => {
+    const r = await call();
+    if (!r.ok) span.end("error", statusType(r.status));
+    return r;
+  }, undefined, { "ob1.probe": "preflight" });
+}
+
 if (!deep) {
   add("embedding provider", "skip", "not checked — pass --deep to call the provider");
 } else if (!embEndpoint.key && !embEndpoint.userinfo && !localEmbeddings) {
@@ -4770,7 +4804,7 @@ if (!deep) {
   try {
     const { resolveEmbeddingDimensions: resolveDims } = await import("../db/config.mjs");
     const wantsTruncation = resolveDims(env.OB1_EMBEDDING_DIMENSIONS, embDim, embModel);
-    const r = await fetch(`${embEndpoint.base}/embeddings`, {
+    const r = await probed("embeddings", embModel, embEndpoint.base, () => fetch(`${embEndpoint.base}/embeddings`, {
       method: "POST",
       headers: embEndpoint.headers,
       // Send exactly what the server will send. Omitting `dimensions` here would
@@ -4781,7 +4815,7 @@ if (!deep) {
         input: "preflight",
         ...(wantsTruncation ? { dimensions: embDim } : {}),
       }),
-    });
+    }));
     if (!r.ok) {
       add("embedding provider", "fail", `${shownBase(embEndpoint)} returned ${r.status}`,
           r.status === 401 ? rejectedRemedy(embEndpoint, "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)", "OB1_LLM_BASE_URL") : "Check the provider's status and credit balance.");
@@ -4837,7 +4871,7 @@ if (deep) {
       // OpenAI layer has been inconsistent about response_format — and one that
       // ignores it degrades every capture to "uncategorized", or fails every
       // pair the judge is shown, without ever failing a request.
-      const m = await fetch(`${chatEndpoint.base}/chat/completions`, {
+      const m = await probed("chat", model, chatEndpoint.base, () => fetch(`${chatEndpoint.base}/chat/completions`, {
         method: "POST",
         headers: chatEndpoint.headers,
         body: JSON.stringify({
@@ -4845,7 +4879,7 @@ if (deep) {
           response_format: { type: "json_object" },
           messages: [{ role: "user", content: 'Reply with only this JSON: {"ok":true}' }],
         }),
-      });
+      }));
       if (!m.ok) {
         add(row, "fail", `${model} returned ${m.status} from ${shownBase(chatEndpoint)}`,
             (m.status === 401
@@ -4871,6 +4905,22 @@ if (deep) {
           `Network reachability to ${hostOf(chatEndpoint.base)}. ${consequence}`);
     }
   }
+}
+
+// ── Telemetry: --deep's probes sent (SMD-1849 PR 2d) ─────────────────────────
+
+if (telemetry) {
+  let sent: Awaited<ReturnType<typeof telemetry.flushTelemetry>>;
+  if (telemetryStarted) {
+    // The send and the SDK's shutdown under one bound, as a server's stop gives its flush one: a collector that never
+    // answers, or one the exporter retries, costs this run 5 s, not the exporter's retries.
+    const deadline = Bun.sleep(PREFLIGHT_FLUSH_MS).then(() => "timeout" as const);
+    sent = await Promise.race([telemetry.flushTelemetry(), deadline]);
+    await Promise.race([telemetry.stopTelemetry(), deadline]);
+  }
+  // What was said read once the send and the shutdown are done, so the send's own losses are among it (review pass 1).
+  const row = telemetry.telemetryRow({ started: telemetryStarted, said: telemetrySaid, urls: telemetry.planTelemetry().urls, probes, sent, boundMs: PREFLIGHT_FLUSH_MS });
+  add("telemetry", row.status, row.detail, row.fix);
 }
 
 // ── Optional: the typed-decision tier (SMD-2050) ─────────────────────────────

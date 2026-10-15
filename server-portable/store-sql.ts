@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -680,17 +680,30 @@ export class SqlStore implements ThoughtStore {
     // above it, the stamp moves to this key (SMD-2664) — the trust this write
     // declares, checked against the text it captured. Made the way the note
     // is made, and after it, so a restamp that fails never holds up the note.
+    // 090: through ob1_weigh_recapture, which says what it did to the label
+    // (SMD-2898); a database at 085–089 has only ob1_restamp_recapture, which
+    // moves it and says nothing, and one before 085 neither.
+    let label;
     if (r?.existed === true && opts.recapture !== "keep") {
+      const args = [id, typeof r.fingerprint === "string" ? r.fingerprint : null, actorPayload(opts.actor), opts.event?.trust ?? null] as const;
       try {
-        await this.sql`SELECT ob1_restamp_recapture(${id}::uuid, ${typeof r.fingerprint === "string" ? r.fingerprint : null}::text, ${actorPayload(opts.actor)}::jsonb, ${opts.event?.trust ?? null}::text)`;
+        label = normaliseRecaptureLabel((await this.sql`SELECT ob1_weigh_recapture(${args[0]}::uuid, ${args[1]}::text, ${args[2]}::jsonb, ${args[3]}::text) AS r`)[0]?.r);
       } catch (e) {
-        if (String((e as { errno?: unknown }).errno ?? "") !== "42883") throw e;
+        // Only the function's own absence falls back: a 42883 from inside it
+        // (a helper it calls gone) is a broken schema, said rather than
+        // swallowed (review pass 1).
+        if (String((e as { errno?: unknown }).errno ?? "") !== "42883" || !/ob1_weigh_recapture\(/.test(String((e as Error).message))) throw e;
+        try {
+          await this.sql`SELECT ob1_restamp_recapture(${args[0]}::uuid, ${args[1]}::text, ${args[2]}::jsonb, ${args[3]}::text)`;
+        } catch (e2) {
+          if (String((e2 as { errno?: unknown }).errno ?? "") !== "42883") throw e2;
+        }
       }
     }
     // 035: `existed` says the text was already there and the envelope's
     // provenance was not written. Passed on only when the body said (a
     // database before 035 returns none, and a guess would be a lie).
-    return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed, supersedes: typeof r.supersedes === "string" ? r.supersedes : null } : {}) };
+    return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed, supersedes: typeof r.supersedes === "string" ? r.supersedes : null } : {}), ...(label ? { label } : {}) };
   }
 
   async updateThought(opts: {

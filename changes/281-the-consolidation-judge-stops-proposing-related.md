@@ -1,0 +1,137 @@
+# 281. The consolidation judge stops proposing related tickets as supersessions — five verdicts, a quoted direction, and a confidence from the model's own token probabilities (SMD-1873)
+
+**What changed.**
+- **The prompt** (`server-portable/consolidate.ts`, `CONSOLIDATE_PROMPT_VERSION` 4, so a new pool under `consolidate:<model>@p4`) has five verdicts where p3 had three:
+  - `unrelated`;
+  - `related`: compatible, and neither continues the other;
+  - `evolves`: one continues the other, and both stand;
+  - `duplicate`: the same claims;
+  - `outdates`: one is no longer current, being a later state of the same thing or a reversal. This is p3's "conflict", renamed.
+
+  Each word starts with a different letter, so the verdict's first token tells them apart. For a directed `outdates`, the judge quotes the words that show which side is current. `judgePair` counts the quote (`evidenceFound`) only when it appears as whole words in that side's text and not in the other's.
+- **What becomes a proposal** (`proposalVerdict`): only `outdates`, in the direction named or `conflict_undirected`. `related`, `evolves` and `duplicate` relate two thoughts that both stand; PR 2 stores them as relations (below).
+- **Relations (PR 2, migration 084).**
+  - A `relation` facet on the newer thought (`thought_facets`, a third kind beside 042's citation and 053's link). Its payload holds:
+    - `relation`: related, evolves or duplicate;
+    - `target`: the older thought's id, which must exist and is stored lower-case;
+    - `judge_key`, and `confidence`, a number from 0 to 1 or absent;
+    - `origin`, which the validator writes as judged.
+  - It is written standing and only ever closed. The validator refuses:
+    - a rewrite of a relation's payload;
+    - a re-open;
+    - a move to another thought;
+    - another kind turned into a relation;
+    - a relation inserted already closed.
+  - One standing per pair, held by a partial unique index.
+  - Its lineage row (`derivations`, a seventh kind, `relation`) names both thoughts at the fingerprints judged, written in the same transaction.
+  - `record_thought_relation` writes a set per pair under an advisory lock on it, both thoughts locked FOR KEY SHARE first, so a delete of either waits rather than deadlocks:
+    - the same word from the same judge key at the same confidence is kept, its lineage moved to the texts judged now;
+    - anything else replaces it: the old one is closed and a new one written;
+    - NULL closes it;
+    - a thought already gone answers none.
+  - The pass writes a related, evolves or duplicate verdict when the token mass of the three words reaches the floor, else the written number does (`relationConfidence`). It stores the probability of the word it chose. Any other well-formed judgement of the pair closes its relation. A malformed or timed-out pair leaves it standing. A pair whose side is deleted mid-write is skipped and counted.
+  - The other thought's delete closes the edge (an AFTER DELETE trigger on `thoughts`). The newer thought's delete takes it by the foreign key, and its lineage row goes with it (an AFTER DELETE trigger on `thought_facets`).
+  - No new grant. Relations take the structure group's INSERT on `thought_facets` (held by the orchestration runner; per table, so that group writes any facet kind, as stated where it is granted) and the capture group's UPDATE and `derivations` writes. A role without them stores none, and the run names the group.
+  - No facet changes its kind on UPDATE, for any kind. A link turned into a citation was admitted, so the capture group's UPDATE could forge a citation that refuses a thought's delete.
+  - The run summary counts relations added, kept, replaced and closed. `--status` counts those standing and those on a moved text. `--list relations` lists them, flagging one whose text has moved since it was judged.
+  - A run that cannot store relations says so at its start and in `--status`; a follower re-checks each poll, and a write refused mid-pass stops relations there. `--status` counts the thoughts judged before 084 and prints the statement that re-pools exactly those.
+  - Preflight's lineage census fails on a standing relation with no lineage row, naming the relation's own remedy, and leaves relations out of its stale count, as it does proposals. On a brain without 084 the pass counts the verdicts and says relations are not stored.
+  - 042's comments on `thought_facets` name the three kinds.
+  - `supersession_proposals`' table comment says "outdates", not "judged to CONFLICT".
+- **The confidence** (`proposalConfidence`).
+  - The pass asks for `logprobs` (`JUDGE_LOGPROBS`, 10). `valueDistribution` reads the model's probability over the five words at the token where the verdict starts, and the proposal records the probability of `outdates`.
+  - It falls back to the number the model wrote when there is no distribution, when the token has no alternatives, or when the alternatives naming a verdict hold under half the token's mass (`MIN_COVERED`).
+  - An endpoint and model that refuse `logprobs` with a 400 or a 422, then answer without it, are asked without it for the rest of the process. If the retry fails too, that error belongs to the pair.
+- **The record.** The proposal's recipe in `derivations` carries `judged`: the verdict word, `confidence_source` (`token` or `stated`), the stated number, `evidence_found` and the token distributions.
+  - `--dump` lines carry `score`, `score_source`, `evidence` and `evidence_found`.
+  - The run summary counts the five verdicts, and how many proposing verdicts were scored each way.
+  - A verdict outside the five, such as p3's `conflict` from a model keeping to the old words, is reported by name.
+- **`evals/eval-judge.ts`** (new) reads a brain's reviewed proposals, the board's links between two tickets, the writers' `supersedes` pointers and a sample of today's candidates, all in one read-only transaction. It judges them offline and reports:
+  - the verdicts by label;
+  - the spread of the written confidence;
+  - the AUROC of the recorded score, over all labelled pairs and, separately, among the pairs proposed, with their count;
+  - how many supersessions the model directed;
+  - what the pass would record.
+
+**Why.**
+- On the dogfood brain, 120 of the 128 proposals carried exactly 0.80 confidence, and 117 named no side.
+- 126 were rejected, mostly two related tickets the judge called a conflict. Re-judged under p3, the 7B called 119 of those 126 a conflict again.
+- The 0.80 was the model's own answer (the parser's default is 0.5). Among the proposals it was a coin, AUROC 0.53.
+- The pairs that do make a thought out of date are mostly a later state of the same thing, and the 7B reads "conflict" as contradiction only.
+
+**Held.**
+- **`test-thoughts`:**
+  - the five verdicts, and p3's words refused by name;
+  - the evidence: kept on a directed supersession only, cut at a word, found through case, line breaks, curly quotes, dashes and an ellipsis, matched as whole words, absent from the other side, and with no backtracking on a line of dots;
+  - `valueDistribution`'s token edges;
+  - that every verdict but `outdates` proposes nothing;
+  - `proposalConfidence` (the probability of `outdates` alone) and its coverage boundary;
+  - the version.
+- **`test-local-provider`:**
+  - a 400 or 422 refusing `logprobs` is retried and remembered per model;
+  - when the retry fails too, `logprobs` stays on;
+  - a 503 is not retried.
+- **`test-live` [16]:**
+  - The stub judge returns logprobs for two pairs. One records 0.90, its probability of `outdates`, rather than the 0.92 it states or the 0.97 that `outdates` and `duplicate` hold together. The other states 0.9 but carries 0.30, so the floor sets it aside.
+  - A pair without logprobs records its stated 0.70.
+  - Each recipe says which source it used.
+  - An agent's duplicate of the operator's thought is judged, counted, and proposes nothing.
+  - An answer in p3's words fails its thought and names the word.
+- **`eval-judge.ts --self-check`,** in CI beside `eval-write-path`'s: the AUROC arithmetic, and what counts as right per label.
+- **PR 2:**
+  - **test-schema [74]:** the validator's refusals, including each way to edit a relation, and the pure close; one standing per pair; `record_thought_relation`'s added, kept, replaced, closed and none, with its lineage; a target's delete; a newer thought's delete; a re-apply.
+  - **test-upgrade [20af]:** refused without 064; onto a populated 083 no row moves, and a link is still admitted.
+  - **test-live [16]:** the deploy pair's evolves is added. The rota duplicate is added, replaced when judged related, kept when judged related again, flagged once a side's text moves, and closed under the floor. Also `--status`, `--list relations`, a brain without 084, and a follower under a granted role taking up a grant and a revoke. test-live [38]: a sleep's pass writes two relations and no audit row.
+  - **test-preflight:** a relation with no lineage row fails; once closed it is history.
+
+**Measured after** (434 pairs from the dogfood brain, qwen2.5:7b, temperature 0; evals/README.md has the tables):
+
+| | p3 | p4 |
+|---|---|---|
+| rejected proposals proposed again | 119 of 126 | 2 of 126 |
+| linked ticket pairs neither unrelated nor proposed | 46 of 126 (agree) | 106 of 126 (85 related, 21 evolves) |
+| writer-superseded pairs proposed | 1 of 60 | 2 of 60 (20 more read as duplicate) |
+| the 2 accepted proposals proposed | 2 of 2 | 0 of 2 (both read as evolves) |
+| supersessions the model directed | 14 of 128 | 4 of 4 |
+| the 120 candidates, recorded | 1 | 0 |
+
+- What p4 buys is the false proposals gone, with every proposal naming a side. It does not find more supersessions.
+- Over all labelled pairs, its token probability of `outdates` ranks supersessions at AUROC 0.59 (p3's written number: 0.12). With four proposals, how the confidence ranks proposals is unmeasured; SMD-2705 measures it on p4's own queue.
+- On qwen3.8:27b, p4 proposes 20 of the 62 true pairs and 11 false ones (6 rejected, 5 duplicate_of links), at about four times the time per pair. Ollama returns that model's first-token logprobs only, so it records the written number, which orders its 31 proposals worse than chance, AUROC 0.39.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | an agent's restatement of the operator's thought, read as a `duplicate`, was proposed to supersede it | cold read | duplicates no longer proposed (pass 4) |
+| 1 | any 400, a context-length overflow included, turned logprobs off for the process, silently | run-it | remembered only when the retry without them succeeds |
+| 1 | the floor against the token score was held by no test | mutant | a token-scored pair under the floor |
+| 1 | a token with no alternatives read 1.00; a chosen token missing from the top list read 0; low coverage gave a normalised share of nothing | run-it | null, the chosen token added, the coverage floor |
+| 1 | the headline AUROC ranked every labelled pair, which the verdict mostly decides, and was quoted as how the confidence ranks proposals | run-it | the AUROC among proposals, with its count |
+| 2 | `forQuote`'s alternation backtracked exponentially, about 0.3 s a call on a line of dots | run-it | character classes, a time-bounded test |
+| 2 | evidence matched substrings; the tool description and the queue's phrase said "conflict"; record numbers overstated | cold read, run-it | whole words; reworded; restated |
+| 3 | HIGH: a capture-only key's near-copy of another key's thought was proposed to stand; once accepted, the key could repoint it at its own text, the harm SMD-2617/2638 closed | run-it | a one-writer rule (pass 4 replaced it) |
+| 3 | a 422 refusing logprobs stopped the pass; the refusal was remembered per base URL, not per model | cold read | 422 retried; keyed by model |
+| 4 | HIGH: a row taken by another key's re-capture or board-sync's adoption kept its capturer's name, so the one-writer rule let the takeover back; two board-sync tickets' duplicate was directed against Linear's duplicate_of | run-it | three passes' seams in one mechanism: a duplicate is a relation, never a proposal |
+| 4 | the merged tree with main: clean; a stale README count, an eval fixture's phrase, the new self-check not in CI | run-it | fixed |
+| PR 2, 1 | the worker-group grant of INSERT on `thought_facets` let a consolidation role forge a citation (pinning a thought against delete) or a link `node_state` reads | run-it | no new grant; the structure group's INSERT, the pass checking it |
+| PR 2, 1 | a relation could be rewritten, re-opened to a deleted target, moved, inserted already closed past the index, or made from a citation | run-it | written once, only closed |
+| PR 2, 1 | an edge kept across a judge-key change kept the old key and score, and read as edited | run-it | kept only for the same word, key and score; otherwise replaced |
+| PR 2, 1 | the floor on the chosen word's own probability dropped about 3.6% of relations the model was sure of | run-it | the floor on the three words' mass |
+| PR 2, 1 | a replace could deadlock a delete of either thought; a delete mid-write failed the newer thought | run-it, cold read | both thoughts locked first; that pair skipped |
+| PR 2, 1 | a relation under the floor, a kept edge and the edited flag were held by no test; preflight's stale count kept closed relations and its remedy named `--retry-failed` | mutant, cold read | tests; relations out of the count; the remedy corrected |
+| PR 2, 2 | the capture group's UPDATE could turn a link into a citation, forging one that refuses a delete (older than 084) | run-it | no facet changes its kind |
+| PR 2, 2 | a close into the future, or one changing the id, slipped past the one-standing rule; the catch swallowed every check violation, a long judge key dropping all relations silently | run-it | the close bounded to now and the same id; the key checked as a parameter, the catch narrowed to a gone side |
+| PR 2, 3 | relations not stored (no 084, or a role without the grant) were said only in the final summary — a follower's months later, each pair lost to its key; a relation whose side was superseded, or under a former judge key, stood unmarked | cold read | said at the start, in `--status` and on each follower poll; the backfill documented; `--list relations` marks both |
+| PR 2, 4 | the summary read only the last state, hiding a relation stored before a revoke; a grant revoked mid-pass failed the thoughts; the remedy named privileges held, and a column UPDATE read as none; pass 3's role paths had no test; nothing counted the thoughts judged before 084, and the docs named no consolidation groups and called it proposal-only | run-it, mutant, walkthrough | the summary over the whole run; relations stop at the refused pair; only what is lacking, column grants read; a granted-role follower test; `--status` counts those thoughts and prints their re-pool; docs; then the tidy-ups (a derivable flag, the listing's joins for the edited count, a misplaced note) |
+
+**Not taken.**
+- **Small edges.** Byte-fallback tokens or U+FFFD make the tokens not spell the content, so the written number is used; Ollama's 7B sent whole characters on every call measured. The floor compares 029's two-decimal value (0.495 passes 0.50). Token-scored and written-number proposals share one queue, and p3's pending rows stay at their written 0.80.
+- **Writers behind an outdates.** An agent's thought outdating the operator's is held by the prompt alone. The reviewer sees no writers (SMD-2707), and an accepted capture-scoped thought can still be repointed (SMD-2708). Both predate p4. The evidence gates nothing, since a side's writer can plant the quote.
+- **The relation lock order** is held by its reasoning and a race probe (20 of 20 deadlocks without it, none with it), not a suite. **The 27B by default:** SMD-2705 decides. **Preflight on relations:** it connects as the server's role, not the consolidation role, so `--status` says it.
+
+**Follow-ups.**
+- SMD-2726: close and re-queue a relation whose text moved (a `rebuild_derived` arm), and show relations on search, fetch and a read tool.
+- SMD-2705: p4 measured on its own queue, and the default judge model.
+- SMD-2707 / SMD-2708: the review listings name each side's writer, kind, trust and capture scope; an accepted proposal takes the capture-scoped thought it makes current (082).
+- SMD-2741: a consolidation role without the extraction group stops on a raw permission error (older than 084).

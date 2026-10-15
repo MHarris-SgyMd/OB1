@@ -14,8 +14,9 @@
 // the log batch's (OTEL_BLRP_*) and the metric reader's are read here and held
 // to their bounds (batchOptions, metricTimes). The resource is the SDK's own
 // (telemetry.sdk.*), the service's name — OTEL_SERVICE_NAME, else the server's
-// own — its version, and whatever OTEL_RESOURCE_ATTRIBUTES adds or overrides
-// (a tier's name, PR 3).
+// own — its version, an instance id fresh at each start, whatever
+// OTEL_RESOURCE_ATTRIBUTES adds or overrides, and a pipeline tier's
+// deployment.environment.name from OB1_TIER (PR 3a), which nothing overrides.
 //
 // What is not sent — an export that failed, or what a batch's full queue
 // dropped — is said on stderr at most once a minute per signal, by count and
@@ -42,6 +43,7 @@ import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader, type 
 import { BasicTracerProvider, BatchSpanProcessor, SimpleSpanProcessor, type ReadableSpan, type Span, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { FlushResult } from "./shutdown.ts";
 import { FORK_VERSION } from "./version.ts";
+import { PIPELINE_TIERS } from "../db/config.mjs";
 
 /** The three signals, each sent only where it has a URL. */
 export type Signal = "traces" | "metrics" | "logs";
@@ -415,6 +417,12 @@ type InMemory = { exporter: SpanExporter; metrics?: PushMetricExporter; logs?: L
 /** A server's: each signal with a URL over OTLP/HTTP, batched, what is not sent said through `report`. */
 type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Record<Signal, string>> };
 
+/** The resource's tier, where OB1_TIER names a pipeline tier (root.ts reads it trimmed and refuses any other at start); none for a plain brain. */
+function tierAttribute(): Attributes {
+  const tier = process.env.OB1_TIER?.trim();
+  return tier !== undefined && (PIPELINE_TIERS as readonly string[]).includes(tier) ? { "deployment.environment.name": tier } : {};
+}
+
 /**
  * Registers a provider for each signal that has somewhere to go, the context
  * manager and the W3C propagator. A server's (Collector): each signal with a
@@ -430,8 +438,14 @@ type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Rec
  */
 export function setUpTelemetry(serviceName: string, mode: InMemory | Collector): Telemetry {
   const resource = defaultResource()
-    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION }))
-    .merge(detectResources({ detectors: [envDetector] }));
+    // service.instance.id a fresh UUID per start (review pass 3 of PR 2d): the MCP server and the REST core under one
+    // OTEL_SERVICE_NAME, or two tiers, would otherwise be one series whose cumulative readings interleave. No host, no process.
+    .merge(resourceFromAttributes({ "service.name": serviceName, "service.version": FORK_VERSION, "service.instance.id": crypto.randomUUID() }))
+    .merge(detectResources({ detectors: [envDetector] }))
+    // A pipeline tier's brain (OB1_TIER, SMD-1806) says which as deployment.environment.name, a label Prometheus keeps, so a
+    // canary sending to stable's collector is told apart by name, not by an instance id (SMD-1849 PR 3a) — over
+    // OTEL_RESOURCE_ATTRIBUTES, which a canary's env file copies from stable's (review pass 2).
+    .merge(resourceFromAttributes(tierAttribute()));
   const collector = "report" in mode ? mode : undefined;
   // The suite's exporters, read only where the mode is a suite's: a Collector's own options never pass as an exporter (review pass 3).
   const memory = "report" in mode ? undefined : mode;
