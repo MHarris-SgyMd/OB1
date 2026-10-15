@@ -599,6 +599,19 @@ jobs:
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-items.ts --self-check && bun ingest-records.ts --self-check
 
+      # The latency harness's pure parts (SMD-3024): the answer reader (a reply
+      # that never parses, an answer to another request), the ok rule against
+      # the server's own capture replies built by renderCapture (saved without
+      # a vector, tagging that failed or was refused, a re-capture), the probe
+      # match its cleanup deletes by (never a thought that quotes a probe), the
+      # call schedule and the tier guard. Its flags are cli.ts's, held by the
+      # flag scanner's suite. No network, no database, no provider: main's
+      # cleanup, deadlines and signals are not run here.
+      - name: Latency harness rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: db
+        run: bun bench-live.ts --self-check
+
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
