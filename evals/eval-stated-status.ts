@@ -139,32 +139,27 @@
  *   that is not its current one (3a37f18b, 1886b600). evals/README.md has the
  *   tables.
  *
- * THE RECORD (the first review pass): every sample is drawn from the live
- * brain, and an item's identity carries the ticket's status now, so a ticket
- * that moves, or a new labelled thought hashing into a sample, used to turn a
- * re-run's verdict into "none" — drift read as a failed rule. The gold now
- * records, per graded item, the samples that drew it and the label sets that
- * held it, and per candidate its counts and whether it labelled the measured
- * case. The verdict is computed from that record (recordedDecision), the
- * self-check holds its numbers with no database, and a live run prints how far
- * the brain has moved from it. (The second review pass made it one snapshot:
- * the gold's and a live run's are built and compared the same way, whole —
- * samples and pooled sets by item, label counts, fresh counts, the measured
- * case — so "matches the record" means equal; readGold refuses a record that
- * breaks its invariants or names another candidate order.)
- *
- * THE RECORD IS FROZEN (the third review pass). The three registrations are
- * closed: the record is the evidence each was decided on, as of round 3, and
- * nothing rewrites it. A second pass's `--record` replaced every membership
- * with a live run's — re-deciding closed registrations (a round-4 label could
- * enter the first's samples or the third's held-out one), and failing the
- * self-check's pins on any adopted re-record — so it is gone. A live run's
+ * THE RECORD. The three registrations are closed, and the gold records the
+ * evidence each was decided on, as of round 3: per graded item, the samples
+ * that drew it and the label sets that held it; per candidate, its labels, its
+ * labels on unsuperseded thoughts, and whether it labels the measured case.
+ * The verdict is computed from that record (recordedDecision), the self-check
+ * holds its numbers with no database — each registration's at the round it
+ * was decided: the first and second at round 2 (moved-session pooled 61 of 68,
+ * moved-session-lag 47 of 51), the third at round 3 — and readGold refuses a
+ * record that breaks its invariants or names another candidate order. Nothing
+ * rewrites it; a new registration brings its own candidates, rounds and
+ * record. A live run builds the same snapshot and compares it whole, and its
  * drift is information: what moved in the evidence (samples, graded pools, the
  * measured case) apart from what moved only in counts (labels, fresh, which
- * the estimates read and no condition does). A new registration brings its own
- * candidates, rounds and record. Each registration's own numbers are pinned
- * where it was decided: the first and second at round 2 (moved-session pooled
- * 61 of 68, moved-session-lag 47 of 51), the third at round 3.
+ * the estimates read and no condition does). How it got here, in three review
+ * passes: samples redrawn live turned a moved ticket into a "none" verdict
+ * (pass 1 recorded them); the drift check compared less than the record held
+ * (pass 2 made one snapshot, compared whole); and a `--record` that rewrote
+ * the record re-decided closed registrations and failed the pins (pass 3
+ * removed it). One held-out item (1f3cea4f, SMD-2294, moved) shares its thought
+ * and ticket with a round-1 stated item; it was not among the 53 of 54 that
+ * chose the rule, so the held-out evidence is still unseen by the choice.
  *
  * KNOWN HAZARDS for PR 2 (the first review pass; inside the measured
  * precision, not fixed here): a list step takes a count with the key's digit
@@ -376,7 +371,7 @@ export const FIRST_ROUNDS = 2;
  * held-out sample, and on (b) again over EVERY graded label the candidate
  * produces (pooled) — the check the first registration lacked.
  */
-export function judgeSecond(t: Tally, pooled: { graded: number; wrong: number }): Verdict {
+export function judgeHeldOut(t: Tally, pooled: { graded: number; wrong: number }): Verdict {
   const v = judge(t);
   const why = [...v.why];
   if (pooled.graded === 0 || (pooled.graded - pooled.wrong) / pooled.graded < PRECISION_MIN) why.push(`(b) pooled precision ${pooled.graded ? ((pooled.graded - pooled.wrong) / pooled.graded).toFixed(3) : "n/a"} < ${PRECISION_MIN}`);
@@ -402,7 +397,7 @@ export type Decision = {
 /** The three registrations' verdicts from each candidate's tally and pooled grades; the chosen one is the third's. */
 export function decide(tallyOf: (c: Candidate) => Tally, pooledOf: (c: Candidate) => Pooled): Decision {
   const first = CANDIDATES.map((c) => { const t = tallyOf(c); return { t, v: judge(t) }; });
-  const held = (cs: readonly Candidate[]) => cs.map((c) => { const t = tallyOf(c); return { t, v: judgeSecond(t, pooledOf(c)) }; });
+  const held = (cs: readonly Candidate[]) => cs.map((c) => { const t = tallyOf(c); return { t, v: judgeHeldOut(t, pooledOf(c)) }; });
   const third = held(THIRD);
   return {
     first, firstPick: pick(first.map((x) => x.v)), second: held(SECOND), third,
@@ -568,7 +563,7 @@ async function measure(url: string, dumpPath: string | undefined) {
       const ls = labelsOf(c, rd);
       if (r.lifecycle) { if (ls.length) lifecycleWouldLabel.set(c, lifecycleWouldLabel.get(c)! + 1); continue; }
       for (const l of ls) per.get(c)!.push({ id: r.id, label: l, row: r });
-      if (c.startsWith("moved-")) {
+      if (c.startsWith("moved-") && c !== "moved-session-stated") {
         const written = writtenAt(c, rd);
         for (const k of keysOf(mentionsOf(r.content), ["key", "list"])) if (heads.has(k) && !statusAt(rd.timeline(k), written)) noHistory.set(c, noHistory.get(c)! + 1);
       }
@@ -776,8 +771,8 @@ function selfCheck() {
   const excl = new Set(s1.slice(0, 5));
   const h1 = sampleOf(many, SAMPLE, HELD_OUT_SALT, excl);
   ok(h1.length === SAMPLE && h1.every((k) => !excl.has(k)) && h1.join() !== s1.join(), "the held-out sample: another hash order, none of the excluded items");
-  ok(!judgeSecond(t("moved-session-lag", {}), { graded: 0, wrong: 0 }).ok, "judgeSecond: nothing pooled is no evidence");
-  ok(judgeSecond(t("moved-session-lag", {}), { graded: 60, wrong: 3 }).ok && !judgeSecond(t("moved-session-lag", {}), { graded: 60, wrong: 4 }).ok && !judgeSecond(t("moved-session-lag", { wrong: 2 }), { graded: 60, wrong: 2 }).ok, "judgeSecond: pooled 57/60 qualifies, 56/60 does not; the held-out (b) still applies");
+  ok(!judgeHeldOut(t("moved-session-lag", {}), { graded: 0, wrong: 0 }).ok, "judgeHeldOut: nothing pooled is no evidence");
+  ok(judgeHeldOut(t("moved-session-lag", {}), { graded: 60, wrong: 3 }).ok && !judgeHeldOut(t("moved-session-lag", {}), { graded: 60, wrong: 4 }).ok && !judgeHeldOut(t("moved-session-lag", { wrong: 2 }), { graded: 60, wrong: 2 }).ok, "judgeHeldOut: pooled 57/60 qualifies, 56/60 does not; the held-out (b) still applies");
   ok(kappa([["useful", "useful"], ["noise", "noise"]]).kappa === 1 && kappa([]).n === 0, "kappa: perfect agreement is 1; no items is none");
 
   // The gold.
