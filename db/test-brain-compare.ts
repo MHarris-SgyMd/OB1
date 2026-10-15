@@ -890,7 +890,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   const logged = (...qs: [string, "keyword" | "hybrid" | "current" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
 
   const same = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1), uid(2)] } }, { hits: { q: [uid(1), uid(2)] } });
-  ok(same.code === 0 && /^replayed 1 of 1 logged searches in the log of localhost:\d+ \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
+  ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of localhost:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
     `--diff: the canary answering as stable does passes, with the window and the counts (${same.code}: ${same.out.split("\n").slice(-2).join(" | ")})`);
   ok(!same.out.includes(KEY), "--diff prints no key");
 
@@ -906,18 +906,42 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(empty.code === 3 && /logged no searches in the window\. A brain logs them only with OB1_QUERY_LOG=on\.$/m.test(empty.out),
     `--diff over an empty log compared nothing: exit 3, not the pass (${empty.code}: ${empty.out.split("\n").slice(-1)})`);
   const emptySince = await gate({ log: logged() }, {}, { since: "2026-10-01T00:00:00Z" });
-  ok(emptySince.code === 3 && emptySince.out.includes("replayed 0 of 0 logged searches since 2026-10-01T00:00:00Z (--since) (0 skipped)") && emptySince.out.includes("and an earlier --since widens the window."),
+  ok(emptySince.code === 3 && emptySince.out.includes("replayed 0 of 0 distinct logged searches since 2026-10-01T00:00:00Z (--since) (0 skipped)") && emptySince.out.includes("and an earlier --since widens the window."),
     `--diff over an empty --since window says so and offers an earlier one (${emptySince.code})`);
   const emptyReplay = await gate({ log: logged() }, {}, { gate: false });
   ok(emptyReplay.code === 0 && emptyReplay.out.includes("nothing to compare"), `--replay over an empty log says nothing was compared and exits 0 (${emptyReplay.code})`);
 
-  const allSkipped = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] }, refuse: ["q"] });
-  ok(allSkipped.code === 3 && allSkipped.out.includes("replayed 0 of 1 logged searches") && allSkipped.out.includes("nothing to compare: every search in the window was skipped."),
-    `--diff whose every search one brain refused compared nothing: exit 3 (${allSkipped.code})`);
-  const someSkipped = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
-  ok(someSkipped.code === 0 && someSkipped.out.includes("replayed 1 of 2 logged searches") && someSkipped.out.includes("on the 1 replayed (1 skipped, not compared)."),
-    `--diff claims only the searches it replayed (${someSkipped.out.split("\n").slice(-1)})`);
+  // A search both brains refuse is not compared; one only the canary fails,
+  // stable having answered it, fails the gate (review pass 1: a canary whose
+  // search broke passed as a skip).
+  const bothRefuse = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] }, refuse: ["q"] });
+  ok(bothRefuse.code === 3 && bothRefuse.out.includes("replayed 0 of 1 distinct logged searches") && bothRefuse.out.includes("nothing to compare: both brains failed every search in the window."),
+    `--diff whose every search both brains refused compared nothing: exit 3 (${bothRefuse.code})`);
+  const someSkipped = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
+  ok(someSkipped.code === 0 && someSkipped.out.includes("replayed 1 of 2 distinct logged searches") && someSkipped.out.includes("on the 1 replayed (1 skipped, not compared)."),
+    `--diff claims only the searches it compared (${someSkipped.out.split("\n").slice(-1)})`);
+  const canaryFails = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
+  ok(canaryFails.code === 1 && /failed: localhost:\d+ failed 1 that localhost:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
+    `--diff fails when the canary fails a search stable answered, the rest unmoved (${canaryFails.code}: ${canaryFails.out.split("\n").slice(-1)})`);
+  const canaryFailsReplay = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] }, refuse: ["q"] }, { gate: false });
+  ok(canaryFailsReplay.code === 1, `--replay exits 1 on it too: a failed step, not a report (${canaryFailsReplay.code})`);
+  const stableFails = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] } });
+  const stableLine = stableFails.out.split("\n").find((l) => l.startsWith("failed:")) ?? "";
+  ok(stableFails.code === 1 && /^failed: localhost:(\d+) failed 1 that localhost:\d+ answered/.test(stableLine) && stableFails.out.includes("skipped — localhost:"),
+    `--diff fails, naming stable, when stable fails a search it logged (${stableFails.code}: ${stableLine})`);
 
+  // Searches logged with no arm (before migration 045) are counted, not lost.
+  const noArmOnly = await gate({ log: logged(["q", null], ["r", null]) }, {});
+  ok(noArmOnly.code === 3 && noArmOnly.out.includes("(0 skipped; 2 more logged with no arm, before migration 045, not replayed)") && noArmOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on."),
+    `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
+  const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
+  ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
+
+  // A page whose searches are not a list is a log not read, not an empty one.
+  const badPage = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, log: { searches: "nope" as unknown as [] } });
+  let badThrew = "";
+  try { await fetchLoggedSearches(badPage.ep, null); } catch (e) { badThrew = (e as Error).message; } finally { badPage.server.stop(true); }
+  ok(/returned no list of searches/.test(badThrew), `a page whose searches are not a list is refused, not read as empty (${badThrew})`);
   const unread = await gate({}, {});
   ok(unread.code === 1 && unread.out.includes("nothing replayed: the log of localhost:") && unread.out.includes("could not be read."), `--diff whose stable has no list_logged_searches is a failed step, exit 1 (${unread.code})`);
   const unreadReplay = await gate({}, {}, { gate: false });
@@ -929,6 +953,17 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(json.code === 1 && parsed.gate === "moved" && !json.out.includes(KEY), `--diff --json carries the verdict and no key (${json.code}, ${parsed.gate})`);
 
   ok(replayVerdict({ rows: [], arms: [], queries: 0, source: "s", sourceError: "x" }) === "unread" && replayVerdict({ rows: [], arms: [], queries: 0, source: "s" }) === "empty", "replayVerdict: a log not read is unread, an empty one empty");
+  // --compare counts a search one brain failed and the other answered as a delta too.
+  {
+    const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+    const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] }, refuse: ["q"] });
+    const logFn = console.log;
+    console.log = () => {};
+    let code = -1;
+    try { code = await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: true, hybrid: false, queries: ["q"], json: false }); }
+    finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
+    ok(code === 1, `--compare exits 1 when one brain fails a search the other answers (${code})`);
+  }
 
   // The CLI, end to end, against the fakes in this process (an async spawn, so
   // they can answer). A child gets the key from OB1_COMPARE_KEY, or none.
