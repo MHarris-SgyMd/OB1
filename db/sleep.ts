@@ -49,7 +49,7 @@
  * safe for what arrives from then on, as a candidate was captured on an
  * earlier UTC date. It joins as well once extraction holds nothing but
  * thoughts that SLEEP_STALLED_JOIN (3) or more long hard stops in a row took
- * with no window saved between, and none saved since (migration 089's
+ * with no window saved between, and none saved since (migration 092's
  * `stalled` and `gained`, SMD-2694; long: the thought held a minute,
  * provider pauses aside, so short sleeps count none): a single window longer than
  * every long sleep — or a stop
@@ -64,7 +64,7 @@
  * stopped, if in hand with a stalled thought — until consolidation's pool
  * drains, then resumes, so on a one-slot model the judge is not left waiting
  * behind the window. The thought is tried in every sleep once consolidation's
- * pool drains, and finished by the first sleep long enough for both. A brain before 089, or a role that
+ * pool drains, and finished by the first sleep long enough for both. A brain before 092, or a role that
  * cannot read it, joins once extraction is drained alone, and the start says
  * so; granted later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
@@ -84,7 +84,7 @@
  * the claims they held moved to the back of the queue, since a release keeps
  * a claim's place: a thought longer than the sleeps would otherwise be every
  * sleep's first, and the pool behind it would never move. That thought's
- * windows answered so far are kept (extract-entities.ts over migration 089,
+ * windows answered so far are kept (extract-entities.ts over migration 092,
  * SMD-2694), so it advances by the windows each sleep finishes and is done
  * once its last is; one whose single window outlasts every sleep is joined
  * past (Asleep), and the row names both (Heartbeat). Waking costs up to
@@ -240,7 +240,7 @@ export interface SleepOptions {
  * A pass's pool: its claim rows by status, and the thoughts a pass would add
  * to it; for extraction, `stalled` — of its pending and in-flight rows, those
  * SLEEP_STALLED_JOIN or more long hard stops in a row have taken with no
- * window saved between, and none since (migration 089, SMD-2694), 0 where the scheduler cannot read them.
+ * window saved between, and none since (migration 092, SMD-2694), 0 where the scheduler cannot read them.
  */
 type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
@@ -254,7 +254,7 @@ const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claimed > 0 && p.pending + p.claimed === p.stalled;
 
 /**
- * 089's rows that speak for the thought as it stands and the windowing in
+ * 092's rows that speak for the thought as it stands and the windowing in
  * force: its fingerprint now (an edit makes a row of other text, which the
  * next claim replaces) and the worker's windowing, as extract-entities.ts
  * reads them before reusing a window.
@@ -278,7 +278,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
            count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n
       FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number }[];
-  // Read only where the start found 089's table readable (stalledUnder, the
+  // Read only where the start found 092's table readable (stalledUnder, the
   // windowing). One gone or refused since reads none stalled, said by the
   // caller, so the scheduler joins once extraction drains rather than ends
   // (review pass 2: the read ran inside reading(), which rethrows it).
@@ -300,7 +300,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
 
 /**
  * The thoughts extraction holds back across the wakes: pending or in flight,
- * a hard stop counted on them (089), of the text and windowing in force —
+ * a hard stop counted on them (092), of the text and windowing in force —
  * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped.
  */
 async function heldBack(sql: SQL, job: string, sig: string): Promise<SleepHeld> {
@@ -536,10 +536,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       return 2;
     }
   }
-  // Whether this role reads 089's kept windows (SMD-2694): consolidation joins
+  // Whether this role reads 092's kept windows (SMD-2694): consolidation joins
   // past a thought extraction holds only when it can tell one, and the row
   // names the held thoughts only then. Read once, as the query log's state is;
-  // a brain before 089, or a role without the extraction group's grant on it,
+  // a brain before 092, or a role without the extraction group's grant on it,
   // joins once extraction is drained, as before, and is told so once.
   const progressState = await atStart(async () => (await sql`
     SELECT CASE WHEN to_regclass('public.extraction_progress') IS NULL THEN 'missing'
@@ -547,7 +547,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   if (progressState === null) { err(STOPPED_EARLY); return 130; }
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
-  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 089 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
+  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 092 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -855,7 +855,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
 
   /**
    * The thoughts a stop has taken, to the back of the queue as each sleep
-   * begins (089's stops, at the text and windowing in force; review pass 5):
+   * begins (092's stops, at the text and windowing in force; review pass 5):
    * a wake's tail move dates them at the wake, so every capture of the awake
    * period after it queued behind them — a stalled thought then held the one
    * worker each sleep until the next wake, those captures unextracted all day
@@ -1004,7 +1004,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         });
         await stopPasses(true);
         if (held) await toTail(held);
-        // The stops just counted (089): the row names what the wakes hold back.
+        // The stops just counted (092): the row names what the wakes hold back.
         await sayHeld();
         return "woken";
       }

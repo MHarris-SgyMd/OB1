@@ -180,7 +180,7 @@ export interface WorkerHeartbeat {
   refused?: SleepRefusal;
   /**
    * The thoughts extraction holds back across the sleep scheduler's wakes —
-   * pending or in flight with a hard stop counted on them (migration 089,
+   * pending or in flight with a hard stop counted on them (migration 092,
    * SMD-2694): how many, and up to three, the most stalled first, each with
    * its stops, the latest of them in a row that gained no window, and its
    * windows kept of how many. Absent while none is, and for the other workers.

@@ -2615,7 +2615,7 @@ else {
   assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046, 055 then 060 re-applied put the column and the trigger back (060's body over 055's over 046's — SMD-2115, SMD-2116)");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
-  // 089's kept windows hang off the claims (SMD-2694): a brain before 015 has neither.
+  // 092's kept windows hang off the claims (SMD-2694): a brain before 015 has neither.
   await claims.unsafe("DROP TABLE extraction_progress");
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);
