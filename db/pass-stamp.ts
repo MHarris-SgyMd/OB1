@@ -20,7 +20,8 @@
  * malformed answers (SMD-2266's alarm, which a follower otherwise says only on
  * stderr), and for the sleep scheduler `slept`, its current or last sleep's
  * `from` and `to` (SleepMark), and `reads`, whether its role reads the query
- * log (LogReads, SMD-2678). Each stamp writes the whole value: a restarted follower's first
+ * log (LogReads, SMD-2678), and `held`, the thoughts its wakes hold back
+ * (SleepHeld, SMD-2694). Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -44,6 +45,7 @@
 
 import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
+import type { SleepHeld } from "../server-portable/brain-info.ts";
 
 /** The workers that stamp, as the key and preflight's row name them. */
 export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep"] as const;
@@ -130,6 +132,13 @@ export interface PassStamper {
    * its pass begins.
    */
   startWait?(on: boolean): Promise<void>;
+  /**
+   * The thoughts extraction holds back across the scheduler's wakes (`held`
+   * in the value, left out while none is), carried by the row's next write —
+   * kept on its end, as a stopped scheduler's held thought is still held:
+   * preflight's `sleep` row names them (SMD-2694). Only the scheduler sets it.
+   */
+  held?(held: SleepHeld | null): void;
 }
 
 /**
@@ -169,12 +178,13 @@ export function passStamper(opts: {
   let reads: LogReads | null = null;
   let waiting: readonly string[] = [];
   let refused: string | null = null;
+  let held: SleepHeld | null = null;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(refused ? { refused } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -244,6 +254,9 @@ export function passStamper(opts: {
     },
     refused(kind) {
       refused = kind;
+    },
+    held(h) {
+      held = h && h.total > 0 ? h : null;
     },
   };
 }
