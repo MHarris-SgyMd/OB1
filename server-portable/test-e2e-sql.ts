@@ -2053,6 +2053,23 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
     const marks = await sql`SELECT thought_id::text AS id, actor_context->>'scope' AS scope FROM thought_audit WHERE action = 'capture' AND thought_id = ANY(${sql.array([merged.s, ws ?? merged.s], "TEXT")}::uuid[])`;
     const scopeOf = (id: string | undefined) => (marks as { id: string; scope: string | null }[]).find((m) => m.id === id)?.scope;
     assert(scopeOf(merged.s) === "capture" && scopeOf(ws) === null, `…the capture key's capture row says its scope, the write key's says none (${JSON.stringify(marks)})`);
+    // SMD-2708 (migration 091): a reviewer's accept making the hook's thought
+    // current takes it. SMD-1873's chain: the hook's newer copy is accepted
+    // over the writer's note; the hook's pointer at the copy then lands
+    // without it, its reply as for any target it cannot point at, and the
+    // copy — not the hook's unreviewed text — reads current.
+    const older = idIn(await call("capture_thought", { content: "[13e] the writer's rota: weekly" }));
+    const copy = idIn(textOf(await K({ content: "[13e] the hook's rota: daily, replacing the weekly one" })));
+    const [{ pid }] = await sql`SELECT record_supersession_proposal(${older}::uuid, ${copy}::uuid, 'newer_supersedes_older', 0.9, '[13e]', 0.9, 'consolidate:stub@e2e') AS pid`;
+    const [{ r: accepted }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${{ name: "consolidate", via: "consolidate", session: "e2e-13e" }}::jsonb, false) AS r`;
+    const [{ t: copyTaken }] = await sql`SELECT ob1_thought_taken(${copy}::uuid) AS t`;
+    assert((accepted as { ok: boolean }).ok === true && (await pointerOf(copy ?? "")) === older && copyTaken === true, `[13e] a reviewer's accept making the hook's copy current takes it (${JSON.stringify(accepted)})`);
+    const passedOn = textOf(await K({ content: "[13e] the hook's unreviewed rota: hourly", supersedes: copy }));
+    const passedOnId = idIn(passedOn);
+    const plain = textOf(await K({ content: "[13e] the hook's rota note naming nothing" }));
+    assert(passedOnId !== undefined && (await pointerOf(passedOnId)) === null && (await projected(copy ?? "")) === 0
+        && passedOn.replace(/id [0-9a-f-]{36}/, "id X").replace(/ — .*$/m, "") === plain.replace(/id [0-9a-f-]{36}/, "id X").replace(/ — .*$/m, ""),
+      `…and the hook's capture naming the copy as supersedes lands without the pointer, its reply as for a capture naming nothing, the copy still current (${passedOn.split("\n")[0].slice(0, 80)})`);
   }
 
   // [13f] SMD-2664's repro: the capture key, classified agent, labels a text

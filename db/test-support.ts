@@ -323,6 +323,9 @@ const FUNCTIONS = [
   "ob1_reset_capture_stamp(uuid, jsonb)",
   // 090 (SMD-2898): the weighing that says what a re-capture did.
   "ob1_weigh_recapture(uuid, text, jsonb, text)",
+  // 091 (SMD-2708): 082's log read by name, and the chain.
+  "ob1_capture_taken_by_log(uuid)",
+  "ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)",
 ];
 
 /**

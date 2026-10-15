@@ -226,8 +226,11 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // Nor is one another key or board-sync has since taken (SMD-2638): a
       // write key's capture of the same text lands on the row, and board-sync
       // adopts it in place, so capturing a text first does not keep it this
-      // key's. Migration 082's one rule says what takes it (takenFromCapturer),
-      // and its lapse clears a pointer this key wrote before the taking.
+      // key's; nor does one a reviewer's accept or another key's pointer put
+      // over a thought this key did not capture, through any number of
+      // links (091, SMD-2708). takenFromCapturer reads 082's log and 091's
+      // chain, and the lapse clears a pointer this key wrote before the
+      // taking.
       const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;
       if (!own) pointer = undefined;
     }
