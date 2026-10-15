@@ -3445,8 +3445,8 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     assert(up.mended === 3 && !after.w?.bare && !after.h?.bare && !after.l?.bare && after.w?.m === EMBEDDING_MODEL, `the provider back: all three mended, the model beside the vector (${JSON.stringify(up)}, ${JSON.stringify(after.w)})`);
     assert(after.w?.name === before.w?.name && after.w?.kind === before.w?.kind && after.w?.trust === before.w?.trust && after.h?.name === "session-hook" && after.h?.kind === before.h?.kind && after.h?.trust === before.h?.trust,
       `who wrote each text stands: the mender's write keeps the row's stamp (${JSON.stringify({ before: before.h, after: after.h })})`);
-    const [ev] = await sql`SELECT count(*)::int AS n, min(action) AS action, min(origin) AS origin FROM thought_audit WHERE actor_name = 'vector-mender' AND thought_id = ${wid}::uuid`;
-    assert(ev.n === 1 && ev.action === "update" && ev.origin === "open-brain", `one update event per mend, the mender's, through the server's door (${JSON.stringify(ev)})`);
+    const [ev] = await sql`SELECT count(*)::int AS n, min(action) AS action, min(origin) AS origin, min(actor_context->>'background') AS background FROM thought_audit WHERE actor_name = 'vector-mender' AND thought_id = ${wid}::uuid`;
+    assert(ev.n === 1 && ev.action === "update" && ev.origin === "open-brain" && ev.background === "vector-mender", `one update event per mend, the mender's, through the server's door, marked background for db/sleep.ts (${JSON.stringify(ev)})`);
     assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'vector-mender'`)[0].n - auditBefore === 3, "…and none for the down tick");
     const [lineage] = await sql`SELECT count(*)::int AS n, min(recipe->>'model') AS model, min(recipe->'params'->>'tokens') AS tokens FROM derivations WHERE artifact_kind = 'chunks' AND (artifact_id = ${lid}::uuid OR ${lid}::uuid = ANY(input_ids))`;
     assert((after.l?.windows ?? 0) > 1 && lineage.n >= 1 && lineage.model === EMBEDDING_MODEL && Number(lineage.tokens) > 0, `the long thought: its windows written, and their recipe recorded — the model and the chunker's sizing (${after.l?.windows} windows, ${JSON.stringify(lineage)})`);
@@ -3489,6 +3489,8 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     gated.OB1_EGRESS_ALLOW = `actor:${writer}`;
     const allowed = await sweep(gatedCore);
     assert(allowed.mended === 1 && (await rowOf(gid))?.bare === false, `an allow term naming the writer: mended (${JSON.stringify(allowed)}, writer ${writer})`);
+    const [sent] = await sql`SELECT actor_context->'egress' AS egress FROM thought_audit WHERE thought_id = ${gid}::uuid AND actor_name = 'vector-mender'`;
+    assert(sent?.egress?.policy === "deny" && sent.egress.embeddings?.allowed === true && sent.egress.embeddings?.rule === "allow-term", `the mend's audit row carries the egress decision that let the text go, as a capture's does (${JSON.stringify(sent?.egress)})`);
 
     // A row an import wrote bare (db/ingest-records.ts's shape: its own door,
     // a label for an actor) is asked as db/reembed.ts asks — its metadata, no
@@ -3512,12 +3514,13 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     const walk = await sweep(gatedCore);
     assert(waitingNow >= 11 && walk.refused === waitingNow && walk.mended === 0, `a sweep over ${waitingNow} refused rows, more than a page: each refused once, and the sweep ends (${JSON.stringify(walk)})`);
 
-    // The leader lock: held by another, a tick reads and writes nothing; let go, the next acts.
-    const held = await store.mendLock();
+    // The leader lock: held by another session (another server), a tick reads
+    // and writes nothing; let go, the next acts.
+    const [{ got }] = await sql`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
     const skipped = await core.mendOnce(newMendState());
-    await held!();
+    const [{ released }] = await sql`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender')) AS released`;
     const acted = await sweep();
-    assert(held !== null && skipped.skipped && skipped.mended === 0 && acted.mended === waitingNow, `the lock held elsewhere: skipped; released, the next sweep mends (${JSON.stringify({ skipped: skipped.skipped, acted })})`);
+    assert(got === true && released === true && skipped.skipped && skipped.mended === 0 && acted.mended === waitingNow, `the lock held by another session: skipped; released, the next sweep mends (${JSON.stringify({ got, skipped: skipped.skipped, acted })})`);
   } finally {
     stubDown = null;
     await store.close();

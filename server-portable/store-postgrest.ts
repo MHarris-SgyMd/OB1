@@ -230,9 +230,10 @@ export class PostgrestStore implements ThoughtStore {
     return ((data ?? []) as Record<string, unknown>[]).map((r) => normaliseVectorlessRow({ ...r, updated_at: r.updated_at ?? r.created_at, origin: null }));
   }
 
-  async mendLock(): Promise<(() => Promise<void>) | null> {
-    // No session to hold a lock in; this store serves Workers, which starts no mender.
-    return async () => {};
+  async mendLock(): Promise<(() => Promise<boolean>) | null> {
+    // No session to hold a lock in. This store serves Workers, which starts
+    // no mender, and on Bun the servers start none over it (mend.ts).
+    return async () => true;
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {

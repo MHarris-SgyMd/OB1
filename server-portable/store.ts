@@ -1083,6 +1083,13 @@ export type Actor = {
    * when the vector landed or the call was not made.
    */
   vectorFailed?: string;
+  /**
+   * A write a server's background work made, not a caller's: the vector
+   * mender's (SMD-2889). Lands in thought_audit.actor_context as
+   * `background`, which db/sleep.ts reads past as it reads past an ingested
+   * write. Only the server sets it; no caller's write carries it.
+   */
+  background?: string;
 };
 
 /**
@@ -1106,6 +1113,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
     ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
     ...(actor.vectorFailed !== undefined ? { vector_failed: actor.vectorFailed } : {}),
+    ...(actor.background !== undefined ? { background: actor.background } : {}),
   };
 }
 
@@ -1362,10 +1370,12 @@ export interface ThoughtStore {
    * a tick acts only while it holds this — a session advisory lock on a
    * connection of its own, so one mender acts at a time across processes and
    * replicas, and a process that dies lets it go with its connection. The
-   * release, or null when another holds it. The PostgREST store has no
-   * session to hold one: it answers a release that does nothing.
+   * release — true when it let the lock go, false when the session that
+   * took it was not the one asked (a pooler between) — or null when another
+   * holds it. The PostgREST store has no session to hold one: it answers a
+   * release that does nothing.
    */
-  mendLock(): Promise<(() => Promise<void>) | null>;
+  mendLock(): Promise<(() => Promise<boolean>) | null>;
 
   /**
    * A window of the brain's logged searches (`query_log`), most recent first, for a

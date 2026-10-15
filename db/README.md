@@ -1834,9 +1834,10 @@ the gate allows, 8 rows a tick (`server-portable/README.md`, "The vector
 mender", SMD-2889), asking the gate what `reembed.ts` would ask of an import's
 row. `reembed.ts` is for a model change, a whole brain at once — an import of
 thousands is hours at 8 a minute — or a brain whose mender is off
-(`OB1_VECTOR_MEND_INTERVAL=off`). The two run side by side safely: each write
-carries the stamp it read, so a row both reach is written once, though it may
-be embedded twice.
+(`OB1_VECTOR_MEND_INTERVAL=off`). The two run side by side safely — each write
+carries the stamp it read, so neither writes over a newer text — but a row both
+reach may be embedded twice and written twice: `reembed.ts` re-reads a row
+another writer moved and embeds it again, vector or not.
 
 ### `reembed.ts`
 

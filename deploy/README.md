@@ -2597,10 +2597,10 @@ lines naming the same one are refused.
        run's. After a model switch it is the whole brain, and imports then
        run to their deadline for as long as that takes.
      - The servers' vector mender (SMD-2889) embeds the same rows too, 8 a
-       tick, from the moment they land. The two never write a row twice —
-       each write carries the stamp it read — but a row both reach is
-       embedded twice; `OB1_VECTOR_MEND_INTERVAL=off` leaves imports to the
-       runner alone.
+       tick, from the moment they land. Neither writes over the other's
+       newer text — each write carries the stamp it read — but a row both
+       reach may be embedded and written twice; `OB1_VECTOR_MEND_INTERVAL=off`
+       leaves imports to the runner alone.
 - **Success** means every row of the pipeline's source has a vector.
   reembed's own exit code (1 for any failed row in its job, or another
   pass's leases) does not decide it.

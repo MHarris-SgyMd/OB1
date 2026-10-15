@@ -131,6 +131,8 @@ export class SqlStore implements ThoughtStore {
   /** The store's own database URL and OB1_PLUGIN_DB_PASSWORD: the plugin login URL is built from them at a plugin's first transaction. */
   private readonly url: string;
   private readonly pluginPassword: string | undefined;
+  /** The vector mender's leader lock's own connection (SMD-2889): opened at the first tick, never one of the pool's. */
+  private lockSql: SQL | null = null;
 
   /** `pluginPassword`: OB1_PLUGIN_DB_PASSWORD, the plugin login role's (SMD-2310). */
   constructor(url: string, opts: { max?: number; pluginPassword?: string } = {}) {
@@ -369,26 +371,22 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseVectorlessRow(r));
   }
 
-  async mendLock(): Promise<(() => Promise<void>) | null> {
-    // Session-level, so it outlives the statement and is held for the tick;
-    // on a reserved connection, so it is the same session that lets it go.
-    const conn = await this.sql.reserve();
-    try {
-      const [r] = await conn`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
-      if (r.got !== true) {
-        conn.release();
-        return null;
-      }
-    } catch (e) {
-      conn.release();
-      throw e;
-    }
+  async mendLock(): Promise<(() => Promise<boolean>) | null> {
+    // A session-level lock, held for the tick, on a client of one connection
+    // of its own: never a pool connection, so live requests do not wait on a
+    // tick's provider calls, and a pool of one does not wedge — the tick's
+    // own reads and writes went through the pool while its lock held the
+    // pool's only connection (review pass 2: OB1_PG_POOL=1 hung the server).
+    this.lockSql ??= new SQL({ url: this.url, max: 1 });
+    const lock = this.lockSql;
+    const [r] = await lock`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
+    if (r.got !== true) return null;
+    // False when the session that took it is not the one that lets it go — a
+    // pooler in statement or transaction mode between here and Postgres —
+    // and the lock is then left on a backend no tick will reach; the mender says so.
     return async () => {
-      try {
-        await conn`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender'))`;
-      } finally {
-        conn.release();
-      }
+      const [u] = await lock`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender')) AS released`;
+      return u.released === true;
     };
   }
 
@@ -1074,6 +1072,6 @@ export class SqlStore implements ThoughtStore {
   }
 
   async close(): Promise<void> {
-    await Promise.all([this.sql.close(), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
+    await Promise.all([this.sql.close(), ...(this.lockSql ? [this.lockSql.close()] : []), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
   }
 }

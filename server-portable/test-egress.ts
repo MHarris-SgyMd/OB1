@@ -474,6 +474,9 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STORE: "sql", DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
     MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "1",
+    // A pool of one: the leader lock holds a connection of its own, so the tick's reads and writes
+    // and every request still have the pool's (review pass 2: the lock took the only one and the server hung).
+    OB1_PG_POOL: "1",
   });
   const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], { cwd: import.meta.dir, env: childEnv(serverPort), stdout: "pipe", stderr: "pipe" });
   // The REST core beside it, as the stack runs it: a mender of its own, the two taking turns under the leader lock.
@@ -503,8 +506,8 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     // [6]'s refused rows wait too: this server declares its provider local, so the gate refuses none of them.
     const waiting = (await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`)[0].n;
     assert(waiting >= 1 && (await health()) === waiting, `keyed /health counts the rows that wait, this one among them (${waiting})`);
-    // Two of the mender's ticks with the provider still down: nothing changes.
-    await Bun.sleep(7_000);
+    // Several of the menders' ticks with the provider still down: nothing changes, and the outage is said once.
+    await Bun.sleep(11_000);
     const [still] = await sql`SELECT embedding IS NULL AS bare FROM thoughts WHERE id = ${id!}::uuid`;
     assert(still.bare === true, "the provider still down after the first ticks: the row waits");
     // The provider back on its port; no hand step.
@@ -553,7 +556,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     provider?.stop(true);
     const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()) + (await new Response(api.stdout).text()) + (await new Response(api.stderr).text());
     const menderLines = said.split("\n").filter((l) => /vector mender/.test(l));
-    // Down for 7 s at a 1 s interval, and two menders: the outage said once by whichever held the lock first, not per tick.
+    // Down for 11 s at a 1 s interval, about six ticks, and two menders: the outage said once by each at most, not per tick.
     const downLines = menderLines.filter((l) => /the embedding provider is unavailable/.test(l)).length;
     assert(downLines >= 1 && downLines <= 2 && menderLines.some((l) => /\d+ thoughts? given a vector/.test(l)), `the servers said the outage once each at most, and the mend (${menderLines.join(" / ")})`);
     assert(codes.every((c) => c === 0) && !/the tick failed/.test(said), `both stop cleanly, no tick failing on the closing pool (exit ${codes.join(", ")})`);

@@ -101,8 +101,8 @@ export interface DatabaseFacts {
   databaseBytes: number | null;
   /**
    * Thoughts with no vector (`embedding IS NULL`) — saved while the provider
-   * did not answer, or refused by the egress gate — which the MCP server's
-   * vector mender embeds (SMD-2889). Null when not read (`stats: false`, or
+   * did not answer, refused by the egress gate, or imported bare — which the
+   * servers' vector mender embeds (SMD-2889). Null when not read (`stats: false`, or
    * `unread` says why).
    */
   vectorless: number | null;

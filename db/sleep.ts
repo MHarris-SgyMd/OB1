@@ -148,7 +148,6 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { STALE_AFTER_INTERVALS } from "../server-portable/brain-info.ts";
-import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
@@ -231,8 +230,9 @@ async function poolOf(sql: SQL, pass: PassName, job: string): Promise<Pool> {
  * The newest live event after `after` — a timestamp, or a number of seconds
  * before now() — and the database's now(). A read is a query_log row (when
  * `readsLog`); a write is a thought_audit row whose actor_kind is not
- * 'ingested' (NULL counts as live) and that the servers' vector mender did not
- * write — background work, as these passes are (SMD-2889). Bounded below, so a brain whose newest
+ * 'ingested' (NULL counts as live) and that no server's background work wrote
+ * (actor_context.background — the vector mender's, SMD-2889), as these
+ * passes' own writes are not live. Bounded below, so a brain whose newest
  * audit rows are all sync writes is not read back to its last live one.
  */
 async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
@@ -241,7 +241,7 @@ async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Pr
   const [r] = await sql`
     SELECT now() AS now, ${read} AS read,
            (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested'
-              AND actor_name IS DISTINCT FROM ${MENDER_ACTOR}) AS write`;
+              AND (actor_context->>'background') IS NULL) AS write`;
   return { now: new Date(r.now), read: r.read ? new Date(r.read) : null, write: r.write ? new Date(r.write) : null };
 }
 
@@ -459,7 +459,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const at = new Date(now);
     const [last] = await sql`
       SELECT ${readsLog ? sql`(SELECT max(logged_at) FROM query_log)` : sql`NULL::timestamptz`} AS read,
-             (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' ORDER BY created_at DESC LIMIT 1) AS write`;
+             (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' AND (actor_context->>'background') IS NULL ORDER BY created_at DESC LIMIT 1) AS write`;
     const read = last.read ? new Date(last.read) : null;
     const write = last.write ? new Date(last.write) : null;
     const newest = newer(read, write);

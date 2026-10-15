@@ -54,7 +54,7 @@ Read the server's log first (`podman compose -f deploy/compose.yaml logs server`
 
 Good news — that means your database, server, and MCP connection are all fine. The issue is isolated to search.
 
-Most likely culprits: the embedding call is failing (the model endpoint is unreachable, or the key for a hosted provider is wrong), or the thoughts were captured without a vector (the reply says so at the time) — the MCP server embeds those by itself once the provider answers and the egress gate allows (`brain_info`'s `Vectors` row counts the ones that wait), `db/reembed.ts` re-embeds a whole brain, and preflight's `vector models` and `re-embed pass` rows warn when the corpus is off the model.
+Most likely culprits: the embedding call is failing (the model endpoint is unreachable, or the key for a hosted provider is wrong), or the thoughts were captured without a vector (the reply says so at the time) — the servers embed those by themselves once the provider answers and the egress gate allows (`brain_info`'s `Vectors` row counts the ones that wait), `db/reembed.ts` re-embeds a whole brain, and preflight's `vector models` and `re-embed pass` rows warn when the corpus is off the model.
 
 Quickest diagnosis: the server's log, then `bun preflight.ts` in `server-portable/` with the stack's environment.
 
