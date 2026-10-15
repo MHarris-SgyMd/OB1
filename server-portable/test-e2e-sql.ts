@@ -2317,6 +2317,85 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   await sql.close();
 }
 
+console.log("\n[13i] list_supersession_proposals names who wrote each side: a capture-only key's text proposed to stand over the operator's is flagged WRITER with --force on its accept, the reverse is not, a lower-trust side is, an ingested side's notice comes before its text, a side the hook has since superseded names the pointer an accept clears, and a brain short of 094 says it cannot name them (SMD-2707, migration 094)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  await sql`SELECT set_agent_kind('session-hook', 'agent')`;
+  await sql`SELECT set_agent_kind('bot-key', 'ingested')`;
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const hook = async (args: Record<string, unknown>) => {
+    const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": CAPTURE_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "capture_thought", arguments: args } }) });
+    const text = await r.text();
+    const body = JSON.parse(text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6)) as { result?: { content?: { text?: string }[] } };
+    return idIn((body.result?.content ?? []).map((c) => c.text ?? "").join("\n"));
+  };
+  const op = async (content: string, key = "op-raw") => idIn(await call("capture_thought", { content }, key));
+  let conf = 0.99;
+  const propose = async (older: string, newer: string) =>
+    String((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', ${(conf -= 0.01)}::numeric, '[13i]', 0.9, 'consolidate:stub@p13i', NULL) AS id`)[0].id);
+  const blockOf = (out: string, pid: string) => out.split(/\n\n(?=\d+\. \[confidence)/).find((b) => b.includes(`proposal ${pid}`)) ?? "";
+
+  // SMD-1873's case: the hook's "the rota is now daily" proposed to stand over the operator's weekly one.
+  const W = (await op("[13i] the rota is weekly, the operator's word"))!;
+  const C = (await hook({ content: "[13i] the rota is now daily, replacing the weekly one" }))!;
+  const p1 = await propose(W, C);
+  // The reverse: the operator's newer text over the hook's older one.
+  const C2 = (await hook({ content: "[13i] the hook's older note on the on-call" }))!;
+  const W2 = (await op("[13i] the operator's newer word on the on-call"))!;
+  const p2 = await propose(C2, W2);
+  // An ingested page proposed to stand over the operator's: lower trust.
+  const W3 = (await op("[13i] the operator's note on the deploy window"))!;
+  const I = (await op("[13i] a page the importer captured on the deploy window", "bot-raw"))!;
+  const p3 = await propose(W3, I);
+  assert([W, C, C2, W2, W3, I].every(Boolean), "setup: each writer's thought lands");
+
+  let listed = await call("list_supersession_proposals", {});
+  const b1 = blockOf(listed, p1), b2 = blockOf(listed, p2), b3 = blockOf(listed, p3);
+  assert(b1.includes(`ID: ${C}\n      By: session-hook (agent) · trust agent · a capture-only key's text`) && b1.includes(`ID: ${W}\n      By: op-key (operator) · trust operator`),
+    `each side names its writer under its id, the hook's text said to be a capture-only key's (${b1.replace(/\n/g, " ⏎ ").slice(0, 600)})`);
+  assert(/^\d+\. \[confidence [\d.]+\] the NEWER thought supersedes the older  WRITER\n/.test(b1)
+      && b1.includes("WRITER: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's — read both writers before accepting; the accept takes --force")
+      && b1.includes(`--accept ${p1} --force`),
+    "the capture-only key's text proposed to stand is flagged WRITER, said why, and its accept carries --force");
+  assert(b2 !== "" && !/WRITER/.test(b2) && !b2.includes(`--accept ${p2} --force`) && b2.includes(`By: session-hook (agent) · trust agent · a capture-only key's text`),
+    `the operator's text standing over the hook's is not flagged, its accept without --force, the hook's side still named (${b2.replace(/\n/g, " ⏎ ").slice(0, 300)})`);
+  assert(b3.includes("WRITER: an accept would make the NEWER side stand: its trust is below the other side's") && b3.includes(`--accept ${p3} --force`)
+      && b3.includes(`newer [${b3.match(/newer \[([^\]]+)\]/)?.[1]}] ${INGESTED_NOTICE}\n      text: [13i] a page the importer captured`)
+      && b3.includes(`ID: ${I}\n      By: bot-key (ingested) · trust ingested`) && !b3.includes(`older [${b3.match(/older \[([^\]]+)\]/)?.[1]}] ${INGESTED_NOTICE}`),
+    `an ingested side standing over the operator's is flagged for its trust, its notice before its text, none before the operator's (${b3.replace(/\n/g, " ⏎ ").slice(0, 500)})`);
+
+  // SMD-1873's case as it is met, at equal trust (review pass 4): a write
+  // key of agent kind, the hook's copy proposed to stand — flagged for its
+  // capture scope alone.
+  await sql`SELECT set_agent_kind('op-key', 'agent')`;
+  const W5 = (await op("[13i] an agent's note on the standup time"))!;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  const C5 = (await hook({ content: "[13i] the hook's copy of the note on the standup time" }))!;
+  const p5 = await propose(W5, C5);
+  const b5 = blockOf(await call("list_supersession_proposals", {}), p5);
+  assert(b5.includes("WRITER: an accept would make the NEWER side stand: its text is a capture-only key's — read both writers before accepting; the accept takes --force")
+      && b5.includes(`ID: ${W5}\n      By: op-key (agent) · trust agent`) && b5.includes(`--accept ${p5} --force`),
+    `at equal trust the hook's copy proposed to stand is flagged for its capture scope alone (${b5.replace(/\n/g, " ⏎ ").slice(0, 400)})`);
+
+  // The hook supersedes its own text: the listing names the pointer an accept making it stand clears.
+  const N = (await hook({ content: "[13i] the hook's next word on the rota", supersedes: C }))!;
+  listed = await call("list_supersession_proposals", {});
+  assert(blockOf(listed, p1).includes(`ID: ${C}\n      By: session-hook (agent) · trust agent · a capture-only key's text\n      superseded by ${N}\n      an accept that makes this side stand clears a capture-only pointer, ${N} onto this side: it then no longer supersedes what it pointed at`),
+    `a side the hook has since superseded names the superseder and the lapse an accept causes (${blockOf(listed, p1).replace(/\n/g, " ⏎ ").slice(0, 600)})`);
+
+  // A brain short of 094: the page lists, and says it cannot name the writers.
+  await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
+  const pre094 = await call("list_supersession_proposals", {});
+  assert(pre094.includes("Writers not shown: this brain's listing is from before migration 094") && !/\bBy: /.test(pre094) && !/WRITER/.test(pre094) && pre094.includes(`ID: ${C}`),
+    `without 094 the listing still lists, says the writers are not shown, and flags nothing (${pre094.split("\n")[0].slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") });
+  assert(/WRITER/.test(await call("list_supersession_proposals", {})), "…and 094 applied, the writers read again");
+  await sql`DELETE FROM supersession_proposals`;
+  await sql`DELETE FROM thoughts WHERE content LIKE '[13i]%'`;
+  await sql.close();
+}
+
 console.log("\n[14] brain_info and the keyed /health body read the live database: versions, the ledger against the tree, counts, size, HNSW (SMD-2041)");
 {
   const sql = new SQL({ url: URL_, max: 1 });

@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -59,6 +59,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  TicketStatusInputs,
   PluginSql,
   UpdateProvenance,
   UpdateResult,
@@ -833,7 +834,20 @@ export class SqlStore implements ThoughtStore {
     // and fails; three resolve (preflight's lineage check names the leftover).
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
-    return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
+    // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
+    // 094 has no such function: the page goes out without writers, and the
+    // reply says so.
+    let writers: Record<string, unknown>[] = [];
+    let read = false;
+    if (rows.length) {
+      try {
+        writers = await this.sql`SELECT * FROM list_proposal_writers(${this.sql.array(rows.map((r: Record<string, unknown>) => String(r.id)), "UUID")}::uuid[])`;
+        read = true;
+      } catch (e) {
+        if (!WRITERS_MISSING.test((e as Error).message)) throw e;
+      }
+    }
+    return withWriters(rows, writers, read).map(normaliseProposal);
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {
@@ -868,6 +882,23 @@ export class SqlStore implements ThoughtStore {
     } catch {
       return {};
     }
+  }
+
+  async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
+    const valid = idList(ids), keys = ticketList(tickets);
+    if (keys.length === 0) return normaliseTicketStatusInputs([]);
+    // Best-effort, as supersededAmong: before 095, or without the order's
+    // ob1_config grant, the label is left off and the search goes on. A row
+    // 095 does not return is skipped by the normaliser, which never throws.
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT kind, thought_id::text AS thought_id, issue, status, status_type, history
+          FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
+    } catch {
+      return null;
+    }
+    return normaliseTicketStatusInputs(rows);
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {
