@@ -8,7 +8,7 @@
  * STUB_EXIT_<cid> says. So what tier.sh hands each half is read without a
  * runtime: one network and one side's password each, the target's settings by
  * name, the arguments to both halves, the source container removed before the
- * target starts, and every refusal before anything is made.
+ * target starts, and each refusal it tries before anything is made.
  *
  *   bun deploy/test-tier-sh.ts
  */
@@ -57,13 +57,19 @@ case "$1" in
     esac
     exit 0 ;;
   wait) cat "$STUB_DIR/exit.$last"; exit 0 ;;
-  cp) if [ "$2" = - ]; then cat > /dev/null; else echo tarbytes; fi; exit 0 ;;
+  # The source argument decides (cp -a - CID:/tmp/ reads the pipe): a receiver
+  # that left it unread could exit first and SIGPIPE the sender (review pass 3).
+  cp) if [ "\${@: -2:1}" = - ]; then cat > /dev/null; else echo tarbytes; fi; exit 0 ;;
   rm) exit 0 ;;
 esac
 exit 0
 `;
 
 const root = mkdtempSync(join(tmpdir(), "ob1-test-tier-sh-"));
+// Removed however the run ends, a kill included (its logs hold the fixtures' env files).
+const cleanup = () => rmSync(root, { recursive: true, force: true });
+process.on("exit", cleanup);
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => { cleanup(); process.exit(128 + ({ SIGINT: 2, SIGTERM: 15, SIGHUP: 1 } as const)[sig]); });
 const bin = join(root, "bin");
 Bun.spawnSync(["mkdir", "-p", bin]);
 for (const name of ["docker", "podman"]) {
@@ -76,7 +82,7 @@ const PB = "pb0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const envA = join(root, "a.env");
 const envB = join(root, "b.env");
 writeFileSync(envA, `POSTGRES_PASSWORD=${PA}\nOB1_COMPARE_KEY=ck-a\nOB1_EMBEDDING_MODEL=model-a\n`);
-writeFileSync(envB, `OB1_EMBEDDING_MODEL=model-b\nOB1_LLM_API_KEY=lk-b\nOB1_WORKER_KEY=wk-b\nOB1_AUTH_OPERATOR_PASSWORD=op-b\nOB1_COMPARE_KEY=ck-b\nOB1_PLUGINS=x\nPOSTGRES_PASSWORD=${PB}\nOB1_TIER=canary\nOB1_LLM_BASE_URL=http://u:p@llm:11434/v1\n`);
+writeFileSync(envB, `OB1_EMBEDDING_MODEL=model-b\nOB1_EMBEDDING_API_KEY=ek-b\nOB1_METADATA_MODEL=mm-b\nOB1_LLM_API_KEY=lk-b\nOB1_WORKER_KEY=wk-b\nOB1_AUTH_OPERATOR_PASSWORD=op-b\nOB1_COMPARE_KEY=ck-b\nOB1_PLUGINS=x\nPOSTGRES_PASSWORD=${PB}\nOB1_TIER=canary\nOB1_LLM_BASE_URL=http://u:p@llm:11434/v1\n`);
 
 type Run = { code: number; err: string; out: string; log: string };
 let runN = 0;
@@ -114,7 +120,10 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
   ok(/ build .*-t pb-tier:latest/.test(argvLines(r).find((l) => l.startsWith("ARGV build ")) ?? "") && /\bpb-tier:latest\b/.test(src ?? ""), "the image is the --to side's project's, pb-tier");
   const order = argvLines(r).map((l) => l.replace(/^ARGV /, "")).filter((l) => /^(start|cp|rm)\b/.test(l));
   const at = (re: RegExp) => order.findIndex((l) => re.test(l));
-  ok(at(/^start -a cid1$/) < at(/^cp cid1:/) && at(/^cp cid1:/) < at(/^rm -f cid1$/) && at(/^rm -f cid1$/) < at(/^start -a cid2$/) && at(/^cp -a - cid2:\/tmp\/$/) > at(/^cp cid1:/),
+  // The two cp's are one pipe's halves, so their order between them is the
+  // scheduler's; both come after the source half and before its removal.
+  ok(at(/^start -a cid1$/) < at(/^cp cid1:/) && at(/^start -a cid1$/) < at(/^cp -a - cid2:\/tmp\/$/)
+      && Math.max(at(/^cp cid1:/), at(/^cp -a - cid2:\/tmp\/$/)) < at(/^rm -f cid1$/) && at(/^rm -f cid1$/) < at(/^start -a cid2$/),
     `the source half runs, its hand-off passes, its container goes, then the target starts (${order.join(" ; ")})`);
   ok(!/pa0a|pb0b/.test(r.out + r.err), "no password on tier.sh's output");
   ok(!r.log.includes("ENVLEFT"), "each half's env file is gone from the host before that half starts");
@@ -149,7 +158,9 @@ refused("…and by --from-network", ["--env-file", envB, "--project", "pb", "--f
 refused("a shell COMPOSE_PROJECT_NAME beside --from-env-file", ["--env-file", envB, "--from-env-file", envA, "--refresh", "--from", "postgres", "--to", "postgres"], /COMPOSE_PROJECT_NAME is set in the shell/, { COMPOSE_PROJECT_NAME: "x" });
 refused("--handoff", [...CANARY, "--handoff", "/x"], /--handoff is tier\.sh's own/);
 refused("a list of networks", ["--env-file", envB, "--network", "pb_data,pa_data", "--refresh", "--from", "postgres", "--to", "postgres"], /--network takes one network name/);
-refused("--from=VALUE", ["--env-file", envB, "--refresh", "--from=postgres", "--to", "postgres"], /give --from VALUE, not --from=VALUE/);
+for (const flag of ["--network", "--project", "--from-network", "--from-project", "--env-file", "--from-env-file", "--runtime", "--from", "--to"]) {
+  refused(`${flag}=VALUE`, ["--env-file", envB, "--refresh", "--from", "postgres", "--to", "postgres", `${flag}=x`], new RegExp(`give ${flag} VALUE, not ${flag}=VALUE`));
+}
 refused("--diff", ["--env-file", envB, "--diff", "--from", "a", "--to", "b"], /--diff runs over HTTP now/);
 refused("no verb", ["--env-file", envB, "--from", "postgres", "--to", "postgres"], /tier\.sh runs one of --refresh and --promote/);
 refused("POSTGRES_PASSWORD in the shell beside --from-env-file", CANARY, /POSTGRES_PASSWORD is set in the shell/, { POSTGRES_PASSWORD: "x" });
@@ -159,6 +170,5 @@ refused("POSTGRES_PASSWORD in the shell beside --from-env-file", CANARY, /POSTGR
   ok(r.code === 0 && !envOf(r, "cid1").includes(PB), `a postgres:// --from on another network runs, with --to's password nowhere in the source half (exit ${r.code})`);
 }
 
-rmSync(root, { recursive: true, force: true });
 console.log(`test-tier-sh: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

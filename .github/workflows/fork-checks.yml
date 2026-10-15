@@ -138,8 +138,8 @@ jobs:
         run: bun deploy/instance.ts --self-check
       # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
       # side's password per half, the target's settings by name, the source
-      # container gone before the target starts, every refusal before
-      # anything is made. The deploy-stack job runs it against a stack.
+      # container gone before the target starts, each refusal it tries
+      # before anything is made. The deploy-stack job runs it against a stack.
       - name: tier.sh's two halves against a stub runtime
         run: bun deploy/test-tier-sh.ts
 

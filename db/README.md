@@ -3687,7 +3687,7 @@ no image the stack runs has both — the pgvector image has the client and no Bu
 builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
 stack server's major) as `<project>-tier` and runs this checkout's `tier.ts` in
 it, so a refresh migrates forward with the tree it was run from —
-`deploy/README.md` has the commands. Each verb runs as two halves that share a
+`deploy/README.md` has the commands. `--refresh` and `--promote` each run as two halves that share a
 directory (`--handoff <dir>`), and tier.sh runs each in a container of its own
 on one brain's network with that brain's password (SMD-2875): the source half
 reads the source's facts and dumps it, as `pg_read_all_data` where the login

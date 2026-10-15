@@ -120,8 +120,10 @@
 # needs a label the container may read; relabel the checkout once (`chcon -Rt
 # container_file_t <checkout>`) — this script does not relabel it for you.
 #
-# Exit status is the first half's to fail, else the target half's; 2 for a
-# usage error here, a network that does not exist included.
+# Exit status is the first half's to fail, else the target half's; 1 when the
+# hand-off cannot be passed or a half's container never ran (start's own
+# status, if it gave one); a failed build's own; 2 for a usage error here, a
+# network that does not exist included.
 set -euo pipefail
 unset CDPATH # a cd that prints the directory would put two lines in HERE
 
