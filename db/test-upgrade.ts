@@ -531,8 +531,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-2744), 087 (what the findings step posted to the board,
   // SMD-2681), 088 (update_thought answers what it did, SMD-2744), 089 (the
   // 1.8.0 cut's schema_version, SMD-1804), 090 (a re-capture says what it
-  // did to a capture-only key's label, SMD-2898) and 091 (each settle by the
-  // pass kept on its proposal, SMD-2913)
+  // did to a capture-only key's label, SMD-2898), 091 (each settle by the
+  // pass kept on its proposal, SMD-2913) and 092 (pg_stat_statements where the
+  // server offers it, SMD-1849)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -648,13 +649,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ob1_config.schema_version for the 1.8.0 cut, needing only 006's table; 090 adds the
   // weighing that answers and redefines 086's restamp as a call of it,
   // refusing by name without 085 or 086 ([20ak]); 091 adds a column and
-  // its trigger to 029's table, refusing by name without 067 ([20al]) — all
+  // its trigger to 029's table, refusing by name without 067 ([20al]); 092
+  // creates pg_stat_statements where the server offers it, needing nothing — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 62, `030 is among the last sixty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 63, `030 is among the last sixty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4397,12 +4399,13 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
       await admin.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC; DROP OWNED BY tu_nousage; DROP ROLE IF EXISTS tu_nousage; DROP OWNED BY tu_granted; DROP ROLE IF EXISTS tu_granted");
     }
     assert(noUsage.code === 2 && /Refused: role tu_nousage has no USAGE on schema public/.test(noUsage.out) && /Run the migrator as the database's owner, postgres, or a role that is a member of it\./.test(noUsage.out)
-             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && /001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has/.test(noUsage.out)
+             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && /001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has;\n {2}092's pg_stat_statements needs a superuser too, and is left out without one\./.test(noUsage.out)
              && noUsageLedger === "",
            `a role without USAGE on public: refused, naming the database's owner, the GRANT and what each extension needs, and no ledger created anywhere (exit ${noUsage.code})`);
     assert(!!noUsageGrant && noUsageGrant.code === 2 && /Run --grant as the objects' owner — the role that ran the migrations — or a superuser\./.test(noUsageGrant.out) && !/GRANT USAGE, CREATE/.test(noUsageGrant.out),
            `…and --grant as that role is refused in its own words: run it as the objects' owner (exit ${noUsageGrant?.code})`);
-    assert(!!granted2 && !/Refused/.test(granted2.out) && /001_\S+\s+applied/.test(granted2.out) && grantedLedger === "public",
+    // Exit 0 and no FAILED line: 092 met pg_stat_statements an earlier superuser run left confined here, and failed this run (SMD-1849 PR 3b review pass 2), which a check of 001 alone passed.
+    assert(!!granted2 && granted2.code === 0 && !/Refused|FAILED/.test(granted2.out) && /001_\S+\s+applied/.test(granted2.out) && grantedLedger === "public",
            `…and the GRANT, run as printed, puts public back on the role's path, and it builds there (${granted2 ? granted2.out.split("\n").find((l) => /FAILED|Refused/.test(l))?.trim() ?? "no failure line" : "no GRANT printed"})`);
   } finally {
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_ahead CASCADE; DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE");

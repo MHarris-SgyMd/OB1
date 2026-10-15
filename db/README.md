@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2783 assertions: 2783 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-one (91) migrations applied, and
+`bun test-schema.ts` prints `2787 assertions: 2787 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-two (92) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-1849).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1433,6 +1433,33 @@ column from each row's status. A relation needs nothing — it has no reopen,
 and said again it is the judge's verdict again. It refuses to apply without
 067. test-schema [81], test-upgrade [20al], test-live [42].
 
+Migration 092 creates `pg_stat_statements` where the server offers it
+(SMD-1849 PR 3b): each SQL statement's calls, times, rows and blocks, which
+the observability profile's exporter reads into its collector beside the
+servers' spans (`deploy/README.md`, "The observability profile"). It is
+created in public, as `vector` and `pg_trgm` are, only where
+`pg_available_extensions` lists it, so a managed Postgres without it migrates
+the same; nothing in the schema depends on it. It is not a trusted
+extension: a migrator that is not a superuser leaves it out, the run going on
+and saying so, unlike 001's `vector`. Its two views and their functions, those
+that exist (an extension older than 1.9 has no `pg_stat_statements_info`), are
+revoked from `PUBLIC` and granted to `pg_monitor` alone, so the plugins' login
+role and the roles `--grant` gives the servers reach none of them, as
+preflight's "plugin tables" row would say; a superuser reads them, as
+compose's servers connect. A restore without privileges — a tier refresh's — creates
+the extension again with `PUBLIC`'s grants under a ledger that already records
+092, so every plain `migrate.ts` run reads those grants and runs 092 again
+where `PUBLIC` holds one, saying so; a role that may not change them (not
+their owner) leaves them as they were with a warning, and the run says that
+instead, with the file to apply as their owner. Its view needs the library loaded at the server's
+start: `deploy/compose.yaml`'s `postgres` and each tier's start with
+`shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-pg_stat_statements}`,
+`track_utility` off, so a utility statement (`ALTER ROLE … PASSWORD`) is never
+recorded with its text, and `track_io_timing` on. Elsewhere a read of the view
+says the library is not loaded, and the brain never reads it. test-schema [82],
+test-live [43], test-upgrade [23]; CI's "Postgres counts the brain's statements
+in pg_stat_statements" and the tier refresh's copy.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -1493,14 +1520,19 @@ the scheduler after either, since it reads the privilege once at its start.
 Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
-a member of no role, its settings in every database cleared; refused if one
+a member of no role but the one `--member-of` names — `pg_monitor`, the one
+it takes, for the observability profile's `ob1_monitor` (SMD-1849), granted
+without ADMIN OPTION and inherited — its settings in every database cleared; refused if one
 survives, as a setting only a superuser may reset does a migrator that is not),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
-role that is a superuser, a member of another role or the owner of anything,
+role that is a superuser, a member of another role (of `--member-of`'s WITH
+ADMIN OPTION too, each grantor's REVOKE printed, and, with `--member-of`, one with
+members of its own, WITH ADMIN OPTION alone too — but the migrator's own row, which
+Postgres 16 gives a creator that is no superuser on each role it creates) or the owner of anything,
 or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
 privilege naming it, a grant in another database). Under that role the `ANALYZE
 thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
@@ -4201,8 +4233,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2783 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2787 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1292 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

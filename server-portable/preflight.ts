@@ -105,7 +105,8 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
      WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
   if (mem?.other) problems.push(`${login} is a member of ${mem.other}: a plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
   if (mem?.inherited) problems.push(`${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
-  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login})`);
+  // pg_stat_statements' views reach it through PUBLIC, which a restore without privileges gives them back to; migrate.ts takes them back on its next plain run, as their owner (SMD-1849 PR 3b review pass 2: the REVOKE named here changed nothing).
+  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login}, or FROM PUBLIC where the grant is PUBLIC's${/\bpg_stat_statements(_info)?\b/.test(l.reaches) ? "; for pg_stat_statements' views, run a plain migrate.ts as their owner or a superuser, which takes them back from PUBLIC" : ""})`);
   if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
   else {
     const { SQL } = await import("bun");

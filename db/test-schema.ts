@@ -14022,6 +14022,19 @@ console.log("\n[81] Migration 091: every time the consolidation pass settled a p
   await db.exec(`DELETE FROM derivations`);
 }
 
+console.log("\n[82] Migration 092: pg_stat_statements where the server offers it, and nothing where it does not (SMD-1849 PR 3b)");
+{
+  const avail = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = 'pg_stat_statements'`);
+  const installed = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_extension WHERE extname = 'pg_stat_statements'`)).rows[0].n;
+  const offered = avail.rows[0].n === 1;
+  assert((await installed()) === (offered ? 1 : 0), `092 created pg_stat_statements exactly where pg_available_extensions lists it (offered here: ${offered})`);
+  let again: string;
+  // By name, not number: main may take the number, and "092" would then re-apply its file (review pass 4).
+  const file = files.find((f) => f.endsWith("_pg_stat_statements.sql")) ?? "no _pg_stat_statements.sql";
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  assert(again.endsWith("_pg_stat_statements.sql") && (await installed()) === (offered ? 1 : 0), `092 applied again changes nothing (${again.slice(0, 80)})`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

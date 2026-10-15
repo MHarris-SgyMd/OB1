@@ -319,7 +319,8 @@
  *      percent-escaped YAML tag, no !reset or !override and no directive;
  *      compose.yaml's proxy as held, its observability collector whole
  *      (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
- *      environment, SMD-1849), and its forwarder (SMD-2583), with the
+ *      environment, SMD-1849), its Postgres exporter and that one's role
+ *      step whole (PG_EXPORTER_SERVICE, PG_MONITOR_ROLE_SERVICE), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
  *      deploy/forwarder.ts; an overlay's only its own table's mount,
  *      no config but the file's own table's (compose.yaml's forwarder's too), no name compose takes with no -f
@@ -6259,7 +6260,7 @@ const FORWARDER_SERVICE = {
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) aside: the image by its digest,
  * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
- * container's loopback, every call out off, Loki's retention, the mesh alone. Its environment holds telemetry's sign-in and
+ * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
  * exposure; a change to it is made here too, on purpose (review pass 1).
  */
 const LGTM_SERVICE = {
@@ -6307,11 +6308,48 @@ const LGTM_SERVICE = {
     LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h",
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
+    // The collector's scrape of pg-exporter on `telemetry` (SMD-1849 PR 3b), one argument with no space in it.
+    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
-  networks: { mesh: { aliases: ["lgtm.ob1.internal"] } },
+  networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
   healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
   restart: "unless-stopped",
+};
+/**
+ * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
+ * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
+ * which statements it names and how much of their text, and its own queries left out. Held whole because CI never starts the profile:
+ * a superuser's DSN, an image by tag or a dropped --member-of passed every other check (review pass 1).
+ */
+const PG_EXPORTER_SERVICE = {
+  image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
+  profiles: ["observability"],
+  read_only: true,
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  command: [
+    "--collector.stat_statements",
+    "--collector.stat_statements.include_query",
+    "--collector.stat_statements.query_length=120",
+    "--collector.stat_statements.limit=100",
+    "--collector.stat_statements.exclude_users=ob1_monitor",
+  ],
+  environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
+  depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
+  networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  restart: "unless-stopped",
+};
+const PG_MONITOR_ROLE_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-migrate",
+  pull_policy: "never",
+  profiles: ["observability"],
+  environment: { DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain", OB1_MONITOR_DB_PASSWORD: "${OB1_MONITOR_DB_PASSWORD:-}" },
+  command: ["bun", "login-role.ts", "--role", "ob1_monitor", "--password-env", "OB1_MONITOR_DB_PASSWORD", "--member-of", "pg_monitor"],
+  depends_on: { postgres: { condition: "service_healthy" }, migrate: { condition: "service_completed_successfully" } },
+  restart: "no",
+  networks: ["data"],
 };
 /** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
@@ -6337,6 +6375,7 @@ const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
 /** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. */
@@ -6361,7 +6400,7 @@ const SERVICE_BUILDS: Record<string, unknown> = {
 };
 /** The networks each file defines, exactly; a file not named here defines none. */
 const FILE_NETWORKS: Record<string, Mapping> = {
-  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true } },
+  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true }, telemetry: { internal: true } },
   "compose.host-ports.yaml": { "postgres-port": {} },
   "compose.grafana-port.yaml": { "grafana-port": {} },
   "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
@@ -6385,8 +6424,11 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     "orchestration-runner-role": ["data"],
     "orchestration-runner": ["data", "egress"],
     auth: { mesh: { aliases: ["auth.ob1.internal"] }, "auth-egress": {} },
-    // The observability profile's collector and Grafana (SMD-1849 PR 3a): the servers send to it and the proxy shows it, on `mesh` alone.
-    lgtm: { mesh: { aliases: ["lgtm.ob1.internal"] } },
+    // The observability profile's collector and Grafana (SMD-1849 PR 3a): the servers send to it and the proxy shows it, on `mesh`; it scrapes pg-exporter on `telemetry` (PR 3b).
+    lgtm: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
+    // The observability profile's database numbers (SMD-1849 PR 3b): the role step on `data`; the exporter on `data` and `telemetry`, where lgtm alone scrapes it.
+    "pg-monitor-role": ["data"],
+    "pg-exporter": { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
   },
   "compose.host-ports.yaml": { postgres: ["postgres-port"] },
   "compose.grafana-port.yaml": { lgtm: ["grafana-port"] },
@@ -6443,6 +6485,13 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const ldiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(lgtm, ["logging"]))), LGTM_SERVICE, "services.lgtm", ldiffs);
     if (ldiffs.length) flag("proxy", `${ldiffs.slice(0, 6).join("; ")}${ldiffs.length > 6 ? `; and ${ldiffs.length - 6} more` : ""} — compose.yaml's lgtm is check 28's LGTM_SERVICE: Grafana's anonymous access, its admin password's refusal, the backends' loopback and every call out are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3a)`);
+    // The Postgres exporter and its role's step, whole (SMD-1849 PR 3b review pass 1): the role it reads as and what it names are their keys.
+    for (const [name, held, lit] of [["pg-exporter", PG_EXPORTER_SERVICE, "PG_EXPORTER_SERVICE"], ["pg-monitor-role", PG_MONITOR_ROLE_SERVICE, "PG_MONITOR_ROLE_SERVICE"]] as const) {
+      const svc = isMapping(services[name]) ? services[name] : undefined;
+      const pdiffs: string[] = [];
+      pathDiffs(JSON.parse(JSON.stringify(omitKeys(svc, ["logging"]))), held, `services.${name}`, pdiffs);
+      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership and which statements it names are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
+    }
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
     pathDiffs(fconfig?.content, FORWARDER_SCRIPT, "configs.forwarder.content", sdiffs);
@@ -7069,7 +7118,7 @@ const RESTART_POLICIES: Record<string, string> = {
   "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
-  lgtm: "unless-stopped",
+  lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
 };
 /** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
 function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {
