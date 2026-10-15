@@ -6,7 +6,8 @@
 
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
-import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type WorkerStatusRow } from "../store.ts";
+import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { movedAmong, ticketsNamed, type Moved } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -115,11 +116,16 @@ function searchFilter(input: { filter?: unknown; said_by?: string; actor?: strin
 // TOPICAL -0.127, a note under a Done ticket -0.292 and -0.524 once the
 // window fills, a settled ticket looked up by its key -0.750 to -1.000), and
 // this surface has no caller who can ask for it.
+//
+// It does carry the stated-status label (SMD-2540), as search_thoughts does:
+// a label moves no rank, and the maintainer's call is the title AND a field —
+// the title because it is what every ChatGPT surface hands the model, the
+// field for a reader that reads the shape (render.ts).
 const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
 const SEARCH_COMPAT_PREFER_CURRENT = false;
 
-/** ChatGPT's search shape, with each result's trust beside it (SMD-1724) — render.ts marks an ingested title with it and sends the shape alone. */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown }[] };
+/** ChatGPT's search shape, with each result's trust (SMD-1724) and moved tickets (SMD-2540) beside it — render.ts marks the title with both and sends the shape, the moved tickets' field only where one moved. */
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved: Moved[] }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -129,12 +135,14 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
   // recency weight above. runSearch gates the query (SMD-1903) and logs.
   const r = await runSearch(ctx, principal, { tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
   if (r.refusal) return refuse(r.refusal);
+  const moved = await movedOf(await ctx.store(), r.rows, null);
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
+      moved: moved[t.id] ?? [],
     })),
   });
 }
@@ -164,8 +172,8 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 
 /** What the query was taken to mean — every hybrid row carries the same four. */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
-/** A hybrid hit, with the newer thought that supersedes it (025), if any. */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null };
+/** A hybrid hit, with the newer thought that supersedes it (025), if any, and the tickets it names that moved since it was written (095, SMD-2540). */
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] };
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -183,6 +191,28 @@ export type SearchThoughtsResult = {
 
 const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
   r ? { needles: r.needles, needleCounts: r.needleCounts, commonNeedles: r.commonNeedles, literalOnly: r.literalOnly } : null;
+
+/**
+ * The stated-status label (SMD-2540): per hit, the tickets it names whose
+ * status moved since it was written — moved-session-settled, the reading
+ * evals/eval-stated-status.ts measured (stated-status.ts). It labels and never
+ * ranks. Read only when a hit names a ticket: then which hits are superseded
+ * (`superseded`, or one query when the caller has not read it) and one query
+ * for the rest's lifecycles and tickets. Best-effort, as supersededAmong: a
+ * brain before 095, or a role without ob1_config, labels nothing and the
+ * search goes on.
+ */
+async function movedOf(store: ThoughtStore, hits: readonly ThoughtHybridMatch[], superseded: Record<string, string> | null): Promise<Record<string, Moved[]>> {
+  const naming = hits.filter((h) => ticketsNamed(h.content).length > 0);
+  if (naming.length === 0) return {};
+  const over = superseded ?? await store.supersededAmong(naming.map((h) => h.id));
+  // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
+  const open = naming.filter((h) => !over[h.id]);
+  const tickets = [...new Set(open.flatMap((h) => ticketsNamed(h.content)))];
+  if (tickets.length === 0) return {};
+  const inputs = await store.ticketStatusInputs(open.map((h) => h.id), tickets);
+  return inputs ? movedAmong(naming, over, inputs) : {};
+}
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
@@ -214,14 +244,16 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
-  const superseded = await (await ctx.store()).supersededAmong(data.map((t) => t.id));
+  const store = await ctx.store();
+  const superseded = await store.supersededAmong(data.map((t) => t.id));
+  const moved = await movedOf(store, data, superseded);
   return ok({
     query,
     preferCurrent: prefer_current,
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null,
+      supersededBy: superseded[t.id] ?? null, moved: moved[t.id] ?? [],
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,

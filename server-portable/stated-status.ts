@@ -1,9 +1,9 @@
 /**
  * stated-status.ts — which tickets a search hit no longer tells right
  * (SMD-2540): the reading evals/eval-stated-status.ts measured and chose,
- * moved-session-settled. No imports: the search reply will call it (SMD-2540
- * PR 2b) over a hit's text and migration 095's ticket_status_inputs; the
- * eval's self-check holds it to
+ * moved-session-settled. No imports: both searches call it (core/reads.ts's
+ * movedAmong, SMD-2540 PR 2b) over a hit's text and migration 095's
+ * ticket_status_inputs; the eval's self-check holds it to
  * evals/stated-status.ts's labelsOf("moved-session-settled", …) on hand cases
  * and a fuzz, so the label shipped is the label measured.
  *
@@ -35,6 +35,8 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
+/** The moved tickets a hit's line and title name; the rest are counted. A thought names up to 12 on stable, 3 at p90 (PR 1's census). */
+export const MOVED_SHOWN = 3;
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
   const out = new Set<string>();
@@ -94,4 +96,35 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
     out.push({ ticket, then, now });
   }
   return out;
+}
+
+/** What the label reads, as migration 095 answers it (store.ts's TicketStatusInputs; spelled here so this module imports nothing). */
+export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<string, Status>; history: ReadonlyMap<string, readonly Change[]> };
+
+/**
+ * Each hit's moved tickets, by id — only the hits the measurement labelled:
+ * none `superseded` names (the eval sampled no superseded thought) and none
+ * with a lifecycle of its own. A hit whose stored time does not parse is read
+ * at its session line, and with none is labelled nothing (no change is at or
+ * before an unknown time); one with nothing moved is absent.
+ */
+export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, Moved[]> {
+  const out: Record<string, Moved[]> = {};
+  for (const h of hits) {
+    if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase())) continue;
+    const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => inputs.heads.get(t), (t) => inputs.history.get(t) ?? []);
+    if (moved.length > 0) out[h.id] = moved;
+  }
+  return out;
+}
+
+/** A status name as a reply prints it: the board's free text on one line, no control character, at most 40 characters. */
+const said = (name: string) => name.replace(/[\p{C}\s]+/gu, " ").trim().slice(0, 40) || "?";
+
+/** The moved tickets in words — `SMD-2306 In Progress → Done; … (+N more)` — the first MOVED_SHOWN by key; null when none moved. */
+export function movedWords(moved: readonly Moved[]): string | null {
+  if (moved.length === 0) return null;
+  const shown = moved.slice(0, MOVED_SHOWN).map((m) => `${m.ticket} ${said(m.then.name)} → ${said(m.now.name)}`).join("; ");
+  const more = moved.length - MOVED_SHOWN;
+  return `${shown}${more > 0 ? ` (+${more} more)` : ""}`;
 }
