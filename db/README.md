@@ -3032,7 +3032,8 @@ sleeps of about a minute, each under the stall floor, neither stall a slow
 window nor let it finish, and consolidation waits on it until a longer
 sleep; once consolidation has joined, a stalled thought in hand keeps its
 turn, and a capture made then waits for the next sleep, where it goes first,
-as one behind a thought still gaining windows waits for its window; and
+as one behind a thought still gaining windows, or a stall or two short of
+the join, waits for its window; and
 while the judge's provider is down consolidation does not drain, so
 extraction stays set aside for the sleep (SMD-3008).
 A brain before 093, or a role that cannot read its table (the

@@ -12065,7 +12065,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     // Work that lands during a sleep — a sync's capture, which wakes nothing —
     // goes ahead of a stalled thought (SMD-3008). One written before it is
     // claimed is dated ahead of it, the stalled thought dated forward as the
-    // sleep began; one written while it is in hand restarts extraction, the
+    // sleep began; one pending beside it in hand restarts extraction, the
     // stalled thought moved behind it, and consolidation still joins past it
     // in the same sleep. With neither, a capture waited behind it, the pool
     // was never all stalled, and the join waited out the window too.
@@ -12084,15 +12084,24 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await capture("We bill annually now.", 0, 0);
     const syncNote = async (text: string, axis: number) =>
       ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
-    // The first note as the pair's first call begins, the second as the stalled thought's does.
+    // Both notes as the pair's first call begins. The second stands for one
+    // that lands between the stalled thought's claim and the next poll, held
+    // there: dated just behind it — as a thought reclaimed from a lapsed lease
+    // with its old date would be — it is pending beside the thought in hand at
+    // every poll until a restart moves the thought behind it. Written as the
+    // stalled call began, it raced the join's poll (review pass 1).
     let mid1 = "", mid2 = "";
     onExtract = async (marker) => {
-      if (marker === "pair" && !mid1) mid1 = await syncNote("The midnote-one, written by a sync during the sleep.", 16);
-      if (marker === "stuck" && mid1 && !mid2) mid2 = await syncNote("The midnote-two, written by a sync while the stalled thought is in hand.", 17);
+      if (marker !== "pair" || mid1) return;
+      mid1 = await syncNote("The midnote-one, written by a sync during the sleep.", 16);
+      mid2 = await syncNote("The midnote-two, written by a sync during the sleep and queued behind the stalled thought.", 17);
+      await sql`UPDATE thought_work_claims SET enqueued_at = (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${held3}::uuid AND work_type = ${EX}) + interval '1 microsecond'
+                 WHERE thought_id = ${mid2}::uuid AND work_type = ${EX}`;
     };
     const midLines: { l: string; at: number }[] = [];
     let stopMid: PassStop | null = null;
-    const midRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
+    wakeReads.length = 0;
+    const midRun = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
     let held3At: string | undefined;
     let prog3: { stops: number; stalled: number } | undefined;
     const midJoined = await pollUntil(async () => {
@@ -12115,8 +12124,10 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     const joinAtMid = midLines.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
     assert(mid1 !== "" && firstAt("mid1") < firstAt("stuck"),
       `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
-    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && joinAtMid > restartAt && held3At !== "succeeded",
-      `one written while the stalled thought is in hand restarts extraction: the window in hand is cut short, the note extracted next, and consolidation joins past it in the same sleep (joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
+    // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
+    const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+      `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
     assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
       `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
 

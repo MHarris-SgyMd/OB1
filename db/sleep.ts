@@ -69,7 +69,7 @@
  * restart it, the stalled thought(s) moved behind that work, at most once a
  * minute. Once consolidation has joined, a stalled thought in hand keeps its
  * turn, and such a capture goes first at the next sleep; nor is a thought
- * still gaining windows stopped for one. When consolidation joins past,
+ * still gaining windows, or a stall or two short of the join, stopped for one. When consolidation joins past,
  * extraction is set aside — stopped, if in hand with a stalled thought —
  * until consolidation's pool drains, then resumes, so on a one-slot model the
  * judge is not left waiting behind the window. The thought is tried in every
@@ -1081,6 +1081,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // go ahead of the stalled thoughts, as the sleep's own did (review
           // pass 6: one waited out the stuck window first).
           await stoppedLast();
+          // A stop that landed during the move: no pass starts after it (review pass 1).
+          if (stopping) return stopped();
           out("  consolidation drained — extracting beside it, the stalled thought(s) last");
           start("extract");
           parked = false;
@@ -1121,8 +1123,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           if (await setAside()) return stopped();
           behindPolls = 0;
           restartedAt = Date.now();
-          // Unmoved, the stalled thought would be claimed first again: no restart after this one.
+          // The release keeps the stalled thought's date, this sleep's forward
+          // one, so the newer work is claimed first; the move covers one dated
+          // before it — a lease another process left, reclaimed with its old
+          // date — and a move that fails ends the restarts, as such a thought
+          // would be claimed first again (review pass 1).
           reorders = await stoppedLast();
+          if (stopping) return stopped();
           start("extract");
         } else if (!FOLLOW && pools.consolidate && drained(pools.extract) && drained(pools.consolidate)) {
           out("  both pools drained — the sleep ends");
