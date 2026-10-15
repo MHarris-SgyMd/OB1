@@ -790,6 +790,10 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
 console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a collector as open-brain-mcp, sent at its stop; the REST core's span the child of its tool call's, across two processes; a plugin tool named on its line");
 {
   const { setUpTelemetry } = await import("../server-portable/otel-setup.ts");
+  // The environment's own OTEL_* set aside for the section — a service name, a sampler, an exporter turned off — in this
+  // process and the entry's, so each sends under its own name (review pass 2: OTEL_SERVICE_NAME failed it).
+  const otelSaved = Object.entries(process.env).filter(([k]) => k.startsWith("OTEL_"));
+  for (const [k] of otelSaved) delete process.env[k];
   // The entry in a process of its own and the REST core in this one, each sending its spans to one collector here.
   const received: Record<string, string[]> = {};
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
@@ -807,11 +811,9 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = holder.port;
   holder.stop(true);
-  // Its service's name its own default, whatever the suite's environment names.
-  const { OTEL_SERVICE_NAME: _named, ...inherited } = process.env;
   const entry = Bun.spawn(["bun", "index.ts"], {
     cwd: import.meta.dir,
-    env: { ...inherited, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
+    env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -839,6 +841,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     restServer.stop(true);
     await tracing.shutdown().catch(() => {});
     collector.stop(true);
+    for (const [k, v] of otelSaved) process.env[k] = v;
   }
   // OTLP/JSON: each export's spans under their resource; a SERVER span is kind 2, and an attribute a key and a typed value.
   type OtlpSpan = { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: number; attributes?: { key: string; value: { stringValue?: string } }[] };
@@ -849,12 +852,12 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   // The entry's spans and the REST core's, told apart by their service — not by a door, which an export holding only a
   // call's tool span would lack (review pass 1: the batch's timer firing between a call's two spans).
   const serviceOf = (r: OtlpResource) => r.resource.attributes.find((a) => a.key === "service.name")?.value.stringValue;
-  const entrySent = sent.filter((r) => serviceOf(r) !== "open-brain-api-test");
+  const entrySent = sent.filter((r) => serviceOf(r) !== tracing.serviceName);
   const service = entrySent[0] && serviceOf(entrySent[0]);
   const mcpSpans = spansOf(entrySent);
   const statsCall = mcpSpans.find((sp) => sp.name === "execute_tool thought_stats");
   const statsRequest = mcpSpans.find((sp) => sp.name === "tools/call thought_stats" && sp.kind === 2);
-  const restStats = spansOf(sent.filter((r) => serviceOf(r) === "open-brain-api-test")).find((sp) => sp.kind === 2 && attr(sp, "ob1.tool") === "thought_stats");
+  const restStats = spansOf(sent.filter((r) => serviceOf(r) === tracing.serviceName)).find((sp) => sp.kind === 2 && attr(sp, "ob1.tool") === "thought_stats");
   assert(up && sdk && service === "open-brain-mcp" && statsRequest !== undefined && statsCall?.parentSpanId === statsRequest.spanId && statsCall.traceId === statsRequest.traceId,
     `the entry sends its spans at its stop as open-brain-mcp: a tool call's span under its request's (${service}; ${mcpSpans.map((sp) => sp.name).join(", ")})`);
   assert(statsCall !== undefined && restStats?.traceId === statsCall.traceId && restStats.parentSpanId === statsCall.spanId,

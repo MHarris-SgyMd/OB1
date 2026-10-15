@@ -266,8 +266,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // whose scope lacks the tool, a revoked one, one the registry is busy on or
   // does not answer for in time — is answered liveness as no key is: this
   // route shows nothing, and refuses no one. The rules are server-portable
-  // index.ts's /health's. The forwarder slot is not read: the record is the
-  // caller's key's to see, whoever carried it.
+  // index.ts's /health's. The forwarder slot is not read here (the middleware
+  // reads it for the span's parent alone): the record is the caller's key's to
+  // see, whoever carried it.
   app.get("/health", async (c) => {
     const keys = headerKeys(c.req.raw);
     if (keys.length === 0) return c.json({ status: "ok" });
@@ -353,12 +354,15 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
    * caller's traceparent is linked, not continued. The registry's word on the
    * key is not asked here (a revoked forwarder is refused below all the same).
    * Undefined where the keys cannot be read: no trust, and `caller` reads them
-   * itself, its throw onError's.
+   * itself, its throw onError's. Before the middleware's own init, so it seeds
+   * the environment itself (review pass 2: an in-process REST core's first
+   * forwarded request was linked); init's throw is the middleware's 500.
    */
   function carrierOf(req: Request): Principal | null | undefined {
     const forwarded = req.headers.get(FORWARDER_HEADER);
-    if (forwarded === null) return null;
+    if (!forwarded) return null;
     try {
+      deps.init();
       return authenticate(forwarded, deps.keys(), { admit: ["forward"] });
     } catch {
       return undefined;

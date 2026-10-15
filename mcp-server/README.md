@@ -128,7 +128,10 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 - **A keyed HEAD's telemetry.** Knowing no key, it sends no span or log record — its
   line and its point on the request-duration histogram kept, as the keyless probe has
   none — so a monitor's probes spend none of the budget for requests no key was
-  accepted for (`telemetry.ts`), where `index.ts` names the key and sends both.
+  accepted for (`telemetry.ts`), where `index.ts` names the key and sends both. A
+  wrong key's HEAD reaches the collector not at all, its line `ok`, where `index.ts`'s
+  is `refused` within the budget. A HEAD at `/mcp` itself is a 405, held to the
+  budget as `index.ts`'s is: point a monitor at `/health`.
 
 **Every request's line** is this server's own, `door: "mcp"`, as `index.ts` writes it
 (SMD-1849): the route as a template, the JSON-RPC method and tool, the key's name once

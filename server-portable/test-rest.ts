@@ -929,9 +929,13 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
         : sp?.spanContext().traceId !== TID && sp?.parentSpanContext === undefined && sp?.links[0]?.context.traceId === TID ? "linked" : `neither (${sp?.name})`;
     };
     const keysUnread = createRestApp({ core, init: () => {}, keys: () => { throw new TypeError("the keys are unreadable"); }, resolve: async () => identity, track: (run) => run(), log: () => {} });
-    const trusts = [await parentage("fwd-raw"), await parentage("write-raw"), await parentage("not-a-key"), await parentage(""), await parentage(null), await parentage("fwd-raw", keysUnread)];
-    assert(JSON.stringify(trusts) === JSON.stringify(["continued", "linked", "linked", "linked", "linked", "linked"]),
-      `a forward-scope key in the forwarder slot continues the caller's traceparent; another key, none, an empty slot, no slot or unread keys link it (${JSON.stringify(trusts)})`);
+    // Keys read only once the environment is seeded, as api.ts's are: the slot is checked after its init, so a REST core
+    // in process trusts its first forwarded request too (review pass 2).
+    let seeded = false;
+    const seededLate = createRestApp({ core, init: () => { seeded = true; }, keys: () => { if (!seeded) throw new Error("env accessed before initEnv()"); return { MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},f:forward:${hashKey("fwd-raw")}` }; }, resolve: async (p) => (p.scope === "forward" ? carrierIdentity : identity), track: (run) => run(), log: () => {} });
+    const trusts = [await parentage("fwd-raw"), await parentage("write-raw"), await parentage("not-a-key"), await parentage(""), await parentage(null), await parentage("fwd-raw", keysUnread), await parentage("fwd-raw", seededLate)];
+    assert(JSON.stringify(trusts) === JSON.stringify(["continued", "linked", "linked", "linked", "linked", "linked", "continued"]),
+      `a forward-scope key in the forwarder slot continues the caller's traceparent, the first request to a core whose keys need its init included; another key, none, an empty slot, no slot or unread keys link it (${JSON.stringify(trusts)})`);
 
     exporter.reset();
     answer = async () => { throw new Error(`the store fell over near ${PLANTED}`); };

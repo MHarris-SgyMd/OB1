@@ -4890,26 +4890,39 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
     // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
-    // index.ts names the key, accepted; the MCP server, which asks the REST core nothing for a HEAD, sends no span or
-    // record for one — its line and its point kept — as the keyless probe has none.
+    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
+    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // sending them past the budget, passed) — each its line and its point, as the keyless probe has no record.
     await stopTelemetry();
     const probed = new InMemorySpanExporter();
+    const probedLogs = new InMemoryLogRecordExporter();
+    const probedPoints = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
     const { useRequestLog } = await import("./telemetry.ts");
     const probeLines: string[] = [];
     const beforeLog = useRequestLog((l) => probeLines.push(l));
+    const VALID = ANONYMOUS_PER_MINUTE + 10, WRONG = 3;
     try {
-      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: probed }) }));
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: probed, logs: probedLogs, metrics: probedPoints }) }));
       now += 60_000;
-      for (let i = 0; i < ANONYMOUS_PER_MINUTE + 10; i++) await (await worker.fetch(new Request("http://mcp/mcp/health", { method: "HEAD", headers: { "x-brain-key": KEY } }))).text();
+      const head = async (key: string) => (await worker.fetch(new Request("http://mcp/mcp/health", { method: "HEAD", headers: { "x-brain-key": key } }))).text();
+      for (let i = 0; i < VALID; i++) await head(KEY);
+      for (let i = 0; i < WRONG; i++) await head(`wrong-${i}`);
       await (await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }))).text();
       await flushTelemetry();
     } finally {
       useRequestLog(beforeLog);
     }
     const probeRecords = probeLines.map((l) => JSON.parse(l) as Record<string, unknown>);
-    const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused");
-    assert(probeRecords.filter((r) => r.method === "HEAD" && r.outcome === "ok").length === ANONYMOUS_PER_MINUTE + 10 && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
-      `${ANONYMOUS_PER_MINUTE + 10} keyed HEADs, each its line: none of the budget spent, so the keyless refusal after them sends its span (${JSON.stringify([probeRecords.length, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
+    const isHead = (attrs: Record<string, unknown> | undefined) => attrs?.["http.request.method"] === "HEAD" || attrs?.method === "HEAD";
+    const headSpans = probed.getFinishedSpans().filter((sp) => isHead(sp.attributes as Record<string, unknown>)).length;
+    const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
+    const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
+    const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
+    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
+    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
+      && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
+      `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
   } finally {
     await stopTelemetry();
     useBudgetClock(realClock);
