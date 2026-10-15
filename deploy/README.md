@@ -2137,8 +2137,11 @@ on: `up` appends it to the file as its last `SERVER_PORT`, which compose
 reads, reads it back, and says so. It does the same for the address, tier and
 profiles when the file holds others than the canary's own, as one made
 before SMD-2874 does (stable's). Stable's port (its env file's
-`SERVER_PORT`, else 8000) is refused, as is a canary file that names no port
-but stable's.
+`SERVER_PORT`, else 8000, or the port its forwarder publishes) is refused.
+The file's port is read only from a file holding the canary's own tier
+(`OB1_TIER="canary"`, which `up` writes with the port): one made before
+SMD-2874 holds stable's tier and the port stable had then, so the first `up`
+on it needs `--port`.
 
 Its networks are its own project's: it joins none of stable's, so it cannot
 reach stable's database, stable's servers, or a service a compose profile
@@ -2178,8 +2181,9 @@ stable is redeployed:
      needs `OB1_LLM_LOCAL=` cleared there, or the egress gate takes it for
      local. A stack whose only model server is the `local-models` profile
      needs an Ollama on the host for its canary;
-   - it has no port: no `--port`, and no env file of its own or one that
-     names no port but stable's; or the port is stable's;
+   - it has no port: no `--port`, and no env file of its own, or one made
+     before SMD-2874 (stable's tier), or one naming stable's port; or the
+     port is stable's;
    - its port is taken. For another container's, pass another
      `--port`; if that container is a canary stood up by hand, remove it
      instead, since the new canary is refreshed from stable and nothing is

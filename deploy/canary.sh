@@ -52,9 +52,10 @@
 #        OB1_CHAT_BASE_URL or OB1_JEV_BASE_URL naming a service on stable's
 #        `egress` network (`ollama`, `jev`, from a compose profile), which the
 #        canary's own networks do not have;
-#      - the canary has no port: no --port, and its env file is absent or
-#        names none but stable's (one made while the canary answered on
-#        stable's origin); or the port is stable's;
+#      - the canary has no port: no --port, and its env file is absent, made
+#        before SMD-2874 (its OB1_TIER is not canary: it holds stable's tier
+#        and the port stable had then), or names stable's port; or the port
+#        is stable's;
 #      - the port is taken, by another container or a process on the host;
 #      - --connect finds another connector under the name;
 #      - stable's Postgres is stamped canary or working, or carries a
@@ -385,6 +386,8 @@ STRONG = 12
 # The canary'"'"'s own values of what canary_compose sets in the shell (CANARY_SET,
 # but OB1_GIT_SHA, a build'"'"'s), which env_file write puts in its file.
 OWN = {"SERVER_PORT": os.environ.get("CANARY_PORT", ""), "SERVER_BIND": "127.0.0.1", "OB1_TIER": "canary", "COMPOSE_PROFILES": ""}
+if mode in ("write", "made", "own", "own-lines") and not OWN["SERVER_PORT"].isdigit():
+    sys.exit("no CANARY_PORT, the canary'"'"'s port, for %s" % mode)
 def compose(env_file, text, *cmd, env=bare):
     # On the shell'"'"'s environment, a variable of the shell'"'"'s that is not
     # UTF-8 is not the file'"'"'s fault: read past it (review pass 4).
@@ -574,7 +577,7 @@ set_canary_own() {
   mv "$CANARY_TMP" "$CANARY_ENV"
   CANARY_TMP=""
   local was=""
-  case "$lines" in *SERVER_PORT=*) was="${FILE_PORT:+ (its SERVER_PORT was $FILE_PORT)}" ;; esac
+  case "$lines" in *SERVER_PORT=*) was="${FILE_PORT_SAID:+ (its SERVER_PORT was $FILE_PORT_SAID)}" ;; esac
   say "wrote $(tr '\n' ' ' <<<"$lines")to the canary's env file, $CANARY_ENV$was"
 }
 
@@ -676,20 +679,21 @@ port_of() {
 # still standing on stable's origin) — or the proxy of a canary stood
 # up before the forwarder (SMD-2583), or the server of one stood up before
 # the proxy (SMD-1846), each of which published the port itself until `up`
-# recreates it, so that `up` and `down` know its port.
+# recreates it, so that `up` and `down` know its port. Another project's
+# (stable's) when one is named.
 published_id() {
   local svc id
   for svc in forwarder proxy server; do
-    id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$svc" | head -n 1)"
+    id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=${1:-$CANARY}" --filter "label=com.docker.compose.service=$svc" | head -n 1)"
     if [ -n "$id" ] && [ -n "$(port_of "$id")" ]; then printf '%s\n' "$id"; return 0; fi
   done
 }
 # The host port the canary's published container is bound to, running or
 # stopped (a reboot can leave it stopped: deploy/README.md, "After a reboot"),
-# or nothing.
+# or nothing; another project's when one is named.
 published_port() {
   local id
-  id="$(published_id)"
+  id="$(published_id "${1:-}")"
   [ -n "$id" ] || return 0
   port_of "$id"
 }
@@ -705,11 +709,10 @@ published_port() {
 # `--port` run, a hand edit of SERVER_PORT) would otherwise lose the old one
 # before naming a connector left there (code review).
 canary_ports() {
-  { [ -z "$PORT" ] || printf '%s\n' "$PORT"
-    [ -z "$FILE_PORT" ] || printf '%s\n' "$FILE_PORT"
-    [ -z "$WAS_PUBLISHED" ] || printf '%s\n' "$WAS_PUBLISHED"
-    published_port
-  } | grep -vxF -e "$STABLE_SERVER_PORT" -e "${STABLE_PUBLISHED:-$STABLE_SERVER_PORT}" || true
+  local p
+  for p in "$PORT" "$FILE_PORT" "$WAS_PUBLISHED" "$(published_port)"; do
+    if [ -n "$p" ] && ! stable_port "$p"; then printf '%s\n' "$p"; fi
+  done
 }
 # Whether a port is stable's: its env file's, or the one it publishes.
 stable_port() { [ "$1" = "$STABLE_SERVER_PORT" ] || [ "$1" = "${STABLE_PUBLISHED:-$STABLE_SERVER_PORT}" ]; }
@@ -727,9 +730,11 @@ endpoint_of() {
 # loopback ports, with any path and any query (`?key=` is the documented form).
 # A URL at /canary/mcp on stable's origin, where a canary answered from
 # SMD-2294 to SMD-2874, is stable's port, and not the canary's to remove.
+# OURS_PORTS, when set, is canary_ports read once (`down`).
 ours() {
-  local p
-  for p in $(canary_ports); do
+  local p ports="${OURS_PORTS:-}"
+  [ -n "$ports" ] || ports="$(canary_ports)"
+  for p in $ports; do
     case "$1" in "http://127.0.0.1:$p"|"http://127.0.0.1:$p/"*|"http://127.0.0.1:$p?"*|"http://localhost:$p"|"http://localhost:$p/"*|"http://localhost:$p?"*) return 0 ;; esac
   done
   return 1
@@ -737,11 +742,17 @@ ours() {
 
 # The port the canary's env file names (SMD-2874), when it names one: `up`
 # takes it when no --port is given, and `down` counts a connector there as
-# the canary's. A file compose cannot read names none here; `up`'s guard
+# the canary's. Only from a file that holds the canary's own tier, which `up`
+# writes with the port: a file made before SMD-2874 holds stable's tier and
+# the port stable had then, which a stable that has moved since would no
+# longer name as its own (code review). FILE_PORT_SAID is what the file says,
+# for messages. A file compose cannot read names none here; `up`'s guard
 # below refuses it.
 FILE_PORT=""
+FILE_PORT_SAID=""
 if [ -f "$CANARY_ENV" ]; then
-  FILE_PORT="$(env_file value "$CANARY_ENV" SERVER_PORT 2>/dev/null)" || FILE_PORT=""
+  FILE_PORT_SAID="$(env_file value "$CANARY_ENV" SERVER_PORT 2>/dev/null)" || FILE_PORT_SAID=""
+  if [ "$(env_file value "$CANARY_ENV" OB1_TIER 2>/dev/null || true)" = canary ]; then FILE_PORT="$FILE_PORT_SAID"; fi
   case "$FILE_PORT" in *[!0-9]*|0*) FILE_PORT="" ;; esac
   [ -z "$FILE_PORT" ] || [ "$FILE_PORT" -le 65535 ] || FILE_PORT=""
 fi
@@ -756,12 +767,7 @@ STABLE_SERVER_PORT="${STABLE_SERVER_PORT:-8000}"
 # …and the one stable's forwarder (its proxy, before SMD-2583) publishes,
 # running or stopped, should the shell or an overlay have given it another
 # (review pass 2).
-STABLE_PUBLISHED=""
-for svc in forwarder proxy; do
-  id="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$STABLE" --filter "label=com.docker.compose.service=$svc" | head -n 1)"
-  [ -z "$id" ] || STABLE_PUBLISHED="$(port_of "$id")"
-  [ -z "$STABLE_PUBLISHED" ] || break
-done
+STABLE_PUBLISHED="$(published_port "$STABLE")"
 # The canary's own published port as this run begins (canary_ports).
 WAS_PUBLISHED="$(published_port)"
 
@@ -801,7 +807,8 @@ if [ "$CMD" = down ]; then
   # canary's port, and removed after the compose down, so a down that fails
   # leaves it registered.
   read_connector
-  SEEN_PORTS="$(canary_ports | sort -un | tr '\n' ' ' | sed 's/ $//')"
+  OURS_PORTS="$(canary_ports | sort -un)"
+  SEEN_PORTS="$(tr '\n' ' ' <<<"$OURS_PORTS" | sed 's/ $//')"
   CONN_ACTION=""
   if [ -n "$CONN_URL" ] && ours "$CONN_URL" && [ "$CONN_SCOPE" = user ]; then CONN_ACTION=remove
   elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then CONN_ACTION=other-scope
@@ -853,7 +860,7 @@ fi
 if [ -z "$PORT" ]; then
   if [ -n "$FILE_PORT" ] && ! stable_port "$FILE_PORT"; then PORT="$FILE_PORT"
   elif [ -f "$CANARY_ENV" ]; then
-    echo "the canary's env file, $CANARY_ENV, names no port of its own (its SERVER_PORT: ${FILE_PORT:-none}; stable's: $STABLE_SERVER_PORT${STABLE_PUBLISHED:+, published $STABLE_PUBLISHED}) — name one with --port N, a free port on this host's loopback, which up writes there." >&2
+    echo "the canary's env file, $CANARY_ENV, names no port of its own (its SERVER_PORT: ${FILE_PORT_SAID:-none}, and a file made before SMD-2874 holds stable's; stable's: $STABLE_SERVER_PORT${STABLE_PUBLISHED:+, published $STABLE_PUBLISHED}) — name one with --port N, a free port on this host's loopback, which up writes there." >&2
     exit 2
   else
     echo "the canary answers on a port of its own: name it with --port N, a free port on this host's loopback. up writes it to the canary's env file ($CANARY_ENV), which later runs read." >&2
@@ -926,9 +933,10 @@ if [ $CONNECT = 1 ]; then
     echo "a connector named $NAME is already registered ($CONN_SCOPE scope, $(shown "${CONN_URL:-no URL}")), and is not this canary's at user scope — left as it is. Remove it, or pass --name." >&2
     # One left at /canary/mcp, where the canary answered on stable's origin
     # from SMD-2294 to SMD-2874: stable's port, which the canary no longer is.
-    case "$(endpoint_of "$CONN_URL")" in
-      *" /canary/mcp") echo "(it is where the canary answered on $STABLE's origin before SMD-2874; it moves to its own port: claude mcp remove --scope $CONN_SCOPE $NAME, then this up --connect again)" >&2 ;;
-    esac
+    at="$(endpoint_of "$CONN_URL")"
+    if [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
+      echo "(it is where the canary answered on $STABLE's origin before SMD-2874; it moves to its own port: claude mcp remove --scope $CONN_SCOPE $NAME, then this up --connect again)" >&2
+    fi
     exit 2
   fi
 fi
@@ -1173,10 +1181,8 @@ else
       # not, so --connect there refuses it (review pass 1).
       say "connector $NAME still points at $(shown "$CONN_URL"), a port this canary no longer answers on: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect (an up that changes the port with --connect moves it)"
     fi
-  else
-    case "$at" in
-      *" /canary/mcp") say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect" ;;
-    esac
+  elif [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
+    say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect"
   fi
 fi
 
