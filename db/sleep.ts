@@ -64,7 +64,7 @@
  * the claims they held moved to the back of the queue, since a release keeps
  * a claim's place: a thought longer than the sleeps would otherwise be every
  * sleep's first, and the pool behind it would never move. That thought's
- * windows answered so far are kept (extract-entities.ts over migration 092,
+ * windows answered so far are kept (extract-entities.ts over migration 093,
  * SMD-2694), so it advances by the windows each sleep finishes and is done
  * once its last is; until then consolidation does not join, and one whose
  * single window outlasts every sleep still holds it back. Waking costs up to

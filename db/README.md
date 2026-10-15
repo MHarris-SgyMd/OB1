@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2694).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 093 SMD-2694).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1433,7 +1433,7 @@ column from each row's status. A relation needs nothing — it has no reopen,
 and said again it is the judge's verdict again. It refuses to apply without
 067. test-schema [81], test-upgrade [20al], test-live [42].
 
-Migration 092 adds `extraction_progress`, a long thought's extraction
+Migration 093 adds `extraction_progress`, a long thought's extraction
 windows kept across a claim that does not finish (SMD-2694). A hard stop
 — the sleep scheduler's wake, the operator's second signal — aborted the
 window in hand and returned the claim, and every window already answered went
@@ -1450,7 +1450,7 @@ holder only, the claim row locked `FOR SHARE`, so a save after the lease went
 back keeps nothing. The row goes with its claim (`ON DELETE CASCADE`), and the
 worker deletes it at a succeeded release; a failed release keeps it, so
 `--retry-failed` resumes. It needs 015 only. See **Long thoughts resume**
-under [`extract-entities.ts`](#extract-entitiests). test-schema [82], test-upgrade [20am],
+under [`extract-entities.ts`](#extract-entitiests). test-schema [83], test-upgrade [20an],
 test-live [10] and [10g], server-portable/test-local-provider.ts.
 
 ## What changed relative to the guide
@@ -1556,7 +1556,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
-| | `extraction_progress` (092) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 092's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
+| | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
@@ -2281,7 +2281,7 @@ no failure exits 0, the partial rows listed on stdout, unless the model looks
 at fault (below).
 
 **Long thoughts resume (SMD-2694).** A windowed thought's windows are kept as
-they parse (migration 092's `extraction_progress`), so a claim that does not
+they parse (migration 093's `extraction_progress`), so a claim that does not
 finish — a hard stop, the sleep scheduler's wake (db/sleep.ts) or the
 operator's second signal; a worker killed and its lease lapsed; a failed
 release — leaves them for the next claim of the same text, which sends only
@@ -2965,7 +2965,7 @@ work. The passes it runs write no audit row, so they never wake it.
 consolidation beside it — the order "Start `extract` alone on a backlog" asks
 of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A long
-thought's answered windows are kept (092, [Long thoughts
+thought's answered windows are kept (093, [Long thoughts
 resume](#extract-entitiests)), so one longer than every sleep advances by the
 windows each sleep finishes, and is done once its last is; until then
 consolidation does not join, and a thought whose single window outlasts every

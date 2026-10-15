@@ -532,7 +532,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-2681), 088 (update_thought answers what it did, SMD-2744), 089 (the
   // 1.8.0 cut's schema_version, SMD-1804), 090 (a re-capture says what it
   // did to a capture-only key's label, SMD-2898), 091 (each settle by the
-  // pass kept on its proposal, SMD-2913) and 092 (a long thought's
+  // pass kept on its proposal, SMD-2913) and 093 (a long thought's
   // extraction windows kept, SMD-2694)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
@@ -649,8 +649,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ob1_config.schema_version for the 1.8.0 cut, needing only 006's table; 090 adds the
   // weighing that answers and redefines 086's restamp as a call of it,
   // refusing by name without 085 or 086 ([20ak]); 091 adds a column and
-  // its trigger to 029's table, refusing by name without 067 ([20al]); 092
-  // adds a table and two functions over 015's claims ([20am]) — all
+  // its trigger to 029's table, refusing by name without 067 ([20al]); 093
+  // adds a table and two functions over 015's claims ([20an]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -4040,33 +4040,33 @@ console.log("\n[20al] Migration 091: refused by name without 067; onto a populat
   await sql.close();
 }
 
-console.log("\n[20am] Migration 092: onto a populated brain at the file before it, a claim in flight — the table and its two functions, no thought or claim moved; the claim's holder keeps a window after it; a re-apply a no-op that keeps it (SMD-2694)");
+console.log("\n[20an] Migration 093: onto a populated brain at the file before it, a claim in flight — the table and its two functions, no thought or claim moved; the claim's holder keeps a window after it; a re-apply a no-op that keeps it (SMD-2694)");
 {
   await dropSchema(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
-  const the092 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;  // by name: renumbered when main takes its number
+  const the093 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;  // by name: renumbered when main takes its number
   // Refused by name on a schema before 015, as 031 is (review pass 4).
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
-  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 }).then(() => "applied", (e: Error) => e.message);
-  assert(/^migration 0\d\d needs 015 \(thought_work_claims\); this schema lacks it$/.test(refused), `092 on a schema before 015 is refused up front, naming what it needs (${refused})`);
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 }).then(() => "applied", (e: Error) => e.message);
+  assert(/^migration 0\d\d needs 015 \(thought_work_claims\); this schema lacks it$/.test(refused), `093 on a schema before 015 is refused up front, naming what it needs (${refused})`);
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the092 });
-  const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 092: a long document') RETURNING id`;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the093 });
+  const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 093: a long document') RETURNING id`;
   await sql`SELECT enqueue_thoughts('extract:stub@p2', ARRAY[${id}::uuid])`;
   await sql`SELECT * FROM claim_thoughts('extract:stub@p2', 'w-upgrade', 1, 900)`;
   const state = async () => JSON.stringify(await sql`SELECT t.id, t.content, t.updated_at, c.status, c.worker_id, c.enqueued_at, c.attempt_count FROM thoughts t JOIN thought_work_claims c ON c.thought_id = t.id ORDER BY t.id`);
   const before = await state();
-  assert((await sql`SELECT to_regclass('extraction_progress') IS NULL AS absent`)[0].absent === true, "before 092 there is no table of kept windows");
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 });
+  assert((await sql`SELECT to_regclass('extraction_progress') IS NULL AS absent`)[0].absent === true, "before 093 there is no table of kept windows");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
   const [shape] = await sql`SELECT to_regclass('extraction_progress') IS NOT NULL AS t,
     to_regprocedure('save_extraction_window(uuid, text, text, text, text, int, int, jsonb)') IS NOT NULL AS s,
     to_regprocedure('note_extraction_stop(uuid, text, text, text, text, boolean)') IS NOT NULL AS n`;
-  assert(shape.t && shape.s && shape.n && (await state()) === before, "092 onto the populated brain: the table and both functions, and no thought or claim moved");
+  assert(shape.t && shape.s && shape.n && (await state()) === before, "093 onto the populated brain: the table and both functions, and no thought or claim moved");
   const [{ ok }] = await sql`SELECT save_extraction_window(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', 3, 0, ${{ index: 0, h: "h0" }}::jsonb) AS ok`;
   assert(ok === true, "the claim in flight across the upgrade: its holder keeps a window after it");
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
   const [n] = await sql`SELECT count(*)::int AS n FROM extraction_progress`;
-  assert(n.n === 1 && (await state()) === before, "a re-apply of 092 is a no-op: the kept window stands, no thought or claim moved");
+  assert(n.n === 1 && (await state()) === before, "a re-apply of 093 is a no-op: the kept window stands, no thought or claim moved");
   await sql.close();
 }
 

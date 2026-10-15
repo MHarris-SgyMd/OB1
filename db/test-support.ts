@@ -44,7 +44,7 @@ const TABLES = [
   "thought_facets",
   "thought_audit",
   "thought_chunks",
-  // 092's kept windows (SMD-2694): a foreign key to the claims, so before them.
+  // 093's kept windows (SMD-2694): a foreign key to the claims, so before them.
   "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",

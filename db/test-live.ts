@@ -4207,7 +4207,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
-  // …but its stop is counted on it before the lease went back (092,
+  // …but its stop is counted on it before the lease went back (093,
   // SMD-2694): a one-window note keeps no window, so the stop is stalled.
   const stopsCounted = (await sql`SELECT stops, stalled, parts FROM extraction_progress WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[])`) as { stops: number; stalled: number; parts: Record<string, unknown> }[];
   assert(stopsCounted.length === 1 && stopsCounted[0].stops === 1 && stopsCounted[0].stalled === 1 && Object.keys(stopsCounted[0].parts).length === 0,
@@ -4877,7 +4877,7 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 092, SMD-2694)");
+console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 093, SMD-2694)");
 {
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
