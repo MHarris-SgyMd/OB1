@@ -129,7 +129,9 @@ export function outcomeOf(status: number, msg: Record<string, any> | null, tool:
   if (tool !== "capture_thought") return { ok: true, status };
   const id = typeof result.structuredContent?.id === "string" ? result.structuredContent.id : undefined;
   if (!id) return { ok: false, status, error: "capture answered without an id" };
-  if (result.structuredContent?.embeddingCall === false) return { ok: false, status, id, error: "degraded: saved without a vector" };
+  // Saved without a vector, either way: the gate refused the call, or the call was made and the provider failed (SMD-2888's vectorFailed).
+  if (result.structuredContent?.embeddingCall === false) return { ok: false, status, id, error: "degraded: saved without a vector (the embedding call was not made)" };
+  if (typeof result.structuredContent?.vectorFailed === "string") return { ok: false, status, id, error: `degraded: saved without a vector (${result.structuredContent.vectorFailed})` };
   if (/automatic tagging failed/.test(text)) return { ok: false, status, id, error: "degraded: automatic tagging failed" };
   return { ok: true, status, id };
 }
@@ -295,6 +297,7 @@ export function selfCheck(): number {
     ["a capture", 200, cap({ id, embeddingCall: true }), "capture_thought", true],
     ["a capture without id", 200, cap({ embeddingCall: true }), "capture_thought", false],
     ["a capture saved without a vector", 200, cap({ id, embeddingCall: false }), "capture_thought", false],
+    ["a capture whose provider failed", 200, cap({ id, embeddingCall: true, vectorFailed: "provider_unavailable" }), "capture_thought", false],
     ["a capture whose tagging failed", 200, cap({ id, embeddingCall: true }, "Captured.\n\nNote: the thought was saved, but automatic tagging failed (timeout)."), "capture_thought", false],
   ];
   for (const [name, status, body, tool, expectOk] of cases) {
