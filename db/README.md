@@ -3696,7 +3696,8 @@ re-embed path, not a cost.
 `db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs), and
 they reach the two brains over HTTP, never Postgres (SMD-2875). `--from` and
 `--to` are each brain's MCP URL or connector name, read with a key as
-`--compare` reads one (`OB1_COMPARE_KEY`, `--from-key`/`--to-key`, or `?key=`).
+`--compare` reads one (`--from-key`/`--to-key`, else a connector's own header or
+a URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains).
 Stable's logged searches (`list_logged_searches`: the window `--since` names, else
 the most recent page) run on both brains, each on the arm that ran it and each
 query and arm once, and the ids the two return are diffed: the measured per-PR

@@ -56,8 +56,8 @@
  *
  * --replay and --diff reach the two brains over HTTP, never Postgres (SMD-2875):
  * --from and --to are each brain's MCP URL or Claude Code connector name, with
- * a read key found as --compare finds one (--from-key/--to-key, OB1_COMPARE_KEY,
- * the URL's ?key=, the connector's header). Stable's logged searches
+ * a read key found as --compare finds one (--from-key/--to-key, else the
+ * connector's header or the URL's ?key=, else OB1_COMPARE_KEY). Stable's logged searches
  * (list_logged_searches, SMD-2245: the window --since names, else the most
  * recent page), each on the arm that ran it and each (query, arm) once, run
  * on both brains, and the ids the two return now are diffed
@@ -668,7 +668,7 @@ const COMPARE_USAGE =
 const VERB_USAGE =
   "  db/tier.ts --refresh | --promote (one verb) --from <postgres://…> --to <postgres://…> [--tier <canary|working>]\n" +
   "  db/tier.ts --replay | --diff (one verb) --from <stable> --to <canary> [--from-key <key>] [--to-key <key>] [--since <iso-ts>] [--json]\n" +
-  "  <stable>/<canary>: an http(s):// MCP URL (key from --from-key/--to-key, OB1_COMPARE_KEY, or ?key=) or a connector name";
+  "  <stable>/<canary>: an http(s):// MCP URL (key from --from-key/--to-key, else ?key=, else OB1_COMPARE_KEY) or a connector name (its own key)";
 
 /**
  * Parse the --compare arguments: `--compare <a> <b>` names the two brains (a URL

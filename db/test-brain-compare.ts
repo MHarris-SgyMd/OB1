@@ -1014,8 +1014,11 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     ok(elsewhere === 0 && /hop: could not be reached/.test(threw), `a redirect to another host is not followed with the key (${elsewhere} request(s) reached it; ${threw.slice(0, 80)})`);
   }
   {
-    const child = Bun.spawnSync(["bun", "--no-env-file", "tier.ts", "--diff", "--from", "http://edge:s3cret-pw@bad host/mcp", "--to", "http://127.0.0.1:1/mcp"], { cwd: import.meta.dir, env: { ...process.env, OB1_COMPARE_KEY: "k" } });
-    ok(!child.stderr.toString().includes("s3cret-pw") && /is not a valid URL/.test(child.stderr.toString()), `an invalid URL's user and password are not echoed (${child.stderr.toString().trim().slice(0, 100)})`);
+    for (const ref of ["http://edge:s3cret-pw@bad host/mcp", "http://edge:s3c?ret-pw@bad host/mcp", "http://edge:s3c/ret-pw@bad host/mcp"]) {
+      const child = Bun.spawnSync(["bun", "--no-env-file", "tier.ts", "--diff", "--from", ref, "--to", "http://127.0.0.1:1/mcp"], { cwd: import.meta.dir, env: { ...process.env, OB1_COMPARE_KEY: "k" } });
+      const err = child.stderr.toString();
+      ok(!/s3c|ret-pw/.test(err) && /is not a valid URL/.test(err), `an invalid URL's user and password are not echoed, a raw ? or / in it included (${err.trim().slice(0, 100)})`);
+    }
   }
   refused(["--diff", "--from", "a", "--to", "b", "--tier", "canary"], /unknown argument 6: not a flag this script has/, "--diff with --tier, a --refresh flag");
 }

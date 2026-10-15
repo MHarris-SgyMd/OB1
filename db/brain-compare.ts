@@ -128,8 +128,10 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
     // show only the part before any query string (review pass 2 — a key-safety tidy
     // in already-merged code, reachable via --a/--b too).
-    // Neither a ?key= nor a user and password in it is echoed (review pass 4: `http://u:pw@bad host/mcp`).
-    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.split("?")[0].replace(/^([a-z]+:\/\/)[^/]*@/i, "$1…@"))} is not a valid URL.`);
+    // Neither a ?key= nor a user and password in it is echoed (review pass 4:
+    // `http://u:pw@bad host/mcp`). The userinfo is cut to the last @ first, so
+    // a password holding a raw ? or / cannot end the cut early (pass 5).
+    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@]*@/i, "$1…@").split("?")[0])} is not a valid URL.`);
     // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
     // /mcp against /canary/mcp, and a host alone would label both alike.
     const at = new URL(parsed.base);
