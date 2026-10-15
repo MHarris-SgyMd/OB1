@@ -2307,7 +2307,8 @@ is the canary's life, in four `up`s:
   answering 200 with a `Deprecation` header;
 - a fourth `up`, on `--port 8012`: written to the canary's env file (mode 600
   kept, compose reading 8012), its forwarder moved, 8011 free, and a
-  connector left at 8011 named;
+  connector left at 8011 named; then 8013 edited into the file by hand, and
+  an `up` with no `--port` moves there and names the connector left at 8012;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);

@@ -699,12 +699,20 @@ published_port() {
 # stable's: a canary file made while the canary answered on stable's origin
 # names stable's port, and a connector there (stable's /mcp, or /canary/mcp)
 # is stable's, not the canary's to replace or remove (review pass 1).
+#
+# The port its container published when this run began counts too: an `up`
+# that moves the forwarder to the file's new port (a retry after a failed
+# `--port` run, a hand edit of SERVER_PORT) would otherwise lose the old one
+# before naming a connector left there (code review).
 canary_ports() {
   { [ -z "$PORT" ] || printf '%s\n' "$PORT"
     [ -z "$FILE_PORT" ] || printf '%s\n' "$FILE_PORT"
+    [ -z "$WAS_PUBLISHED" ] || printf '%s\n' "$WAS_PUBLISHED"
     published_port
   } | grep -vxF -e "$STABLE_SERVER_PORT" -e "${STABLE_PUBLISHED:-$STABLE_SERVER_PORT}" || true
 }
+# Whether a port is stable's: its env file's, or the one it publishes.
+stable_port() { [ "$1" = "$STABLE_SERVER_PORT" ] || [ "$1" = "${STABLE_PUBLISHED:-$STABLE_SERVER_PORT}" ]; }
 # A connector URL as printed: without its query, where the documented form
 # carries the key (`?key=`).
 shown() { case "$1" in *\?*) printf '%s?…' "${1%%\?*}" ;; *) printf '%s' "$1" ;; esac; }
@@ -737,6 +745,9 @@ if [ -f "$CANARY_ENV" ]; then
   case "$FILE_PORT" in *[!0-9]*|0*) FILE_PORT="" ;; esac
   [ -z "$FILE_PORT" ] || [ "$FILE_PORT" -le 65535 ] || FILE_PORT=""
 fi
+# Every runtime call below assumes the runtime answers: said once here, rather
+# than as a bare `ps` failure under set -e (code review).
+"$RUNTIME" ps -q > /dev/null 2>&1 || { echo "$RUNTIME does not answer (\`$RUNTIME ps\` failed): start it (podman machine start, or Docker's daemon) and re-run." >&2; exit 2; }
 # Stable's port: the one stable's env file names (SERVER_PORT, else
 # compose.yaml's 8000). `up` refuses it as the canary's, and no connector at it
 # is the canary's.
@@ -751,6 +762,8 @@ for svc in forwarder proxy; do
   [ -z "$id" ] || STABLE_PUBLISHED="$(port_of "$id")"
   [ -z "$STABLE_PUBLISHED" ] || break
 done
+# The canary's own published port as this run begins (canary_ports).
+WAS_PUBLISHED="$(published_port)"
 
 if [ "$CMD" = down ]; then
   # compose's name for the file's `pgdata` volume, which `down --volumes`
@@ -838,16 +851,16 @@ fi
 # which a canary file made while it answered on stable's origin names as its
 # own.
 if [ -z "$PORT" ]; then
-  if [ -n "$FILE_PORT" ] && [ "$FILE_PORT" != "$STABLE_SERVER_PORT" ]; then PORT="$FILE_PORT"
+  if [ -n "$FILE_PORT" ] && ! stable_port "$FILE_PORT"; then PORT="$FILE_PORT"
   elif [ -f "$CANARY_ENV" ]; then
-    echo "the canary's env file, $CANARY_ENV, names no port of its own (its SERVER_PORT: ${FILE_PORT:-none}; stable's: $STABLE_SERVER_PORT) — name one with --port N, a free port on this host's loopback, which up writes there." >&2
+    echo "the canary's env file, $CANARY_ENV, names no port of its own (its SERVER_PORT: ${FILE_PORT:-none}; stable's: $STABLE_SERVER_PORT${STABLE_PUBLISHED:+, published $STABLE_PUBLISHED}) — name one with --port N, a free port on this host's loopback, which up writes there." >&2
     exit 2
   else
     echo "the canary answers on a port of its own: name it with --port N, a free port on this host's loopback. up writes it to the canary's env file ($CANARY_ENV), which later runs read." >&2
     exit 2
   fi
 fi
-[ "$PORT" != "$STABLE_SERVER_PORT" ] || { echo "port $PORT is stable's (SERVER_PORT in $ENV_FILE, or compose.yaml's 8000): the canary answers on one of its own." >&2; exit 2; }
+! stable_port "$PORT" || { echo "port $PORT is stable's (SERVER_PORT in $ENV_FILE, or compose.yaml's 8000, or the port its forwarder publishes): the canary answers on one of its own." >&2; exit 2; }
 
 KEY="${OB1_SMOKE_KEY:-}"
 [ $SMOKE = 0 ] || [ -n "$KEY" ] || { echo "up smoke-tests the canary with OB1_SMOKE_KEY — a raw write key whose hash is in MCP_ACCESS_KEYS. Set it, or pass --no-smoke." >&2; exit 2; }

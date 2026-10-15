@@ -2311,7 +2311,9 @@ jobs:
       # - A third `up`, with a connector at the port's root: named as on the
       #   deprecated root, not as one the canary no longer answers, and the
       #   root answers 200 with a Deprecation header (SMD-2661).
-      # - A fourth `up`, on --port 8012: the port is written to the canary's
+      # - A fourth `up`, on --port 8012, then one after 8013 is edited into the
+      #   file by hand, which names the connector left at 8012.
+      #   On --port 8012: the port is written to the canary's
       #   env file, 8011 is free, and a connector left at 8011 is named.
       # - Then teardown:
       #   - `down --volumes` is refused on a canary stamped working;
@@ -2470,6 +2472,13 @@ jobs:
           # a cold key registry answers plain `ok` (smoke.sh warms it the same way).
           for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null 2>&1 && break; sleep 2; done
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "127.0.0.1:8012/mcp does not answer as the canary: $(health 8012/mcp | head -c 120)" >&2; exit 1; }
+          # A port edited into the file by hand: the next up (no --port) moves
+          # the forwarder there, and a connector left at the port it published
+          # when the run began is still named (code review).
+          echo 'SERVER_PORT="8013"' >> .env.canary.local
+          FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8013 ] || { echo "the canary's forwarder did not move to the edited port, 127.0.0.1:8013" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes
@@ -2483,7 +2492,7 @@ jobs:
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
           grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
-          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8012/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
+          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
           grep -F 'nothing to delete' /tmp/canary-down2.out
           grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a local-scope connector" >&2; exit 1; }
@@ -2502,7 +2511,7 @@ jobs:
           [ -z "$(canary_left)" ] || { echo "the refused down left canary containers" >&2; exit 1; }
           docker volume inspect open-brain-canary_pgdata > /dev/null
           docker volume rm open-brain-canary_pgdata
-          FAKE_URL=http://127.0.0.1:8012/mcp ./canary.sh down
+          FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down
           grep -F 'mcp remove --scope user open-brain-canary' /tmp/fake-claude.log
           [ -z "$(canary_left)" ] || { echo "canary containers remain" >&2; exit 1; }
           [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "the canary's volume remains" >&2; exit 1; }
