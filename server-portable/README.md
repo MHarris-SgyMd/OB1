@@ -53,10 +53,29 @@ chat only, beside Ollama:
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
 
-The two calls fail differently and deliberately. An embedding failure fails the
-capture, because a thought with no vector is invisible to search. A metadata
-failure lets the capture succeed and records why, because the content is the
-durable part and the tags are re-derivable.
+The two calls fail differently and deliberately. A metadata failure lets the
+capture succeed and records why, because the content is the durable part and the
+tags are re-derivable: a 4xx, a body that is not JSON or an answer with no
+content writes placeholder tags beside `metadata_extraction_failed`; a provider
+that did not answer — the connection refused, reset or unroutable, a name that
+does not resolve, the deadline passed, a 5xx, 408 or 429 (`embed.ts`
+`providerDown`, SMD-2888) — writes the marker alone, no topics and no type, as a
+refused call does, so a re-capture during the outage leaves an existing
+thought's tags as they were. An embedding failure lets the capture succeed only
+when the provider did not answer: the thought lands with its text and
+fingerprint and no vector, the reply says the provider was unavailable (where
+and why to a key that can read; that it was, to one that cannot), the write's
+audit row records the word (`thought_audit.actor_context.vector_failed`:
+`provider_unreachable`, `provider_timeout`, `provider_<status>` — that this
+write's call failed, which on a re-capture is not that the row has no vector),
+and `search_thoughts_keyword` finds it at once. The same text captured again
+once the provider answers takes its vector; so does a re-embed pass. Any other
+embedding failure still fails the capture — a 4xx (an input the model refuses, a
+credential, a model that is not there), a body that is not JSON, a vector of the
+wrong width — because those say the brain is misconfigured, and a thought with
+no vector is invisible to semantic search. An edit (`update_thought`) whose
+provider does not answer is refused whole, as before: nothing is lost, and
+storing the new text would clear a vector the thought had.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
@@ -814,10 +833,11 @@ stripped (`X-Forwarded-Prefix`).
   the registry reads a known name with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
-  vector with the row, false when the egress gate refused the embedding call (on a
-  re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
+  vector with the row, false when the egress gate refused the embedding call or the
+  provider did not answer it, `vectorFailed` saying why (on a re-capture the row then
+  keeps any vector it had); a scan a 202 whose handle points at
   `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
-  `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
+  `embeddingCall`, `chunks`, `contextFailures`, `vectorFailed`'s word — and not the provider's address, the
   egress gate's reasons or the extractor's tags — unless a forwarder carried the
   request, which is answered the whole value for the MCP server to word for that key,
   as a refusal is (SMD-2287). A refusal is its code, `retryable` and the facts its code declares

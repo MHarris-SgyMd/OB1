@@ -4044,8 +4044,8 @@ ends the fetch and the batches behind it are reported not attempted, for the nex
 pass. The census carries each issue's project, state and label names beside its
 `updatedAt`, so a rename — which never bumps `updatedAt` — makes the ticket stale
 on the next pass. When the text moves, the tags are extracted
-again with the vector (a fallback tag set from a provider outage would otherwise
-stand on current text forever), every facet goes over them (a `status` or an
+again with the vector (a fallback tag set, or a provider outage's marker alone —
+SMD-2888 — would otherwise stand on current text forever), every facet goes over them (a `status` or an
 `issue` the model read out of the description must not win), and a stale
 `metadata_extraction_failed` the fresh tags do not carry is set to null — the
 nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
