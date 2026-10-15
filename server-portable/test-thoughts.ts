@@ -916,6 +916,34 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     ok200.stop(true);
     too413.stop(true);
   }
+  // A provider that sends its 200 headers and part of the body, then stalls:
+  // the deadline is the timeout it is — an outage — not the runtime's bare
+  // TimeoutError, which providerDown does not read (review pass 2: test-chunking's
+  // "body never ends" stub never reached the body read, Bun.serve holding the
+  // headers back until the first chunk).
+  const stalled = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+    data(sock) { sock.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{"data":[`); sock.flush(); },
+  } });
+  try {
+    let eStall: unknown;
+    try { await providerCall(resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stalled.port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_TIMEOUT: "0.5" }), "/embeddings", { model: "m", input: "x" }, { kind: "capture" }); } catch (e) { eStall = e; }
+    assert(eStall instanceof ProviderError && eStall.kind === "timeout" && providerDown(eStall)?.reason === "provider_timeout", `a body that stalls after a 200's headers is the timeout, an outage (${String(eStall)})`);
+  } finally {
+    stalled.stop(true);
+  }
+  // A body fault that is no outage — a gzip body that does not inflate (Bun:
+  // ZlibError) — is still the body that was not JSON, as before: rethrown
+  // raw it failed the capture's tagging call (review pass 2).
+  const corrupt = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+    data(sock) { sock.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 12\r\n\r\nnot-gzipped!`); sock.flush(); },
+  } });
+  try {
+    let eZip: unknown;
+    try { await providerCall(resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${corrupt.port}/v1`, OB1_LLM_LOCAL: "1" }), "/chat/completions", { model: "m" }, { kind: "capture" }); } catch (e) { eZip = e; }
+    assert(eZip instanceof ProviderError && eZip.kind === "body" && providerDown(eZip) === null, `a 200 whose gzip body does not inflate is a body that was not JSON, no outage (${String(eZip)})`);
+  } finally {
+    corrupt.stop(true);
+  }
 
   // The core's capture itself, with chat and embeddings at two endpoints, both
   // down: the row is written with no vector and the marker alone, the actor
@@ -939,6 +967,23 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   assert(written[0].payload?.metadata?.metadata_extraction_failed === "provider_unreachable" && written[0].payload.metadata.topics === undefined && written[0].payload.metadata.type === undefined,
     `the chat call's outage is the marker alone, no placeholder tags (${JSON.stringify(written[0].payload?.metadata)})`);
   assert(written[0].actor?.vectorFailed === "provider_unreachable", `the actor carries vector_failed (${JSON.stringify(written[0].actor)})`);
+  // A chat failure that is no outage — TLS spoken to a plain-HTTP port, a
+  // misconfiguration (Bun: EPROTO) — still fails the capture, and nothing is
+  // written (review pass 2: no test showed the chat catch rethrowing).
+  const plain = Bun.serve({ port: 0, fetch: () => new Response("{}") });
+  try {
+    const written2: unknown[] = [];
+    const ctx2 = createContext({
+      env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+      store: async () => ({ captureThought: async (args: unknown) => { written2.push(args); return { id: "00000000-0000-4000-8000-0000000000b2", existed: false }; } }) as never,
+      door: "test",
+    });
+    let eTls: unknown;
+    try { await capture(ctx2, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought whose chat endpoint is misconfigured" } as never); } catch (e) { eTls = e; }
+    assert(eTls !== undefined && providerDown(eTls) === null && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${String(eTls)} ${(eTls as { code?: string })?.code})`);
+  } finally {
+    plain.stop(true);
+  }
 }
 
 report();

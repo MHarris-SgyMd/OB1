@@ -896,7 +896,9 @@ function explainRecaptureLabel(v: Captured): string {
  */
 function explainHeadWindow(e: HeadWindow | null, recaptures = true): string {
   if (!e?.fellBack || e.refused) return "";
-  const head = `\n\nNote: the whole content could not be embedded in one call (${e.error ?? "no detail"}); the head window's vector stands in for it. `;
+  // The provider's words name its endpoint, which a key that cannot read is
+  // not told (rest/app.ts capturedFor; SMD-2888 review pass 2).
+  const head = `\n\nNote: the whole content could not be embedded in one call${recaptures ? ` (${e.error ?? "no detail"})` : ""}; the head window's vector stands in for it. `;
   return recaptures
     ? `${head}The thought is stored and searchable, and every search chunk has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
     : `${head}A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks. A re-embed pass gives a head window's vector the whole-content one once the provider answers.`;
@@ -1030,8 +1032,8 @@ export function renderCapture(o: Outcome<Captured>): Reply {
           `their situating context — the call failed, or returned a blurb too long to be one. ` +
           // A capture-only key's re-capture writes no windows (080, SMD-2539),
           // and it is not told whether the text was new.
-          (reader ? `They are stored and searchable; re-capture to regenerate, or check the model at ` : `A new thought stores them so, searchable; text already captured gets none of them. Check the model at `) +
-          `${chat.base}.`
+          // The endpoint to a reader only (SMD-2888 review pass 2).
+          (reader ? `They are stored and searchable; re-capture to regenerate, or check the model at ${chat.base}.` : `A new thought stores them so, searchable; text already captured gets none of them. The operator can check the chat model.`)
         // The blurbs are chat calls, and the gate refused the chat endpoint
         // (SMD-1903): not a model to check, and the reason is the one the
         // tagging note below carries.

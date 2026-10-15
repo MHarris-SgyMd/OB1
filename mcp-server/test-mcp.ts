@@ -274,12 +274,16 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
     assert(!got.isError && expectReply(got, want), `${key}: the capture said as in-process (${got.text.slice(0, 70)})`);
   }
   // A capture saved without its vector because the provider did not answer (SMD-2888): the forwarded value says it as in-process, for both keys.
-  const away = { ...captured, vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" } };
-  answer = (n) => (n === "capture" ? ok(away) : ok({}));
-  for (const key of ["cap-raw", "write-raw"]) {
+  // Each key with its own value, as the REST core hands it: a capture key's (reader false), a write key's (reader true, existed false).
+  const vf = { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" };
+  for (const [key, away, words] of [
+    ["cap-raw", { ...captured, vectorFailed: vf }, /the embedding provider was unavailable\./],
+    ["write-raw", { ...captured, reader: true, existed: false, vectorFailed: vf }, /saved WITHOUT a vector — the embedding provider at http:\/\/ollama:11434\/v1 was unavailable \(the connection was refused\)/],
+  ] as const) {
+    answer = (n) => (n === "capture" ? ok(away) : ok({}));
     const got = await tool("capture_thought", { content: "Session summary", source: "claude-code" }, key);
     const want = say.renderCapture(ok(away) as never);
-    assert(!got.isError && expectReply(got, want) && /the embedding provider was unavailable/.test(got.text) && got.sc.vectorFailed === "provider_unreachable",
+    assert(!got.isError && expectReply(got, want) && words.test(got.text) && got.sc.vectorFailed === "provider_unreachable",
       `${key}: a capture saved without its vector said as in-process (${got.text.split("\n\n").find((p) => /vector/.test(p))?.slice(0, 90)})`);
   }
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.

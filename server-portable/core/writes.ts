@@ -266,6 +266,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         ? ctx.embedder.embedCapture(content, subject).catch((e: unknown) => {
             const down = providerDown(e);
             if (!down) throw e;
+            console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
             vectorFailed = down;
             return undefined;
           })

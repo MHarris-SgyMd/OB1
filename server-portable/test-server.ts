@@ -2438,8 +2438,11 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   const writer = reply(true, fell, 0), hook = reply(false, fell, 0);
   assert(/has its vector; re-capture, or a re-embed pass, gives it the whole-content vector/.test(writer) && /A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks\. A re-embed pass gives a head window's vector the whole-content one/.test(hook) && !/The thought is stored/.test(hook) && !/re-capture/.test(hook),
     `the head-window note: a reader is told re-capture or a re-embed pass, a capture-only key the re-embed pass alone (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 160)})`);
+  // The provider's words, which name its endpoint, to a reader only (SMD-2888 review pass 2).
+  assert(writer.includes("(503 briefly unavailable)") && !hook.includes("503 briefly unavailable") && /could not be embedded in one call; the head window/.test(hook),
+    `the head-window note gives a reader the provider's words and a capture-only key none (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 120)})`);
   const writerBlurbs = reply(true, null, 2), hookBlurbs = reply(false, null, 2);
-  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. Check the model at http:\/\/chat\./.test(hookBlurbs) && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
+  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. The operator can check the chat model\./.test(hookBlurbs) && !hookBlurbs.includes("http://chat") && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
     `the situating-context note: a reader is told to re-capture or check the model, a capture-only key to check the model (${hookBlurbs.split("\n").filter((l) => /situating/.test(l)).join(" ").slice(0, 160)})`);
   // …and its refused-chat arm: the blurb calls were not made.
   const refusedBlurbs = (reader: boolean) =>
