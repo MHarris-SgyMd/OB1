@@ -2113,14 +2113,15 @@ services:
 
   # postgres_exporter, pinned by the digest the multi-arch index v0.20.1
   # resolved to (2026-10-14), as ob1_monitor: pg_stat_statements' top 100
-  # statements by time, each labelled by its normalized text cut to 120
-  # characters (constants are $1, $2 there; utility statements are untracked,
-  # compose.yaml's postgres), its own queries left out; connections by
-  # database and state (pg_stat_activity, the servers' pool among them, which
-  # their client cannot count), and the exporter's default collectors. On `data`, where Postgres
-  # is, and on the internal `telemetry`, where lgtm's collector scrapes it
-  # every 30 s and nothing else is; it publishes nothing. Confined as the
-  # authorization server is: read-only, no capability, no new privileges.
+  # statements by time (of those above the tenth percentile), each labelled
+  # by its normalized text cut to 120 characters (constants are $1, $2 there;
+  # utility statements are untracked, compose.yaml's postgres), its own
+  # queries left out; connections by database and state (pg_stat_activity,
+  # the servers' pool among them, which their client cannot count), and the
+  # exporter's default collectors. On `data`, where Postgres is, and on the
+  # internal `telemetry`, where lgtm's collector scrapes it every 30 s and
+  # nothing else is; it publishes nothing. Confined as the authorization
+  # server is: read-only, no capability, no new privileges.
   pg-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     profiles: ["observability"]

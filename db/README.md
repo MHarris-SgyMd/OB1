@@ -1439,26 +1439,27 @@ the observability profile's exporter reads into its collector beside the
 servers' spans (`deploy/README.md`, "The observability profile"). It is
 created in public, as `vector` and `pg_trgm` are, only where
 `pg_available_extensions` lists it, so a managed Postgres without it migrates
-the same; nothing in the schema depends on it. It is not a trusted
-extension: a migrator that is not a superuser leaves it out, the run going on
-and saying so, unlike 001's `vector`. Its two views and their functions, those
-that exist (an extension older than 1.9 has no `pg_stat_statements_info`), are
-revoked from `PUBLIC` and granted to `pg_monitor` alone, so the plugins' login
-role and the roles `--grant` gives the servers reach none of them, as
-preflight's "plugin tables" row would say; a superuser reads them, as
-compose's servers connect. A restore without privileges — a tier refresh's — creates
-the extension again with `PUBLIC`'s grants under a ledger that already records
+the same; nothing in the schema depends on it. It is not a trusted extension:
+a migrator that is not a superuser leaves it out, the run going on and saying
+so, unlike 001's `vector`. Its two views and their functions, those that exist
+(an extension older than 1.9 has no `pg_stat_statements_info`), are revoked
+from `PUBLIC` and granted to `pg_monitor` alone, so the plugins' login role
+and the roles `--grant` gives the servers reach none of them, as preflight's
+"plugin tables" row would say; a superuser reads them, as compose's servers
+connect. A restore without privileges — a tier refresh's — creates the
+extension again with `PUBLIC`'s grants under a ledger that already records
 092, so every plain `migrate.ts` run reads those grants and runs 092 again
 where `PUBLIC` holds one, saying so; a role that may not change them (not
 their owner) leaves them as they were with a warning, and the run says that
-instead, with the file to apply as their owner. Its view needs the library loaded at the server's
-start: `deploy/compose.yaml`'s `postgres` and each tier's start with
+instead, with the file to apply as their owner. Its view needs the library
+loaded at the server's start: `deploy/compose.yaml`'s `postgres` and each
+tier's start with
 `shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-pg_stat_statements}`,
 `track_utility` off, so a utility statement (`ALTER ROLE … PASSWORD`) is never
 recorded with its text, and `track_io_timing` on. Elsewhere a read of the view
-says the library is not loaded, and the brain never reads it. test-schema [82],
-test-live [43], test-upgrade [23]; CI's "Postgres counts the brain's statements
-in pg_stat_statements" and the tier refresh's copy.
+says the library is not loaded, and the brain never reads it. test-schema
+[82], test-live [43], test-upgrade [23]; CI's "Postgres counts the brain's
+statements in pg_stat_statements" and the tier refresh's copy.
 
 ## What changed relative to the guide
 
@@ -1522,17 +1523,18 @@ holds one advisory lock, so two at once in one database queue. `db/login-role.ts
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
 a member of no role but the one `--member-of` names — `pg_monitor`, the one
 it takes, for the observability profile's `ob1_monitor` (SMD-1849), granted
-without ADMIN OPTION and inherited — its settings in every database cleared; refused if one
-survives, as a setting only a superuser may reset does a migrator that is not),
+without ADMIN OPTION and inherited — its settings in every database cleared;
+refused if one survives, as a setting only a superuser may reset does a migrator that is not),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
 role that is a superuser, a member of another role (of `--member-of`'s WITH
-ADMIN OPTION too, each grantor's REVOKE printed, and, with `--member-of`, one with
-members of its own, WITH ADMIN OPTION alone too — but the migrator's own row, which
-Postgres 16 gives a creator that is no superuser on each role it creates) or the owner of anything,
+ADMIN OPTION too, each grantor's REVOKE printed, and, with `--member-of`, one
+with members of its own, WITH ADMIN OPTION alone too, each row's REVOKE
+printed — but for the migrator's own rows when it is no superuser, which
+Postgres 16 gives such a creator on each role it creates) or the owner of anything,
 or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
 privilege naming it, a grant in another database). Under that role the `ANALYZE
 thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the

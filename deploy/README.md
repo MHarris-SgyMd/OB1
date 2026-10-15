@@ -1362,45 +1362,45 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
 - **The database's own numbers** in Prometheus under `job` `postgres`, from
   `pg-exporter` (postgres_exporter, pinned by digest) every 30 s:
   `pg_stat_statements_calls_total`, `_seconds_total`, `_rows_total` and the
-  block read and write seconds for the 100 statements that took the most
-  time (of those above the tenth percentile of total time: the exporter's
-  own query leaves out the rest), each by `queryid`, `user` and `datname`, with
-  `pg_stat_statements_query_id` naming each `queryid`'s normalized text cut
-  to 120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c
-  FROM match_thoughts($1 ::vector, …)`, measured); connections by state,
+  block read and write seconds for the 100 statements that took the most time
+  (of those above the tenth percentile of total time: the exporter's own query
+  leaves out the rest), each by `queryid`, `user` and `datname`, with
+  `pg_stat_statements_query_id` naming each `queryid`'s normalized text cut to
+  120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c FROM
+  match_thoughts($1 ::vector, …)`, measured); connections by state,
   `pg_stat_activity_count` by database and state — the servers' pool among
-  them, which their client cannot count — and the exporter's default collectors (`pg_up`, locks,
-  database sizes, the WAL). The statements are the server's, the workers'
-  and the migrator's alike; the exporter's own are left out. Postgres starts
-  with `pg_stat_statements` preloaded on every stack and tier, with utility
-  statements untracked, so an `ALTER ROLE … PASSWORD` is never recorded with
-  its text, and with `track_io_timing` on, which the block times need (CI's
-  "Postgres counts the brain's statements" holds all three). Those are `-c`
-  flags on Postgres's command, which outrank `postgresql.conf` and
-  `ALTER SYSTEM`: a library of your own to preload goes in
+  them, which their client cannot count — and the exporter's default
+  collectors (`pg_up`, locks, database sizes, the WAL). The statements are the
+  server's, the workers' and the migrator's alike; the exporter's own are left
+  out. Postgres starts with `pg_stat_statements` preloaded on every stack and
+  tier, with utility statements untracked, so an `ALTER ROLE … PASSWORD` is
+  never recorded with its text, and with `track_io_timing` on, which the block
+  times need (CI's "Postgres counts the brain's statements" holds all three).
+  Those are `-c` flags on Postgres's command, which outrank `postgresql.conf`
+  and `ALTER SYSTEM`: a library of your own to preload goes in
   `POSTGRES_PRELOAD_LIBRARIES` in `deploy/.env`, beside `pg_stat_statements`,
   which the list must keep
   (`POSTGRES_PRELOAD_LIBRARIES=pg_stat_statements,auto_explain`). The image
   ships Postgres's contrib modules (`auto_explain` among them) and pgvector,
   not `pg_cron` or another extension: a library it does not have stops
-  Postgres at its start, on every tier that copies the setting. Migration
-  092 creates the extension only as a superuser may: a migrator that is not
-  one leaves it out and says so. Its views are `pg_monitor`'s alone, and
-  each plain migrate run takes back a grant to `PUBLIC` that a restore without
-  privileges gives back (a tier refresh's).
-  `pg-exporter` reads as `ob1_monitor`, a member of Postgres's read-only
-  `pg_monitor` alone, which `pg-monitor-role` sets from
-  `OB1_MONITOR_DB_PASSWORD` (24 or more of A–Z a–z 0–9 _ -) at each `up`:
-  unset or short, `up -d` fails naming `pg-monitor-role`, whose log
-  (`compose logs pg-monitor-role`) says what to set, and `pg-exporter` is
-  created but never started; the rest of the stack comes up (measured). It is on `data`,
-  where Postgres is, and on the internal `telemetry`, where the collector
-  scrapes it; it publishes nothing, is read-only, holds no capability. Two
-  gaps are open (SMD-3023): every container on `data` reads its `/metrics`,
-  and its `/probe`, which postgres_exporter cannot turn off, dials whatever
-  Postgres target and credentials its caller names — so a caller on
-  `telemetry` (lgtm, or a data source its admin adds) can try passwords
-  against Postgres through it, each failure in Postgres's log.
+  Postgres at its start, on every tier that copies the setting. Migration 092
+  creates the extension only as a superuser may: a migrator that is not one
+  leaves it out and says so. Its views are `pg_monitor`'s alone, and each
+  plain migrate run takes back a grant to `PUBLIC` that a restore without
+  privileges gives back (a tier refresh's). `pg-exporter` reads as
+  `ob1_monitor`, a member of Postgres's read-only `pg_monitor` alone, which
+  `pg-monitor-role` sets from `OB1_MONITOR_DB_PASSWORD` (24 or more of A–Z a–z
+  0–9 _ -) at each `up`: unset or short, `up -d` fails naming
+  `pg-monitor-role`, whose log (`compose logs pg-monitor-role`) says what to
+  set, and `pg-exporter` is created but never started; the rest of the stack
+  comes up (measured). It is on `data`, where Postgres is, and on the internal
+  `telemetry`, where the collector scrapes it; it publishes nothing, is
+  read-only, holds no capability. Two gaps are open (SMD-3023): every
+  container on `data` reads its `/metrics`, and its `/probe`, which
+  postgres_exporter cannot turn off, dials whatever Postgres target and
+  credentials its caller names — so a caller on `telemetry` (lgtm, or a data
+  source its admin adds) can try passwords against Postgres through it, each
+  failure in Postgres's log.
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1420,9 +1420,9 @@ was ready 4 s after it started (measured on podman 6, macOS); its image is
 It calls out to nothing by itself: what it would call is off — Grafana's
 plugin fetches, signing keys and preinstalled apps (so no Drilldown apps),
 usage reports, update checks, news feed, gravatars, cloud migration and
-external snapshots, and the backends' usage reports. On `mesh` and `telemetry`,
-both internal, it has no outward network; with `compose.grafana-port.yaml` its port's network reaches
-out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
+external snapshots, and the backends' usage reports. On `mesh` and
+`telemetry`, both internal, it has no outward network; with
+`compose.grafana-port.yaml` its port's network reaches out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
 switches are what keep it quiet. Snapshots, public dashboards and Grafana's
 own `/metrics` are off: each would show data without a sign-in. On `mesh` only
 Grafana (3000), the collector's OTLP (4317, 4318) and its health check (13133,
@@ -1449,8 +1449,9 @@ One on a `--port` of its own is not on stable's mesh, and says `ENOTFOUND`
 until the endpoint is out of its file (`OTEL_EXPORTER_OTLP_ENDPOINT=
 deploy/canary.sh --port <n> up`, an empty one in the shell, keeps it out of
 the canary's servers without an edit); `up` says so. `GRAFANA_*` and
-`OB1_MONITOR_*` are never carried. The three-brain stack (`compose.tiers.yaml`) runs no collector and
-passes the servers none of these variables.
+`OB1_MONITOR_*` are never carried. The three-brain stack
+(`compose.tiers.yaml`) runs no collector and passes the servers none of these
+variables.
 
 **Turning it off**: take `observability` and the endpoint out of
 `deploy/.env` and `compose up -d` without the Grafana `-f` files, then
