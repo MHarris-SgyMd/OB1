@@ -1830,10 +1830,10 @@ thought, then `upsert_thought` over a PostgREST this stack does not run
 A thought with no vector at all — the provider did not answer the capture's
 call, the egress gate refused it, or an import wrote it bare — needs no run of
 its own: the servers' vector mender embeds it once the provider answers and
-the gate allows, 8 rows a tick (`server-portable/README.md`, "The vector
+the gate allows, 8 rows a tick per server (`server-portable/README.md`, "The vector
 mender", SMD-2889), asking the gate what `reembed.ts` would ask of an import's
 row. `reembed.ts` is for a model change, a whole brain at once — an import of
-thousands is hours at 8 a minute — or a brain whose mender is off
+thousands is hours at 8 rows a tick per server — or a brain whose mender is off
 (`OB1_VECTOR_MEND_INTERVAL=off`). The two run side by side safely — each write
 carries the stamp it read, so neither writes over a newer text — but a row both
 reach may be embedded twice and written twice: `reembed.ts` re-reads a row

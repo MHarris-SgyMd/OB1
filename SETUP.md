@@ -188,7 +188,8 @@ changed policy takes effect when the server restarts (SMD-2889).
 Nor is a capture whose provider is down (stopped, unreachable, timing out or
 answering 5xx): it lands the same way, the reply saying the provider was
 unavailable, and the mender gives it its vector once the provider answers — 8
-rows every `OB1_VECTOR_MEND_INTERVAL` (60 s unless set; SMD-2888, SMD-2889). A refused search says which tool works without a model call
+rows a tick per server, every `OB1_VECTOR_MEND_INTERVAL` (60 s unless set;
+SMD-2888, SMD-2889). A refused search says which tool works without a model call
 (`search_thoughts_keyword`). Terms are `unit:value`, comma-separated — `actor`
 (the access key's name), `source`, `type`, `topic` (a row's metadata, known to
 the passes and the re-embed, not at a first capture), `marker` (a literal in the

@@ -3484,8 +3484,13 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     const gated: Record<string, string | undefined> = { ...env, OB1_LLM_LOCAL: undefined, OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: undefined };
     const gatedCore = createCore({ env: () => gated as never, store: async () => store, door: "open-brain" });
     const bodies = stubBodies.length;
+    // Deny with no allow term refuses every call: the tick is idle, nothing read.
+    const idle = await gatedCore.mendOnce(newMendState());
+    assert(idle.refusedAll !== null && idle.refused === 0 && (await rowOf(gid))?.bare === true && stubBodies.length === bodies, `deny, no term: idle, nothing read, no call, still vectorless (${idle.refusedAll})`);
+    // A term naming another key: this row refused, row by row, no call.
+    gated.OB1_EGRESS_ALLOW = "actor:someone-else";
     const refused = await sweep(gatedCore);
-    assert(refused.refused === 1 && refused.mended === 0 && (await rowOf(gid))?.bare === true && stubBodies.length === bodies, `deny, no term: refused, no call, still vectorless (${JSON.stringify(refused)})`);
+    assert(refused.refused >= 1 && refused.mended === 0 && (await rowOf(gid))?.bare === true && stubBodies.length === bodies, `deny, another key's term: refused, no call, still vectorless (${JSON.stringify(refused)})`);
     gated.OB1_EGRESS_ALLOW = `actor:${writer}`;
     const allowed = await sweep(gatedCore);
     assert(allowed.mended === 1 && (await rowOf(gid))?.bare === false, `an allow term naming the writer: mended (${JSON.stringify(allowed)}, writer ${writer})`);
@@ -3509,10 +3514,20 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     stubDown = "refused";
     for (let i = 0; i < 11; i++) await captureAs("e2e-key", `[21] gamma: refused row ${i}`);
     stubDown = null;
-    gated.OB1_EGRESS_ALLOW = undefined;
+    gated.OB1_EGRESS_ALLOW = "actor:someone-else";
     const waitingNow = (await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`)[0].n;
     const walk = await sweep(gatedCore);
     assert(waitingNow >= 11 && walk.refused === waitingNow && walk.mended === 0, `a sweep over ${waitingNow} refused rows, more than a page: each refused once, and the sweep ends (${JSON.stringify(walk)})`);
+
+    // The lock's connection dropped while held (a restart, an idle reaper):
+    // the unlock runs on a new session and finds nothing, and the lock went
+    // with the old one — let go, not a pooler's keeping.
+    const rel = await store.mendLock();
+    await sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%pg_try_advisory_lock(hashtext('ob1:vector-mender'))%"}`;
+    await Bun.sleep(100);
+    const letGo = await rel!().catch(() => true);
+    const [{ held: stillHeld }] = await sql`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory'`;
+    assert(letGo === true && stillHeld === 0, `a lock whose connection dropped: let go, and no advisory lock left (${letGo}, ${stillHeld})`);
 
     // The leader lock: held by another session (another server), a tick reads
     // and writes nothing; let go, the next acts.

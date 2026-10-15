@@ -86,32 +86,37 @@ gate refused, or one an import wrote bare. Both servers run one (`index.ts` and
 lock (`ob1:vector-mender`) taken on a connection of its own, never the pool's,
 so one tick acts at a time across the two and across replicas. Each server
 keeps its own cursor, holds and log; the lock only takes turns, so a brain's
-two servers mend up to twice as many rows a minute as one, and a held row is
+two servers mend up to 8 rows a tick each (16 an interval), and a held row is
 tried by each on its own schedule. A session lock needs a session: behind a
 pooler in statement or transaction mode it is not let go where it was taken
 (the mender says so, once) — point `DATABASE_URL` at Postgres, or set the knob
-off on every server but one. A tick reads in id order from where the last
-stopped, passing over the rows the gate refuses and the rows held, until it has
-made 8 provider calls, read 256 rows, or reached the end; it embeds each by the
-capture's own path — windows, blurbs and the head-window fallback included —
-and writes it through `update_thought` with the stamp it read: one `update`
-event per row, actor `vector-mender` (marked `background` on the audit row,
-which `db/sleep.ts` reads past, as it reads past an ingested write), the row's
-own stamp (who wrote the text, its trust) kept, the egress decision recorded,
-and its `updated_at` moved, as any event moves it — an agent holding the old
-stamp for `if_unchanged_since` re-reads. The provider away is one rule: a call
-that meets an outage before any call of the tick was answered stops the tick,
-one call spent, and the cursor passes the row, so an outage costs one call a
-tick and is said once; two outages in a row after an answer stop it too, one
-alone is that row's. The row a tick stopped on is told later: if the next
-tick's call is answered it failed alone or met the outage's end, and twice is
-held; the same row stopping three ticks running with nothing answered between
-— a text the provider fails alone, or the only row waiting through an outage —
-is held briefly (up to 8 sweeps). When the provider answers again after an
-outage, the rows the outage held are tried at once. A row whose call or write
-fails otherwise (a 4xx, the wrong width, a write the database refuses) is held
-for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a restart tries
-every row again. A database not there to answer stops the tick, and the loop
+off on every server but one. The lock's connection is one beyond
+`OB1_PG_POOL` per server. A tick reads in id order from where the last stopped,
+passing over the rows the gate refuses and the rows held, until it has embedded
+8 rows (a long row is a call per window and one for the whole, and a blurb call
+per window under `OB1_CHUNK_CONTEXT`), read 256 rows, or reached the end; a
+policy that refuses every call (deny with no allow term, an endpoint not
+declared local) makes it idle, said once. It embeds each by the capture's own
+path — windows, blurbs and the head-window fallback included — and writes it
+through `update_thought` with the stamp it read: one `update` event per row,
+actor `vector-mender` (marked `background` on the audit row, which
+`db/sleep.ts` reads past, as it reads past an ingested write), the row's own
+stamp (who wrote the text, its trust) kept, the egress decision recorded, and
+its `updated_at` moved, as any event moves it — an agent holding the old stamp
+for `if_unchanged_since` re-reads. The provider away is one rule, kept in the
+holds: a call that meets an outage before any call of the tick was answered
+stops the tick, one call spent, and holds the row as an outage's (1, 2, 4, up
+to 8 sweeps), so an outage costs a call a tick at most, fewer as its rows'
+holds grow, and is said once; after an answer an outage is the row's own
+failure, and a second in a row stops the tick and makes the first an outage's
+too. When the provider answers again the outage's holds are let go at once,
+the rows marked: one whose next call meets an outage again, with nothing to
+say the provider is away, failed alone and is held as its own. A sweep's end
+drops the holds of rows no longer waiting (mended by another writer, or
+deleted), and with no outage's hold left the outage is over. A row whose call
+or write fails otherwise (a 4xx, the wrong width, a write the database refuses)
+is held for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a
+restart tries every row again. A database not there to answer stops the tick, and the loop
 waits twice as long each time, up to 32 times the interval. The egress gate is
 asked what the row's writer asked: a row a key captured through a server (its
 capture's audit `origin` a server's name) as the capture was asked — the key

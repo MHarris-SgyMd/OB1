@@ -59,7 +59,7 @@ export function createCore(deps: CoreDeps) {
     },
     /** The longest one capture's model calls may run under this brain's settings, in seconds: what a webhook's id lease is sized from (SMD-2768). */
     captureSeconds: (): number => writes.captureCallSeconds(ctx.embedConfig(), resolveJevConfig(ctx.env())),
-    /** The vector mender's loop (SMD-2889): the MCP server starts one at boot, under OB1_VECTOR_MEND_INTERVAL. */
+    /** The vector mender's loop (SMD-2889): both servers start one at boot, under OB1_VECTOR_MEND_INTERVAL. */
     startVectorMender: bind(ctx, mend.startVectorMender),
     /** One tick of it, for a suite. */
     mendOnce: bind(ctx, mend.mendOnce),

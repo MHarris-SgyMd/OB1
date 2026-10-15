@@ -8,7 +8,8 @@
 // which writes the content fingerprint (003) with the text; a raw insert left the
 // fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
 // one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
-// here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
+// here, so the 2-argument form is resolved and the row waits for the servers'
+// vector mender (SMD-2889) or a re-embed pass. FORK.md
 // change 71; scripts/check-fork-consistency.ts check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
