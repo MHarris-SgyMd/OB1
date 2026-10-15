@@ -42,8 +42,8 @@
 # port 5432 and database openbrain unless named — and this builds the URL as
 # the stack's own services do, postgres://postgres:$POSTGRES_PASSWORD@HOST:PORT/DB,
 # with that side's password. A full postgres:// URL is passed through as given.
-# Every other argument goes to the target half's tier.ts unchanged (db/README.md
-# has its verbs); the source half gets the verb alone.
+# Every other argument goes to both halves' tier.ts unchanged (db/README.md has
+# its verbs), so a flag tier.ts refuses is refused before anything is dumped.
 #
 # Flags of this wrapper's own, all optional:
 #   --env-file PATH  the --to side's env file: its POSTGRES_PASSWORD builds a
@@ -55,7 +55,10 @@
 #                    stack's (deploy/canary.sh names stable's, SMD-2583): its
 #                    POSTGRES_PASSWORD builds a short-form --from's URL and its
 #                    project names that side's network; nothing else is read
-#                    from it. Unset, --from is on --env-file's stack
+#                    from it. Unset, --from is on --env-file's stack; and a
+#                    short-form --from on another network than --to's is
+#                    refused without it, since --to's password would be the
+#                    one handed to the other brain's side
 #   --project NAME   the --to side's project (default: the project --env-file
 #                    names, COMPOSE_PROJECT_NAME as compose reads it, else
 #                    compose.yaml's open-brain; SMD-2873): the image's name,
@@ -73,19 +76,23 @@
 # The environment is compose's: `compose config --environment` reads the env
 # file as the stack does (quotes, inline comments, `export`, CRLF, a BOM) under
 # the shell's own variables, which win there too. Of --env-file's, only what
-# tier.ts and migrate.ts read is handed to the target half: the OB1_* knobs
-# (migrate.ts's OB1_EMBEDDING_* and OB1_PLUGINS on a refresh) and
-# POSTGRES_PASSWORD, which builds the URL. Access keys, OPENROUTER_API_KEY (a
-# replay's embed fell back to it before the replay moved onto HTTP, SMD-2875),
-# LINEAR_API_KEY, the authorization server's OB1_AUTH_* settings (its signing
-# key, client secrets and password; SMD-2285) and the rest stay behind. The
-# source half gets its URL alone. Each half's values travel in a mode-600
+# tier.ts and migrate.ts read is handed to the target half, by name: the
+# knobs migrate.ts and db/config.mjs read (OB1_EMBEDDING_*, OB1_TRGM_INDEX,
+# OB1_BACKFILL_LIMIT, OB1_CHUNK_CONTEXT, OB1_METADATA_MODEL, OB1_LLM_BASE_URL,
+# OB1_PLUGINS and the plugin role's OB1_PLUGIN_DB_PASSWORD), OB1_TIER, and
+# POSTGRES_PASSWORD, which builds the URL. Every other OB1_* stays behind: the
+# provider keys, the worker keys, OB1_COMPARE_KEY (which `tier.ts --diff`
+# reads from the shell, and compose's reading carries) and the authorization
+# server's OB1_AUTH_* settings (SMD-2285, SMD-2875); so do access keys,
+# OPENROUTER_API_KEY, LINEAR_API_KEY and the rest. The source half gets its URL
+# alone. Each half's values travel in a mode-600
 # temporary env file, so they are not on this command line or the runtime's;
 # they are in the half's container environment (`inspect` shows it while it
 # runs), and its URL is on the argument lists inside it (bun's, migrate.ts's),
 # which a Linux host's `ps` shows (SMD-2119). The hand-off holds the source's
-# whole dump: it is on this CLI's pipe, and in the target's container until
-# the EXIT trap removes both.
+# whole dump: it is in the source half's container until the hand-off is
+# passed (the container is removed then), on this CLI's pipe, and in the
+# target's container until the EXIT trap removes it.
 #
 # Nothing else reaches a container's environment: the checkout is mounted, and
 # its own .env files (evals/.env, .env, deploy/.env, which db/env.ts would read,
@@ -163,12 +170,11 @@ while [ $# -gt 0 ]; do
       echo "$1 runs over HTTP now, each brain at its own URL with its own key, and needs no container (SMD-2875): bun db/tier.ts $1 --from <stable's MCP URL or connector> --to <the canary's>." >&2
       exit 2 ;;
     --refresh|--promote) VERBS+=("$1"); PASS+=("$1"); shift ;;
+    --handoff|--handoff=*) echo "--handoff is tier.sh's own: each half's container has its hand-off at /tmp/handoff." >&2; exit 2 ;;
     *) PASS+=("$1"); shift ;;
   esac
 done
-# The source half is handed the verb alone, so the wrapper must know it.
 [ "${#VERBS[@]}" = 1 ] || { echo "tier.sh runs one of --refresh and --promote, each as two halves (db/README.md has the verbs; --replay and --diff run over HTTP)." >&2; exit 2; }
-VERB="${VERBS[0]}"
 [ -n "$FROM" ] && [ -n "$TO" ] || { echo "tier.sh needs --from and --to (HOST[:PORT][/DB] on its side's network, or a postgres:// URL)." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 case "$SEEN" in *" --from-env-file "*)
@@ -179,6 +185,11 @@ case "$SEEN" in *" --from-env-file "*)
   [ -n "$FROM_ENV_FILE" ] || { echo "--from-env-file takes a file." >&2; exit 2; }
   [ -f "$FROM_ENV_FILE" ] || { echo "no env file at $FROM_ENV_FILE (--from-env-file)." >&2; exit 2; }
   [ -z "${POSTGRES_PASSWORD+set}" ] || { echo "POSTGRES_PASSWORD is set in the shell, where it wins over both env files and would give --from and --to one password: unset it to use --from-env-file." >&2; exit 2; }
+  # …and so does COMPOSE_PROJECT_NAME, which would read as both files' project
+  # and put both halves on one network, unless the projects are named here.
+  if [ -n "${COMPOSE_PROJECT_NAME+set}" ] && { [ -z "$PROJECT$NETWORK" ] || [ -z "$FROM_PROJECT$FROM_NETWORK" ]; }; then
+    echo "COMPOSE_PROJECT_NAME is set in the shell, where it wins over both env files and would name one project for both sides: unset it to use --from-env-file, or name the projects with --project and --from-project." >&2; exit 2
+  fi
   ;;
 esac
 
@@ -299,17 +310,22 @@ while IFS= read -r line; do
   name="${line%%=*}"
   case "$name" in
     OB1_ALLOW_REMOTE_DB|OB1_ENV_FILE|OB1_ENV_FILES) continue ;;
-    # The authorization server's settings (its signing key, client secrets and
-    # the operator's password) are not tier.ts's, and stay behind (SMD-2285;
-    # deploy/auth/provision.ts --self-check runs this loop). A line of its
-    # own: db/test-connect.ts reads the one above as names alone.
-    OB1_AUTH_*) continue ;;
-    OB1_*|POSTGRES_PASSWORD) ;;
+    # By name, what migrate.ts and db/config.mjs read on a refresh: no other
+    # OB1_* setting (a provider's key, a worker's, OB1_COMPARE_KEY, the
+    # authorization server's) reaches the container (SMD-2285, SMD-2875;
+    # deploy/auth/provision.ts --self-check runs this loop, and
+    # db/test-connect.ts reads the line above as names alone).
+    OB1_EMBEDDING_*|OB1_TRGM_INDEX|OB1_BACKFILL_LIMIT|OB1_CHUNK_CONTEXT|OB1_METADATA_MODEL|OB1_LLM_BASE_URL|OB1_PLUGINS|OB1_PLUGIN_DB_PASSWORD|OB1_TIER|POSTGRES_PASSWORD) ;;
     *) continue ;;
   esac
   printf '%s\n' "$line" >> "$TMP_ENV"
-  [ "$name" = POSTGRES_PASSWORD ] && POSTGRES_PASSWORD="${line#*=}"
+  # An if, not `[ … ] &&`: as the body's last command, a false test would be
+  # the loop's status when the last line handed on is not the password, and
+  # set -e would end the script there (review pass 1).
+  if [ "$name" = POSTGRES_PASSWORD ]; then POSTGRES_PASSWORD="${line#*=}"; fi
 done <<< "$RESOLVED"
+
+is_url() { case "$1" in postgres://*|postgresql://*) return 0 ;; esac; return 1; }
 
 # The --from database's password: --from-env-file's, read the same way, when
 # --from is another stack's with a password of its own (deploy/canary.sh's
@@ -318,6 +334,10 @@ done <<< "$RESOLVED"
 FROM_PASSWORD="$POSTGRES_PASSWORD"
 if [ -n "$FROM_ENV_FILE" ]; then
   FROM_PASSWORD="$(resolve_env "$FROM_ENV_FILE" | sed -n 's/^POSTGRES_PASSWORD=//p' | head -n 1)"
+elif [ "$FROM_NETWORK" != "$NETWORK" ] && ! is_url "$FROM"; then
+  # Another brain's network with no env file of its own: the only password to
+  # build its URL from is --to's, which that brain must never be handed.
+  echo "--from is on $FROM_NETWORK, not --to's network, and no --from-env-file gives its password: name that brain's env file with --from-env-file (or give --from as a postgres:// URL)." >&2; exit 2
 fi
 
 # Percent-encode for the userinfo part of a URL: a password holding @, / or :
@@ -335,8 +355,6 @@ urlencode() {
   done
   printf '%s' "$out"
 }
-
-is_url() { case "$1" in postgres://*|postgresql://*) return 0 ;; esac; return 1; }
 
 # HOST[:PORT][/DB] PASSWORD FILE → postgres://postgres:…@HOST:PORT/DB, FILE
 # named when PASSWORD is empty; a URL as given. Called as an assignment, so its
@@ -398,7 +416,7 @@ SRC_CID="$("$RUNTIME" create --init \
   -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
-  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --handoff /tmp/handoff' tier "$VERB")"
+  sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --handoff /tmp/handoff' tier ${PASS[@]+"${PASS[@]}"})"
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
 DST_CID="$("$RUNTIME" create --init \
   --network "$NETWORK" \
@@ -420,7 +438,7 @@ run_half() {
     # never ran (docker's created, podman's configured: start's own failure,
     # a network removed since the check), or a state this does not know
     # (dead, paused): not done, whatever start said
-    *) exit $(( start_rc ? start_rc : 1 )) ;;
+    *) echo "a tier half's container did not run to its end (start exited $start_rc); nothing after it ran." >&2; exit $(( start_rc ? start_rc : 1 )) ;;
   esac
   [ "$status" = 0 ] || exit "$status"
 }
@@ -431,4 +449,7 @@ run_half "$SRC_CID"
 # ownership: Docker Engine's cp makes a copy root's without it, and the
 # directory is mode 700 (podman's cp keeps it either way; measured).
 "$RUNTIME" cp "$SRC_CID:/tmp/handoff" - | "$RUNTIME" cp -a - "$DST_CID:/tmp/" || { echo "could not pass the hand-off from the source half's container to the target half's." >&2; exit 1; }
+# The source half's container holds the source's URL and the dump: not kept
+# through the target half.
+"$RUNTIME" rm -f "$SRC_CID" >/dev/null 2>&1 && SRC_CID=""
 run_half "$DST_CID"

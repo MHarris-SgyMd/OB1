@@ -62,7 +62,7 @@ import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, parsePromoteSource, parseRefreshSource, promote, promoteSource, promoteTarget, refresh, refreshSource, refreshTarget, refreshToolsReady, settleRefreshed, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, parsePromoteSource, parseRefreshSource, promote, promoteSource, promoteTarget, refresh, refreshSource, refreshTarget, refreshToolsReady, sameDatabase, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -7355,7 +7355,26 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
                pg_catalog.current_database() AS database`)[0];
       const refusedBy = async (run: () => Promise<unknown>) => { try { await run(); return "no refusal"; } catch (e) { return (e as Error).message; } };
       process.env.PATH = `${toolDir}:${savedPath}`;
+      const savedAllow = process.env[REMOTE_DB_FLAG];
       try {
+        // Both halves in one process run the target's guards before anything
+        // is dumped: with a usable pg_dump on PATH, a refusal on --to (stable,
+        // stamped tier=stable) leaves no pg_dump call at all (review pass 1:
+        // dumping first passed every check while the tools were absent).
+        const beforeDump = await refusedBy(() => refresh(canaryUrl, URL_!, "canary"));
+        assert(/stamped tier=stable/.test(beforeDump) && !existsSync(argsLog), `a refresh refused on --to calls no pg_dump first (${beforeDump.slice(0, 80)}; pg_dump ${existsSync(argsLog) ? "was called" : "was not called"})`);
+        // Each half asks the URL rules of its own side (review pass 1): the
+        // target half a remote --to without the override, the source half a
+        // --from with no host.
+        delete process.env[REMOTE_DB_FLAG];
+        mkdirSync(handDir);
+        const remoteTo = await refusedBy(() => refreshTarget(handDir, "postgres://u@example.com:5432/b", "canary"));
+        const hostlessFrom = await refusedBy(() => refreshSource("postgres:///b", join(handDir, "never")));
+        rmSync(handDir, { recursive: true, force: true });
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
+        assert(/^--to is not plainly this machine — example\.com is not a loopback host/.test(remoteTo), `the target half refuses a remote --to without OB1_ALLOW_REMOTE_DB (${remoteTo.slice(0, 90)})`);
+        assert(/^--from: .*Refusing: --refresh dumps --from/.test(hostlessFrom), `the source half refuses a --from that names no host (${hostlessFrom.slice(0, 90)})`);
+
         await refreshSource(URL_!, handDir);
         const facts = JSON.parse(readFileSync(join(handDir, "source.json"), "utf8"));
         const dumpArgs = readFileSync(argsLog, "utf8");
@@ -7367,6 +7386,12 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
             && /--role=pg_read_all_data/.test(dumpArgs) && !carriesPassword
             && existsSync(join(handDir, "stable.dump")) && (statSync(join(handDir, "source.json")).mode & 0o777) === 0o600,
           `the source half writes its facts (mode 600) and its dump, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
+        assert(/--handoff: .* already exists; name a directory this run can make, mode 700/.test(await refusedBy(() => refreshSource(URL_!, handDir))),
+          "the source half refuses a hand-off directory that exists (it keeps its own mode, and the dump goes in it)");
+        // The identity's three parts each decide (the halves cannot ask each other's server).
+        const me = facts.identity;
+        assert(sameDatabase(me, { ...me }) && !sameDatabase(me, { ...me, system: `${me.system}1` }) && !sameDatabase(me, { ...me, started: `${me.started}1` }) && !sameDatabase(me, { ...me, database: `${me.database}x` }),
+          "sameDatabase: one database only when the cluster, its start and the database name all agree (a volume copy started at another time is another)");
         assert(/--from and --to name the same database/.test(await refusedBy(() => refreshTarget(handDir, URL_!, "canary"))),
           "the target half refuses the source half's own database, by the identity in the hand-off (targetRefusal would refuse it too, in other words)");
         writeFileSync(join(handDir, "source.json"), JSON.stringify({ ...facts, identity: await identityOf(canarySql) }));
@@ -7376,6 +7401,7 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
           ["the refresh mark, the target's own", { ...facts, settings: { "ob1.refresh_target": "canary" } }],
           ["a major that is not a number", { ...facts, major: "16" }],
           ["no identity", { ...facts, identity: undefined }],
+          ["a setting value that is not text", { ...facts, settings: { "hnsw.ef_search": 5 } }],
         ] as const) {
           writeFileSync(join(handDir, "source.json"), JSON.stringify(bad));
           const why = await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"));
@@ -7388,6 +7414,7 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
         assert(/source\.json could not be read \(ENOENT\)/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "…and one without its facts");
 
         // promote's halves: the canary read, stable stamped.
+        rmSync(handDir, { recursive: true, force: true });
         await promoteSource(canaryUrl, handDir);
         const promoted = JSON.parse(readFileSync(join(handDir, "promote.json"), "utf8"));
         assert(parsePromoteSource(promoted) !== null && promoted.identity.database === canaryDb, `the promote's source half writes the canary's identity and version (${promoted.version})`);
@@ -7398,8 +7425,11 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
         assert(/--from and --to name the same database/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "the promote's target half refuses stable as its own canary, by identity");
         writeFileSync(join(handDir, "promote.json"), JSON.stringify({ ...promoted, version: 44 }));
         assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and a hand-off whose version is not text");
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ version: promoted.version }));
+        assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and one with no identity");
       } finally {
         process.env.PATH = savedPath;
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
         rmSync(handDir, { recursive: true, force: true });
         rmSync(toolDir, { recursive: true, force: true });
         await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;

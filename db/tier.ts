@@ -184,7 +184,7 @@ async function databaseIdentity(sql: SQL): Promise<DatabaseIdentity> {
   return row;
 }
 
-const sameDatabase = (a: DatabaseIdentity, b: DatabaseIdentity): boolean =>
+export const sameDatabase = (a: DatabaseIdentity, b: DatabaseIdentity): boolean =>
   a.system === b.system && a.started === b.started && a.database === b.database;
 
 const isIdentity = (v: unknown): v is DatabaseIdentity => {
@@ -442,6 +442,22 @@ const HANDOFF = { source: "source.json", dump: "stable.dump", promote: "promote.
 /** What a refresh's source half hands its target half, beside the dump. */
 export type RefreshSource = { identity: DatabaseIdentity; major: number; settings: Record<string, string> };
 
+/**
+ * Make a hand-off directory, mode 700, refusing one that exists: an existing
+ * directory keeps its own mode (/tmp's is world-readable), and the dump of the
+ * whole source is about to go in it (review pass 1).
+ */
+async function makeHandoff(dir: string): Promise<void> {
+  try {
+    await mkdir(dir, { mode: 0o700 });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    throw new Error(code === "EEXIST"
+      ? `--handoff: ${dir} already exists; name a directory this run can make, mode 700 (the source's dump goes in it).`
+      : `--handoff: could not make ${dir} (${code ?? (e as Error).message}).`);
+  }
+}
+
 /** The URL rules a refresh asks of a side before it opens either (connect.ts). */
 function refuseRefreshUrl(side: "--from" | "--to", url: string): void {
   // connect.ts's one rule, the test scaffolding's too. Each URL must be one
@@ -659,7 +675,7 @@ export async function refreshSource(fromUrl: string, dir: string): Promise<void>
   refuseRefreshUrl("--from", fromUrl);
   const { source, fromAs, readOnly } = await readRefreshSource(fromUrl);
   await requireRefreshTools(source.major);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await makeHandoff(dir);
   await dumpSource(fromUrl, fromAs, readOnly, join(dir, HANDOFF.dump));
   await writeFile(join(dir, HANDOFF.source), JSON.stringify(source), { mode: 0o600 });
 }
@@ -801,7 +817,7 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
 /** A promote's source half (deploy/tier.sh's container on the canary's network alone, SMD-2875). */
 export async function promoteSource(canaryUrl: string, dir: string): Promise<void> {
   const source = await readPromoteSource(canaryUrl);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await makeHandoff(dir);
   await writeFile(join(dir, HANDOFF.promote), JSON.stringify(source), { mode: 0o600 });
 }
 

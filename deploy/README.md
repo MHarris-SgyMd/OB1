@@ -1966,34 +1966,47 @@ the services here do, with that side's `POSTGRES_PASSWORD`. A full
   password of its own (the canary's refresh names stable's; SMD-2583), or
   `--from-project NAME`, and `--from-network NAME` names its network. With none
   of these, `--from` is on the `--to` side's network. Only the password and
-  the project are read from `--from-env-file`.
+  the project are read from `--from-env-file`. A short-form `--from` on
+  another network with no `--from-env-file` is refused, since the only
+  password to build its URL from would be `--to`'s. So is a
+  `COMPOSE_PROJECT_NAME` in the shell beside `--from-env-file`, where it would
+  name one project for both sides, unless `--project` and `--from-project`
+  (or the networks) name them.
 
 Each of `--network` and `--from-network` is one network: a list is refused,
 since a container on two would reach both brains. `--promote`'s `--from` is the
 canary and its `--to` stable, so there `--env-file` is stable's. `--runtime` is
-`docker` or `podman` (docker when it is on the PATH). The source half is handed
-the verb alone, and anything else goes to the target half's `tier.ts` as given.
-A wrapper flag given twice is refused.
+`docker` or `podman` (docker when it is on the PATH). Anything else goes to
+both halves' `tier.ts` as given, so a flag it refuses is refused before
+anything is dumped; `--handoff` is the wrapper's own. A wrapper flag given
+twice is refused.
 
 The env file (`--env-file`, default `deploy/.env`) is read by compose itself,
 through `compose config --environment`. So a quoted value, an inline comment,
 an `export` line, CRLF line endings or a byte-order mark read here as they do
 for the stack. A variable set in the shell wins over the file, as it does
 there. Only what `tier.ts` and `migrate.ts` read is handed to the target half,
-and the source half gets its URL alone:
-- the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` and `OB1_PLUGINS`
-  on a refresh);
+by name, and the source half gets its URL alone:
+- the knobs `migrate.ts` and `db/config.mjs` read on a refresh:
+  `OB1_EMBEDDING_*`, `OB1_TRGM_INDEX`, `OB1_BACKFILL_LIMIT`,
+  `OB1_CHUNK_CONTEXT`, `OB1_METADATA_MODEL`, `OB1_LLM_BASE_URL`, `OB1_PLUGINS`
+  and the plugin role's `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
 - `POSTGRES_PASSWORD`.
 
-Access keys, `OPENROUTER_API_KEY` (a replay's embed fell back to it until the
-replay moved onto HTTP, SMD-2875), `LINEAR_API_KEY`, `OLLAMA_BASE` and the
-authorization server's `OB1_AUTH_*` settings stay behind. The values travel in a temporary
+Every other `OB1_*` setting stays behind: the provider and worker keys,
+`OB1_COMPARE_KEY` (which `tier.ts --diff` reads from the shell, and compose's
+reading would carry) and the authorization server's `OB1_AUTH_*` settings. So
+do access keys, `OPENROUTER_API_KEY` (a replay's embed fell back to it until
+the replay moved onto HTTP, SMD-2875), `LINEAR_API_KEY` and `OLLAMA_BASE`. The values travel in a temporary
 env file per half (mode 600, removed on exit), so they are not on the
 wrapper's command line or the runtime's. They are in each half's container
 environment, which `inspect` shows while it runs, and its URL is on the
 argument lists of bun and `migrate.ts` inside it, which a Linux host's `ps`
-shows (SMD-2119). The hand-off holds the source's whole dump: it is on the
-CLI's pipe, then in the target's container until the wrapper removes both. The checkout's own `.env` files are mounted with the code and
+shows (SMD-2119). The hand-off holds the source's whole dump: it is in the
+source half's container until the hand-off is passed (that container is
+removed then), on the CLI's pipe, and in the target's container until the
+wrapper removes it. A `--handoff` given to `tier.ts` itself must not exist yet:
+it is made mode 700. The checkout's own `.env` files are mounted with the code and
 switched off: `OB1_ENV_FILES=off` stops `db/env.ts` reading them, and
 `bun --no-env-file`, run from a working directory outside the checkout, stops
 Bun's auto-load. So only the stack's environment reaches `tier.ts`.
