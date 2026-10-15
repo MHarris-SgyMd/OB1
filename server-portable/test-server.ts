@@ -191,7 +191,9 @@ console.log("\n[2] Runtime neutrality");
   // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
   const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
   const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
-  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc]]) {
+  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, is the Worker's as much as index.ts is.
+  const edgeSrc = await Bun.file(new URL("./mcp-edge.ts", import.meta.url)).text();
+  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc], ["mcp-edge.ts", edgeSrc]]) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
@@ -852,7 +854,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
   // /health is the probe target for platforms that can only GET and want 2xx:
   // it needs no key, and without one it says `ok` and nothing else. The match
-  // rule is the HEALTH_PATH comment in index.ts; these rows pin it. A key
+  // rule is the comment above index.ts's /health route (HEALTH_PATH is mcp-edge.ts's); these rows pin it. A key
   // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
@@ -915,6 +917,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const answer = (text: string): unknown[] => {
     statements.push(text);
     if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (lockProposals && /FROM supersession_proposals p\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/FROM board_findings_posted/.test(text)) {
+      if (findingsRefused) throw pgError("permission denied for table board_findings_posted", "42501");
+      return findingsAnswer;
+    }
     if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
     if (/FROM schema_migrations/.test(text)) {
       if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
@@ -924,8 +931,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/server_version/.test(text)) {
       return [{
         postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
-        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true },
-        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public" },
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true, board_findings_posted: catalogFindings },
+        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public", ...(catalogFindings ? { board_findings_posted: "public" } : {}) },
         hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
         tickets_linked: catalogLinked,
       }];
@@ -951,6 +958,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let boardTimeout = false;
   let lockFacets = false;
   let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
+  let catalogFindings = false;
+  let findingsRefused = false;
+  let lockProposals = false;
+  let findingsAnswer: Record<string, unknown>[] = [];
   let failRelease: RegExp | null = null;
   let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   const slow = new Set<string>();
@@ -1070,6 +1082,76 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
       && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
     `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // What became of the findings posted to the board (SMD-2682): a stats read
+  // where 087's table resolves, each (pair, word) by its outcome, the found
+  // apart; null and unnamed without the table; refused, malformed or behind a
+  // refused lock on thought_facets, unread with the rest standing.
+  const day = 86_400;
+  const at0 = new Date("2026-10-01T00:00:00.000Z");
+  const fRow = (o: Record<string, unknown>) => ({ posted_on: o.ticket_b, origin: "posted", posted_at: at0, linked_s: null, accepted: 0, rejected: 0, stale: 0, pending: 0, accepted_s: null, rejected_s: null, stands: null, ...o });
+  findingsAnswer = [
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "related", age_s: 40 * day, linked_s: 3 * day, stands: true }),
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "outdates", age_s: 40 * day, accepted: 1, accepted_s: 1 * day }),
+    fRow({ ticket_a: "SMD-3", ticket_b: "SMD-4", word: "outdates", age_s: 10 * day, posted_at: new Date("2026-10-02T00:00:00.000Z"), rejected: 1, rejected_s: 2 * day, linked_s: day }),
+    fRow({ ticket_a: "SMD-5", ticket_b: "SMD-6", word: "evolves", age_s: 40 * day, stands: true }),
+    fRow({ ticket_a: "SMD-7", ticket_b: "SMD-8", word: "related", age_s: 5 * day, stands: true }),
+    fRow({ ticket_a: "SMD-9", ticket_b: "SMD-10", word: "outdates", age_s: 5 * day, stale: 1 }),
+    fRow({ ticket_a: "SMD-11", ticket_b: "SMD-12", word: "duplicate", origin: "found", age_s: 2 * day, stands: false }),
+  ];
+  catalogFindings = true;
+  statements.length = 0;
+  const told = await readDatabaseFacts(fake);
+  const leanTold = await readDatabaseFacts(fake, { stats: false });
+  const toldSent = statements.filter((t) => /FROM board_findings_posted/.test(t)).length;
+  findingsRefused = true;
+  const toldRefused = await readDatabaseFacts(fake);
+  findingsRefused = false;
+  lockFacets = true;
+  const toldLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  // A lock refused on the queue's table: the queue's read waits on it once,
+  // and the findings read — after it, joining it — is not tried (review pass 1:
+  // it ran first and waited too).
+  lockProposals = true;
+  statements.length = 0;
+  const toldQueueLocked = await readDatabaseFacts(fake);
+  const queueSent = statements.filter((t) => /FROM supersession_proposals/.test(t)).length;
+  lockProposals = false;
+  findingsAnswer = [fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "supersedes", age_s: 1 })];
+  const toldOdd = await readDatabaseFacts(fake);
+  findingsAnswer = [];
+  const toldNone = await readDatabaseFacts(fake);
+  catalogFindings = false;
+  const wantTold = { posted: 6, comments: 5, found: 1, accepted: 2, rejected: 1, withdrawn: 0, open: 2, unanswered: 1, windowDays: 30, medianAnswerS: 2 * day };
+  assert(JSON.stringify(told.findings) === JSON.stringify(wantTold) && !("findings" in told.unread) && leanTold.findings === null && toldSent === 1 && facts.findings === null && !("findings" in facts.unread)
+      && toldRefused.findings === null && toldRefused.unread.findings?.reason === "refused" && toldRefused.relations?.related === 9
+      && toldLocked.findings === null && /not tried — a lock on thought_facets/.test(toldLocked.unread.findings?.message ?? "")
+      && toldQueueLocked.proposals === null && toldQueueLocked.unread.proposals?.reason === "timeout" && /not tried — a lock on supersession_proposals/.test(toldQueueLocked.unread.findings?.message ?? "") && queueSent === 1
+      && toldOdd.findings === null && toldOdd.unread.findings?.reason === "error" && JSON.stringify(toldNone.findings) === JSON.stringify({ ...wantTold, posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, medianAnswerS: null }),
+    `the findings posted are a stats read of 087's table, by outcome, the found apart; absent, null and unnamed; refused, malformed or behind a refused lock, unread (${JSON.stringify(told.findings)}, ${JSON.stringify(toldLocked.unread.findings)}, ${JSON.stringify(toldOdd.unread.findings)})`);
+  const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
+  const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 1, comments: 1, withdrawn: 1 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000)),
+    // A brain behind this server: the read names 091's column (SMD-2913, review pass 1).
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.pass_settled_at does not exist" } } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.reviewed_at does not exist" } } }), 1000))]
+    .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
+  assert(toldRows.join("\n") === [
+    "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — acceptance 50% (2 of 4: accepted over accepted, rejected and unanswered), median 2 d to an answer; 1 found on the board from another poster",
+    "Findings:        none posted",
+    "Findings:        ? (board_findings_posted not readable by this role)",
+    "Findings:        no table — migration 087 is not applied",
+    "Findings:        2 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 2 open, 0 withdrawn — no rate yet (none answered, none past the window)",
+    "Findings:        1 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 1 withdrawn — no rate yet (none answered, none past the window)",
+    "(no row)",
+    "Findings:        ? (thought_facets not read in time)",
+    "Findings:        ? (not read in time)",
+    "Findings:        ? (migration 091 is not applied)",
+    "Findings:        ? (not read)",
+  ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, no row without the stats, and 091 named when its column is absent (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [
     { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },
@@ -3809,7 +3891,8 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
 
 console.log("\n[25] Each request a point on the request-duration histogram and a log record (SMD-1849 PR 2c), a fault's kind and code on its span and never its message, and each signal said by itself when it is not sent");
 {
-  const { beginRequest, cutOpenRequests, faultOf, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { beginRequest, cutOpenRequests, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { faultOf } = await import("./spans.ts");
   const { batchOptions, batchSizes, flushesResult, flushSignal, logDrops, metricTimes, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
   const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
@@ -4171,6 +4254,614 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   dropMeter.createCounter("otel.sdk.processor.log.processed").add(1);
   dropMeter.createHistogram("h").record(1);
   assert(counted.join() === "2", `the log batch's meter counts its queue's drops alone (${counted.join()})`);
+}
+
+console.log("\n[26] A provider call, a store operation and a job's body under spans of their own (SMD-1849 PR 2d): a provider's model, host and token counts, a store's operation and SQLSTATE, a job's own trace linked to its call — a point each, no text, no userinfo — and nothing in a process that installs no tracing");
+{
+  const { beginRequest, cutOpenRequests, flushTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
+  const { faultOf, useTracing, withSpan, withStoreSpan } = await import("./spans.ts");
+  const { OTEL_TRACING, openSpanCount } = await import("./tracing.ts");
+  const { providerCall, resolveEmbedConfig } = await import("./embed.ts");
+  const { createStore, tracedStore } = await import("./store.ts");
+  const { markRunningLost, startJob } = await import("./jobs.ts");
+  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  type Span = import("@opentelemetry/sdk-trace-base").ReadableSpan;
+  type Point = { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } };
+  const PLANTED = "planted-2d-text-7c31";
+  const spans = new InMemorySpanExporter();
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+  let started = false;
+  try {
+    started = await startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured }) }));
+  } finally {
+    if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
+  }
+  const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
+  const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === name);
+  const pointsOf = async (name: string) => {
+    await flushTelemetry();
+    return (measured.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === name).flatMap((m) => m.dataPoints as unknown as Point[]);
+  };
+  const said = () => JSON.stringify([spans.getFinishedSpans().map((s) => [s.name, s.attributes, s.events, s.links]), measured.getMetrics()]);
+  // A provider that answers each model its own way: tokens counted, a 503, a body that is not JSON, and one that never answers.
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: [0.1, 0.2] }], usage: { prompt_tokens: 7, total_tokens: 7, completion_tokens: PLANTED } });
+      const { model } = (await req.json()) as { model: string };
+      if (model === "slow-model") return new Promise<Response>(() => {});
+      if (model === "refused-model") return new Response(`overloaded ${PLANTED}`, { status: 503 });
+      if (model === "garbled-model") return new Response("not json");
+      if (model === "huge-tokens") return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 1e308, completion_tokens: 2 ** 64 } });
+      if (model === "negative-tokens") return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: -1, completion_tokens: 3 } });
+      return Response.json({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 11, completion_tokens: 3 } });
+    },
+  });
+  try {
+    assert(started, "the suite's SDK is started as a server's is");
+    const LOCAL = { OB1_LLM_LOCAL: "1", OB1_CHAT_LOCAL: "1" };
+    const cfg = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://user:${PLANTED}@127.0.0.1:${provider.port}/v1`, OB1_LLM_TIMEOUT: "0.3" });
+    const nowhere = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
+    const SUBJ = { kind: "capture" as const };
+    const chat = (model: string, at = cfg) => providerCall(at, "/chat/completions", { model, messages: [{ role: "user", content: PLANTED }] }, SUBJ);
+    const ends: string[] = [];
+    await withToolSpan("capture_thought", async () => {
+      await providerCall(cfg, "/embeddings", { model: "embed-model", input: PLANTED }, SUBJ);
+      await chat("chat-model");
+      for (const model of ["refused-model", "garbled-model", "slow-model", `bad model ${PLANTED}`]) ends.push(await chat(model).then(() => "answered", (e: Error) => e.name));
+      ends.push(await chat("chat-model", nowhere).then(() => "answered", (e: Error) => e.name));
+    });
+    const tool = named("execute_tool capture_thought");
+    const calls = spans.getFinishedSpans().filter((s) => s.kind === SpanKind.CLIENT);
+    assert(calls.length === 7 && calls.every((s) => s.parentSpanContext?.spanId === tool?.spanContext().spanId && s.spanContext().traceId === tool?.spanContext().traceId),
+      `each provider call a client span, a child of the tool call that made it (${calls.map((s) => s.name).join(", ")})`);
+    const embed = named("embeddings embed-model");
+    const answered = named("chat chat-model");
+    assert(JSON.stringify(attrs(embed)) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port, "gen_ai.usage.input_tokens": 7, "ob1.outcome": "ok" })
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(embed?.resource.attributes["service.instance.id"]))
+      && attrs(answered)["gen_ai.usage.input_tokens"] === 11 && attrs(answered)["gen_ai.usage.output_tokens"] === 3 && answered?.status.code === SpanStatusCode.UNSET,
+      `a call's span: the GenAI conventions' name and operation, its model, the endpoint's host and port, the answer's token counts; the process's own instance id on the resource (${JSON.stringify([attrs(embed), attrs(answered)])})`);
+    const failedAs = (name: string) => { const s = named(name); return s?.status.code === SpanStatusCode.ERROR ? attrs(s)["error.type"] : "not an error"; };
+    assert(ends.slice(0, 3).join() === "ProviderError,ProviderError,ProviderError" && failedAs("chat refused-model") === "503" && failedAs("chat garbled-model") === "invalid_body" && failedAs("chat slow-model") === "timeout"
+      && named("chat ?") !== undefined && named(`chat bad model ${PLANTED}`) === undefined
+      && JSON.stringify(named("chat refused-model")?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "ProviderError" }]]),
+      `a failed call: the provider's status, a body that is not JSON, the deadline — each its error.type, the throw's kind on its span; a model's name that is no name is \`?\` (${JSON.stringify(calls.map((s) => [s.name, attrs(s)["error.type"]]))})`);
+    const refusedConnection = calls.find((s) => attrs(s)["server.port"] === 1);
+    assert(ends[4] !== "answered" && refusedConnection?.status.code === SpanStatusCode.ERROR && attrs(refusedConnection)["error.type"] === "ECONNREFUSED" && calls.every((s) => s.links.length === 0),
+      `a connection refused: the runtime's own error, by its code or kind (${JSON.stringify(attrs(refusedConnection))})`);
+    const providerPoints = await pointsOf("gen_ai.client.operation.duration");
+    const pointOf = (model: string) => providerPoints.find((p) => p.attributes["gen_ai.request.model"] === model && p.attributes["server.port"] === provider.port);
+    assert(providerPoints.length === 7 && JSON.stringify(pointOf("embed-model")?.attributes) === JSON.stringify({ "gen_ai.operation.name": "embeddings", "gen_ai.request.model": "embed-model", "server.address": "127.0.0.1", "server.port": provider.port })
+      && pointOf("refused-model")?.attributes["error.type"] === "503" && (pointOf("slow-model")?.value.sum ?? 0) >= 0.25 && (pointOf("slow-model")?.value.sum ?? 99) < 5
+      && providerPoints.every((p) => p.value.count === 1) && pointOf("embed-model")?.value.buckets.boundaries.at(-1) === 327.68
+      && !("gen_ai.usage.input_tokens" in (pointOf("embed-model")?.attributes ?? {})),
+      `each call a point on gen_ai.client.operation.duration: its operation, model, host and port, and how it failed; no token count as a label (${JSON.stringify(providerPoints.map((p) => [p.attributes, p.value.sum]))})`);
+    assert(!said().includes(PLANTED) && !said().includes("user:"), "no text sent, no answer's words, no base's userinfo in a span or a point");
+    // An IPv6 host as the conventions spell an address, without the brackets a URL keeps it in (review pass 1).
+    await chat("chat-model", resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://[::1]:1/v1" })).catch(() => {});
+    const six = spans.getFinishedSpans().filter((s) => attrs(s)["server.port"] === 1).map((s) => attrs(s)["server.address"]);
+    assert(six.join() === "127.0.0.1,::1", `an IPv6 provider's address without its brackets (${six.join()})`);
+    // A base with no port is the scheme's; a model's name past 128 characters is no name (review pass 2).
+    spans.reset();
+    await chat("a".repeat(128), resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: "http://127.0.0.1/v1", OB1_LLM_TIMEOUT: "2" })).catch(() => {});
+    await chat("a".repeat(129)).catch(() => {});
+    const bounded = spans.getFinishedSpans().map((s) => [attrs(s)["gen_ai.request.model"], attrs(s)["server.port"]]);
+    assert(JSON.stringify(bounded) === JSON.stringify([["a".repeat(128), 80], ["?", provider.port]]), `a base with no port is the scheme's, 80; a model's name of 129 characters is \`?\` (${JSON.stringify(bounded).slice(0, 120)})`);
+    // A token count past a safe integer is none: an export holding 1e308 as an int64 is refused whole (review pass 3).
+    spans.reset();
+    await chat("huge-tokens");
+    await chat("negative-tokens");
+    const huge = attrs(named("chat huge-tokens"));
+    const negative = attrs(named("chat negative-tokens"));
+    assert(!("gen_ai.usage.input_tokens" in huge) && !("gen_ai.usage.output_tokens" in huge) && huge["ob1.outcome"] === "ok"
+      && !("gen_ai.usage.input_tokens" in negative) && negative["gen_ai.usage.output_tokens"] === 3,
+      `a token count of 1e308, 2^64 or -1 is no count on the span; a count beside it is kept (${JSON.stringify([huge, negative])})`);
+    // A status no HTTP failure has is \`_OTHER\`: a runtime takes any three digits (review pass 3).
+    const { createServer } = await import("node:net");
+    // Answers each request with the status its model names (`s300`), 999 for any other.
+    const odd = createServer((socket) => {
+      let got = "";
+      socket.on("data", (chunk) => {
+        got += chunk.toString();
+        if (!/"model":"[^"]*"/.test(got)) return;
+        const status = /"model":"s(\d+)"/.exec(got)?.[1] ?? "999";
+        socket.end(`HTTP/1.1 ${status} Odd\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno`);
+      });
+    });
+    await new Promise<void>((done) => odd.listen(0, "127.0.0.1", () => done()));
+    try {
+      const oddPort = (odd.address() as { port: number }).port;
+      spans.reset();
+      const oddAt = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://127.0.0.1:${oddPort}/v1` });
+      for (const model of ["chat-model", "s300", "s599", "s600"]) await chat(model, oddAt).catch(() => {});
+      const oddTypes = spans.getFinishedSpans().filter((s) => attrs(s)["server.port"] === oddPort).map((s) => [attrs(s)["gen_ai.request.model"], attrs(s)["error.type"]]);
+      assert(JSON.stringify(oddTypes) === JSON.stringify([["chat-model", "_OTHER"], ["s300", "300"], ["s599", "599"], ["s600", "_OTHER"]]),
+        `a provider's status from 300 to 599 is itself; 600 or 999, \`_OTHER\`, no series of its own (${JSON.stringify(oddTypes)})`);
+    } finally {
+      odd.close();
+    }
+
+    // A store's operations, each a client span under its call; the store's own methods on the store itself (a private field reads).
+    spans.reset();
+    class FakeStore {
+      #rows = 3;
+      readonly kind = "sql" as const;
+      async countThoughts() { return this.#rows; }
+      async getThought() { throw Object.assign(new Error(`duplicate ${PLANTED}`), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno: "23505" }); }
+      async listThoughts() { throw Object.assign(new Error("broken pipe"), { code: "EPIPE" }); }
+      async deleteThought() { throw Object.assign(new Error("raised"), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno: "P0001" }); }
+      async pluginTx<T>(_plugin: string, fn: (sql: never) => Promise<T>) { return this.#rows > 0 ? fn(undefined as never) : fn(undefined as never); }
+      jobSink() { return null; }
+      async close() { return this.#rows; }
+    }
+    const store = tracedStore(new FakeStore() as unknown as import("./store.ts").ThoughtStore);
+    let counted = 0;
+    const storeEnds: string[] = [];
+    await withToolSpan("thought_stats", async () => {
+      counted = await store.countThoughts();
+      storeEnds.push(await store.getThought("x").then(() => "answered", (e: Error) => e.name));
+      storeEnds.push(await store.listThoughts({} as never).then(() => "answered", (e: Error) => e.name));
+      storeEnds.push(await store.deleteThought({ id: "x" }).then(() => "answered", (e: Error) => e.name));
+      await store.pluginTx!("example-plugin", async () => 1);
+      await store.pluginTx!(`Bad ${PLANTED}`, async () => 1);
+      store.jobSink("mcp");
+      storeEnds.push(String(await store.close()), typeof store.toString());
+    });
+    const statsTool = named("execute_tool thought_stats");
+    const ops = spans.getFinishedSpans().filter((s) => s.kind === SpanKind.CLIENT);
+    const txs = spans.getFinishedSpans().filter((s) => s.name === "pluginTx");
+    assert(counted === 3 && storeEnds.join() === "PostgresError,Error,PostgresError,3,string" && ops.map((s) => s.name).join() === "countThoughts,getThought,listThoughts,deleteThought"
+      && ops.every((s) => s.parentSpanContext?.spanId === statsTool?.spanContext().spanId),
+      `each store operation a client span under its call, the store's own method on the store itself, its throw rethrown as it came; no span for the job sink's maker, the close (on the store itself) or an inherited member (${ops.map((s) => s.name).join()}; ${storeEnds.join()})`);
+    assert(JSON.stringify(attrs(ops[0])) === JSON.stringify({ "db.system.name": "postgresql", "db.operation.name": "countThoughts", "ob1.store": "sql", "ob1.outcome": "ok" })
+      && attrs(ops[1])["error.type"] === "23505" && attrs(ops[1])["db.response.status_code"] === "23505" && ops[1].status.code === SpanStatusCode.ERROR
+      && attrs(ops[2])["error.type"] === "EPIPE" && !("db.response.status_code" in attrs(ops[2]))
+      && attrs(ops[3])["error.type"] === "P0001" && attrs(ops[3])["db.response.status_code"] === "P0001",
+      `a store span: the operation, the store's kind, a fault's SQLSTATE as its status code — a plpgsql raise's P0001 too, a system error's five letters not (${JSON.stringify(ops.map(attrs))})`);
+    assert(txs.length === 2 && txs.every((s) => s.kind === SpanKind.INTERNAL && s.parentSpanContext?.spanId === statsTool?.spanContext().spanId)
+      && attrs(txs[0])["ob1.plugin"] === "example-plugin" && attrs(txs[1])["ob1.plugin"] === "?" && !("db.operation.name" in attrs(txs[0]))
+      && attrs(txs[0])["db.system.name"] === "postgresql" && attrs(txs[0])["ob1.store"] === "sql" && !said().includes(PLANTED),
+      `a plugin's transaction: an internal span with its plugin's name held to a plugin's and the store's, no database operation; no fault's message or plugin name planted in any store span (${JSON.stringify(txs.map((s) => [s.kind, attrs(s)]))})`);
+    const storePoints = await pointsOf("db.client.operation.duration");
+    assert(storePoints.length === 4 && JSON.stringify(storePoints.find((p) => p.attributes["db.operation.name"] === "getThought")?.attributes) === JSON.stringify({ "db.system.name": "postgresql", "db.operation.name": "getThought", "ob1.store": "sql", "error.type": "23505", "db.response.status_code": "23505" })
+      && storePoints.every((p) => p.attributes["db.operation.name"] !== "pluginTx" && !("ob1.plugin" in p.attributes) && p.value.count === 1)
+      && storePoints[0]?.value.buckets.boundaries.join() === "0.0005,0.001,0.0025,0.005,0.0075,0.01,0.025,0.05,0.075,0.1,0.25,0.5,0.75,1,2.5,5,10,30,60",
+      `each operation one point on db.client.operation.duration, none for a plugin's transaction, whose time is the plugin's own code (${JSON.stringify(storePoints.map((p) => [p.attributes, p.value.count]))})`);
+    // The store's kind is the store's own.
+    spans.reset();
+    await tracedStore(Object.assign(new FakeStore(), { kind: "postgrest" }) as unknown as import("./store.ts").ThoughtStore).countThoughts();
+    assert(attrs(named("countThoughts"))["ob1.store"] === "postgrest", `a span's store kind is the store's (${JSON.stringify(attrs(named("countThoughts")))})`);
+    // The configured store is the wrapped one: an operation on a database that is not there is a span that failed.
+    spans.reset();
+    const real = await createStore({ DATABASE_URL: "postgres://u:pw@127.0.0.1:1/x" });
+    await real.countThoughts().catch(() => {});
+    await real.close().catch(() => {});
+    const realSpan = named("countThoughts");
+    assert(realSpan?.status.code === SpanStatusCode.ERROR && attrs(realSpan)["ob1.store"] === "sql" && !said().includes("u:pw"), `createStore's store spans its operations (${JSON.stringify(attrs(realSpan))})`);
+
+    // A job's body starts a trace of its own, linked to the call that started it; what it does is its child.
+    spans.reset();
+    const principal = { keyHash: "h".repeat(64), name: "w" };
+    let ran: Promise<unknown> = Promise.resolve();
+    const track = <T,>(r: () => Promise<T>) => { const p = r(); ran = p; return p; };
+    await withToolSpan("scan_thoughts", async () => startJob(principal, "scan_thoughts", async () => store.countThoughts(), { track }));
+    await ran;
+    await withToolSpan("scan_thoughts", async () => startJob(principal, "scan_thoughts", async () => { throw new TypeError(PLANTED); }, { track }));
+    await ran;
+    const callSpans = spans.getFinishedSpans().filter((s) => s.name === "execute_tool scan_thoughts");
+    const jobs = spans.getFinishedSpans().filter((s) => s.name === "job scan_thoughts");
+    const inJob = named("countThoughts");
+    assert(jobs.length === 2 && jobs.every((j, i) => j.parentSpanContext === undefined && j.spanContext().traceId !== callSpans[i]?.spanContext().traceId && j.links[0]?.context.spanId === callSpans[i]?.spanContext().spanId)
+      && inJob?.parentSpanContext?.spanId === jobs[0].spanContext().spanId && inJob?.spanContext().traceId === jobs[0].spanContext().traceId
+      && attrs(jobs[0])["ob1.job.kind"] === "scan_thoughts" && attrs(jobs[0])["ob1.outcome"] === "ok"
+      && attrs(jobs[1])["error.type"] === "TypeError" && jobs[1].status.code === SpanStatusCode.ERROR && !said().includes(PLANTED),
+      `a job's body: a root span of its own, linked to its call, its store operations its children; a body that throws an error by its kind, never its message (${JSON.stringify(jobs.map((j) => [attrs(j), j.links.length, j.parentSpanContext?.spanId]))})`);
+    spans.reset();
+    const quiet = (signal: AbortSignal) => new Promise<string>((resolve) => signal.addEventListener("abort", () => resolve("partial"), { once: true }));
+    startJob(principal, "scan_thoughts", (job) => quiet(job.signal), { track, maxRunMs: 50 });
+    await ran;
+    startJob(principal, "scan_thoughts", () => Bun.sleep(300).then(() => "late"), { track, maxRunMs: 50 });
+    await ran;
+    const timedOut = spans.getFinishedSpans().filter((s) => s.name === "job scan_thoughts");
+    const msOf = (t: readonly [number, number]) => t[0] * 1e3 + t[1] / 1e6;
+    assert(timedOut.length === 2 && timedOut.every((s) => attrs(s)["ob1.outcome"] === "error" && attrs(s)["error.type"] === "JOB_TIMEOUT" && s.status.code === SpanStatusCode.ERROR)
+      && msOf(timedOut[1].endTime) - msOf(timedOut[1].startTime) < 280,
+      `a job its timer fails: an error by the record's code, ended as the timer fires — whether its body returns quietly on the abort or runs on (${JSON.stringify(timedOut.map((s) => [attrs(s), Math.round(msOf(s.endTime) - msOf(s.startTime))]))})`);
+    const jobPoints = await pointsOf("ob1.job.duration");
+    const jobPoint = (type: string | undefined) => jobPoints.find((p) => p.attributes["ob1.job.kind"] === "scan_thoughts" && p.attributes["error.type"] === type);
+    assert(jobPoint("JOB_TIMEOUT")?.value.count === 2 && jobPoint(undefined)?.value.count === 1 && jobPoint("TypeError")?.value.count === 1 && jobPoint("JOB_TIMEOUT")?.value.buckets.boundaries.join() === "0.1,0.5,1,5,10,30,60,300,600,1800,3600",
+      `each job one point on ob1.job.duration, by its kind and how it failed (${JSON.stringify(jobPoints.map((p) => [p.attributes, p.value.count]))})`);
+    startJob(principal, `Kind ${PLANTED}`, async () => 1, { track });
+    await ran;
+    assert(attrs(named("job ?"))["ob1.job.kind"] === "?", `a job's kind that is no kind as the code names one is \`?\` (${spans.getFinishedSpans().map((s) => s.name).join(", ")})`);
+    // A tool call's throw is `error` by its outcome, as it has been since PR 2b, not by the throw's kind: a tool's code is its reply's.
+    spans.reset();
+    await withToolSpan("thought_stats", async () => { throw new TypeError("x"); }).catch(() => {});
+    const thrownTool = named("execute_tool thought_stats");
+    assert(attrs(thrownTool)["error.type"] === "error" && attrs(thrownTool)["ob1.outcome"] === "error" && thrownTool?.events[0]?.attributes?.["exception.type"] === "TypeError",
+      `a tool call that throws: error.type \`error\`, its kind on its event (${JSON.stringify([attrs(thrownTool), thrownTool?.events.map((e) => e.attributes)])})`);
+    // A job the stop loses before any cut ends: an error by the record's code (review pass 2).
+    spans.reset();
+    startJob(principal, "scan_thoughts", () => new Promise<never>(() => {}), { track: (r) => void r() });
+    markRunningLost();
+    const lost = named("job scan_thoughts");
+    assert(attrs(lost)["error.type"] === "SERVER_STOPPING" && lost?.status.code === SpanStatusCode.ERROR, `a job lost at the stop, no cut first: an error by its code (${JSON.stringify(attrs(lost))})`);
+
+    // The stop's cut ends what is still running: a job's body and a provider call that never answers.
+    spans.reset();
+    const patient = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_TIMEOUT: "30" });
+    const pending = chat("slow-model", patient).catch(() => {});
+    void startJob(principal, "scan_thoughts", () => new Promise<never>(() => {}), { track: (r) => void r() });
+    await Bun.sleep(50);
+    cutOpenRequests();
+    const cut = spans.getFinishedSpans();
+    assert(cut.map((s) => [s.name, attrs(s)["ob1.outcome"]]).sort().join(";") === "chat slow-model,cut;job scan_thoughts,cut" && cut.every((s) => s.status.code === SpanStatusCode.ERROR),
+      `the stop's cut ends a provider call and a job's body still running, each \`cut\` (${JSON.stringify(cut.map((s) => [s.name, attrs(s)["ob1.outcome"]]))})`);
+    // The record as the stop's drain leaves it, so no later section inherits a job still running.
+    markRunningLost();
+    provider.stop(true);
+    await pending;
+
+    // A process that installs no tracing — a db/ worker, an eval — makes no span, with an SDK running beside it: the work runs, and that is all.
+    spans.reset();
+    useTracing(undefined);
+    let untraced: number | undefined;
+    try {
+      untraced = await withSpan("nothing", {}, async (span) => { span.set({ a: 1 }); span.fault(new Error("x")); span.end("error", "X"); return 5; });
+    } finally {
+      useTracing(OTEL_TRACING);
+    }
+    const traced = await withSpan("something", {}, async () => 6);
+    assert(openSpanCount() === 0, `every work span ended leaves the registry, so the stop's cut finds none (${openSpanCount()} open)`);
+    assert(JSON.stringify([new DOMException("x", "AbortError"), new DOMException("x", "TimeoutError")].map(faultOf)) === JSON.stringify([{ kind: "AbortError" }, { kind: "TimeoutError" }]),
+      `an abort's or a timeout's DOMException by its name, not its legacy number (${JSON.stringify([new DOMException("x", "AbortError"), new DOMException("x", "TimeoutError")].map(faultOf))})`);
+    assert(untraced === 5 && traced === 6 && spans.getFinishedSpans().map((s) => s.name).join() === "something",
+      `with no tracing installed a span is nothing and the work's value comes back; installed again, it is a span (${spans.getFinishedSpans().map((s) => s.name).join()})`);
+  } finally {
+    provider.stop(true);
+    await stopTelemetry();
+  }
+
+  // Each setup its own instance: two processes under one service name are two series (review passes 3–4).
+  {
+    const resourceOf = async () => {
+      const exporter = new InMemorySpanExporter();
+      const set = setUpTelemetry("open-brain-test", { exporter });
+      try {
+        await withSpan("probe", {}, async () => {});
+        return exporter.getFinishedSpans()[0]?.resource.attributes ?? {};
+      } finally {
+        await set.shutdown();
+      }
+    };
+    const idOf = async () => String((await resourceOf())["service.instance.id"]);
+    const ids = [await idOf(), await idOf()];
+    assert(ids.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) && ids[0] !== ids[1], `each setup a fresh service.instance.id (${ids.join(", ")})`);
+    // A pipeline tier's brain names its tier on the resource; a plain brain, or a word that is no tier, names none (SMD-1849 PR 3a).
+    const savedTier = process.env.OB1_TIER;
+    const savedAttributes = process.env.OTEL_RESOURCE_ATTRIBUTES;
+    const tiers: unknown[] = [];
+    const over: unknown[] = [];
+    try {
+      delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      for (const tier of ["stable", "canary", "working", " canary ", undefined, "prod"]) {
+        if (tier === undefined) delete process.env.OB1_TIER;
+        else process.env.OB1_TIER = tier;
+        tiers.push((await resourceOf())["deployment.environment.name"]);
+      }
+      // A canary whose env file carries stable's OTEL_RESOURCE_ATTRIBUTES still says canary; a plain brain keeps the operator's own (review pass 2).
+      process.env.OTEL_RESOURCE_ATTRIBUTES = "deployment.environment.name=stable";
+      process.env.OB1_TIER = "canary";
+      over.push((await resourceOf())["deployment.environment.name"]);
+      delete process.env.OB1_TIER;
+      over.push((await resourceOf())["deployment.environment.name"]);
+    } finally {
+      if (savedTier === undefined) delete process.env.OB1_TIER;
+      else process.env.OB1_TIER = savedTier;
+      if (savedAttributes === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      else process.env.OTEL_RESOURCE_ATTRIBUTES = savedAttributes;
+    }
+    assert(JSON.stringify(tiers) === JSON.stringify(["stable", "canary", "working", "canary", null, null]) && tiers[4] === undefined && tiers[5] === undefined,
+      `each pipeline tier is deployment.environment.name on the resource, read trimmed as root.ts reads it; unset or not a tier, none (${JSON.stringify(tiers)})`);
+    assert(JSON.stringify(over) === JSON.stringify(["canary", "stable"]),
+      `a tier's name wins over OTEL_RESOURCE_ATTRIBUTES's, which a plain brain keeps (${JSON.stringify(over)})`);
+  }
+  // An SDK that throws as a span starts, is told, or ends is never the work's undoing: a write that landed is
+  // reported as it landed, a throw as the work's own (review pass 1).
+  {
+    const otelApi = await import("@opentelemetry/api");
+    const boom = () => { throw new Error("the SDK fell over"); };
+    const broken = { spanContext: () => otelApi.INVALID_SPAN_CONTEXT, setAttribute: boom, setAttributes: boom, addEvent: boom, addLink: boom, addLinks: boom, setStatus: boom, updateName: boom, end: boom, isRecording: () => true, recordException: boom };
+    let starts = 0;
+    otelApi.trace.setGlobalTracerProvider({ getTracer: () => ({ startSpan: () => (++starts === 3 ? boom() : broken), startActiveSpan: boom }) } as never);
+    let writes = 0;
+    const own = new Error("the work's own");
+    try {
+      const landed = await withStoreSpan("captureThought", "sql", async () => { writes++; return "landed"; });
+      const thrown = await withStoreSpan("getThought", "sql", async () => { throw own; }).then(() => undefined, (e: unknown) => e);
+      const unstarted = await withStoreSpan("countThoughts", "sql", async () => 7);
+      assert(landed === "landed" && writes === 1 && thrown === own && unstarted === 7 && openSpanCount() === 0,
+        `an SDK that throws loses its span, not the work: the write's value, the work's own throw, the work run with no span (${landed}, ${writes}, ${thrown === own}, ${unstarted})`);
+      // …and a request's own span: one whose start throws, and one whose end does, each still ends with its line (review pass 2).
+      const requestLines: string[] = [];
+      let requestThrew = false;
+      try {
+        starts = 2;
+        const unspanned = beginRequest("api", new Request("http://api/v1/whoami"), (r) => requestLines.push(requestLine(r)));
+        unspanned.end({ status: 200 });
+        beginRequest("api", new Request("http://api/v1/stats"), (r) => requestLines.push(requestLine(r))).end({ status: 200 });
+      } catch {
+        requestThrew = true;
+      }
+      assert(!requestThrew && requestLines.length === 2, `an SDK that throws as a request's span starts or ends fails no request: each line written (${requestThrew}, ${requestLines.length})`);
+    } finally {
+      otelApi.trace.disable();
+    }
+  }
+}
+
+console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2)");
+  {
+    const { telemetryRow } = await import("./telemetry.ts");
+    const GOES = "telemetry: open-brain-preflight's spans and metrics go to http://c:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849)";
+    const BOTH = { traces: "http://c:4318/v1/traces", metrics: "http://c:4318/v1/metrics" };
+    const base = { started: true, said: [GOES], urls: BOTH, probes: 2, sent: "sent" as const, boundMs: 5000 };
+    const cells = [
+      telemetryRow({ ...base, started: false, said: [], urls: {} }),
+      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_SDK_DISABLED=true: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
+      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
+      telemetryRow({ ...base, urls: { logs: "http://c:4318/v1/logs" }, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_TRACES_EXPORTER=none: no spans are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, probes: 0, sent: "none" }),
+      telemetryRow({ ...base, probes: 0, sent: "none", said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, sent: "none" }),
+      telemetryRow({ ...base, said: [GOES, 'telemetry: OTEL_TRACES_EXPORTER "console" is not read (only otlp or none): spans go as OTLP/HTTP JSON (SMD-1849)'] }),
+      telemetryRow({ ...base, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
+      telemetryRow({ ...base, sent: "failed", said: [GOES, "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)", "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)"] }),
+      telemetryRow({ ...base, sent: "timeout" }),
+      telemetryRow({ ...base, urls: { traces: BOTH.traces } }),
+    ];
+    assert(JSON.stringify(cells.map((c) => [c.status, c.fix !== undefined])) === JSON.stringify([
+      ["skip", false], ["skip", false], ["warn", true], ["skip", false], ["skip", false], ["warn", true], ["ok", false], ["ok", false], ["warn", true], ["warn", true], ["warn", true], ["ok", false],
+    ]) && /^no collector named/.test(cells[0].detail) && /^the probes' spans and points go nowhere — .*OTEL_TRACES_EXPORTER=none/.test(cells[3].detail)
+      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans and metrics go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
+      && /^the provider probes' spans and points sent — .*is not an http\(s\) URL/.test(cells[8].detail)
+      && /^the provider probes' spans and points not all sent — /.test(cells[9].detail) && cells[9].detail.split("HTTP 400").length === 2
+      && /^the provider probes' spans and points not all sent within 5 s — /.test(cells[10].detail) && /^the provider probes' spans sent — /.test(cells[11].detail),
+      `the telemetry row: no collector, a skip; off on purpose, a skip; a wrong endpoint, a warning, sent or not and probed or not; nothing left after probes ran, sent; a loss once; the timeout's bound; spans alone (${JSON.stringify(cells.map((c) => [c.status, c.detail.slice(0, 60)]))})`);
+  }
+
+console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, nor does any db/ worker or eval through server-portable/'s files: none of them installs one (SMD-1849 PR 2d)");
+{
+  const scanner = new Bun.Transpiler({ loader: "ts" });
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { dirname, resolve } = await import("node:path");
+  const reached = (entry: string): string[] => {
+    const seen = new Set<string>();
+    const bare = new Set<string>();
+    const walk = (file: string) => {
+      if (seen.has(file) || !existsSync(file)) return;
+      seen.add(file);
+      for (const i of scanner.scan(readFileSync(file, "utf8")).imports) {
+        if (i.kind === "dynamic-import") continue;
+        if (i.path.startsWith(".")) walk(resolve(dirname(file), i.path));
+        // Through server-portable/'s own files alone: a db/ or evals/ file's own package (PGlite) is its directory's install.
+        else if (!i.path.startsWith("node:") && i.path !== "bun" && file.startsWith(import.meta.dir)) bare.add(`${file.slice(import.meta.dir.length + 1)} → ${i.path}`);
+      }
+    };
+    walk(resolve(import.meta.dir, entry));
+    return [...bare];
+  };
+  const { readdirSync } = await import("node:fs");
+  // Every file under db/ and evals/ that names server-portable/, nested directories too (evals/orchestration/), installs aside.
+  const importers = ["db", "evals"].flatMap((dir) => (readdirSync(resolve(import.meta.dir, "..", dir), { recursive: true }) as string[])
+    .filter((f) => /\.(ts|mjs)$/.test(f) && !f.includes("node_modules") && readFileSync(resolve(import.meta.dir, "..", dir, f), "utf8").includes("/server-portable/"))
+    .map((f) => `../${dir}/${f}`));
+  const entries = ["spans.ts", "embed.ts", "store.ts", "jobs.ts", ...importers];
+  const packages = entries.map((e) => [e, reached(e)] as const).filter(([, p]) => p.length > 0);
+  assert(importers.length > 10 && packages.length === 0, `spans.ts, embed.ts, store.ts and jobs.ts — and every one of the ${importers.length} db/ and evals/ files that import server-portable/ — reach no package through server-portable/'s files, so a worker with no server-portable/ install still runs (${JSON.stringify(packages)})`);
+}
+
+console.log("\n[29] capture_thought's reply says what a re-capture did to a capture-only key's label — moved, kept, settled (by whom, and whose), unweighed — from 090's answer, and nothing from none, a body before 090, or no label (SMD-2898)");
+{
+  const { normaliseRecaptureLabel } = await import("./store.ts");
+  const { renderCapture } = await import("./render.ts");
+  const ID = "00000000-0000-4000-8000-000000002898";
+  const hook = { actor_kind: "agent", actor_name: "session-hook", trust: "ingested" }, op = { actor_kind: "operator", actor_name: "op-key", trust: "operator" }, bot = { actor_kind: "agent", actor_name: "bot-key", trust: "agent" };
+  const labels = {
+    moved: normaliseRecaptureLabel({ outcome: "moved", stamp: op, before: hook }),
+    kept: normaliseRecaptureLabel({ outcome: "kept", stamp: hook, weighed: "agent", own: true }),
+    keptNameOnly: normaliseRecaptureLabel({ outcome: "kept", stamp: hook, weighed: "agent", own: false }),
+    mine: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op, mine: true }),
+    other: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op, mine: false }),
+    unsaid: normaliseRecaptureLabel({ outcome: "settled", by: "restamp", stamp: op }),
+    declined: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key", decliner_weighed: false }),
+    declinedWeighed: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key", decliner_weighed: true }),
+    declinedUnsaid: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: "bot-key" }),
+    declinedNameless: normaliseRecaptureLabel({ outcome: "settled", by: "decline", stamp: hook, decliner: null, decliner_weighed: true }),
+    unweighed: normaliseRecaptureLabel({ outcome: "unweighed", stamp: hook }),
+  };
+  const nothing = [
+    normaliseRecaptureLabel({ outcome: "none" }), normaliseRecaptureLabel(true), normaliseRecaptureLabel(false), normaliseRecaptureLabel(null),
+    normaliseRecaptureLabel({ outcome: "moved", stamp: op }), normaliseRecaptureLabel({ outcome: "kept" }), normaliseRecaptureLabel({ outcome: "lifted", stamp: op }), normaliseRecaptureLabel([{ outcome: "kept", stamp: hook }]),
+    normaliseRecaptureLabel({ outcome: "settled", stamp: op, mine: true }), normaliseRecaptureLabel({ outcome: "settled", by: "someone", stamp: op }),
+  ];
+  const { moved, kept, keptNameOnly, mine, other, unsaid, declined, declinedWeighed, declinedUnsaid, declinedNameless, unweighed } = labels;
+  assert(JSON.stringify(moved) === JSON.stringify({ outcome: "moved", stamp: { actorKind: "operator", actorName: "op-key", trust: "operator" }, before: { actorKind: "agent", actorName: "session-hook", trust: "ingested" } })
+      && kept?.outcome === "kept" && kept.weighed === "agent" && kept.own === true && keptNameOnly?.outcome === "kept" && keptNameOnly.own === false
+      && mine?.outcome === "settled" && mine.by === "restamp" && mine.mine === true && other?.outcome === "settled" && other.by === "restamp" && other.mine === false
+      && unsaid?.outcome === "settled" && unsaid.by === "restamp" && unsaid.mine === false && declined?.outcome === "settled" && declined.by === "decline" && !("mine" in declined) && declined.decliner === "bot-key" && declined.declinerWeighed === false
+      && declinedWeighed?.outcome === "settled" && declinedWeighed.by === "decline" && declinedWeighed.declinerWeighed === true && declinedUnsaid?.outcome === "settled" && declinedUnsaid.by === "decline" && declinedUnsaid.declinerWeighed === false && declinedNameless?.outcome === "settled"
+      && unweighed?.outcome === "unweighed" && nothing.every((n) => n === undefined),
+    `090's answer as the store's label; none, 085's boolean, a body with no stamp (a move with no before), a settle by no one it names, an outcome this server does not know, and an array are no label (${JSON.stringify(nothing)})`);
+  const base = { id: ID, existed: true, reader: true, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null };
+  const reply = (label: unknown) => renderCapture({ ok: true, value: { ...base, ...(label === undefined ? {} : { label }) } } as never);
+  const text = (label: unknown) => reply(label).content[0].text;
+  const plain = text(undefined);
+  assert(plain === `Captured as observation — id ${ID}` && !("label" in (reply(undefined).structuredContent ?? {})), `no label: the reply as before 090, its structured content with no label (${plain})`);
+  const t = Object.fromEntries(Object.entries(labels).map(([k, v]) => [k, text(v)]));
+  const PUT_BACK = "An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands.";
+  const REOPEN = "An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands.";
+  assert(t.moved === `${plain}\n\nNote: this re-capture landed on ${ID}, which already held the text under a capture-only key's label (session-hook — kind agent, trust ingested). Its label moved to your key: op-key — kind operator, trust operator. The outside-text notice goes, and min_trust searches up to operator include it. No later re-capture moves it. ${PUT_BACK}`,
+    `moved: the label the capture-only key's, then the caller's; lifted out of ingested, what fetch and min_trust now do; no later re-capture moves it, the reset puts it back (${t.moved.split("\n").pop()})`);
+  const into = text(normaliseRecaptureLabel({ outcome: "moved", stamp: { ...bot, trust: "ingested" }, before: { ...hook, trust: null } }));
+  const sideways = text(normaliseRecaptureLabel({ outcome: "moved", stamp: op, before: bot }));
+  assert(/Its label moved to your key: bot-key — kind agent, trust ingested\. It now shows under fetch's outside-text notice, and min_trust searches find it at ingested and leave it out above\. No later re-capture moves it\./.test(into)
+      && !/outside-text notice/.test(sideways) && /Its label moved to your key: op-key — kind operator, trust operator\. No later re-capture moves it\./.test(sideways),
+    "a move into ingested says the notice now shows (review pass 2); one between two other trusts says nothing of it");
+  assert(t.kept.endsWith(`under a capture-only key's label (session-hook — kind agent, trust ingested), and the label was kept: the trust your key was weighed at (agent) does not rank above it. The row is now settled against every other key (your own key's later re-capture is still weighed). ${REOPEN}`)
+      && t.keptNameOnly.endsWith(`The row is now settled against every key, yours included. ${REOPEN}`),
+    `kept: weighed and not higher, settled, the reset reopening it; the own-key clause only for a key with an agent id (review pass 1) (${t.keptNameOnly.split("\n").pop()})`);
+  assert(t.mine.endsWith(`; its label is already your key's (op-key — kind operator, trust operator), from an earlier re-capture. A label moves once, so this re-capture moved nothing. ${PUT_BACK}`)
+      && t.other.endsWith(`, and an earlier re-capture by another key moved its label to that key: op-key — kind operator, trust operator. This re-capture moved nothing. ${PUT_BACK}`)
+      && t.declined.endsWith(`, and an earlier re-capture settled it against every key, leaving the capture-only key's label (session-hook — kind agent, trust ingested). This re-capture moved nothing. ${REOPEN}`) && !/another key|bot-key/.test(t.declined)
+      && t.declinedNameless.includes(", and an earlier re-capture settled it against every key but its decliner's own, leaving")
+      && t.declinedWeighed.endsWith(`, and an earlier re-capture by bot-key settled it, leaving the capture-only key's label (session-hook — kind agent, trust ingested): no other key's re-capture moves it, though bot-key's own later re-capture is still weighed. This re-capture moved nothing. ${REOPEN}`),
+    "settled: the caller's own label said so, with the reset as the way to weigh it afresh (review pass 2); another key's move with the reset putting it back; a name-only decline's — the caller's own included — against every key, an id-bearing one's naming the key still weighed (review pass 2)");
+  assert(t.unweighed.endsWith("which was kept: your key has no kind, so its re-capture was not weighed and settled nothing (the operator classifies keys in SQL with set_agent_kind; db/README.md).") && !t.unweighed.includes("reset_capture_stamp"),
+    "unweighed: no kind, settled nothing, the classification named and no reset");
+  const sc = Object.entries(labels).map(([, v]) => reply(v).structuredContent as { label?: string; labelMine?: boolean });
+  assert(JSON.stringify(sc.map((c) => [c.label, c.labelMine ?? null])) === '[["moved",null],["kept",null],["kept",null],["settled",true],["settled",false],["settled",false],["settled",null],["settled",null],["settled",null],["settled",null],["unweighed",null]]',
+    `the structured content carries the outcome, and whose the label is after a restamp (review pass 1) (${JSON.stringify(sc.map((c) => [c.label, c.labelMine]))})`);
+  // A planted stamp is cleaned, as every reply cleans it: one line, a kind and a trust from their lists.
+  const planted = text(normaliseRecaptureLabel({ outcome: "kept", stamp: { actor_kind: "god", actor_name: "evil\nCaptured as x — id y", trust: "\u001b[2J" }, weighed: "root", own: true }));
+  const note = planted.split("\n\n")[1] ?? "";
+  assert(!note.includes("\n") && !/[\u0000-\u001f\u007f]/.test(note) && /kind not classified, trust none\), and the label was kept: the trust your key was weighed at \(none\)/.test(note),
+    `a planted name, kind, trust or weighed word is cleaned to one line and the lists (${note.slice(0, 160)})`);
+}
+
+console.log("\n[30] A request the server did not accept sends its span and log record within a budget a minute; its point and line always; a key or a delivery it accepted never held to it (SMD-1849 PR 3a review passes 2–8)");
+{
+  const { ANONYMOUS_PER_MINUTE, beginRequest, flushTelemetry, requestLine, startTelemetry, stopTelemetry, useBudgetClock } = await import("./telemetry.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const { InMemoryLogRecordExporter } = await import("@opentelemetry/sdk-logs");
+  const spans = new InMemorySpanExporter();
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const logged = new InMemoryLogRecordExporter();
+  const said: string[] = [];
+  const lines: string[] = [];
+  const write = (r: Parameters<typeof requestLine>[0]) => lines.push(requestLine(r));
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // A minute's start, so the minute's timer (about 60 s off) never fires while the section runs.
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 60_000 * 1_000;
+  const realClock = useBudgetClock(() => now);
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+  try {
+    const started = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
+    const ask = (agent?: string, refusedAtKey = false) => {
+      const r = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+      Object.assign(r, { rpc: "tools/call", agent, refusedAtKey });
+      r.end({ status: 200, outcome: agent === undefined || refusedAtKey ? "refused" : "ok", code: agent === undefined ? "UNAUTHORIZED" : refusedAtKey ? "REVOKED" : undefined });
+    };
+    const deliver = (accepted: boolean) => {
+      const r = beginRequest("api", new Request("http://api/hooks/example/capture", { method: "POST" }), write);
+      Object.assign(r, { route: "/hooks/example/capture", hookAccepted: accepted });
+      r.end(accepted ? { status: 202, outcome: "ok" } : { status: 401, outcome: "refused", code: "UNAUTHORIZED" });
+    };
+    const counted = () => said.filter((l) => l.includes("the server did not accept"));
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE + 5; i++) ask();
+    ask("MCP_ACCESS_KEY");
+    ask("revoked-key", true);
+    deliver(true);
+    deliver(false);
+    const unsaidBeforeFlush = counted().length;
+    await flushTelemetry();
+    const pointsCount = () => durationPoints(measured).reduce((n, p) => n + p.value.count, 0);
+    const doors = (agentless: boolean) => spans.getFinishedSpans().filter((s) => (s.attributes["ob1.agent"] === undefined) === agentless).length;
+    const hookSpans = () => spans.getFinishedSpans().filter((s) => s.attributes["http.route"] === "/hooks/example/capture").map((s) => s.attributes["ob1.outcome"]);
+    assert(started && ANONYMOUS_PER_MINUTE === 60 && doors(true) === 61 && doors(false) === 1 && JSON.stringify(hookSpans()) === '["ok"]' && logged.getFinishedLogRecords().length === 62 && pointsCount() === 69 && lines.length === 69,
+      `past ${ANONYMOUS_PER_MINUTE} in a minute, a request the server did not accept — no key, a revoked one, a delivery its plugin refused — sends no span and no record; its point and line still count it; a key accepted, or a delivery its plugin accepted, is never held (${JSON.stringify([doors(true), doors(false), hookSpans(), logged.getFinishedLogRecords().length, pointsCount(), lines.length])})`);
+    assert(unsaidBeforeFlush === 0 && counted().length === 1 && counted()[0] === "telemetry: 7 requests the server did not accept past 60 in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)",
+      `the flush a server's stop runs says the count, once (${JSON.stringify([unsaidBeforeFlush, counted()])})`);
+    // The next minute: a fresh budget, and nothing more said.
+    now += 60_000;
+    ask();
+    await flushTelemetry();
+    assert(doors(true) === 62 && counted().length === 1, `the next minute's first is sent, and nothing said twice (${JSON.stringify([doors(true), counted().length])})`);
+    // A count left at the stop is said by the stop; a new start's budget is fresh.
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE; i++) ask();
+    await stopTelemetry();
+    const atStop = counted();
+    assert(atStop.length === 2 && atStop[1].startsWith("telemetry: 1 request the server did not accept past 60"), `the stop says what is left, in the singular (${JSON.stringify(atStop)})`);
+    // Requests begun before the SDK loaded record nothing, and spend none of a new start's budget.
+    const early = Array.from({ length: ANONYMOUS_PER_MINUTE + 1 }, () => beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write));
+    // A fresh exporter: the stop shut the first one down.
+    const after = new InMemorySpanExporter();
+    const afterLogs = new InMemoryLogRecordExporter();
+    const restarted = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: after, logs: afterLogs }) }));
+    for (const r of early) r.end({ status: 200, outcome: "refused", code: "UNAUTHORIZED" });
+    ask();
+    await flushTelemetry();
+    assert(restarted && after.getFinishedSpans().length === 1 && afterLogs.getFinishedLogRecords().length === 1 && counted().length === 2,
+      `a new start's budget is fresh, within the same minute; a request begun before it spends none and sends no record (${JSON.stringify([after.getFinishedSpans().length, afterLogs.getFinishedLogRecords().length, counted().length])})`);
+    // A minute ending with no request after it: its timer says the count, once — the next minute's first says nothing more.
+    const before = counted().length;
+    now = Math.floor(now / 60_000) * 60_000 + 120_000 - 30;
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE + 2; i++) ask();
+    await Bun.sleep(150);
+    const byTimer = counted().slice(before);
+    now += 60_000;
+    ask();
+    const afterRoll = counted().slice(before);
+    assert(byTimer.length === 1 && byTimer[0].startsWith("telemetry: 2 requests the server did not accept past 60") && afterRoll.length === 1,
+      `the minute's end says its count by itself, once (${JSON.stringify([byTimer, afterRoll.length])})`);
+    // A request ended while a stop shuts the SDK down, past the budget: its count is said by the next start, not lost
+    // (review passes 6–8). The shutdown is held on a gate, so the request ends after the stop has said its own count and
+    // before the SDK is gone, whatever the SDK's timing; the clock at a minute's start, so no minute's timer says it.
+    await stopTelemetry();
+    now = (Math.floor(now / 60_000) + 1) * 60_000;
+    const leftLog: string[] = [];
+    let shuttingDown = false;
+    let release = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    await startTelemetry("probe", (l) => leftLog.push(l), async () => ({ setUpTelemetry: () => {
+      const held = setUpTelemetry("open-brain-test", { exporter: new InMemorySpanExporter() });
+      return { ...held, serviceName: held.serviceName, flush: () => held.flush(), emit: (r) => held.emit(r), shutdown: async () => { shuttingDown = true; await gate; await held.shutdown(); } };
+    } }));
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE; i++) ask();
+    const late = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+    const saidBefore = said.length;
+    const stopping = stopTelemetry();
+    while (!shuttingDown) await Promise.resolve();
+    late.end({ status: 200, outcome: "refused", code: "UNAUTHORIZED" });
+    release();
+    await stopping;
+    const saidByStop = leftLog.filter((l) => l.includes("did not accept")).length;
+    await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: new InMemorySpanExporter() }) }));
+    const leftLines = leftLog.filter((l) => l.includes("did not accept"));
+    const newLines = said.slice(saidBefore).filter((l) => l.includes("did not accept"));
+    assert(saidByStop === 0 && leftLines.length === 1 && leftLines[0].startsWith("telemetry: 1 request the server did not accept past 60") && newLines.length === 0,
+      `a request ended while a stop shuts the SDK down, past the budget, is said once, to that SDK's log, by the next start — not by the stop (${JSON.stringify([saidByStop, leftLines.map((l) => l.slice(0, 40)), newLines.length])})`);
+    // Spans sampled out (OTEL_TRACES_SAMPLER=always_off): no span records, and the log records are held all the same (review pass 4).
+    await stopTelemetry();
+    const savedSampler = process.env.OTEL_TRACES_SAMPLER;
+    process.env.OTEL_TRACES_SAMPLER = "always_off";
+    const quiet = new InMemorySpanExporter();
+    const quietLogs = new InMemoryLogRecordExporter();
+    try {
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: quiet, logs: quietLogs }) }));
+      now += 60_000;
+      for (let i = 0; i < ANONYMOUS_PER_MINUTE + 5; i++) ask();
+      await flushTelemetry();
+    } finally {
+      if (savedSampler === undefined) delete process.env.OTEL_TRACES_SAMPLER;
+      else process.env.OTEL_TRACES_SAMPLER = savedSampler;
+    }
+    assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
+      `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
+  } finally {
+    await stopTelemetry();
+    useBudgetClock(realClock);
+    if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
+  }
 }
 
 report();

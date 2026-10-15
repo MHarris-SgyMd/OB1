@@ -1,0 +1,136 @@
+# 312. The REST core's typed client, and a forwarded refusal that carries its own words — the first cut of the MCP server as a REST client (SMD-2287)
+
+**What changed.**
+- **`rest-client/`**, a new top-level package (the maintainer's choice, 2026-10-13, over a client derived in TypeScript from the route table):
+  - `generate.ts` writes `openapi.json`, the document `server-portable/rest/openapi.ts` builds of the core operations, with "snapshot" in place of the release's version, which every cut bumps.
+  - It also writes `schema.d.ts`, openapi-typescript 7.13.0's types of that document (a success the document states only as an object typed `Record<string, unknown>`), and `operations.ts`, each operation's method and path by its operationId.
+  - `index.ts`'s `createRestClient({ baseUrl, fetch?, forwarderKey?, headers?, timeoutMs? })` is openapi-fetch 0.17.0's client. Its `call(name, input, { key, signal })` takes an operation's input as the MCP tool takes it, one object: the path's fields fill the path, the rest goes in the query string (GET, DELETE) or a JSON body (POST, PATCH). The input is typed from the document.
+  - Every status is an answer `{ status, ok, headers, body, sent }`, and an error with an empty body has `body: null`. Only a request that never got one throws: the core away, the timeout, the caller's signal. A write that threw may still have landed.
+  - `createRestClient` refuses a `baseUrl` that is not http or https, carries credentials, has a query or a fragment (a bare `?` or `#` included), holds a space or a control character anywhere, or has a path the URL parser rewrites; a `forwarderKey` no header carries as written; and a `timeoutMs` no timer holds (a whole number of milliseconds from 1 to 2^31 - 1). `call` and `stream` build their URLs under one root. A redirect is an answer, not followed: fetch would carry the key and the forwarder key to the next origin.
+  - The key rides `x-brain-key` and the forwarder key `x-brain-forwarder`, and `headers()` adds the calling span's `traceparent`. A key is sent only if it rides the header byte for byte (tab, printable ASCII and U+0080–U+00FF, no space or tab at either end; DEL left out, which a Go server such as Traefik refuses); any other gets the REST core's own 401 `UNAUTHORIZED`, with nothing sent, and a `null` key is none. `headers()` may not set a key's header or the forwarder slot.
+  - The timeout bounds a `call` to its whole answer and a `stream` until its headers arrive. The timeout and the caller's signal end the wait even through a `fetch` that does not heed the signal, a signal already aborted sends nothing, and an answer that comes after the abort is cancelled unread. On an open stream the caller's signal aborts the request. `raw` takes the caller's own signal.
+  - An input a URL cannot carry is answered without sending anything (`sent: false`), as the REST core's own 400 `REFUSED_INPUT` naming the field. That covers a path field that is missing, not a string, empty, `.` or `..`: a dot segment is removed by the URL parser however it is encoded, so the request would reach another route. It also covers text with a lone surrogate in the path or the query, an object, or a list holding one, in a GET's or a DELETE's input, and a query field name other than letters, digits, `_`, `.` and `-`, which rides the URL as it is. All of that holds for an input of JSON values: a value JSON cannot carry throws as `JSON.stringify` does.
+  - `stream(jobId)` returns a job's event stream unread, or a refusal's JSON unread, and `call` takes every operation but that one.
+  - A plugin's operations are not in the document: which plugins run is the operator's choice, so they are called by their manifest's path.
+- **The REST core:**
+  - A refusal answered to a request a forwarder carried also holds the refusal whole, as `refusal`, beside `{code, retryable, …facts}`. That includes the words its facts leave out: the value quoted back, a filter's message, the egress gate's reason, the store's own refusal, a key's registry kind.
+  - A save whose vector did not attach carries it beside its 201, and a job stream's 404 beside its facts.
+  - The refusal is the one the operation made for that caller, with the existence-oracle rule already applied: what `render.ts` has always been handed in process, and bounds into its text. A caller with no carrier gets the facts alone, as before. The document says so on `Refusal`.
+  - A number in a query string may be written as JavaScript prints one (`1e-7`, `1e+21`), so a client's `String(n)` reads back as `n`.
+- **CI:** the portable-server job installs, type-checks and runs `rest-client/` after server-portable's install. Its imports of `../server-portable` resolve there. Check 18 names the directory, and `db/ci-parity.sh` runs it in CI's order. The landing check (`scripts/check-landing.ts`, SMD-1857) and CONTRIBUTING.md ask a change to it for a fragment, as they ask one of `server-portable/`.
+
+**Why.** SMD-2282's decision 3: the MCP server becomes a client of the REST core, calling it through a typed client generated from its OpenAPI document and shared with the GUI.
+
+SMD-2284's review found the one gap in rendering REST answers. The MCP reply to every success is already what `render.ts` makes of the REST answer. Several refusals' MCP texts, though, read the caller's input or the store's words, which REST withholds from a client that reads values. The maintainer chose to have a forwarded call carry the refusal whole. That keeps the words exact with one mechanism and leaves the public REST contract's facts as they are.
+
+**Held.**
+- `bun test-client.ts` (128, new):
+  - the generated files equal what `generate.ts` renders;
+  - every operation's method and path is its route's;
+  - every tool's input, held to the generated type at compile time, reaches the real REST app's stub core exactly as the tool's schema parses it, a path field with a slash, a question mark and a space included;
+  - the key, the forwarder slot (read back as `act`) and the extra headers ride every call, and none is sent unless given;
+  - a forwarded refusal carries itself whole and one not forwarded does not; a 401, a fault's 500 and a body that is no JSON are answers;
+  - an empty, dot, two-dot, missing, null or numeric path field, and a lone surrogate in the path, a query field or a query list, are a 400 `REFUSED_INPUT` naming the field, with nothing sent and no operation run; a lone surrogate in a body is sent, and three dots are;
+  - the timeout and the caller's signal end a call that never answers, a fetch that ignores the signal included, and a signal already aborted runs no operation;
+  - a job's stream is handed back keyed and unread, a refusal readable, a forwarded one whole, and a job id of one dot refused rather than read as GET /v1/jobs/stream;
+  - a key holding an emoji, a NUL, a line break or spaces at its ends is a 401 from `call` and `stream`, sent nowhere; a base with a query or a fragment, and a forwarder key with a line break or a space at its end, are refused at the start; `call` and `stream` share a root under a base with a trailing slash; an error with an empty body has a null one;
+  - a fetch that throws at once rejects the call and leaves no listener behind; an answer after the timeout is cancelled; a stream whose headers never come ends at the timeout, an open one runs past it unaborted, and the caller's signal ends one;
+  - a key holding `é` or a tab inside is sent, and answered by the core; a base ending in a bare `?` or `#` is refused, and one with two trailing slashes shares a root; `headers()` adds a traceparent and no key or forwarder; a 307 to another origin over a real server is the answer, from call and stream, the key going nowhere else; twenty streams on one caller's signal leave no listener on it; the caller's signal ends an open stream;
+  - a key with a CR or LF at an end, or a 0x01 or vertical tab, is a 401 sent nowhere, never another key's 200, while a DEL inside rides byte for byte; such a forwarder key is refused at the start; a base with credentials, another scheme, no scheme, a dot segment encoded or not, or a space or tab is refused, and an IPv6 host, an upper-case scheme, an encoded `?` in the path and trailing slashes are taken; an object, a list inside a list, or an object holding a lone surrogate in a GET's input is refused unsent;
+  - a DEL inside a key is a 401 sent nowhere while U+00A0 and U+00FF ride byte for byte; a timeout no timer holds (past 2^31 - 1, Infinity, NaN, 0, negative, fractional) is refused at the start; a query field named `#`, `a&b`, `a=b`, a lone surrogate or with a space is refused unsent; a null key sends none, from call and stream, and a null forwarder key is none; a base with a tab or a line break in its host, or that is a URL object, is refused.
+- `../db/with-postgres.sh bun test-rest-sql.ts` (201, from 161): every refusal [5] reaches, and three of a capture-only key's (a supersedes shape quoted back, a malformed metadata key named, a ticket key), through the forwarder slot, has its facts as before beside the refusal whole. `render.ts` makes of that exactly the MCP reply, text and structuredContent.
+- `bun test-rest.ts` (357, from 351):
+  - a forwarded refusal and a forwarded unattached save carry `refusal`, and the same without a carrier do not;
+  - a number in exponent form reads as that number, while a half-written one or hex stays text.
+- Sixty-six mutants killed, none hanging a suite, and two that survived removed as redundant (a base's control-character check the rewritten-path check covers; a list's object check the recursion covers):
+  - the whole refusal always sent, or never; the unattached save's and the job stream's dropped; the exponent form reverted;
+  - the forwarder slot, the extra headers or the key not sent; everything in the query; path fields left in the body; a success's text not parsed, or an error's body dropped;
+  - the timeout or the caller's signal ignored; the fetch not held to the signal; a signal already aborted still sending;
+  - and from review pass 1: dot segments, a non-string path field, or a lone surrogate in a path or a query sent; the stream sending no forwarder slot; its dot guard dropped; the generated version kept; empty objects typed `never`;
+  - and from review pass 2: a key's header check dropped from `call` or `stream`, or edge spaces let through; the base's and the forwarder key's checks dropped; the base keeping its slash; an empty error body kept as text; the fetch called in the executor; a late answer left uncancelled; the stream's timeout dropped, never cleared, or the caller's signal ignored by it;
+  - and from review pass 3: a bare `?` let through; the base dropping one slash; redirects followed by call or by stream; an extra header setting a key; the header check back to ASCII alone, or its edges let through; the stream's listener on the caller's signal added by hand;
+  - and from review pass 4: the header check back to what `Headers` takes, or its edges dropped; a base's scheme, credentials or rewritten path let through; an object, or a list inside a list, sent in a query; and, re-anchored, a bare `?` let through and a query's lone surrogate sent;
+  - and from review pass 5: DEL let back in; a base's control characters or its type unchecked; the timeout unchecked or uncapped; query names unchecked; a null key sent by stream, or a null forwarder key sent; a forwarder key's type unchecked.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | A path field of `.`, `..` or `""` reached another route, since the URL parser removes dot segments however they are encoded: `stream(".")` ran job_status for a job named "stream", and `reset_capture_stamp {id:"."}` was a 405 | run-it | 2439929a: refused unsent, 400 `REFUSED_INPUT` naming the field |
+| 1 | `stream()` handed back a refusal's response already read: openapi-fetch reads a non-ok body itself | run-it | 2439929a: the stream request sent directly |
+| 1 | A missing, null or numeric path field went out as a literal `{id}`, which the operation ran | run-it | 2439929a: refused unsent |
+| 1 | A lone surrogate in a path or query value threw, which the README's "throws only on no answer" denied | run-it | 2439929a: refused unsent |
+| 1 | The timeout and the caller's signal leaned on the fetch heeding them: through an in-process `app.fetch` a 50 ms timeout answered after 407 ms, and a signal already aborted still captured | run-it | 2439929a: `heeding()` |
+| 1 | A forwarded job stream's 404 carried no `refusal` | cold-read | 2439929a |
+| 1 | `call("job_stream")` compiled and could never finish: an open stream read as text | cold-read | 2439929a: `call` takes every operation but that one |
+| 1 | The README said an excess field fails to compile for every operation; TypeScript checks none against `{}` | cold-read | 2439929a: said for an operation that takes input |
+| 1 | No forwarded case for a capture-only key, and an assertion that counted the same case list twice | cold-read | 2439929a: three capture-only cases; the assertion dropped |
+| 1 | "Its carrier is told nothing its client is not" overclaimed: `refusal` holds a citing statement whole and a write key's own registry kind, which `render.ts` cuts or leaves unsaid | run-it | 2439929a: worded as the refusal the operation made for that caller, which the renderer bounds |
+| 1 | A broken timeout hung test-client's [6] rather than failing it | mutant | 2439929a: each call raced against a deadline |
+| 2 | `stream()` had no bound at all while `call()` kept the timeout, and the README said the timeout ends the wait | run-it | fdfd6902: the timeout holds a stream until its headers arrive |
+| 2 | A key no header carries as presented threw (an emoji, a NUL), and one with spaces at its ends arrived trimmed, as another key than the one presented | run-it | fdfd6902: the core's 401, given here, nothing sent |
+| 2 | A forwarder key or a base the client cannot use failed every call, or built a URL with every path after a query; `stream` and `call` dropped a base's trailing slashes differently | run-it | fdfd6902: refused at the start; one root |
+| 2 | An error with an empty body read `""`, not `null` | run-it | fdfd6902 |
+| 2 | A fetch that threw at once left its abort listener on the caller's signal | run-it | fdfd6902: the fetch called after a turn |
+| 2 | An answer that came after the abort was left unread, never cancelled | run-it | fdfd6902 |
+| 2 | The local refusal's message named its field twice | run-it | fdfd6902: zod's shape |
+| 2 | A change to `rest-client/` alone asked no fragment: the landing check's directories did not name it | cold-read | fdfd6902: the check, its probe, CONTRIBUTING.md and the workflow name it |
+| 2 | Docs overreached: `raw` takes no timeout, `mcp-server/` does not exist yet, and the forwarded loop holds the codes [5] reaches, not every code | cold-read | fdfd6902: worded as it is |
+| 2 | A late-answer case whose body never ended hung the suite's process when the abort race was mutated away | mutant | fdfd6902: the body closes itself |
+| 3 | A redirect was followed, and fetch carried the key and the forwarder key to the other origin (a 307 to another port took both) | run-it | f822e30c: `redirect: "manual"`, a 3xx the answer |
+| 3 | A base ending in a bare `?` or `#` passed the start check (URL reads it as empty), and every path followed it | run-it | f822e30c |
+| 3 | `stream()` left a listener on the caller's signal per stream, 5 MB over 20,000 on one long-lived signal | run-it | f822e30c: joined by `AbortSignal.any` |
+| 3 | The header check refused keys a header carries and the core takes (`é`, a tab inside), so a legacy key that works over MCP today would get a local 401 | cold-read | f822e30c: what `Headers` takes, no space at either end |
+| 3 | A base with two trailing slashes split `call` from `stream` | run-it | f822e30c |
+| 3 | `headers()` could set the key or the forwarder slot over the call's | cold-read | f822e30c: left out |
+| 3 | A custom fetch resolving nothing after the abort threw outside the call | run-it | f822e30c |
+| 3 | "The caller's signal ends either" was held only before the headers came | cold-read | f822e30c: an open stream ended by it |
+| 3 | The `refusal` description read "carried alone", as if no caller's key came with it | cold-read | f822e30c: "only on a forwarded request" |
+| 4 | A key with a CR or LF at an end passed the header check, which `Headers` then stripped: `\rwrite-raw` arrived as `write-raw` and authenticated, a forwarder key likewise | run-it | f566b5f2: an allow-list, byte for byte |
+| 4 | Interior control characters passed the check (Bun's `Headers` takes them) and Bun's server answered them with a bare 400; a forwarder key holding one failed every call | run-it | f566b5f2 |
+| 4 | A base with credentials sent them as an Authorization header round the rule that no extra header is a key; `file:`, `data:` and a scheme-less host were taken; a dot segment or an edge space sent requests elsewhere than the base as written | run-it | f566b5f2 |
+| 4 | An object in a GET's input threw inside openapi-fetch rather than being answered | cold-read | f566b5f2: refused unsent |
+| 4 | The README said the timeout ends the wait through a fetch that ignores the signal; through one, a `call`'s body read is unbounded | cold-read | f566b5f2: worded as it is |
+| 4 | Two checks no case reached: a base's control characters (the rewritten-path check covers them) and a list's object test (the recursion covers it) | mutant | f566b5f2: removed |
+| 5 | A `timeoutMs` past 2^31 - 1 made `stream()` time out at once (setTimeout's cap), and Infinity or NaN made every `call()` throw; nothing checked it | run-it | 394816fd: refused at the start |
+| 5 | A query field name rode the URL unencoded: `{"#": "x", limit: 5}` sent `?#=x&limit=5`, and the core ran without the limit | run-it | 394816fd: a name other than letters, digits, `_`, `.`, `-` refused unsent |
+| 5 | A tab or a line break in a base's host was dropped by the parser: `http://ev\til.com` reached evil.com, against the README's word (pass 4 had removed the whole-base check as redundant, judged on paths alone) | cold-read | 394816fd: the check back, over the whole base |
+| 5 | A DEL rode a key byte for byte to Bun, but a Go server (Traefik, on the `/api` route) refuses it with a bare 400 | cold-read | 394816fd: left out of the allow-list, as RFC 9110 leaves it |
+| 5 | A `null` key went out from `stream()` as the text "null", a `null` forwarder key from both; a URL object for the base gave an unhelpful error | run-it | 394816fd |
+| 5 | "Only a request that never got one throws" overclaimed for a bigint, a cycle or a symbol in the input, and for a `headers()` value no header carries | run-it | 394816fd: worded for an input of JSON values |
+
+**Not taken.** A query string carries text: a `null` there is left out and `"true"` reads as `true`. The MCP server's SDK holds every input to the tool's schema before the client sees it, and a TypeScript caller's types do; the README says so. A GET's input is held to Bun's header limit (16,000 characters pass, 64,000 are a bodyless 431); the README says so too, and free text rides a body. `stream()`'s own refusal is a Response, with no `sent` to tell it from the core's: nothing reads that yet. Through an in-process `fetch` that ignores the signal, a `call`'s timeout does not bound the reading of its body (a real fetch's does). Two API questions are left to PR 3, which has the caller that answers them, and are recorded on the ticket: how a plugin's operation is called (today `raw`, with no `Answer`), and a thrown error that tells "never sent" from "sent, no answer" for capture's wording.
+
+**Boyscout.** After the stop signal, with the files open: the client's constants gathered before their first use; `Answer`'s doc names both of the client's own answers; the header check's and the base check's reasons set out one bound to a line, where five passes had layered them; test-client's deadline and refusal helpers defined once, not four times; server-portable's README says who sends the forwarder slot now. No behaviour changed: every suite as before.
+
+## PR 2 — the MCP endpoint's HTTP edge, out of index.ts
+
+**What changed.** `server-portable/mcp-edge.ts` holds what `index.ts` answered around the SDK's transport. It was moved as it was, with `export` added to the names `index.ts` uses and to the few the MCP server as a REST client will (the 405 method lists, the unauthorized code and message, the edge refusal and its target, the legacy header, the parsed body's type):
+- the methods the endpoint serves, the CORS headers and the two 405 header sets;
+- the JSON-RPC refusal codes, their messages and the envelope for a request; a refused notification's bare 202 or 503 (SMD-2106);
+- the public origin's challenge and its 503 (SMD-2382);
+- the bounded read of a refused body (`REFUSAL_BODY_LIMIT`), and the refusal target read from it;
+- a request's parts and its calls' record (`recordCall`, `worseOutcome`) for its line (SMD-1849);
+- the stop's cut line (SMD-2250), and the old root URL's once-per-key line and its header (SMD-2306);
+- the keyed mirrors' answer to a caller they show nothing, and the health path's test.
+
+`index.ts` keeps everything that reads the environment or the store (the edge's settings, the routes, the server's build). It re-exports the names the suites import from it, so no suite changed but for one new row.
+
+**Why.** The MCP server as a REST client (`mcp-server/`, the next PR) answers at its edge exactly as this one does. One module both import keeps the two from drifting through the cutover, as `root.ts` and `sse.ts` were moved out for the REST core (SMD-2284).
+
+**Held.**
+- **Check 25:** it holds `mcp-edge.ts` as a transport file of its own. It may import hono's `Context`, the origin's challenge and its retry delay, the request record's types and `traceOf`, and the tool names, and nothing else. A store import, a root import and a `fetch` added to it are each refused (three mutants, all killed). `index.ts` may import it.
+- **test-server [2]:** runtime neutrality reads `mcp-edge.ts` too: no `Bun.`, no `Deno.`, no `jsr:`. That makes test-server 1050, up from 1047.
+- **Unchanged suites:** test-auth 190, test-rest 357, test-plugins 259, test-e2e-sql 562, test-rest-sql 201, test-plugins-sql 106.
+- **Builds and typechecks:** the Workers dry run (the OpenTelemetry API alone in the bundle); tsc in server-portable, db and evals.
+- **The move is verbatim:** every line `index.ts` lost is in `mcp-edge.ts`, in order, but for its imports.
+- **The same answers, run:** a run-it review served the base's `index.ts` and this one's, each in its own process with no store, and sent both the same 69 requests, under two settings, the auth profile and an origin among them. It recorded every status, header, body and log line. The two transcripts matched, all 138 pairs: the 405s, the CORS preflight, the keyless, wrong-key and over-limit refusals, the notifications' 202, the challenge and its 503, the mirrors' `ok`, and the old root URL's single line.
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | Moved comments pointed at what stayed behind: "the route below" and "every keyed route below" in `mcp-edge.ts`; cutByStopLine's "the same close" had dangled since SMD-2284 moved its sibling to sse.ts | cold-read | 43dcd326: pointed at `index.ts` and `sse.ts` |
+| 1 | "`export` added where index.ts uses a name" was narrower than the file: eight names are exported for the MCP server as a REST client | cold-read | 43dcd326: said |
+| 1 | Check 25's own summary and comment, and compose.yaml's pointer to HEALTH_PATH, still named `index.ts` alone | cold-read | 43dcd326 |
+| 2 | smoke.sh, deploy/README.md and test-server pointed at `index.ts` for the unauthorized code and HEALTH_PATH; check 25 had no standing probe of the edge's role; ragged wraps from pass 1 | cold-read | a8fdaa44: pointed; four probes |
+
+**Boyscout.** After the stop signal, with the files open: `index.ts`'s leading blank line and the two doubled blank lines the move left, one in each file, gone. Whitespace alone.

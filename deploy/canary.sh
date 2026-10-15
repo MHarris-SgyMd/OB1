@@ -2,10 +2,12 @@
 # Stand a canary brain beside a running stack, and take it down again (SMD-2038).
 #
 # The canary is this same deploy/compose.yaml run again as its own compose
-# project, open-brain-canary, with its own Postgres, volume, networks and
+# project, <stable>-canary (open-brain-canary beside the default stable;
+# SMD-2873), with its own Postgres, volume, networks and
 # images, OB1_TIER=canary, and two servers: the MCP server and the REST core.
-# It runs on an env file of its own (SMD-2583), `.env.canary.local` beside
-# stable's unless --canary-env-file names another; the root .gitignore's
+# It runs on an env file of its own (SMD-2583), `.env.<canary>.local` beside
+# stable's (`.env.canary.local` for open-brain-canary) unless
+# --canary-env-file names another; the root .gitignore's
 # `.env.*.local` ignores it in any checkout, an old release's included. `up`
 # writes it the first time from stable's file as compose reads it: every
 # setting, each value as compose read it, but the database password, which is
@@ -121,16 +123,23 @@
 # Options, all optional:
 #   --env-file PATH       the running stack's env file (default deploy/.env beside
 #                         this script — which a branch worktree does not have)
-#   --canary-env-file PATH  the canary's own env file (default .env.canary.local
-#                         beside stable's), made by `up` when absent; never
-#                         stable's own file, by any path
+#   --canary-env-file PATH  the canary's own env file (default .env.<canary>.local
+#                         beside stable's, <canary> the canary's project, and
+#                         .env.canary.local for open-brain-canary), made by `up`
+#                         when absent; never stable's own file, by any path
 #   --runtime CLI         docker or podman (default: docker when on PATH, else podman)
-#   --stable-project NAME stable's compose project (default open-brain)
+#   --stable-project NAME stable's compose project (default: the project stable's
+#                         env file names, COMPOSE_PROJECT_NAME as compose reads
+#                         it, else compose.yaml's open-brain; SMD-2873). The
+#                         canary's project is <stable>-canary
 #   --port N              serve the canary from its own proxy on 127.0.0.1:N, not
 #                         at /canary/mcp on stable's origin (for a stable from
 #                         before SMD-2294); with `down`, the port such a canary
 #                         was stood up on
-#   --name NAME           the connector's name (default open-brain-canary)
+#   --name NAME           the connector's name (default: the canary's project,
+#                         open-brain-canary for the default stable)
+#   names                 print stable's project, the canary's, the connector
+#                         and the canary's env file, and change nothing
 #   up --connect          register the connector after the smoke passes
 #   up --no-smoke         skip step 5 (no key needed; the connector needs one)
 #   down --volumes        delete the canary's database as well
@@ -164,7 +173,8 @@ trap cleanup EXIT
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-CANARY=open-brain-canary
+# Set once stable's project is known (SMD-2873): <stable>-canary.
+CANARY=""
 
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
@@ -174,9 +184,9 @@ usage() {
 ENV_FILE="$HERE/.env"
 CANARY_ENV=""
 RUNTIME=""
-STABLE=open-brain
+STABLE=""
 PORT=""
-NAME=open-brain-canary
+NAME=""
 CMD=""
 CONNECT=0
 SMOKE=1
@@ -197,7 +207,7 @@ while [ $# -gt 0 ]; do
     --connect) CONNECT=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
     --volumes) VOLUMES=1; shift ;;
-    up|down) [ -z "$CMD" ] || { echo "one command: up or down." >&2; exit 2; }; CMD="$1"; shift ;;
+    up|down|names) [ -z "$CMD" ] || { echo "one command: up, down or names." >&2; exit 2; }; CMD="$1"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
@@ -207,23 +217,14 @@ if [ -n "$PORT" ]; then
   case "$PORT" in *[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
   [ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 fi
-# A compose project's name, as compose allows one: anything else would reach the
-# runtime's label filter, where a blank value matches every project's containers.
-[[ "$STABLE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "--stable-project takes a compose project name (lower-case letters, digits, - and _): '$STABLE'" >&2; exit 2; }
-[ "$STABLE" != "$CANARY" ] || { echo "--stable-project names the canary's own project." >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
 [ $CONNECT = 0 ] || [ $SMOKE = 1 ] || { echo "--connect needs the smoke's key; drop --no-smoke." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
-# The canary's own env file (SMD-2583): beside stable's unless named, made by
-# `up` from stable's the first time. Its directory must exist; the file need not.
-CANARY_ENV="${CANARY_ENV:-$(dirname "$ENV_FILE")/.env.canary.local}"
-[ -d "$(dirname "$CANARY_ENV")" ] || { echo "no directory for the canary's env file: $(dirname "$CANARY_ENV")" >&2; exit 2; }
-CANARY_ENV="$(cd "$(dirname "$CANARY_ENV")" && pwd)/$(basename "$CANARY_ENV")"
-[ ! -e "$CANARY_ENV" ] || [ -f "$CANARY_ENV" ] || { echo "the canary's env file, $CANARY_ENV, exists and is not a file." >&2; exit 2; }
-# By path or by file (a symlink, /private/tmp for /tmp; review pass 2).
-if [ "$CANARY_ENV" = "$ENV_FILE" ] || [ "$CANARY_ENV" -ef "$ENV_FILE" ]; then echo "--canary-env-file names stable's env file; the canary's is its own." >&2; exit 2; fi
+# The canary's own env file (SMD-2583) is placed once stable's project is
+# known, below: beside stable's unless named, made by `up` from stable's the
+# first time. Its directory must exist; the file need not.
 # The canary's database password is its env file's. A value in the shell would
 # win over that file in compose, and hand the canary stable's.
 unset POSTGRES_PASSWORD
@@ -233,6 +234,57 @@ if [ -z "$RUNTIME" ]; then
   elif command -v podman >/dev/null 2>&1; then RUNTIME=podman
   else echo "neither docker nor podman is on PATH." >&2; exit 2
   fi
+fi
+command -v "$RUNTIME" >/dev/null 2>&1 || { echo "--runtime $RUNTIME is not on PATH." >&2; exit 2; }
+
+# Stable's project (SMD-2873): one env file is one brain, so the project is the
+# one stable's env file names — COMPOSE_PROJECT_NAME as compose reads it, the
+# shell's winning as it does for stable's own `up` — else compose.yaml's
+# `name:`, open-brain: compose renders a stub carrying that `name:`, so no
+# setting is interpolated, and its `name` is the project stable's `up` takes.
+# The runtime's compose first, then either other one on PATH, as tier.sh reads
+# its env file (compose quotes a name YAML would read otherwise, `"123"`); on
+# none, compose's own last word goes to stderr.
+read_project() {
+  local c out errf
+  errf="$(mktemp "${TMPDIR:-/tmp}/ob1-canary-project.XXXXXX")"
+  for c in "$RUNTIME" docker podman; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    out="$(printf 'name: open-brain\nservices: {}\n' | "$c" compose --env-file "$1" -f - config 2>"$errf" | sed -n 's/^name: //p' | head -n 1 | tr -d "\"'")" || true
+    if [ -n "$out" ]; then rm -f "$errf"; printf '%s\n' "$out"; return 0; fi
+  done
+  sed $'s/\x1b\\[[0-9;]*m//g' "$errf" | grep -v -E 'Executing external compose provider|^Error: executing .*compose|^[[:space:]]*$' | tail -n 1 >&2 || true
+  rm -f "$errf"
+  return 1
+}
+FROM_WHERE="--stable-project"
+if [ -z "$STABLE" ]; then
+  if [ -n "${COMPOSE_PROJECT_NAME+set}" ]; then FROM_WHERE="COMPOSE_PROJECT_NAME in the shell, which wins over $ENV_FILE"; else FROM_WHERE="COMPOSE_PROJECT_NAME in $ENV_FILE, or compose.yaml's open-brain"; fi
+  STABLE="$(read_project "$ENV_FILE")" || { echo "could not read stable's project from $ENV_FILE through compose (its reason above); name it with --stable-project." >&2; exit 2; }
+fi
+# Read; from here on the canary's compose takes its project from -p alone.
+unset COMPOSE_PROJECT_NAME
+# A compose project's name, as compose allows one: anything else would reach the
+# runtime's label filter, where a blank value matches every project's containers.
+[[ "$STABLE" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "stable's project ($FROM_WHERE) takes a compose project name (lower-case letters, digits, - and _): '$STABLE'" >&2; exit 2; }
+# A canary is <stable>-canary, so a project of that form is a canary's, and has none of its own.
+case "$STABLE" in *-canary) echo "stable's project, $STABLE ($FROM_WHERE), is a canary's: name the stable it stands beside." >&2; exit 2 ;; esac
+CANARY="$STABLE-canary"
+NAME="${NAME:-$CANARY}"
+# The canary's env file: beside stable's, named for the canary's project so two
+# instances in one directory keep two canaries apart; the dogfood canary's, made
+# before SMD-2873 as .env.canary.local, keeps that name.
+if [ -z "$CANARY_ENV" ]; then
+  if [ "$CANARY" = open-brain-canary ]; then CANARY_ENV="$(dirname "$ENV_FILE")/.env.canary.local"; else CANARY_ENV="$(dirname "$ENV_FILE")/.env.$CANARY.local"; fi
+fi
+[ -d "$(dirname "$CANARY_ENV")" ] || { echo "no directory for the canary's env file: $(dirname "$CANARY_ENV")" >&2; exit 2; }
+CANARY_ENV="$(cd "$(dirname "$CANARY_ENV")" && pwd)/$(basename "$CANARY_ENV")"
+[ ! -e "$CANARY_ENV" ] || [ -f "$CANARY_ENV" ] || { echo "the canary's env file, $CANARY_ENV, exists and is not a file." >&2; exit 2; }
+# By path or by file (a symlink, /private/tmp for /tmp; review pass 2).
+if [ "$CANARY_ENV" = "$ENV_FILE" ] || [ "$CANARY_ENV" -ef "$ENV_FILE" ]; then echo "--canary-env-file names stable's env file; the canary's is its own." >&2; exit 2; fi
+if [ "$CMD" = names ]; then
+  printf 'stable    %s\ncanary    %s\nconnector %s\nenv file  %s\n' "$STABLE" "$CANARY" "$NAME" "$CANARY_ENV"
+  exit 0
 fi
 
 say() { printf '▸ %s\n' "$*"; }
@@ -266,10 +318,14 @@ canary_compose() {
 # What the canary's env file leaves out of stable's: its database password,
 # which is its own, and the secrets of the profiles the canary never runs
 # (the authorization server's, n8n's, the import runner's, the workers' key,
-# board-sync's Linear keys), in any letter case. Linear's by prefix, as the
+# board-sync's Linear keys, the observability profile's Grafana password), in
+# any letter case. Linear's by prefix, as the
 # others: an exact LINEAR_API_KEY let SMD-2681's LINEAR_COMMENT_API_KEY, a key
-# that can comment, through to the canary's file (SMD-2882).
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*'
+# that can comment, through to the canary's file (SMD-2882). Stable's
+# COMPOSE_PROJECT_NAME never reads as a setting here, since every read is under
+# the canary's -p, which compose reports as the name; the file names the
+# canary's own project instead (SMD-2873, env_file write).
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift.
 CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY_STABLE_MESH'
@@ -292,15 +348,18 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY
 #                               CANARY_DROPPED's, each "double-quoted" with
 #                               \\ \" \$ \n escaped, which compose reads back
 #                               exactly (measured), then POSTGRES_PASSWORD as
-#                               $CANARY_PW (the environment's, never argv). A
+#                               $CANARY_PW (the environment's, never argv), and
+#                               COMPOSE_PROJECT_NAME as the canary's project, so
+#                               the file names its own brain (SMD-2873). A
 #                               value STABLE builds from the shell (`${X}`),
 #                               which reads otherwise with the shell's
 #                               variables than without, is refused, not
 #                               frozen
 #   env_file made STABLE OUT    exit 0 when OUT reads as STABLE but for
 #                               CANARY_DROPPED's names, each unset there but
-#                               POSTGRES_PASSWORD, which is $CANARY_PW, and
-#                               the guard below holds
+#                               POSTGRES_PASSWORD, which is $CANARY_PW, it
+#                               names the canary's project, and the guard
+#                               below holds
 #   env_file guard STABLE OUT   exit 0 when OUT's POSTGRES_PASSWORD is set,
 #                               reads alike with and without the shell's
 #                               variables, spans no lines, and neither is nor
@@ -308,15 +367,18 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA|CANARY
 #                               shell); and no value of OUT's holds STABLE's
 #                               (one of 12 characters or more; a shorter one
 #                               would match ordinary text) or a line setting
-#                               POSTGRES_PASSWORD. Every `up` that finds the
+#                               POSTGRES_PASSWORD; and it names no project but
+#                               the canary's. Every `up` that finds the
 #                               file runs it first, as an edit can undo it
 #   env_file drift STABLE OUT   the names whose values differ, CANARY_DROPPED's
 #                               and CANARY_SET's aside, on one line
 #   env_file password OUT       OUT's POSTGRES_PASSWORD, exactly, on stdout
+#   env_file project OUT        the project OUT names (COMPOSE_PROJECT_NAME, read
+#                               without -p), or nothing
 # A refusal names the setting, never its value.
 env_file() {
   # shellcheck disable=SC2016 # Python's text, which the shell must not expand
-  RT="$RUNTIME" PROJ="$CANARY-env" DROPPED="$CANARY_DROPPED" SET_BY_CANARY="$CANARY_SET" FROM="$ENV_FILE" python3 -c '
+  RT="$RUNTIME" PROJ="$CANARY-env" OWN_PROJECT="$CANARY" DROPPED="$CANARY_DROPPED" SET_BY_CANARY="$CANARY_SET" FROM="$ENV_FILE" python3 -c '
 import datetime, json, os, re, subprocess, sys
 mode, args = sys.argv[1], sys.argv[2:]
 dropped = re.compile("(?:%s)" % os.environ["DROPPED"], re.I)
@@ -350,6 +412,19 @@ def values(env_file, cand, env=bare):
     return {n: None if raw[n] == UNSET else raw[n].replace("$$", "$") for n in cand}
 def file_names(env_file):
     return sorted(names(env_file) - names(os.devnull))
+UNNAMED = "ob1-canary-unnamed-7f3a9c"
+def project_of(env_file, env=bare):
+    # The project the file names: compose renders a stub carrying a name of its
+    # own, under no -p (a -p is what every other read here reports as the name).
+    try:
+        r = subprocess.run([os.environ["RT"], "compose", "--env-file", env_file, "-f", "-", "config"], input="name: %s\nservices: {}\n" % UNNAMED, capture_output=True, text=True, env=env, timeout=120)
+    except (UnicodeError, subprocess.TimeoutExpired):
+        sys.exit("compose could not read %s for its project" % env_file)
+    m = re.search(r"^name: (.*)$", r.stdout, re.M) if r.returncode == 0 else None
+    if not m:
+        sys.exit("compose could not read %s for its project" % env_file)
+    name = m.group(1).strip().strip("\"'"'"'")
+    return None if name == UNNAMED else name
 def guard(stable, out):
     # Stable'"'"'s password as compose reads it on its own and with the shell
     # (one stable builds from a shell variable; review pass 4).
@@ -380,9 +455,20 @@ def guard(stable, out):
             problems.append("%s holds stable'"'"'s database password" % n)
         if "\nPOSTGRES_PASSWORD=" in v:
             problems.append("%s holds a line setting POSTGRES_PASSWORD" % n)
+    named = project_of(out)
+    if named is not None and named != os.environ["OWN_PROJECT"]:
+        problems.append("COMPOSE_PROJECT_NAME names %s, not the canary'"'"'s project, %s" % (named, os.environ["OWN_PROJECT"]))
+    # Compose run by hand with the file reads it under the shell'"'"'s variables:
+    # a name built from them (${X}) names another brain there (review pass 2).
+    shell_env = {k: v for k, v in os.environ.items() if k != "COMPOSE_PROJECT_NAME"}
+    if project_of(out, shell_env) != named:
+        problems.append("its COMPOSE_PROJECT_NAME reads otherwise with the shell'"'"'s variables")
     return problems
 if mode == "password":
     sys.stdout.write(values(args[0], ["POSTGRES_PASSWORD"])["POSTGRES_PASSWORD"] or "")
+    sys.exit(0)
+if mode == "project":
+    sys.stdout.write(project_of(args[0]) or "")
     sys.exit(0)
 stable, out = args
 if mode == "write":
@@ -400,6 +486,7 @@ if mode == "write":
             if not dropped.fullmatch(n) and s[n] is not None:
                 f.write("%s=%s\n" % (n, quote(s[n])))
         f.write("POSTGRES_PASSWORD=%s\n" % quote(os.environ["CANARY_PW"]))
+        f.write("COMPOSE_PROJECT_NAME=%s\n" % quote(os.environ["OWN_PROJECT"]))
     sys.exit(0)
 if mode == "guard":
     problems = guard(stable, out)
@@ -414,6 +501,8 @@ if mode == "drift":
 problems = []
 if c.get("POSTGRES_PASSWORD") != os.environ["CANARY_PW"]:
     problems.append("POSTGRES_PASSWORD is not the one written")
+if project_of(out) != os.environ["OWN_PROJECT"]:
+    problems.append("COMPOSE_PROJECT_NAME is not the canary'"'"'s project")
 for n in cand:
     if n == "POSTGRES_PASSWORD":
         continue
@@ -710,6 +799,11 @@ if [ -f "$CANARY_ENV" ] && ! why="$(env_file guard "$ENV_FILE" "$CANARY_ENV" 2>&
   echo "the canary's env file, $CANARY_ENV: ${why:-compose did not answer} — it must hold a POSTGRES_PASSWORD of the canary's own and nothing of stable's. Fix it, or delete it to make it again." >&2
   exit 2
 fi
+# A file made before SMD-2873 names no project, so a compose command given it
+# alone acts on compose.yaml's default, open-brain, not the canary.
+if [ -f "$CANARY_ENV" ] && [ -z "$(env_file project "$CANARY_ENV" 2>/dev/null)" ]; then
+  say "note: the canary's env file, $CANARY_ENV, names no project: add COMPOSE_PROJECT_NAME=$CANARY to it, so a compose command given that file alone acts on the canary, not on compose.yaml's default (open-brain)"
+fi
 
 KEY="${OB1_SMOKE_KEY:-}"
 [ $SMOKE = 0 ] || [ -n "$KEY" ] || { echo "up smoke-tests the canary with OB1_SMOKE_KEY — a raw write key whose hash is in MCP_ACCESS_KEYS. Set it, or pass --no-smoke." >&2; exit 2; }
@@ -731,16 +825,25 @@ for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
     if host and "." not in host and ":" not in host and host != "localhost":
         print(f"{k}={env[k]}")
 print("ORIGIN=" + (env.get("OB1_PUBLIC_ORIGIN") or ""))
+print("OTLP=" + (env.get("OTEL_EXPORTER_OTLP_ENDPOINT") or ""))
 ')" || { echo "could not read the canary's configuration through \`$RUNTIME compose config --format json\` (Docker Compose v2): $(head -c 400 "$CONFIG_ERR")" >&2; exit 2; }
-unreachable="$(grep -v '^ORIGIN=' <<<"$said" || true)"
+unreachable="$(grep -v -e '^ORIGIN=' -e '^OTLP=' <<<"$said" || true)"
 PUBLIC_ORIGIN="$(sed -n 's/^ORIGIN=//p' <<<"$said")"
+# Stable's observability collector, by its name on stable's mesh (SMD-1849
+# PR 3a), in any case: a canary on a port of its own (--port, read here
+# before MODE is chosen below) is not on that mesh, so each of its servers
+# would say ENOTFOUND once a minute per signal.
+OTLP_ENDPOINT="$(sed -n 's/^OTLP=//p' <<<"$said")"
+case "$(tr '[:upper:]' '[:lower:]' <<<"$OTLP_ENDPOINT")" in
+  *lgtm.ob1.internal*) [ -z "$PORT" ] || say "note: the canary's servers would send their telemetry to $OTLP_ENDPOINT, stable's collector, which a canary on a port of its own cannot reach — each would say ENOTFOUND once a minute per signal; OTEL_EXPORTER_OTLP_ENDPOINT= deploy/canary.sh --port $PORT up, an empty one in the shell, keeps it out" ;;
+esac
 [ -z "$unreachable" ] || {
   echo "the canary's server would dial $(tr '\n' ' ' <<<"$unreachable")— a bare name, which on the canary's network resolves to nothing: stable's compose services (a profile's ollama or jev) are on stable's network. Name an endpoint it can reach for the canary alone, in the shell, which wins over the env file for the canary's server and leaves stable's as it is: OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1 deploy/canary.sh … up for an Ollama on the host (podman: host.containers.internal), a host's full name for one on the LAN. It must serve the brain's embedding model. A remote provider also needs OB1_LLM_LOCAL= cleared there, or the egress gate takes it for local." >&2
   exit 2
 }
 
 STABLE_PG="$(container_of "$STABLE" postgres)"
-[ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE — start the stack first, or name it with --stable-project." >&2; exit 2; }
+[ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE ($FROM_WHERE) — start the stack first, or name it with --stable-project." >&2; exit 2; }
 STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
 [ -n "$STABLE_DB_NET" ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
 
@@ -754,7 +857,7 @@ STABLE_MESH="${STABLE}_mesh"
 if [ -n "$PORT" ]; then
   MODE=port
 else
-  [ -n "$STABLE_PROXY" ] || { echo "no running proxy in compose project $STABLE, so the canary has no origin to answer at (/canary/mcp). Start the stack's proxy, or give the canary a proxy of its own with --port N." >&2; exit 2; }
+  [ -n "$STABLE_PROXY" ] || { echo "no running proxy in compose project $STABLE ($FROM_WHERE), so the canary has no origin to answer at (/canary/mcp). Start the stack's proxy, or give the canary a proxy of its own with --port N." >&2; exit 2; }
   routes="$("$RUNTIME" inspect -f '{{index .Config.Labels "ob1.proxy-routes"}}' "$STABLE_PROXY")"
   grep -qF 'mcp.canary.ob1.internal' <<<"$routes" || { echo "$STABLE_PROXY routes no /canary/mcp: stable runs a release from before SMD-2294. Upgrade stable, or stand the canary behind its own proxy on a loopback port as before, with --port N (the canary's old port, where its connector points)." >&2; exit 2; }
   # shellcheck disable=SC2016 # a Go template's variables, not the shell's

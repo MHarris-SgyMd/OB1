@@ -18,7 +18,9 @@ is migration 055 (SMD-2115): the capture event carries
 the content and a backdating writer's `created_at`, the update event the
 key's move, the rules are functions, and the backfill filled every capture
 row on the dogfood log — the option of seeding a replay from the row store
-is declined on that measurement.
+is declined on that measurement. Amended 2026-10-13 (SMD-2928): the default
+read over valid time labels a closed window rather than hiding the row, and
+a valid-now read is opt-in ("Time").
 
 The thesis the ticket filed under is **understanding is a fold, not a
 column**: what the brain believes is the projection of every event to date,
@@ -354,11 +356,16 @@ or a named schema, never over the live rows. The bound is the pair and
 backfill and VACUUM had reordered), as 050's own comment says. The **as-of
 read over valid time** is a filter on the window, on the row or the facet,
 which SMD-2011 wires: a supersession closes the older thought's `valid_until`
-at the newer one's observed-at instead of flagging it, the default read is
-valid-now, `valid_at` returns the state believed true at a time, and a fact
-with no known end has an open window. The two answer different questions and
-both are answerable because both axes are stored; a read that hides rows by
-either clock says how many it hid (SMD-1725).
+at the newer one's observed-at instead of flagging it, `valid_at` returns the
+state believed true at a time, and a fact with no known end has an open
+window. The two answer different questions and both are answerable because
+both axes are stored; a read that hides rows by either clock says how many it
+hid (SMD-1725). The default read hides a row by neither clock: a thought whose
+window has closed is returned labelled, the rule supersession has followed
+since 025, whose measurement moved topical MRR by +0.000 when superseded rows
+were excluded. SMD-2255's eval scored exclusion 0.000 on its PREVIOUS class,
+the questions whose answer is the older version, and 059 shipped
+`prefer_current` opt-in; a valid-now read is opt-in the same way.
 
 ## Deletion and forgetting
 

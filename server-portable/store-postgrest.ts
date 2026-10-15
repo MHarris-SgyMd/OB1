@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -410,20 +410,32 @@ export class PostgrestStore implements ThoughtStore {
       }
       // 085: and when the row's stamp is still a capture-only key's, at a trust
       // above it, the stamp moves to this key (SMD-2664), after the note, as
-      // the SQL store moves it. A database before 085 has no such function.
+      // the SQL store moves it. 090: through ob1_weigh_recapture, which says
+      // what it did to the label (SMD-2898); a database at 085–089 has only
+      // ob1_restamp_recapture, which says nothing, and one before 085 neither.
+      let label;
       if (r?.existed === true && opts.recapture !== "keep") {
-        const { error: restampError } = await this.client.rpc("ob1_restamp_recapture", {
+        const args = {
           p_id: id,
           p_fingerprint: typeof r.fingerprint === "string" ? r.fingerprint : null,
           p_actor: actorPayload(opts.actor),
           p_declared: opts.event?.trust ?? null,
-        });
-        if (restampError && !(restampError.code === "PGRST202" || restampError.code === "42883" || /Could not find the function/i.test(restampError.message ?? ""))) throw new Error(restampError.message);
+        };
+        const absent = (e: { code?: string; message?: string }) => e.code === "PGRST202" || e.code === "42883" || /Could not find the function/i.test(e.message ?? "");
+        const { data: weighed, error: weighError } = await this.client.rpc("ob1_weigh_recapture", args);
+        // Only the function's own absence falls back, as the SQL store reads it.
+        if (weighError && !(absent(weighError) && /ob1_weigh_recapture/.test(weighError.message ?? ""))) throw new Error(weighError.message);
+        if (weighError) {
+          const { error: restampError } = await this.client.rpc("ob1_restamp_recapture", args);
+          if (restampError && !absent(restampError)) throw new Error(restampError.message);
+        } else {
+          label = normaliseRecaptureLabel(weighed);
+        }
       }
       // 035: `existed` — the text was already there, the envelope's provenance
       // not written. Passed on only when the body said; the two-step fallback
       // below goes through the 2-argument form, which does not say.
-      return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed, supersedes: typeof r.supersedes === "string" ? r.supersedes : null } : {}) };
+      return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed, supersedes: typeof r.supersedes === "string" ? r.supersedes : null } : {}), ...(label ? { label } : {}) };
     }
 
     console.warn(

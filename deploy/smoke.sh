@@ -82,7 +82,7 @@ echo "▸ $BASE"
 #    tear the connection down instead of surfacing the error. The 200 alone proves
 #    nothing: a server with no key check answers initialize with a result. So the
 #    body must be the Unauthorized error (-32001, JSON_RPC_UNAUTHORIZED_CODE in
-#    server-portable/index.ts), asked twice: with no key, and with a key that is
+#    server-portable/mcp-edge.ts), asked twice: with no key, and with a key that is
 #    not one of the server's, which is the comparison and not only the presence
 #    check (SMD-2103, from recipes/brain-smoke-test's Auth category). Asked at
 #    "$BASE/", which is never the public resource: a keyless request at exactly
@@ -230,8 +230,8 @@ code=$(status "$BASE/")
 
 # 4. GET /health is 200 with the body `ok`: the liveness target for a platform
 #    probe that can only GET. "$BASE/health" is right whether or not the proxy
-#    strips its prefix; the match rule is the HEALTH_PATH comment in
-#    server-portable/index.ts. No key, for the same reasons as check 3. The body
+#    strips its prefix; the match rule is the comment above server-portable/
+#    index.ts's /health route (HEALTH_PATH is mcp-edge.ts's). No key, for the same reasons as check 3. The body
 #    is asserted because a 200 alone proves nothing here: upstream's server has
 #    no such route and answers a keyless GET with a 200 JSON-RPC refusal, and a
 #    proxy that redirects unknown paths to a landing page answers 200 too.

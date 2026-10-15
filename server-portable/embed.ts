@@ -46,6 +46,7 @@ import {
   type ExtractWindowFrom,
 } from "../db/config.mjs";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
+import { statusType, usageOf, withProviderSpan } from "./spans.ts";
 
 /** The environment keys this module reads. A subset of root.ts's Env. */
 export type EmbedEnv = {
@@ -154,6 +155,14 @@ export class ProviderError extends Error {
  * `egress` thrown before the request exists. The server's capture and search
  * paths ask the gate first and skip the call, so a refusal here is the belt
  * under those braces, never the way a refused capture is meant to be found.
+ *
+ * Each call the gate lets through is a client span, `embeddings <model>` or
+ * `chat <model>`, and a point on `gen_ai.client.operation.duration` (spans.ts
+ * withProviderSpan, SMD-1849 PR 2d): the model, the endpoint's host and port,
+ * the answer's token counts, and how it failed — `timeout`, the status,
+ * `invalid_body`, or the runtime's code (`ECONNREFUSED`) — never the text or
+ * the base's userinfo. A call the gate
+ * refuses was never made, and has none.
  */
 export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
@@ -163,6 +172,28 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   const at = endpointFor(cfg, path);
   const gate = mayLeaveBox(subject, at, cfg.egress);
   if (!gate.allowed) throw refuseEgress(what, at.base, gate);
+  const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
+  return withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
+    const answer = await exchange<T>(cfg, path, body, at, what);
+    span.set(usageOf(answer));
+    return answer;
+  }, providerErrorType);
+}
+
+/**
+ * How a provider call failed, for its span and its point: `timeout`, the
+ * provider's status (spans.ts statusType: 300 to 599, else `_OTHER`),
+ * `invalid_body`; undefined for the runtime's own error, read by its code or
+ * kind (spans.ts faultOf).
+ */
+function providerErrorType(err: unknown): string | undefined {
+  if (!(err instanceof ProviderError)) return undefined;
+  if (err.kind === "http" && err.status !== undefined) return statusType(err.status);
+  return err.kind === "body" ? "invalid_body" : err.kind;
+}
+
+/** providerCall's exchange, once the gate has let it through: the request, the deadline over it, the status kept, the body capped, the JSON parsed. */
+async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, at: ProviderEndpoint, what: string): Promise<T> {
   const timedOut = () =>
     new ProviderError(`${what} request to ${at.base} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
   let r: Response;

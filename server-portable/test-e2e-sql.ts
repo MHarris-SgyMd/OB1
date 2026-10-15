@@ -25,6 +25,7 @@ import { hashKey } from "./auth.ts";
 import { trustAtOrAbove, TRUST } from "./core/filter.ts";
 import { INGESTED_NOTICE } from "./render.ts";
 import { fileURLToPath } from "node:url";
+import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -135,7 +136,15 @@ process.env.OB1_TIER = "canary";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+// index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+const worker = await mcpUnderTest();
+// Through the MCP server as a REST client, a write is the REST core's: its door (api.ts's API_DOOR), with the MCP
+// server named beside it as the request's carrier (`act`, stack.ts's forwarder key) — where index.ts records its own
+// door and no carrier. The sections that read a door read this one (SMD-2287 PR 3b).
+const VIA_CLIENT = mcpTarget() === "client";
+const DOOR = VIA_CLIENT ? "open-brain-api" : "open-brain";
+const CARRIER = VIA_CLIENT ? SUITE_CARRIER : null;
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const H = {
@@ -696,15 +705,18 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
 
 console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
 {
-  // The suite runs the server in-process (not import.meta.main), so index.ts's
-  // startup wiring does not fire — set the sink here, sharing jobs.ts's module
-  // state with the running server. A separate SqlStore on the same database is
+  // The suite runs the server in-process (not import.meta.main), so its entry's
+  // startup wiring (index.ts's, or the REST core's api.ts behind the MCP server)
+  // does not fire — set the sink here, sharing jobs.ts's module state with the
+  // running server. A separate SqlStore on the same database is
   // enough: the durable table is shared. resetJobsForTest() clears the in-memory
   // registry, standing in for a restart.
   const { setJobSink, resetJobsForTest, reconcileDurableJobsLost } = await import("./jobs.ts");
   const { SqlStore } = await import("./store-sql.ts");
   const jobStore = new SqlStore(URL_!);
-  const sink = jobStore.jobSink("open-brain");
+  // The sink with the door of the server that starts the job, as its entry would build it (root.ts). Which door each
+  // entry gives its sink is held where the entry runs as itself: [18] for index.ts, test-rest-sql for api.ts.
+  const sink = jobStore.jobSink(DOOR);
   assert(sink !== null, "the SQL store returns a durable job sink");
   setJobSink(sink);
   const sql = new SQL({ url: URL_, max: 1 });
@@ -723,11 +735,12 @@ console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a rest
   // The terminal write is best-effort/async, so poll the DB for the durable row.
   let dbRow: Record<string, unknown> | undefined;
   for (let i = 0; i < 100; i++) {
-    const rows = await sql`SELECT status, owner_key_hash FROM jobs WHERE id = ${handle.jobId}::uuid`;
+    const rows = await sql`SELECT status, owner_key_hash, door FROM jobs WHERE id = ${handle.jobId}::uuid`;
     if (rows[0]?.status === "succeeded") { dbRow = rows[0]; break; }
     await new Promise((res) => setTimeout(res, 20));
   }
   assert(dbRow?.status === "succeeded" && dbRow?.owner_key_hash === OWNER_HASH, `the terminal row is durable in jobs, owned by the starting key (${dbRow?.status})`);
+  assert(dbRow?.door === DOOR, `…and carries its sink's door, 078's (${dbRow?.door})`);
 
   // A restart: the in-memory registry is gone, but the poll falls back to the
   // durable row and still carries the result.
@@ -744,7 +757,7 @@ console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a rest
 
   // Reconcile: a job left running (its process gone) is marked lost, durably.
   const orphan = crypto.randomUUID();
-  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, door) VALUES (${orphan}::uuid, 'scan', ${OWNER_HASH}, 'e2e', 'running', ${DOOR})`;
   const cut = await reconcileDurableJobsLost();
   assert(cut >= 1, `reconcile marks the orphaned running job lost (${cut})`);
   const lost = (await (await fetch(`${BASE}/jobs/${orphan}`, { headers: { "x-brain-key": "e2e-key" } })).json()) as Record<string, unknown>;
@@ -1460,11 +1473,11 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   const [row] = await sql`SELECT metadata->>'source' AS origin, derived_from FROM thoughts WHERE id = ${id}::uuid`;
   assert(row?.origin === "claude-code", `metadata.source is the harness the caller named (${row?.origin})`);
   assert(JSON.stringify(row?.derived_from ?? null).includes(retrieved!), `derived_from carries the retrieved thought (${JSON.stringify(row?.derived_from)})`);
-  const [audit] = await sql`SELECT source, actor_name, canonical_agent_id, origin FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
+  const [audit] = await sql`SELECT source, actor_name, canonical_agent_id, origin, actor_context->'act'->>'name' AS act FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
   assert(audit?.source === "claude-code" && audit?.actor_name === "session-hook",
     `the audit row carries the source and the key's name (${audit?.source}, ${audit?.actor_name})`);
   // 046's origin (SMD-1730) comes from the actor's `via`, which the tool sets inline; no suite drove the real server's capture and read it back (seventh review pass).
-  assert(audit?.origin === "open-brain", `…and the door the write came through, 046's origin (${audit?.origin})`);
+  assert(audit?.origin === DOOR && (audit?.act ?? null) === CARRIER, `…and the door the write came through, 046's origin, with its carrier if one carried it (${audit?.origin}, ${audit?.act})`);
   assert(typeof audit?.canonical_agent_id === "string", "…and the hook's agent id — 049 lets the registry record the capture scope, so the write is attributed");
   const [key] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(CAPTURE_KEY)}`;
   assert(key?.scope === "capture", `the registry recorded the scope as presented (${key?.scope})`);
@@ -2187,6 +2200,62 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
       `the operator's own row is refused NOT_CAPTURE_STAMP, a missing id NOT_FOUND (${notCapture.sc.code}, ${missing.sc.code})`);
   }
 
+  // [13h] SMD-2898 (migration 090): capture_thought's reply says what a
+  // re-capture did to a capture-only key's label — moved to the caller, kept
+  // and settled, settled before (the caller's own, or another key's), or not
+  // weighed — and a new text, the capture key's own re-capture and a database
+  // before 090 say nothing of it.
+  {
+    const K = captureAs(CAPTURE_KEY);
+    const say = async (args: Record<string, unknown>, key: string) => {
+      const b = await rpcAs(key)("tools/call", { name: "capture_thought", arguments: args });
+      return { text: textOf(b), label: (b.result?.structuredContent as { label?: unknown } | undefined)?.label };
+    };
+    const NOTE = /Note: this re-capture landed on/;
+    const MOVED = "[13h] smd2898probe a page the hook labels outside text and the operator lifts";
+    await K({ content: MOVED, trust: "ingested" });
+    const moved = await say({ content: MOVED }, "op-raw");
+    assert(new RegExp(`Note: this re-capture landed on ${idIn(moved.text)}, which already held the text under a capture-only key's label \\(session-hook — kind agent, trust ingested\\)\\. Its label moved to your key: op-key — kind operator, trust operator\\. The outside-text notice goes, and min_trust searches up to operator include it\\. No later re-capture moves it\\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\\.`).test(moved.text)
+        && moved.label === "moved",
+      `[13h] the operator's re-capture of the hook's outside text: the label moved to it, no later re-capture moves it, the reset puts it back (${moved.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const mine = await say({ content: MOVED }, "op-raw"), others = await say({ content: MOVED }, "bot-raw");
+    const mineSc = (await rpcAs("op-raw")("tools/call", { name: "capture_thought", arguments: { content: MOVED } })).result?.structuredContent as { label?: string; labelMine?: boolean } | undefined;
+    assert(/; its label is already your key's \(op-key — kind operator, trust operator\), from an earlier re-capture\. A label moves once, so this re-capture moved nothing\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\.$/m.test(mine.text) && mine.label === "settled"
+        && /, and an earlier re-capture by another key moved its label to that key: op-key — kind operator, trust operator\. This re-capture moved nothing\. An operator key's reset_capture_stamp puts the capture-only key's label back, to be weighed afresh, while the text stands\./.test(others.text) && others.label === "settled"
+        && mineSc?.labelMine === true,
+      `…again: the operator told the label is its own (its structured content too), an agent key that another key's re-capture moved it, with the reset (${others.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const KEPT = "[13h] smd2898probe a page the hook labels outside text and an agent re-sends as outside text";
+    await K({ content: KEPT, trust: "ingested" });
+    const kept = await say({ content: KEPT, trust: "ingested" }, "bot-raw");
+    assert(/under a capture-only key's label \(session-hook — kind agent, trust ingested\), and the label was kept: the trust your key was weighed at \(ingested\) does not rank above it\. The row is now settled against every other key \(your own key's later re-capture is still weighed\)\. An operator key's reset_capture_stamp reopens it, to be weighed afresh, while the text stands\./.test(kept.text) && kept.label === "kept",
+      `an agent key's re-capture at the hook's own trust: kept and settled, the reset named (${kept.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const UNWEIGHED = "[13h] smd2898probe a page the hook labels outside text and an unclassified key re-sends";
+    await K({ content: UNWEIGHED, trust: "ingested" });
+    const unweighed = await say({ content: UNWEIGHED }, "e2e-key");  // the legacy key, which no one classifies
+    assert(/under a capture-only key's label \(session-hook — kind agent, trust ingested\), which was kept: your key has no kind, so its re-capture was not weighed and settled nothing \(the operator classifies keys in SQL with set_agent_kind; db\/README\.md\)\./.test(unweighed.text) && unweighed.label === "unweighed",
+      `an unclassified key's re-capture: not weighed, not settled (${unweighed.text.split("\n").find((l) => NOTE.test(l))?.slice(0, 160)})`);
+    const fresh = await say({ content: "[13h] smd2898probe the operator's own new note" }, "op-raw");
+    const again = await say({ content: "[13h] smd2898probe the operator's own new note" }, "op-raw");
+    const hookAgain = await K({ content: KEPT, trust: "ingested" });
+    assert(!NOTE.test(fresh.text) && fresh.label === undefined && !NOTE.test(again.text) && again.label === undefined && !NOTE.test(textOf(hookAgain)),
+      "a new text, a re-capture of a row no capture-only key captured, and the capture key's own re-capture say nothing of a label");
+    // A database before 090: 086's restamp, and no weighing that answers —
+    // the label still moves, and the reply is as it was.
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("086_") });
+    await sql`ALTER FUNCTION ob1_weigh_recapture(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture_hidden`;
+    try {
+      const OLD = "[13h] smd2898probe a page the hook labels outside text before 090";
+      await K({ content: OLD, trust: "ingested" });
+      const old = await say({ content: OLD }, "op-raw");
+      const [m] = await sql`SELECT metadata->>'actor_name' AS name FROM thoughts WHERE content = ${OLD}`;
+      assert(!NOTE.test(old.text) && old.label === undefined && m?.name === "op-key",
+        `a database before 090: the operator's re-capture still moves the label (086's restamp), and the reply says nothing of it (${m?.name})`);
+    } finally {
+      await sql`ALTER FUNCTION ob1_weigh_recapture_hidden(uuid, text, jsonb, text) RENAME TO ob1_weigh_recapture`;
+      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("090_") });
+    }
+  }
+
   // A derived_from that names a ghost: the positions that name no thought are
   // named, so a caller drops exactly those; the ids beside them only to a key
   // that can read (second review pass).
@@ -2409,6 +2478,11 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     want.board = pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length;
     wantRel.boardPairs = facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length;
     assert(want.board === 1 && wantRel.boardPairs === 1, `…the link takes t0–t1 out of both counts by hand (${want.board}, ${wantRel.boardPairs})`);
+    // What became of a finding posted (SMD-2682): t1→t0's relation was posted
+    // three days before that link, which answers it.
+    const told = (await sql`SELECT id::text AS id FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${t[1]}::uuid AND payload->>'target' = ${t[0]}`)[0].id as string;
+    await sql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids, posted_at)
+              VALUES ('SMD-7001', 'SMD-7002', 'related', 'SMD-7002', 'posted', 'c-e2e', ARRAY[${told}::uuid], now() - interval '3 days')`;
 
     const found = (await health("e2e-key") as Record<string, any>).database ?? {};
     const q = found.proposals ?? {};
@@ -2422,6 +2496,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     const rRow = table.split("\n").find((l) => l.startsWith("Relations"));
     assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\)$/.test(rRow ?? ""),
       `the tool's table carries the same counts (${pRow} / ${rRow})`);
+    const fRow = table.split("\n").find((l) => l.startsWith("Findings"));
+    assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
+        && /^Findings: +1 posted in 1 comment\(s\): 1 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 0 withdrawn — acceptance 100% \(1 of 1: accepted over accepted, rejected and unanswered\), median 3 d to an answer$/.test(fRow ?? ""),
+      `the finding posted before the link reads accepted in keyed /health and the tool's table (${JSON.stringify(found.findings)} / ${fRow})`);
 
     // A server role granted capture and server — no worker group — reads the
     // queue: the server group's SELECT on supersession_proposals (SMD-2680).
@@ -2433,8 +2511,9 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     const asServer = new SQL({ url: URL_.replace(/\/\/[^@]*@/, "//e2e_server_only:server@"), max: 1 });
     try {
       const f = await (await import("./brain-info.ts")).readDatabaseFacts(asServer);
-      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread),
-        `a role granted capture and server alone reads the queue and the relations (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
+      assert(f.proposals?.pending === want.pending && f.proposals?.boardPairs === want.board && !("proposals" in f.unread) && f.relations?.related === wantRel.related && !("relations" in f.unread)
+          && f.findings?.accepted === 1 && !("findings" in f.unread),
+        `a role granted capture and server alone reads the queue, the relations and what became of the findings posted (${JSON.stringify(f.proposals)}, ${JSON.stringify(f.unread)})`);
     } finally {
       await asServer.close();
       await sql.unsafe(`DROP OWNED BY e2e_server_only`);
@@ -2463,6 +2542,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND thought_id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
     await sql`DELETE FROM thought_facets WHERE kind = 'link' AND ((thought_id = ${t[0]}::uuid AND payload->>'target' = 'SMD-7002') OR (thought_id = ${t[2]}::uuid AND payload->>'target' = 'SMD-7003'))`;
     await sql`DELETE FROM supersession_proposals WHERE judge_key = 'consolidate:e2e@p4'`;
+    await sql`DELETE FROM board_findings_posted WHERE ticket_a = 'SMD-7001' AND ticket_b = 'SMD-7002'`;
     await sql`UPDATE thoughts SET metadata = metadata - 'issue' - 'ticket' WHERE id = ANY(${sql.array(t, "TEXT")}::uuid[])`;
     for (const h of had) await sql`UPDATE thoughts SET metadata = metadata || ${h.keys}::jsonb WHERE id = ${h.id}::uuid`;
   }
@@ -3127,8 +3207,10 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   // serves (serveHere), and only then does the store's first build reconcile
   // the rows a prior process left live. Its first keyed request builds the
   // store (the registry lookup reads it); the reconcile runs detached after.
-  // It reaches the MCP server's live rows (door open-brain), not the REST
-  // core's (open-brain-api): two servers on one database (078).
+  // It reaches server-portable's live rows (door open-brain), not the REST
+  // core's (open-brain-api): two servers on one database (078). It spawns
+  // index.ts's entry under OB1_MCP_UNDER_TEST=client too: the MCP server holds
+  // no job store, and the REST core's entry is test-rest-sql's to run.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();
@@ -3184,15 +3266,24 @@ console.log("\n[19] A capture's request line names the tool, the key and the tim
   try {
     await call("capture_thought", { content: PLANTED, metadata: { note: "planted-metadata-value" } });
     await call("search_thoughts", { query: "planted-search-words" });
-    for (let i = 0; i < 50 && said.length < 2; i++) await Bun.sleep(20); // a stream's line is written as it ends
+    for (let i = 0; i < 50 && said.length < (VIA_CLIENT ? 4 : 2); i++) await Bun.sleep(20); // a stream's line is written as it ends
   } finally {
     useRequestLog(previous);
   }
   const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
   const captures = lines.filter((l) => l.tool === "capture_thought");
   const captured = captures[0];
-  assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
-    `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
+  if (VIA_CLIENT) {
+    // The MCP server writes no line of its own yet (SMD-2287 PR 4): the lines are the REST core's, one per call it
+    // was sent — each tool call's whoami, then the operation, the tool named on the operation's. No rpc or bytes:
+    // telemetry records those for an MCP or streamed answer, not a REST JSON one.
+    assert(lines.length === 4 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 2
+      && captures.length === 1 && captured?.route === "/v1/thoughts" && captured.outcome === "ok" && captured.status === 201 && typeof captured.ms === "number",
+      `two calls, the REST core's four lines; the capture's: the tool, ok, a duration (${said.join(" / ")})`);
+  } else {
+    assert(lines.length === 2 && captures.length === 1 && captured?.door === "mcp" && captured.rpc === "tools/call" && captured.outcome === "ok" && captured.status === 200 && typeof captured.ms === "number" && typeof captured.bytes === "number",
+      `two calls, two lines; the capture's: the tool, ok, a duration and the bytes (${said.join(" / ")})`);
+  }
   assert(lines.filter((l) => l.tool === "search_thoughts" && l.outcome === "ok").length === 1, "…and one for the search");
   const all = said.join("\n");
   for (const s of ["omega", "never reach", "planted-metadata-value", "planted-search-words", "e2e-key"]) assert(!all.includes(s), `no ${s} in any line`);

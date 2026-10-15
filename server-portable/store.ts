@@ -31,6 +31,8 @@ import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
+import { withSpan, withStoreSpan } from "./spans.ts";
+import { PLUGIN_NAME_RE } from "../db/config.mjs";
 
 export type ThoughtMatch = {
   id: string;
@@ -645,6 +647,13 @@ export type CaptureResult = {
    * row with no pointer; absent whenever `existed` is.
    */
   supersedes?: string | null;
+  /**
+   * Migration 090 (SMD-2898): what the re-capture did to a capture-only key's
+   * label, as ob1_weigh_recapture answered it under the row lock. Absent for a
+   * new text, a key that cannot read, a row that is not a capture-only key's
+   * to weigh (`none`), and a database before 090.
+   */
+  label?: RecaptureLabel;
 };
 
 /**
@@ -934,6 +943,53 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: o.error, kind: typeof o.kind === "string" ? o.kind : null };
   if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "NOT_CAPTURE_STAMP")) return { ok: false, error: o.error };
   throw new Error(`ob1_reset_capture_stamp answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
+ * What a re-capture did to a capture-only key's label (migration 090,
+ * SMD-2898). `moved`: the label moved to the caller — `stamp` the caller's,
+ * `before` the capture-only key's. `kept`: weighed now and not higher, the row
+ * settled — `weighed` the trust the caller was weighed at, `own` whether the
+ * caller's own later re-capture is weighed again (085 knows a key's own by its
+ * agent id alone). `settled`: an earlier re-capture settled the row — `by` a
+ * restamp (`mine` when the stamp is the caller's own) or a decline (`decliner`
+ * its key's name, `declinerWeighed` whether 085 still weighs that key's own
+ * later re-capture — a decline naming its agent id). `unweighed`:
+ * the caller's key has no kind, so nothing was weighed and this call settled
+ * nothing. `stamp`: the row's three stamp keys after the call.
+ */
+export type RecaptureLabel =
+  | { outcome: "moved"; stamp: ActorStamp; before: ActorStamp }
+  | { outcome: "kept"; stamp: ActorStamp; weighed: string | null; own: boolean }
+  | { outcome: "settled"; by: "restamp"; stamp: ActorStamp; mine: boolean }
+  | { outcome: "settled"; by: "decline"; stamp: ActorStamp; decliner: string | null; declinerWeighed: boolean }
+  | { outcome: "unweighed"; stamp: ActorStamp };
+
+/**
+ * ob1_weigh_recapture's jsonb (migration 090) as the store's label — one
+ * reading for both stores. `none`, an outcome this server does not know, or
+ * a body that is no envelope (085's boolean, from the function before 090)
+ * is no label: the capture landed, and the reply says what it said before.
+ */
+export function normaliseRecaptureLabel(r: unknown): RecaptureLabel | undefined {
+  const o = r !== null && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const stampOf = (v: unknown): ActorStamp | undefined => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+    const m = v as Record<string, unknown>;
+    return { actorKind: word(m.actor_kind), actorName: word(m.actor_name), trust: word(m.trust) };
+  };
+  const stamp = stampOf(o?.stamp);
+  if (!o || !stamp) return undefined;
+  switch (o.outcome) {
+    case "moved": { const before = stampOf(o.before); return before ? { outcome: "moved", stamp, before } : undefined; }
+    case "kept": return { outcome: "kept", stamp, weighed: word(o.weighed), own: o.own === true };
+    case "settled":
+      return o.by === "restamp" ? { outcome: "settled", by: "restamp", stamp, mine: o.mine === true }
+        : o.by === "decline" ? { outcome: "settled", by: "decline", stamp, decliner: word(o.decliner), declinerWeighed: o.decliner_weighed === true } : undefined;
+    case "unweighed": return { outcome: "unweighed", stamp };
+    default: return undefined;
+  }
 }
 
 /**
@@ -1706,7 +1762,50 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
 }
 
 /**
- * Build the configured store.
+ * Whether each member of a store is an operation the core calls, spanned as
+ * one (tracedStore): every member named, so one added to ThoughtStore is
+ * decided here or the typecheck fails. The job sink's maker and the close are
+ * not.
+ */
+const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
+  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
+  listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
+  resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
+  findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  pluginTx: true, jobSink: false, close: false,
+};
+
+/**
+ * The store with each operation the core calls run under a client span of its
+ * own, a child of the call that made it, and a point on
+ * `db.client.operation.duration` (spans.ts withStoreSpan, SMD-1849 PR 2d):
+ * the operation's name, the store's kind and a fault's SQLSTATE — no query, no
+ * parameter. A plugin's transaction is an internal span, `pluginTx` with its
+ * plugin, and no point: it runs the plugin's own code and SQL, and the
+ * operations it calls are spans and points of their own (review pass 1). Every other member
+ * is the store's own, each method called on the store itself, not this
+ * wrapper.
+ */
+export function tracedStore(store: ThoughtStore): ThoughtStore {
+  return new Proxy(store, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      const method = value as (...args: unknown[]) => unknown;
+      if (typeof prop !== "string" || !Object.hasOwn(STORE_OPERATIONS, prop) || !STORE_OPERATIONS[prop as keyof typeof STORE_OPERATIONS]) return method.bind(target);
+      if (prop === "pluginTx") {
+        return (...args: unknown[]) => withSpan("pluginTx", {
+          attributes: { "db.system.name": "postgresql", "ob1.store": target.kind, "ob1.plugin": typeof args[0] === "string" && PLUGIN_NAME_RE.test(args[0]) ? args[0] : "?" },
+        }, async () => method.apply(target, args));
+      }
+      return (...args: unknown[]) => withStoreSpan(prop, target.kind, async () => method.apply(target, args));
+    },
+  });
+}
+
+/**
+ * Build the configured store, each operation spanned (tracedStore).
  *
  * The SQL implementation is imported dynamically on purpose: it pulls in Bun's
  * Postgres client, which does not exist on Cloudflare Workers. A static import
@@ -1726,7 +1825,7 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     }
     const { SqlStore } = await import("./store-sql.ts");
     // Plugins' SQL logs in as the plugin login role (SMD-2310), never as this connection's role.
-    return new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD });
+    return tracedStore(new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD }));
   }
 
   if (kind === "postgrest") {
@@ -1736,7 +1835,7 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     const mismatch = postgrestOverPostgresUrl(env);
     if (mismatch) throw new Error(mismatch);
     const { PostgrestStore } = await import("./store-postgrest.ts");
-    return new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+    return tracedStore(new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY));
   }
 
   throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the default) or "postgrest" (Cloudflare Workers)`);

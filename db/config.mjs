@@ -2410,6 +2410,10 @@ export const ROLE_GRANTS = Object.freeze({
     // unread, preflight's proposals row names this grant and the listing tool
     // is refused; a capture and every other read go on. The writes stay the worker group's.
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),          since: "029" }),
+    // brain_info reads what became of the findings board-sync posted to the
+    // board (SMD-2682). Soft as the rest: without it the Findings row says
+    // the table is not readable by this role, and nothing else changes.
+    Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT"]),           since: "087" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's

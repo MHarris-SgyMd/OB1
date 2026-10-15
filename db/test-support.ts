@@ -325,6 +325,10 @@ const FUNCTIONS = [
   "ob1_restamp_recapture(uuid, text, jsonb, text)",
   // 086 (SMD-2744): the operator resets a settled or moved label.
   "ob1_reset_capture_stamp(uuid, jsonb)",
+  // 090 (SMD-2898): the weighing that says what a re-capture did.
+  "ob1_weigh_recapture(uuid, text, jsonb, text)",
+  // 091 (SMD-2913): the trigger that keeps each settle by the pass.
+  "ob1_keep_proposal_settles()",
 ];
 
 /**

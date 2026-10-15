@@ -78,6 +78,29 @@ x-hook-env: &hook-env
   OB1_HOOKS: ${OB1_HOOKS:-}
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
+# The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
+# the REST core alone: the workers send no telemetry. Each is the SDK's own
+# variable, passed as deploy/.env gives it; unset, it is empty, which the
+# servers read as unset (measured: no line, no change), so nothing is sent until
+# OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
+# below is http://lgtm.ob1.internal.:4318 — and each server keeps its own
+# service name (open-brain, open-brain-api): no OTEL_SERVICE_NAME here, which
+# would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
+# 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust. The
+# three-brain stack leaves them out (check 27's TIER_OMITTED_ENV);
+# deploy/README.md, "Traces, metrics and log records", says what each does.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-}
+  OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-}
+  OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-}
+
 # The proxy's route table (SMD-1846), which Traefik's file provider reads. It
 # lives here rather than in a file of its own because compose.yaml is the file
 # a release ships (scripts/release-artifacts.ts, ASSETS): a pinned stack on a
@@ -96,7 +119,8 @@ x-hook-env: &hook-env
 #
 # A request's path reaches the server as it came (no prefix stripped): the
 # server answers POST at every path and /health under any prefix
-# (server-portable/index.ts, HEALTH_PATH), so `/mcp` needs no setting there.
+# (server-portable/index.ts's /health route, mcp-edge.ts's HEALTH_PATH), so
+# `/mcp` needs no setting there.
 # The routers, highest priority first, each on the one public entrypoint
 # (`web`): a router that names none is on every entrypoint, the ping one
 # included, and so would be any entrypoint added later:
@@ -141,6 +165,12 @@ x-hook-env: &hook-env
 #           and the MCP server, until the operator names
 #           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
 #           it to the REST core (SMD-2310);
+#   grafana-off  /grafana and everything under it: a bare 404 (`not-served`)
+#           until the operator names deploy/compose.grafana-public.yaml, whose
+#           router (priority 36) takes it to the observability profile's
+#           Grafana (SMD-1849 PR 3a). Off by default: Grafana on this
+#           origin shares it with /auth, so a script running in a Grafana
+#           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
 #   canary, working  /canary/mcp and /working/mcp and everything under each
 #           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
@@ -238,6 +268,12 @@ x-proxy-routes: &proxy-routes |
         service: noop@internal
       hooks-off:
         rule: "Path(`/hooks`) || PathPrefix(`/hooks/`)"
+        priority: 35
+        entryPoints: [web]
+        middlewares: [not-served]
+        service: noop@internal
+      grafana-off:
+        rule: "Path(`/grafana`) || PathPrefix(`/grafana/`)"
         priority: 35
         entryPoints: [web]
         middlewares: [not-served]
@@ -873,7 +909,7 @@ services:
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
       PORT: "8000"
     environment:
-      <<: [*server-env, *plugin-env]
+      <<: [*server-env, *plugin-env, *otel-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # No `ports:`. The proxy below is the stack's published port and reaches
     # this server as mcp.ob1.internal:8000 on the mesh (SMD-1846, SMD-2294);
@@ -943,7 +979,7 @@ services:
     pull_policy: never
     command: ["api.ts"]
     environment:
-      <<: [*server-env, *plugin-env, *hook-env]
+      <<: [*server-env, *plugin-env, *hook-env, *otel-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     depends_on:
       postgres:
@@ -1897,14 +1933,146 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # The observability profile (SMD-1849 PR 3a). Optional — `--profile
+  # observability`; nothing else waits on it. One container of Grafana's
+  # otel-lgtm: an OpenTelemetry collector taking OTLP on 4317 and 4318, and
+  # Prometheus, Tempo, Loki, Pyroscope and Grafana behind it, all on the
+  # stack's machine — the brain is personal data, and its telemetry goes
+  # nowhere else unless an operator sends it there. The two servers send to it
+  # when deploy/.env names it, OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318
+  # (x-otel-env). Its Grafana is reached through compose.grafana-port.yaml, on
+  # loopback and an origin of its own, or at /grafana on the stack's origin
+  # with compose.grafana-public.yaml (deploy/README.md, "The observability
+  # profile", says why that is a choice).
+  #
+  # Pinned by digest, the multi-arch index 0.36.0 resolved to (2026-10-13):
+  # Grafana 13.2.3, Prometheus 3.15.0, Tempo 3.1.0, Loki 3.7.8, Pyroscope
+  # 2.3.1, collector 0.162.0. Bump it deliberately: the dashboard (PR 3c)
+  # reads Prometheus's names for the servers' metrics, which this pin's OTLP
+  # receiver writes with underscores and a unit suffix
+  # (`gen_ai_client_operation_duration_seconds`, measured), and each flag below
+  # is this pin's (measured: each binary started with it). Check 28
+  # (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this service whole.
+  #
+  # Grafana's image signs anyone in as Admin unless told otherwise
+  # (run-grafana.sh, GF_AUTH_ANONYMOUS_ENABLED defaulting to true): here
+  # anonymous access is off, and the command refuses to start with
+  # GRAFANA_ADMIN_PASSWORD in deploy/.env under 12 characters (spaces aside,
+  # counted as characters) or Grafana's own default `admin` (in any case), at
+  # every start, saying why and waiting
+  # 30 s before it exits, as the authorization server's refusal does, so
+  # `unless-stopped` retries it at that pace rather than a hot loop; `init`
+  # stops it at once meanwhile. Grafana keeps the password it first started
+  # with in its database (the volume): a later change to the variable changes
+  # nothing until the operator changes it in Grafana. Its root URL is the
+  # stack's origin (LGTM_ORIGIN, a trailing slash dropped) at /grafana/, and
+  # its cookie Secure where that origin is https, in any case.
+  #
+  # Only Grafana (3000), the collector's OTLP (4317, 4318) and its health
+  # check (13133, which says only that it is up) answer on `mesh`:
+  # Prometheus, Loki, Tempo and Pyroscope listen on the container's loopback,
+  # each server, gRPC and gossip port alike, where Grafana and the collector
+  # reach them, so another service on the mesh cannot read or write them
+  # around Grafana's sign-in (review pass 1, each port probed from the mesh).
+  #
+  # What it would call out to by itself is off below, Grafana's and the
+  # backends' alike: with compose.grafana-port.yaml its port's network reaches
+  # out, as compose.host-ports.yaml's Postgres's does (measured). What a Grafana admin
+  # reaches — every name on `mesh`, through a data source — and the rest of
+  # why: deploy/README.md, "The observability profile".
+  lgtm:
+    image: docker.io/grafana/otel-lgtm:0.36.0@sha256:57c04cbd8e7022f32bb84c4ac005d79baf8b08e2c5be44facf11f5f1f9944ba2
+    profiles: ["observability"]
+    init: true
+    # Confined as the authorization server is, but writable: it writes /data and
+    # /tmp (review pass 7).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command:
+      - bash
+      - -c
+      - |
+        LC_ALL=C.UTF-8
+        pw=$$(printf '%s' "$$GF_SECURITY_ADMIN_PASSWORD" | tr -d '[:space:]')
+        if [ "$$(printf '%s' "$$pw" | tr '[:upper:]' '[:lower:]')" = admin ] || [ "$${#pw}" -lt 12 ]; then
+          echo "lgtm: set GRAFANA_ADMIN_PASSWORD in deploy/.env, 12 characters or more and not admin: Grafana signs its operator in with it" >&2; sleep 30; exit 1
+        fi
+        origin=$${LGTM_ORIGIN%/}
+        export GF_SERVER_ROOT_URL="$$origin/grafana/"
+        case "$$(printf '%s' "$$origin" | tr '[:upper:]' '[:lower:]')" in https://*) export GF_SECURITY_COOKIE_SECURE=true ;; esac
+        sed 's/^server:$$/server:\n  http_listen_address: 127.0.0.1\n  grpc_listen_address: 127.0.0.1/' /otel-lgtm/tempo-config.yaml > /tmp/tempo-config.yaml
+        if [ "$$(grep -c 'listen_address:' /tmp/tempo-config.yaml)" != 2 ] || ! grep -qx '  grpc_listen_address: 127.0.0.1' /tmp/tempo-config.yaml; then
+          echo "lgtm: the image's tempo-config.yaml is not the one this was written for (a server: block setting no address): Tempo would not be on loopback alone" >&2; sleep 30; exit 1
+        fi
+        exec /otel-lgtm/run-all.sh
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # The stack's public origin, which the command makes Grafana's root URL at
+      # /grafana/ (links Grafana writes name it): unset, the stack's loopback
+      # origin. compose.grafana-port.yaml names Grafana's own port instead.
+      LGTM_ORIGIN: "${OB1_PUBLIC_ORIGIN:-http://127.0.0.1:${SERVER_PORT:-8000}}"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      GF_SECURITY_DATA_SOURCE_PROXY_WHITELIST: "127.0.0.1:9090 127.0.0.1:3100 127.0.0.1:3200 127.0.0.1:4040"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SNAPSHOTS_ENABLED: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_PUBLIC_DASHBOARDS_ENABLED: "false"
+      GF_METRICS_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_CLOUD_MIGRATION_ENABLED: "false"
+      PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090"
+      # Loki keeps every log record for ever unless its compactor's retention is
+      # on: 14 days, as Tempo keeps its traces by default; Prometheus keeps 15 days.
+      LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h"
+      # Tempo has no flag for its listen address (ports alone): the command
+      # writes /tmp/tempo-config.yaml, the image's with its server on loopback,
+      # and the last -config.file Tempo is given is the one it reads (measured).
+      TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false"
+      PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false"
+    # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
+    volumes:
+      - lgtm-data:/data
+    # `mesh` alone, as lgtm.ob1.internal: the two servers send to it there, and
+    # compose.grafana-public.yaml's proxy reaches its Grafana there. No `ports:`.
+    networks:
+      mesh:
+        aliases: [lgtm.ob1.internal]
+    # run-all.sh removes /tmp/ready as it starts and writes it once the
+    # collector and every backend answer (4 s here, measured); it watches none
+    # of them after, so each answers its own ready URL here, run-all.sh's own
+    # list (review pass 4). A backend that dies leaves lgtm unhealthy, not
+    # restarted — neither Docker nor Podman restarts an unhealthy container by
+    # default — so `compose restart lgtm` brings it back (deploy/README.md).
+    # Five minutes to start: a first start or an image bump migrates Grafana's
+    # database and replays the backends' write-ahead logs, and a check that
+    # passes ends the period at once (review pass 5).
+    healthcheck:
+      test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"]
+      interval: 10s
+      timeout: 8s
+      retries: 3
+      start_period: 300s
+    restart: unless-stopped
+    logging: *logging
+
 networks:
   # The ADR's networks (docs/operator-surface-tiers.md, "Two networks"), as
   # the network move built them (SMD-2583). Every service names its own, so
   # compose makes no default network and nothing joins one.
   #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
-  #          core (api.ob1.internal) and the authorization server
-  #          (auth.ob1.internal), each called by that name; a tier of another
-  #          project joins it under its own (compose.canary.yaml).
+  #          core (api.ob1.internal), the authorization server
+  #          (auth.ob1.internal) and the observability profile's collector
+  #          (lgtm.ob1.internal), each called by that name; a tier of another
+  #          project joins it under its own (compose.canary.yaml), and a
+  #          path-mode canary's servers send to stable's collector there.
   #   data   internal: Postgres, and only what connects to it — the migrator,
   #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
@@ -1920,8 +2088,9 @@ networks:
   #          looks up that nothing holds never reaches the host's resolvers.
   # An internal network has no route out and does not forward a name it does
   # not hold to the host's resolvers (measured on podman 6); it also
-  # publishes no port, so Postgres's, in compose.host-ports.yaml, comes with
-  # a network of its own.
+  # publishes no port, so Postgres's, in compose.host-ports.yaml, and
+  # Grafana's, in compose.grafana-port.yaml, each come with a network of their
+  # own.
   mesh:
     internal: true
   data:
@@ -1938,6 +2107,7 @@ volumes:
   jev-models:
   n8n-data:
   auth-data:
+  lgtm-data:
 
 configs:
   # The proxy's route table, inline: x-proxy-routes at the top of this file.

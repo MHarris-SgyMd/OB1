@@ -15,6 +15,7 @@ import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
 import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { failure } from "./refusal.ts";
+import { withSpan } from "../spans.ts";
 import { SPECS } from "./schemas.ts";
 import type { createCore } from "./index.ts";
 
@@ -24,6 +25,48 @@ type Core = ReturnType<typeof createCore>;
 const PLUGIN_NAME = PLUGIN_NAME_RE;
 /** An operation's key: lower-case words joined by single underscores. */
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+/** A field name a query string carries as written (rest-client sends no other). */
+const QUERY_NAME = /^[A-Za-z0-9_.-]+$/;
+/** The types the REST core reads back from a query string's text (rest/app.ts inputFromQueryShape). */
+const QUERY_SCALARS = new Set(["string", "number", "integer", "boolean"]);
+/** A field's parse of one value at load, never a throw: a step that throws on it (or awaits) is a value it refuses here. */
+function parses(field: z.ZodType, value: unknown): { ok: true; data: unknown } | { ok: false } {
+  try {
+    const r = field.safeParse(value);
+    return r.success ? { ok: true, data: r.data } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+/**
+ * A step in a URL field's schema that takes a value of any type — a
+ * preprocess (a pipe from a transform), a coerce, a catch — or none. The MCP
+ * server sends the value its client sent, which a URL carries as text and the
+ * REST core reads back by the field's own type, so such a step would see
+ * another value than index.ts's does (review pass 3: a coerce.boolean's
+ * "false" arrived as false where index.ts parsed true). Walked, not sampled
+ * (review pass 4: a preprocess keyed on "1.50" or on 1 passed every probe). A
+ * codec's input side is the field's own type, so a stringbool is fine.
+ */
+function anyTypeStep(schema: unknown, seen = new Set<unknown>()): string | null {
+  const def = (schema as { _zod?: { def?: Record<string, unknown> } } | null)?._zod?.def;
+  if (!def || seen.has(def)) return null;
+  seen.add(def);
+  if (def.coerce === true) return "a coerce";
+  if (def.type === "catch") return "a catch";
+  if (def.type === "pipe" && (def.in as { _zod?: { def?: { type?: string } } } | undefined)?._zod?.def?.type === "transform") return "a preprocess";
+  for (const key of ["innerType", "in", "out", "element"]) {
+    const found = anyTypeStep(def[key], seen);
+    if (found) return found;
+  }
+  for (const key of ["options", "items"]) {
+    for (const sub of Array.isArray(def[key]) ? (def[key] as unknown[]) : []) {
+      const found = anyTypeStep(sub, seen);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 /** An operation's path under its plugin's: `/` and segments, each lower-case words and hyphens or one `{field}`. */
 const OPERATION_PATH = /^(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
 /** A webhook's name: one path segment of lower-case words and hyphens. */
@@ -129,7 +172,46 @@ export function manifestProblems(manifests: readonly PluginManifest[]): string[]
         // A path segment is text: a field of another type could never be reached over REST.
         else if (jsonSchemaType(field, "input") !== "string") problems.push(`${where}: its path's {${f}} is not a string field`);
         // A path segment is always there: a field that may be absent is one MCP could call without.
-        else if (field.safeParse(undefined).success) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
+        else if (parses(field, undefined).ok) problems.push(`${where}: its path's {${f}} is optional or defaulted, and a path field is always given`);
+        else {
+          const step = anyTypeStep(field);
+          if (step) problems.push(`${where}: its path's {${f}} has ${step}, which takes a value of any type, where a path carries text`);
+        }
+      }
+      // A GET's or a DELETE's input rides the query string, through the REST
+      // core and through the MCP server that calls it: each field one the REST
+      // core reads back as it was sent — text, a number, a boolean, or a list of
+      // text whose absence is the empty list, as a query carries no empty list
+      // and no null (SMD-2287 PR 4a review pass 1: a nullable number arrived as
+      // text, a list of numbers as strings, an empty list as none).
+      if (op.method === "GET" || op.method === "DELETE") {
+        for (const [f, field] of Object.entries(op.input ?? {})) {
+          if (fields.includes(f)) continue;
+          if (!QUERY_NAME.test(f)) { problems.push(`${where}: its input field ${JSON.stringify(f)} is no name a query string carries`); continue; }
+          let js: { type?: string; items?: { type?: string } } = {};
+          try { js = z.toJSONSchema(field, { io: "input" }) as typeof js; } catch { /* a schema JSON cannot state: refused below as no type */ }
+          if (js.type === "array") {
+            // Absent and [] the same value: a query string sends no empty list, so [] arrives as absent (review pass 4: a transform past the default gave them apart).
+            const absent = parses(field, undefined);
+            const empty = parses(field, []);
+            if (js.items?.type !== "string") problems.push(`${where}: its query field ${f} is a list of other than text, which a query string carries as text`);
+            else if (!(absent.ok && Array.isArray(absent.data) && absent.data.length === 0 && (!empty.ok || JSON.stringify(empty.data) === "[]"))) problems.push(`${where}: its query field ${f} is a list whose absence is not [] as [] is: a query string carries no empty list`);
+          } else if (!QUERY_SCALARS.has(js.type ?? "")) {
+            problems.push(`${where}: its query field ${f} is not text, a number or a boolean (nullable, a union or an object), which a query string cannot carry as it was given`);
+            continue;
+          }
+          const step = anyTypeStep(field);
+          if (step) problems.push(`${where}: its query field ${f} has ${step}, which takes a value of any type, where a query string carries text`);
+        }
+      }
+      // tools/list states the input as JSON Schema: a type it cannot state (a
+      // date, a bigint, a map) is a tool no client could be shown. A transform
+      // is fine — the MCP server as a REST client sends the input its client
+      // sent, which the REST core parses once (SMD-2287 PR 4a review pass 2).
+      try {
+        z.toJSONSchema(z.object(op.input ?? {}), { io: "input" });
+      } catch {
+        problems.push(`${where}: its input schema cannot be stated as JSON Schema, which tools/list shows`);
       }
       // The output is held to its schema once, here, and the MCP SDK holds the
       // held value to it again: a transform would answer REST and fail MCP.
@@ -324,9 +406,11 @@ export async function runHook(hook: LoadedHook, deps: { core: Core; secret: stri
     // hold the sender's 2xx (review pass 1, measured on Bun 1.4.0). What the
     // socket takes at once is written by then; a large answer's tail may
     // still wait on work that spins (review pass 2).
+    // Work, which runs after the answer, starts a trace of its own linked to the delivery's request, as a job's body
+    // does; a discard runs before a failed delivery's 500, inside its request, so it stays that request's child (SMD-1849 PR 2d).
     const run = () =>
       new Promise<void>((resolve) => setImmediate(resolve))
-        .then(work)
+        .then(() => withSpan(`defer ${hook.plugin}`, { root: what === "work", attributes: { "ob1.plugin": hook.plugin, "ob1.defer": what } }, () => work()))
         .then(
           () => undefined,
           (err) => {

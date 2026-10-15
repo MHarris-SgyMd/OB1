@@ -18,12 +18,21 @@
 // no-ops, recorded and sent nowhere, until an operator names a collector
 // (OTEL_EXPORTER_OTLP_ENDPOINT, or a signal's own variable), when
 // startTelemetry loads the SDK (otel-setup.ts). Nothing here sends anything
-// anywhere on its own.
+// anywhere on its own. The spans inside a tool call — a provider call, a store
+// operation — a job's body and a webhook's deferred work are spans.ts's, on
+// the API through tracing.ts, which this module installs (PR 2d).
 
 import * as otel from "@opentelemetry/api";
 import type { FlushResult } from "./shutdown.ts";
 import { TOOLS } from "./tools.ts";
 import { labelPart } from "./sse.ts";
+import { useTracing, type HistogramSpec } from "./spans.ts";
+import { cutOpenSpans, histogram, markFault, OTEL_TRACING, tracer } from "./tracing.ts";
+
+// The provider calls', the store's, the jobs' and the deferred work's spans (spans.ts) are the API's from here on, in
+// every process that loads this module — a server, preflight under --deep — and nothing in a db/ worker or an eval,
+// which never does (PR 2d).
+useTracing(OTEL_TRACING);
 
 /** Which server answered: the MCP server, or the REST core. */
 export type Door = "mcp" | "api";
@@ -188,16 +197,61 @@ let starting: Promise<boolean> | undefined;
 let generation = 0;
 let stopping: Promise<void> | undefined;
 
+/**
+ * A request the server did not accept — no key, one it refused (revoked, busy,
+ * outside the door's scopes), a webhook delivery its plugin refused — sends its
+ * span and log record within this many a minute per server, each start of the
+ * SDK a fresh count; past it, its point on the request-duration histogram and
+ * its line still count it (the line naming a trace that was not sent), and one
+ * line says how many sent neither, at the minute's end, the next minute's first
+ * or the stop's flush (SMD-1849 PR 3a review passes 2–3: a keyless flood put
+ * about 1 KB a request on a collector's disk, measured, and Loki and Tempo
+ * expire by age alone). Only the request's own span is held: work it ran under
+ * it — a refused key's registry lookup, a delivery its plugin refused after a
+ * capture — still sends its spans, without their parent. A key accepted, or a
+ * delivery its plugin accepted, is never held to it.
+ */
+export const ANONYMOUS_PER_MINUTE = 60;
+let anonymous = { minute: -1, sent: 0, unsent: 0 };
+let clock = (): number => Date.now();
+let telemetryLog: (line: string) => void = (line) => console.warn(line);
+
+/** The clock the anonymous budget reads its minutes from, for a suite; returns the one it replaced. */
+export function useBudgetClock(next: () => number): () => number {
+  const previous = clock;
+  clock = next;
+  return previous;
+}
+
+/** Whether a request the server did not accept sends its span and record: within the minute's budget. */
+function anonymousSent(): boolean {
+  const now = clock();
+  const minute = Math.floor(now / 60_000);
+  if (minute !== anonymous.minute) {
+    sayUnsent();
+    anonymous = { minute, sent: 0, unsent: 0 };
+  }
+  if (anonymous.sent < ANONYMOUS_PER_MINUTE) {
+    anonymous.sent += 1;
+    return true;
+  }
+  // The minute's first past the budget: its count is said when the minute ends, or by the next minute's first, or at the stop's flush.
+  if (anonymous.unsent++ === 0) setTimeout(sayUnsent, Math.max(0, (minute + 1) * 60_000 - now)).unref?.();
+  return false;
+}
+
+/** Says how many requests the server did not accept sent no span or record since it last said, once. */
+function sayUnsent(): void {
+  const n = anonymous.unsent;
+  if (n === 0) return;
+  anonymous.unsent = 0;
+  try {
+    telemetryLog(`telemetry: ${n} ${n === 1 ? "request" : "requests"} the server did not accept past ${ANONYMOUS_PER_MINUTE} in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)`);
+  } catch {}
+}
+
 /** What a request's record is told on its way: every RequestRecord field but the door, the method, the time and the trace id, which the record keeps itself. */
 export type RequestFields = Partial<Omit<RequestRecord, "door" | "method" | "ms" | "trace">>;
-
-/**
- * The tracer every span here comes from: the API's no-op until otel-setup.ts
- * registers a provider. Read each time: a suite's shutdown (trace.disable())
- * replaces the API's proxy, so a tracer held from before would miss the next
- * provider.
- */
-const tracer = () => otel.trace.getTracer("ob1");
 
 /**
  * A request's `traceparent` for the W3C propagator, and nothing else: the
@@ -296,59 +350,11 @@ function labelsOf(attributes: otel.Attributes, fields: CheckedRecord, refusedAtK
  * keepalive's ceiling, 600 s, where a stream still running is `stalled`
  * (sse.ts; review pass 1).
  */
-const DURATION_BOUNDS = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10, 30, 60, 300, 600];
-
-/** The histogram, made again whenever the API's meter provider is another (the SDK set up, or a suite's stopped). */
-let durations: { provider: otel.MeterProvider; histogram: otel.Histogram } | undefined;
-function durationHistogram(): otel.Histogram {
-  const provider = otel.metrics.getMeterProvider();
-  if (durations?.provider !== provider) {
-    durations = {
-      provider,
-      histogram: provider.getMeter("ob1").createHistogram("http.server.request.duration", {
-        unit: "s",
-        description: "How long each request took, to its answer or its stream's end (SMD-1849)",
-        advice: { explicitBucketBoundaries: DURATION_BOUNDS },
-      }),
-    };
-  }
-  return durations.histogram;
-}
-
-/**
- * A fault's kind and code, for its span — never its message, which can carry
- * a URL, a key or a thought's text (SMD-2310's note; 2b review pass 5): an
- * Error's `name` where it is spelled as one (`TypeError`, `PostgresError`),
- * what was thrown where it was no Error (`string`), and a code it carries
- * where that is spelled as one — a Postgres error's SQLSTATE, which Bun's SQL
- * keeps in `errno` (`23505`; its `code` is the driver's own,
- * `ERR_POSTGRES_SERVER_ERROR`, for every server error), else its `code`: a
- * network error's (`ECONNREFUSED`), the driver's, a status.
- */
-export function faultOf(err: unknown): { kind: string; code?: string } {
-  // Each read in a guard of its own: what was thrown can throw as it is read (a Proxy, a getter), and this runs in
-  // the catch that ends a call — a throw out of it would leave the call unended and its line `unrun` (review pass 1);
-  // a code that throws leaves the kind that did not (review pass 2).
-  let kind = "?";
-  try {
-    const name = err instanceof Error ? (err as { name?: unknown }).name : undefined;
-    kind = err instanceof Error ? (typeof name === "string" && /^[A-Z][A-Za-z0-9]{0,63}$/.test(name) ? name : "?") : err === null ? "null" : typeof err;
-  } catch {}
-  let code: string | undefined;
-  try {
-    const { errno, code: raw } = typeof err === "object" && err !== null ? (err as { errno?: unknown; code?: unknown }) : {};
-    code = typeof errno === "string" && /^[0-9A-Z]{5}$/.test(errno) ? errno
-      : typeof raw === "string" && /^[A-Z0-9][A-Z0-9_]{1,47}$/.test(raw) ? raw
-      : typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw < 1_000_000 ? String(raw) : undefined;
-  } catch {}
-  return code === undefined ? { kind } : { kind, code };
-}
-
-/** A fault on a span: an `exception` event with its kind and code (faultOf), and nothing of its message or stack. */
-function markFault(span: otel.Span, err: unknown): void {
-  const { kind, code } = faultOf(err);
-  span.addEvent("exception", code === undefined ? { "exception.type": kind } : { "exception.type": kind, "ob1.fault.code": code });
-}
+const REQUEST_DURATION: HistogramSpec = {
+  unit: "s",
+  description: "How long each request took, to its answer or its stream's end (SMD-1849)",
+  bounds: [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10, 30, 60, 300, 600],
+};
 
 /** The records not yet ended, so the stop can end each (cutOpenRequests). */
 const OPEN = new Set<RequestTrace>();
@@ -388,6 +394,14 @@ export class RequestTrace {
   deferred = false;
   /** Set where the request was refused at its key, before any tool could run (the MCP route's refusal, a keyed mirror's, the REST core's). */
   refusedAtKey = false;
+  /** Set where a plugin accepted a webhook delivery (an answer under 400): its sender verified, it is not held to the anonymous budget (review pass 3). */
+  hookAccepted = false;
+  /**
+   * Whether the SDK was running when the request began: one begun before it loaded, and not accepted, spends none of
+   * the anonymous budget and sends no record (review passes 3, 5). Not whether its span records — an unsampled span, or spans turned off, records nothing
+   * while the request's log record still goes, and the budget holds that record too (review pass 4).
+   */
+  private readonly loaded = sdk !== undefined;
   private done = false;
   /** The request's server span, and the context its handlers run in (run). */
   private readonly span: otel.Span;
@@ -409,19 +423,29 @@ export class RequestTrace {
     const caller = trusted ? undefined : otel.trace.getSpanContext(remote);
     this.incoming = trusted ? incomingTrace(headers.get("traceparent")) : undefined;
     const name = METHODS.has(method) ? method : "?";
-    this.span = tracer().startSpan(name === "?" ? "HTTP" : name, {
-      kind: otel.SpanKind.SERVER,
-      startTime: this.started,
-      attributes: { "http.request.method": name === "?" ? "_OTHER" : name, "ob1.door": door },
-      links: caller && otel.isSpanContextValid(caller) ? [{ context: caller }] : undefined,
-    }, parent);
+    // An SDK that throws as the span starts leaves the request a span that records nothing, not a failed request (review pass 2).
+    let span: otel.Span;
+    try {
+      span = tracer().startSpan(name === "?" ? "HTTP" : name, {
+        kind: otel.SpanKind.SERVER,
+        startTime: this.started,
+        attributes: { "http.request.method": name === "?" ? "_OTHER" : name, "ob1.door": door },
+        links: caller && otel.isSpanContextValid(caller) ? [{ context: caller }] : undefined,
+      }, parent);
+    } catch {
+      span = otel.trace.wrapSpanContext(otel.INVALID_SPAN_CONTEXT);
+    }
+    this.span = span;
     this.context = otel.trace.setSpan(parent, this.span);
   }
 
   /** The request's trace id: its span's, or, where no collector is set, a trusted incoming `traceparent`'s. */
   get traceId(): string | undefined {
-    const own = this.span.spanContext();
-    return otel.isSpanContextValid(own) ? own.traceId : this.incoming;
+    try {
+      const own = this.span.spanContext();
+      if (otel.isSpanContextValid(own)) return own.traceId;
+    } catch {}
+    return this.incoming;
   }
 
   /** Runs `fn` with the request's span current, so a tool's span (withToolSpan) is its child. */
@@ -462,14 +486,20 @@ export class RequestTrace {
       // The span, the histogram's point and the log record whatever the line's sink does.
       const fields = checked(record);
       const span = spanOf(fields, this.refusedAtKey);
-      this.span.updateName(span.name);
-      this.span.setAttributes(span.attributes);
-      if (span.error) this.span.setStatus({ code: otel.SpanStatusCode.ERROR });
-      this.span.end(at);
-      // Never the request's undoing: an SDK that throws here loses its point and its record, not the request (PR 2c).
+      // A request the server did not accept: its span unended (never exported) and no record past the minute's budget; its point always.
+      const accepted = (record.agent !== undefined && !this.refusedAtKey) || this.hookAccepted;
+      // One begun before the SDK loaded has no span to send and spends none of the budget; its record goes nowhere either (review pass 5).
+      const sent = accepted || sdk === undefined || (this.loaded && anonymousSent());
+      // Never the request's undoing: an SDK that throws here loses its span (review pass 2), its point and its record (PR 2c), not the request.
       try {
-        durationHistogram().record(Math.max(0, at - this.started) / 1000, labelsOf(span.attributes, fields, this.refusedAtKey));
-        if (sdk) {
+        this.span.updateName(span.name);
+        this.span.setAttributes(span.attributes);
+        if (span.error) this.span.setStatus({ code: otel.SpanStatusCode.ERROR });
+        if (sent) this.span.end(at);
+      } catch {}
+      try {
+        histogram("http.server.request.duration", REQUEST_DURATION).record(Math.max(0, at - this.started) / 1000, labelsOf(span.attributes, fields, this.refusedAtKey));
+        if (sdk && sent) {
           const body: Record<string, string | number> = {};
           for (const [key, value] of Object.entries(fields)) if (value !== undefined) body[key] = value;
           sdk.emit({ body, severity: span.error ? "ERROR" : fields.outcome === undefined || fields.outcome === "ok" ? "INFO" : "WARN", context: this.context, at });
@@ -491,48 +521,24 @@ export interface ToolSpan {
   fault(err: unknown): void;
 }
 
-/** The tool calls' spans not yet ended, so the stop's cut ends them with their requests (cutOpenRequests). */
-const OPEN_TOOLS = new Set<ToolSpan>();
-
 /**
  * Runs one tool call under its own span, current while it runs (so what the
- * call starts is its child): `fn` ends it with how the call ended; one that
- * throws first ends it as an error, and one that returns without ending it
- * ends it `ok`.
+ * call starts — a provider call, a store operation — is its child): `fn`
+ * ends it with how the call ended; one that throws first ends it as an error,
+ * and one that returns without ending it ends it `ok` (tracing.ts).
  */
-export async function withToolSpan<T>(tool: string, fn: (span: ToolSpan) => Promise<T>): Promise<T> {
+export function withToolSpan<T>(tool: string, fn: (span: ToolSpan) => Promise<T>): Promise<T> {
   const name = toolName(tool) ?? "?";
-  const parent = otel.context.active();
-  const span = tracer().startSpan(`execute_tool ${name}`, {
-    kind: otel.SpanKind.INTERNAL,
-    attributes: { "gen_ai.tool.name": name },
-  }, parent);
-  let done = false;
-  const handle: ToolSpan = {
+  // A throw's error.type is its outcome, as a tool call's has always been: a tool's fault code is its reply's, not the throw's.
+  return OTEL_TRACING.run(`execute_tool ${name}`, { attributes: { "gen_ai.tool.name": name }, errorType: () => "error" }, (work) => fn({
     end: (outcome, code) => {
-      if (done) return;
-      done = true;
-      OPEN_TOOLS.delete(handle);
       const checkedCode = spelled(code, CODE);
-      span.setAttributes({ "ob1.outcome": outcome, "ob1.code": checkedCode });
+      work.set({ "ob1.code": checkedCode });
       // A fault, or a call the stop cut off, as a request's span says either.
-      if (outcome === "error" || outcome === "cut") span.setAttributes({ "error.type": checkedCode ?? outcome }).setStatus({ code: otel.SpanStatusCode.ERROR });
-      span.end();
+      work.end(outcome, checkedCode);
     },
-    fault: (err) => {
-      if (!done) markFault(span, err);
-    },
-  };
-  OPEN_TOOLS.add(handle);
-  try {
-    const value = await otel.context.with(otel.trace.setSpan(parent, span), () => fn(handle));
-    handle.end("ok");
-    return value;
-  } catch (err) {
-    handle.fault(err);
-    handle.end("error");
-    throw err;
-  }
+    fault: work.fault,
+  }));
 }
 
 /** The exporter and protocol values the OpenTelemetry SDKs name, which a line may echo; any other is not shown. */
@@ -658,6 +664,10 @@ export function startTelemetry(
       return undefined;
     }
     sdk = set;
+    // A count left by a stop (requests ended while it shut down) is said before the reset (review pass 6).
+    sayUnsent();
+    anonymous = { minute: -1, sent: 0, unsent: 0 };
+    telemetryLog = log;
     return set;
   }).catch((err: unknown) => {
     // The import's failure or the setup's, a server that serves either way (review pass 4: a throw in the setup killed it).
@@ -676,6 +686,38 @@ export function startTelemetry(
 }
 
 /**
+ * `preflight --deep`'s telemetry row (PR 2d review passes 1–2), from what the
+ * start and the send said (`said`, startTelemetry's lines), the signals with a
+ * URL, the provider probes made and how the send went: `ok` where the probes'
+ * spans or points went — by the signals that go, a flush that found nothing
+ * left counted as gone, since a span batch may have sent them first; a warning
+ * for what the server would share — an export not sent, an endpoint that is no
+ * URL or has a query string, an SDK that would not start — whatever was sent;
+ * a skip where no collector is named, a signal is off on purpose
+ * (`OTEL_SDK_DISABLED`, an exporter's `none`), spans and points both go
+ * nowhere, or no probe ran. A line that says where a signal goes, or what is
+ * not read, is no problem. Each line once, in a row's words.
+ */
+export function telemetryRow(state: { started: boolean; said: readonly string[]; urls: TelemetryPlan["urls"]; probes: number; sent?: FlushResult; boundMs: number }): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
+  // No `telemetry:` before, no ticket after; one of each: the flush and the shutdown each send the metrics' reading, so a refused one is said twice.
+  const said = [...new Set(state.said.map((line) => line.replace(/^telemetry: /, "").replace(/ \(SMD-1849\)$/, "").replace(/, SMD-1849\)$/, ")")))];
+  const deliberate = (line: string) => /OTEL_SDK_DISABLED=true|_EXPORTER=none/.test(line);
+  const wrong = said.some((line) => !/ go to | is not read/.test(line) && !deliberate(line));
+  const row = (status: "ok" | "warn" | "skip", detail: string) => status === "warn"
+    ? { status, detail, fix: "Fix what the row names, or check the collector is up and reachable from here; the server reads the same variables and sends to the same." }
+    : { status, detail };
+  if (!state.started && said.length === 0) return row("skip", "no collector named (OTEL_EXPORTER_OTLP_ENDPOINT or a signal's own endpoint): the probes' spans and points go nowhere");
+  // What the probes make — spans, points — by the signals that go somewhere; a log record they never make.
+  const carried = state.started ? [state.urls.traces ? "spans" : undefined, state.urls.metrics ? "points" : undefined].filter((w): w is string => w !== undefined) : [];
+  if (carried.length === 0) return row(wrong ? "warn" : "skip", `the probes' spans and points go nowhere — ${said.join("; ")}`);
+  if (state.probes === 0) return row(wrong ? "warn" : "skip", `no provider probe ran, so nothing was sent — ${said.join("; ")}`);
+  const went = state.sent === "sent" || state.sent === "none";
+  const what = `the provider probes' ${carried.join(" and ")}`;
+  const how = went ? "sent" : state.sent === "timeout" ? `not all sent within ${state.boundMs / 1000} s` : "not all sent";
+  return row(went && !wrong ? "ok" : "warn", `${what} ${how} — ${said.join("; ")}`);
+}
+
+/**
  * Shuts the SDK down and forgets its start, so a suite can start it again;
  * spans are no-ops after. A start still loading is waited for, its own SDK
  * shut down before this returns, and a start made meanwhile waits for this.
@@ -686,6 +728,7 @@ export async function stopTelemetry(): Promise<void> {
   starting = undefined;
   const stop = (async () => {
     await loading;
+    sayUnsent();
     await sdk?.shutdown();
     sdk = undefined;
   })();
@@ -701,9 +744,12 @@ export async function stopTelemetry(): Promise<void> {
  * Sends what each signal still holds — the spans and log records batched, the
  * metrics' last reading — and waits for what is on its way: how that ended,
  * or undefined with no collector set. A server's stop runs it beside closing
- * its pool, under the pool's bound, and says which (shutdown.ts).
+ * its pool, under the pool's bound, and says which (shutdown.ts); first it says
+ * what the anonymous budget held back, since a server's stop never shuts the
+ * SDK down (review pass 3).
  */
 export async function flushTelemetry(): Promise<FlushResult | undefined> {
+  sayUnsent();
   return sdk?.flush();
 }
 
@@ -763,8 +809,9 @@ export function endsWithStream(trace: RequestTrace, signal: AbortSignal): Stream
  * middleware would have said had its handler returned first.
  */
 export function cutOpenRequests(): void {
-  // A tool call still running is cut with it: its span ends too, so the export carries it (review pass 1).
-  for (const call of [...OPEN_TOOLS]) call.end("cut");
+  // A tool call, a provider call, a store operation or a job still running is cut with it: its span ends too, so the
+  // export carries it (review pass 1; PR 2d).
+  cutOpenSpans();
   // Each ended alone: a sink that throws on one leaves the rest to end, and the stop to flush and exit (review pass 3).
   for (const trace of [...OPEN]) {
     try {

@@ -174,7 +174,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**279 numbered changes** on top of the pin: 1–17 are the table above; 18–279 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**313 numbered changes** on top of the pin: 1–17 are the table above; 18–313 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -440,6 +440,40 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 277 | [A peer's odd status can no longer stop the authorization server, and a throw in a function its own code hands on is logged, not the process's end](changes/277-a-peer-s-odd-status-can-no-longer-stop.md) | SMD-2665 |
 | 278 | [The MCP tools and the REST core's operations are two projections of one contract, held by a test that reads both surfaces as a client does, and the REST gateways and three vendored MCP servers retire against it](changes/278-the-mcp-tools-and-the-rest-core-s-operations-are.md) | SMD-1931 |
 | 279 | [A capture-only key is refused `metadata.ticket`](changes/279-a-capture-only-key-is-refused-metadata-ticket.md) | SMD-2657 |
+| 280 | [A vendored MCP server's slow tool call is answered, not reset](changes/280-a-vendored-mcp-server-s-slow-tool-call.md) | SMD-2001 |
+| 281 | [The consolidation judge stops proposing related tickets as supersessions](changes/281-the-consolidation-judge-stops-proposing-related.md) | SMD-1873 |
+| 282 | [The proxy's route tables carry no comment and are held byte for byte](changes/282-the-proxy-s-route-tables-carry-no-comment.md) | SMD-2658 |
+| 283 | [The sleep scheduler, `db/sleep.ts`: extraction and consolidation while the brain is quiet, yielding on the first live call](changes/283-the-sleep-scheduler-db-sleep-ts-extraction.md) | SMD-1794 |
+| 284 | [canary.sh reads a port's bound address from the binding's JSON, which both runtimes spell `HostIp`, so `--runtime podman` stands a path-mode canary](changes/284-canary-sh-reads-a-port-s-bound-address-from.md) | SMD-2677 |
+| 285 | [kubernetes-deployment's provider calls end at OB1_LLM_TIMEOUT, and a failed chat call costs a capture its tags, not the capture, as on the core server](changes/285-kubernetes-deployment-s-provider-calls-end.md) | SMD-2692 |
+| 286 | [canary.sh names a connector at the root of the canary's own port as on the deprecated root, not as one the canary no longer answers](changes/286-canary-sh-names-a-connector-at-the-root.md) | SMD-2661 |
+| 287 | [Each request to either server but the keyless liveness probe leaves one JSON line, from an allow-list, and a span, a metric point and a log record where a collector is named, and no container's log grows without bound](changes/287-each-request-to-either-server-but-the-keyless.md) | SMD-1849 |
+| 288 | [The session-capture hook's --check warns while its url is on the deprecated root](changes/288-the-session-capture-hook-s-check-warns-while.md) | SMD-2686 |
+| 289 | [Plugins in the REST core](changes/289-plugins-in-the-rest-core.md) | SMD-2310 |
+| 290 | [Only the proxy's backends answer it](changes/290-only-the-proxy-s-backends-answer.md) | SMD-2685 |
+| 291 | [recipes/ and integrations/ resolve extensions/' pinned install through committed node_modules links, and test-auth starts their servers under --no-install](changes/291-recipes-and-integrations-resolve-extensions.md) | SMD-1991 |
+| 292 | [bench-hnsw.ts section F: `match_thoughts` under concurrency](changes/292-bench-hnsw-ts-section-f-match-thoughts-under.md) | SMD-1500 |
+| 293 | [The session-capture hook's url: the slash on the path, a ?key= refused unechoed, query values masked when printed](changes/293-the-session-capture-hook-s-url-the-slash.md) | SMD-2743 |
+| 294 | [A capture-only key's stamp yields to the first classified key that can read to re-capture the text, at a higher trust](changes/294-a-capture-only-key-s-stamp-yields-to-the-first.md) | SMD-2664 |
+| 295 | [A plugin's webhook refuses replays: a timestamped signature, and a delivery's id run once](changes/295-a-plugin-s-webhook-refuses-replays-a-timestamped.md) | SMD-2755 |
+| 296 | [The network move](changes/296-the-network-move.md) | SMD-2583 |
+| 297 | [The compose stack comes back after a reboot: Postgres and Ollama restart unless-stopped, every policy held, podman's boot unit documented](changes/297-the-compose-stack-comes-back-after-a-reboot.md) | SMD-2760 |
+| 298 | [brain_info, keyed /health and preflight report the proposal queue and the standing judged relations, so a sleep pass's findings are seen without a query](changes/298-brain-info-keyed-health-and-preflight-report.md) | SMD-2680 |
+| 299 | [The webhook delivery-id memory is the SDK's `onceById`, its lease sized from the core's own model-call deadline](changes/299-the-webhook-delivery-id-memory-is-the-sdk.md) | SMD-2768 |
+| 300 | [The server sized for the table](changes/300-the-server-sized-for-the-table.md) | SMD-1499 |
+| 301 | [The operator resets a capture-only key's settled or moved label](changes/301-the-operator-resets-a-capture-only-key-s-settled.md) | SMD-2744 |
+| 302 | [A plugin webhook answers before its capture finishes: `ctx.defer`, owned by the runtime, and `onceById`'s `defer`](changes/302-a-plugin-webhook-answers-before-its-capture.md) | SMD-2767 |
+| 303 | [Consolidation findings between two unlinked tickets are posted as one Linear comment on the newer ticket, opt-in, capped and through the egress gate](changes/303-consolidation-findings-between-two-unlinked.md) | SMD-2681 |
+| 304 | [Preflight's resident-memory row leaves out a staging index 039 is about to adopt, and says so](changes/304-preflight-s-resident-memory-row-leaves-out.md) | SMD-2871 |
+| 305 | [The sleep scheduler runs as an opt-in compose service, beside which the workers profile may not run, with its own preflight row and an opt-in grant for the query log it wakes on](changes/305-the-sleep-scheduler-runs-as-an-opt-in-compose.md) | SMD-2678 |
+| 306 | [Preflight's walk index remedy runs 039 through the migrator, after the steps 039's own decisions call for](changes/306-preflight-s-walk-index-remedy-runs-039-through.md) | SMD-2880 |
+| 307 | [The sleep scheduler survives a database restart at any sleep, checks each pass's start once before its first quiet, says each banner once, ends on a start refusal no retry mends, and says on its row a pass waiting for the provider and the refusal that ended it](changes/307-the-sleep-scheduler-survives-a-database-restart.md) | SMD-2752 |
+| 308 | [A base URL's user and password are its endpoint's Basic credential, on every Bun](changes/308-a-base-url-s-user-and-password-are-its-endpoint.md) | SMD-2885 |
+| 309 | [Bun 1.4.3 everywhere, every pin held to one version; brain-compare and n8n provisioning send a URL's user and password as Basic on every Bun](changes/309-bun-1-4-3-everywhere-every-pin-held-to-one.md) | SMD-2894 |
+| 310 | [Every suite is run: the weekly digest's and the job registry's suites in CI, and check 34 holds every `test-*` script to a workflow step or a stated reason](changes/310-every-suite-is-run-the-weekly-digest.md) | SMD-2895 |
+| 311 | [ci-parity.sh runs what CI runs, held to the workflow both ways by check 35](changes/311-ci-parity-sh-runs-what-ci-runs-held.md) | SMD-2903 |
+| 312 | [The REST core's typed client, and a forwarded refusal that carries its own words](changes/312-the-rest-core-s-typed-client-and-a-forwarded.md) | SMD-2287 |
+| 313 | [What became of each finding posted to the board, and the acceptance rate, from the brain alone](changes/313-what-became-of-each-finding-posted-to-the-board.md) | SMD-2682 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->

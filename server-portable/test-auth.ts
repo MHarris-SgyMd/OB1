@@ -15,6 +15,7 @@
 import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, presentedKeys, queryOf, secretMatches, CLIENT_SCOPES, SCOPES } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert, RuntimeUrl } from "../db/test-support.ts";
+import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
 import { mayCall, visibleToolNames, READ_TOOL_NAMES, UNLOCKS, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
 
 const { assert, report } = createAssert();
@@ -190,7 +191,9 @@ process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEYS = KEYS;
 delete process.env.MCP_ACCESS_KEY;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+// server-portable's index.ts, or the MCP server as a REST client with OB1_MCP_UNDER_TEST=client (SMD-2287).
+const worker = await mcpUnderTest();
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 

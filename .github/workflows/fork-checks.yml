@@ -60,7 +60,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/, plugins/, evals/ or jev/ beyond tests and docs
+      # touches db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -69,7 +69,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, plugins/, evals/ or jev/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, rest-client/, mcp-server/, plugins/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -128,6 +128,14 @@ jobs:
       # it again from the copy compose mounts.
       - name: The forwarder's address rule and how it closes
         run: bun deploy/forwarder.ts --self-check
+
+      # One env file is one brain (SMD-2873): deploy/instance.ts check reads
+      # each published port's setting from the house form, compose's render
+      # and a container list, and names who holds a port. Its parts on fixtures,
+      # and check() itself against stub runtimes; the deploy-stack job runs it
+      # beside a stack and a second brain.
+      - name: The host-port check's reading of settings and holders
+        run: bun deploy/instance.ts --self-check
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -188,6 +196,55 @@ jobs:
       - name: Typecheck
         working-directory: server-portable
         run: bunx tsc --noEmit
+
+      # The REST core's client (SMD-2287), which the MCP server and the
+      # operator GUI call the brain through: its generated files against the
+      # REST core's own document, so a route or a schema changed without
+      # `bun generate.ts` fails here, and every operation through it into the
+      # real REST app over a stub core. Its imports of ../server-portable
+      # resolve against that directory's install above.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the REST client
+        working-directory: rest-client
+        run: bunx tsc --noEmit
+
+      - name: The REST client against the REST core
+        working-directory: rest-client
+        run: bun test-client.ts
+
+      # The MCP server as a client of the REST core (SMD-2287): its own suite
+      # over the real REST app with a stub core, then test-auth's assertions
+      # held to it with the REST core behind it in process — the same suite
+      # the step above runs against server-portable's index.ts.
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the MCP server
+        working-directory: mcp-server
+        run: bunx tsc --noEmit
+
+      - name: The MCP server over the REST core
+        working-directory: mcp-server
+        run: bun test-mcp.ts
+
+      - name: Scoped access keys, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-auth.ts
+
+      # An enabled plugin's operation as the MCP server's tool, called on the
+      # REST core by its route (SMD-2287 PR 4a); its request line is the REST
+      # core's until PR 4b.
+      - name: Plugins in the contract, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-plugins.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
@@ -700,6 +757,27 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The same suite through the MCP server as a client of the REST core
+      # (SMD-2287 PR 3b), the REST core in process behind it: the same
+      # assertions, but a write records the REST core's door with the MCP
+      # server as its carrier, and the request lines are the REST core's
+      # until the MCP server writes its own (PR 4). The two installs pin its
+      # cross-directory imports; Bun would otherwise fetch them (SMD-2978).
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      - name: End-to-end over MCP, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
+
       # The REST core beside the MCP server on one database (SMD-2284): every
       # operation through both doors, the MCP reply what render.ts makes of the
       # REST answer, the same refusals, and test-auth's cases against REST.
@@ -717,6 +795,15 @@ jobs:
         run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The example's operations read back through the MCP server as a REST
+      # client (SMD-2287 PR 4a), on the installs above.
+      - name: Plugin tables, through the MCP server as a REST client
+        working-directory: server-portable
+        run: bun test-plugins-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_MCP_UNDER_TEST: client
 
       # The fully local path: both model calls go to a configured endpoint with no
       # credential, and a wrong-width vector is refused rather than stored.
@@ -1295,6 +1382,10 @@ jobs:
           # rooted mesh name — and beside /api's, both routes on the proxy.
           docker compose -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-hooks-route"] == .configs["proxy-hooks-route"].content) and (.services.proxy.labels | has("ob1.proxy-api-route")) and (.configs["proxy-hooks-route"].content | test("X-Brain-Forwarder: \"\"")) and ([.configs["proxy-hooks-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://api.ob1.internal.:8000"])'
+          # /grafana's overlay (SMD-1849 PR 3a), the same way: no port, its route
+          # file its label, Grafana by its rooted mesh name, no wait on it.
+          docker compose -f compose.yaml -f compose.grafana-public.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-grafana-route"] == .configs["proxy-grafana-route"].content) and ([.configs["proxy-grafana-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://lgtm.ob1.internal.:3000"]) and (.services.proxy.depends_on | has("lgtm") | not)'
           # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
           # REST core join stable's mesh under the canary's names alone, the
           # canary's own `mesh` stays its own, and it adds no port (the one the
@@ -1325,6 +1416,16 @@ jobs:
           # the POC's switch.
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+          # SMD-1849 PR 3a: the observability profile's collector publishes
+          # nothing and joins the internal mesh alone (check 28 holds the rest of
+          # it, LGTM_SERVICE); with compose.grafana-port.yaml, Grafana's port on
+          # loopback, a network of its own and its origin that port. The two servers take the ten
+          # OpenTelemetry settings, each empty unless deploy/.env sets it, and no
+          # service name; no other service takes any, under every profile.
+          docker compose -f compose.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
+          docker compose -f compose.yaml -f compose.grafana-port.yaml --profile observability config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
           # SMD-2583, the network move, as compose renders each stack with
           # every profile: no service on compose's default network (a service
           # that names none is put there); Postgres on the internal `data`
@@ -1340,16 +1441,19 @@ jobs:
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
           all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
           tiers=(); while IFS= read -r p; do tiers+=("$p"); done < <(profiles_of compose.tiers.yaml)
-          [ "${#all[@]}" -ge 6 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the six it had" >&2; exit 1; }
+          [ "${#all[@]}" -ge 8 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the eight it has" >&2; exit 1; }
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "proxy", "server"])'
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"])
+              and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
+          docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"])'
           docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
@@ -1515,8 +1619,9 @@ jobs:
           # port binds loopback"; the ports by it and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
+              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
               compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
@@ -1529,10 +1634,13 @@ jobs:
           rendered=()
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold. Labels are held on the substituted
-          # render alone: --no-interpolate leaves two files' labels a list.
+          # render alone: --no-interpolate leaves two files' labels a list,
+          # and their environment one too, which `env` reads as a mapping
+          # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           held='. as $r | .services.proxy as $p
-            | def rest: del(.services.proxy, .configs) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
+            | def env: if type == "array" then map(index("=") as $i | if $i then {(.[:$i]): .[$i + 1:]} else {(.): null} end) | add // {} else . end;
+            def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
             and (($r.configs // {}) | keys) == ([$want[].source, "forwarder"] | sort)
@@ -1589,6 +1697,7 @@ jobs:
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
+          grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
           tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
@@ -1596,6 +1705,11 @@ jobs:
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
           proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
           CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
           proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
@@ -1611,10 +1725,76 @@ jobs:
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
             proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
+
+      # SMD-2873. A second brain beside the stack, from its own env file: the
+      # host-port check refuses to run where Bun would load deploy/.env into
+      # it; says the stack's port is its own (the stack came up with no
+      # --env-file, so from its directory's .env); refuses, before any up, ob1b
+      # on the stack's port (naming SERVER_PORT and the stack's forwarder), a
+      # second env file in deploy/ naming no project (so the stack's project,
+      # made from .env), ob1b on a port a host process holds, ob1b on a port a
+      # created, never started container holds (Docker's ps prints no ports for
+      # it), and an env file's COMPOSE_FILE without the same files as -f; and
+      # passes ob1b on its own. ob1b comes up healthy on that port, and no
+      # container of either brain is on the other's networks. Then the check
+      # reads ob1b's port as ob1b's own, and ob1b goes, its volume with it (its
+      # logs first, when the step failed).
+      - name: A second brain beside the stack, from its own env file
+        working-directory: deploy
+        run: |
+          trap 'rc=$?; [ "$rc" = 0 ] || docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          # Run from deploy/, whose .env Bun would load into the check: refused without --no-env-file, naming it.
+          rc=0; bun instance.ts check > /tmp/instance-bunenv.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'Run it as: bun --no-env-file' /tmp/instance-bunenv.out; then cat /tmp/instance-bunenv.out >&2; echo "the check ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
+          bun --no-env-file instance.ts check | tee /tmp/instance-stack.out
+          grep -F "127.0.0.1:8010: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder" /tmp/instance-stack.out
+          (umask 077 && { grep -v -E '^(COMPOSE_PROJECT_NAME|SERVER_PORT|POSTGRES_PASSWORD)=' .env; echo COMPOSE_PROJECT_NAME=ob1b; echo SERVER_PORT=8040; echo "POSTGRES_PASSWORD=\"$(openssl rand -hex 24)\""; } > .env.ob1b.local)
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8010/' .env.ob1b.local > .env.ob1b-clash.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-clash.local > /tmp/instance-clash.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'SERVER_PORT' /tmp/instance-clash.out || ! grep -F 'published by open-brain-forwarder-1, of project open-brain' /tmp/instance-clash.out; then cat /tmp/instance-clash.out >&2; echo "ob1b on the stack's port was not refused before its up, naming SERVER_PORT and the stack's forwarder (exit $rc)" >&2; exit 1; fi
+          # A second env file naming no project is the stack's project, made from .env: refused, whatever its ports.
+          (umask 077 && grep -v -E '^(SERVER_PORT|COMPOSE_PROJECT_NAME)=' .env.ob1b.local > .env.noname.local && echo SERVER_PORT=8042 >> .env.noname.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.noname.local > /tmp/instance-noname.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'project open-brain was made from' /tmp/instance-noname.out; then cat /tmp/instance-noname.out >&2; echo "an env file naming no project was not refused as the stack's project from another file (exit $rc)" >&2; exit 1; fi
+          # A process on the host on ob1b's port, which no container list shows.
+          python3 -m http.server 8041 --bind 127.0.0.1 > /dev/null 2>&1 &
+          SQUAT=$!
+          for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/8041) 2>/dev/null && break; sleep 0.25; done
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8041/' .env.ob1b.local > .env.ob1b-squat.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-squat.local > /tmp/instance-squat.out 2>&1 || rc=$?
+          kill "$SQUAT"; SQUAT=""
+          if [ "$rc" != 2 ] || ! grep -F 'something on this host that is no container already listens there' /tmp/instance-squat.out; then cat /tmp/instance-squat.out >&2; echo "a host process on ob1b's port was not refused (exit $rc)" >&2; exit 1; fi
+          # A container Docker made and never started holds its port, which Docker's ps does not print.
+          docker create --name ob1-ci-port-held -p 127.0.0.1:8043:80 "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" > /dev/null
+          (umask 077 && sed 's/^SERVER_PORT=8040$/SERVER_PORT=8043/' .env.ob1b.local > .env.ob1b-held.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-held.local > /tmp/instance-held.out 2>&1 || rc=$?
+          docker rm -f ob1-ci-port-held > /dev/null
+          if [ "$rc" != 2 ] || ! grep -F 'published by ob1-ci-port-held, of project (none), created: it takes the port when it first starts' /tmp/instance-held.out; then cat /tmp/instance-held.out >&2; echo "a created container's port was not refused (exit $rc)" >&2; exit 1; fi
+          # An env file that sets COMPOSE_FILE picks the files an up reads: the check wants them with -f.
+          (umask 077 && { cat .env.ob1b.local; echo COMPOSE_FILE=compose.yaml:compose.host-ports.yaml; } > .env.ob1b-files.local)
+          rc=0; bun --no-env-file instance.ts check --env-file .env.ob1b-files.local > /tmp/instance-files.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'give the check the same files with -f' /tmp/instance-files.out; then cat /tmp/instance-files.out >&2; echo "an env file's COMPOSE_FILE was not refused without -f (exit $rc)" >&2; exit 1; fi
+          bun --no-env-file instance.ts check --env-file .env.ob1b-files.local -f compose.yaml -f compose.host-ports.yaml > /dev/null
+          bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — free"
+          docker compose --env-file .env.ob1b.local -f compose.yaml up -d --build --wait --wait-timeout 300
+          for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health)" = ok ] && break; sleep 2; done
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health)" = ok ] || { echo "ob1b does not answer on its own port" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] || { echo "the stack stopped answering on its port beside ob1b" >&2; exit 1; }
+          # Every container of each brain on its own project's networks alone. inspect ends each container's
+          # list with a newline of its own, a blank line grep -v would match (review pass 8): dropped.
+          nets() { for id in $(docker compose "$@" -f compose.yaml ps -aq); do docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$id"; done | sed '/^$/d' | sort -u; }
+          ob1b_nets="$(nets --env-file .env.ob1b.local)"
+          stack_nets="$(nets)"
+          if [ -z "$ob1b_nets" ] || [ -z "$stack_nets" ]; then echo "could not read either brain's networks" >&2; exit 1; fi
+          if grep -v '^ob1b_' <<<"$ob1b_nets"; then echo "an ob1b container is on a network not ob1b's" >&2; exit 1; fi
+          if grep -v '^open-brain_' <<<"$stack_nets"; then echo "a stack container is on a network not the stack's" >&2; exit 1; fi
+          bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder"
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
@@ -1979,6 +2159,17 @@ jobs:
           }
           refused postgres open-brain-postgres-1 'name the same database'
           refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
+          # SMD-2873: the networks are the project's that the env file names (the
+          # runs above, on .env, which names none, joined open-brain's); and
+          # --project with --network is refused.
+          (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
+          rc=0; ./tier.sh --env-file /tmp/ob1x.env --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'no network ob1x_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not take ob1x's networks from an env file naming ob1x (exit $rc)" >&2; exit 1; fi
+          rc=0; ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--project and --network both name the networks' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; exit 1; fi
+          rc=0; ./tier.sh --env-file /tmp/ob1x.env --project ob1y --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F 'no network ob1y_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "--project did not name the networks over the env file's project" >&2; exit 1; fi
+          rm -f /tmp/ob1x.env
           [ "$(q openbrain "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the brain lost its thought" >&2; exit 1; }
 
       # SMD-2038. deploy/canary.sh stands a canary beside this stack and takes
@@ -2030,6 +2221,24 @@ jobs:
           refused 'takes a value' up --port ''
           refused 'takes a value' up --name ' '
           refused 'takes a compose project name' up --stable-project 'Open Brain'
+          # SMD-2873: stable's project is the one its env file names, so the canary
+          # looks for that project's stack, and every name follows it; and a
+          # canary's project is no stable.
+          (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
+          refused 'in compose project ob1x' up --env-file /tmp/ob1x.env
+          [ ! -e /tmp/.env.ob1x-canary.local ] || { echo "a refused up made ob1x's canary env file" >&2; exit 1; }
+          # Exit 0 and nothing on stderr, so a `names` that went on to act fails here.
+          names() {
+            local out
+            out="$(./canary.sh "$@" names 2> /tmp/canary-names.err)" || { cat /tmp/canary-names.err >&2; echo "canary.sh $* names exited non-zero" >&2; return 1; }
+            [ ! -s /tmp/canary-names.err ] || { cat /tmp/canary-names.err >&2; echo "canary.sh $* names wrote to stderr" >&2; return 1; }
+            printf '%s\n' "$out" | sed 's/  */ /g' | tr '\n' '|'
+          }
+          [ "$(names --env-file /tmp/ob1x.env)" = "stable ob1x|canary ob1x-canary|connector ob1x-canary|env file /tmp/.env.ob1x-canary.local|" ] || { names --env-file /tmp/ob1x.env >&2; echo "canary.sh's names do not follow the project ob1x's env file names" >&2; exit 1; }
+          [ "$(names --env-file /tmp/ob1x.env --stable-project ob1y)" = "stable ob1y|canary ob1y-canary|connector ob1y-canary|env file /tmp/.env.ob1y-canary.local|" ] || { echo "--stable-project does not name the canary" >&2; exit 1; }
+          [ "$(names)" = "stable open-brain|canary open-brain-canary|connector open-brain-canary|env file $PWD/.env.canary.local|" ] || { names >&2; echo "the default stable's canary is not open-brain-canary on .env.canary.local" >&2; exit 1; }
+          rm -f /tmp/ob1x.env
+          refused "is a canary's" up --stable-project open-brain-canary
           # The image the stack already pulled holds the port as well as any.
           docker run -d --name ob1-port-squat -p 127.0.0.1:8011:5432 -e POSTGRES_PASSWORD=squat pgvector/pgvector:0.8.6-pg16
           refused 'port 8011 is published by ob1-port-squat' up --port 8011
@@ -2123,7 +2332,9 @@ jobs:
           # dummies (nothing here runs board-sync), so the check below has a
           # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
           # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
-          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\n' >> .env
+          # SMD-1849 PR 3a: the observability profile's Grafana password too,
+          # a dummy (nothing here runs the profile).
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
           ./canary.sh up --connect 2>&1 | tee /tmp/canary-up.out
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
@@ -2142,8 +2353,24 @@ jobs:
           if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
+          # SMD-2873: the file names the canary's own project, so compose given it
+          # alone acts on the canary; one naming another is refused at an up.
+          grep -qx 'COMPOSE_PROJECT_NAME="open-brain-canary"' .env.canary.local || { echo "the canary's env file does not name its project" >&2; exit 1; }
+          [ "$(printf 'name: x\nservices: {}\n' | docker compose --env-file .env.canary.local -f - config | sed -n 's/^name: //p')" = open-brain-canary ] || { echo "compose given the canary's env file alone does not take the canary's project" >&2; exit 1; }
+          printf 'COMPOSE_PROJECT_NAME=open-brain\n' >> .env.canary.local
+          rc=0; ./canary.sh up --no-smoke > /tmp/canary-guard.out 2>&1 || rc=$?
+          sed -i '$d' .env.canary.local
+          if [ "$rc" != 2 ] || ! grep -F "COMPOSE_PROJECT_NAME names open-brain, not the canary's project, open-brain-canary" /tmp/canary-guard.out; then cat /tmp/canary-guard.out >&2; echo "an up did not refuse a canary env file naming stable's project" >&2; exit 1; fi
+          # A canary file from before SMD-2873 names no project, as the dogfood's
+          # does: an up lets it through with a note, and here stops at the
+          # smoke key's refusal, which comes next.
+          (umask 077 && grep -v '^COMPOSE_PROJECT_NAME=' .env.canary.local > .env.canary-noname.local)
+          rc=0; OB1_SMOKE_KEY='' ./canary.sh up --canary-env-file .env.canary-noname.local > /tmp/canary-noname.out 2>&1 || rc=$?
+          rm -f .env.canary-noname.local
+          if [ "$rc" != 2 ] || ! grep -F 'names no project: add COMPOSE_PROJECT_NAME=open-brain-canary' /tmp/canary-noname.out || ! grep -F 'up smoke-tests the canary with OB1_SMOKE_KEY' /tmp/canary-noname.out; then cat /tmp/canary-noname.out >&2; echo "an up did not let a canary env file naming no project through with its note" >&2; exit 1; fi
           # The password through docker's environment, and grep's pattern from a
           # file, so neither is on a command line (review pass 3).
           login() { PGPASSWORD="$3" docker run --rm --network "$1" -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h "$2" -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
@@ -2463,6 +2690,56 @@ jobs:
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY")
           [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
+
+      # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
+      # compose.grafana-public.yaml is named — never the legacy route and the
+      # MCP server, a keyed POST included — and with the overlay named while
+      # the observability profile is off (CI pulls no Grafana image), Traefik's
+      # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
+      # Check 28 holds both tables byte for byte; this holds what Traefik does
+      # with them.
+      - name: /grafana is a 404 unless its overlay is named, and with no Grafana behind it
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/grafana-body -w '%{http_code}' --max-time 15 "$@"; }
+          answers404() {
+            local p c
+            for p in /grafana /grafana/ /grafana/login /grafana/api/search; do
+              c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B$p")
+              [ "$c" = 404 ] || { echo "$1: GET $p answered $c: $(head -c 120 /tmp/grafana-body)" >&2; exit 1; }
+            done
+            c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$B/grafana/")
+            [ "$c" = 404 ] || { echo "$1: a keyed POST to /grafana/ answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          }
+          # Which router answered each, from the proxy's JSON access log: the
+          # overlay's grafana-public, whose 404 is grafana-absent's for the
+          # Grafana it cannot reach; the base's grafana-off answers through
+          # noop@internal, which Traefik does not log, so none — a 404 alone is
+          # also every route's absence, so /mcp/health answering after each
+          # recreate shows the tables loaded.
+          routers() {
+            sleep 1
+            docker compose -f compose.yaml logs --no-color --no-log-prefix --since "$1" proxy \
+              | jq -Rr 'fromjson? | objects | select((.RequestPath // "") as $p | $p == "/grafana" or ($p | startswith("/grafana/"))) | "\(.RouterName) \(.DownstreamStatus)"' | sort -u
+          }
+          loaded() { [ "$(code "$B/mcp/health")" = 200 ] || { echo "$1: /mcp/health did not answer, so the proxy's tables are not loaded" >&2; exit 1; }; }
+          loaded "with the overlay off"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay off"
+          seen=$(routers "$since")
+          [ -z "$seen" ] || { echo "with the overlay off, /grafana reached a router the access log names (grafana-off's noop@internal is not logged): $seen" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.grafana-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test -f /etc/traefik/dynamic/grafana.yaml || { echo "the overlay's route file is not on the proxy" >&2; exit 1; }
+          loaded "with the overlay on"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay on and no Grafana behind it"
+          seen=$(routers "$since")
+          [ "$seen" = "grafana-public@file 404" ] || { echo "with the overlay on, /grafana was answered by: ${seen:-nothing logged}" >&2; exit 1; }
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
+          loaded "with the overlay dropped"
+          answers404 "with the overlay dropped"
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
