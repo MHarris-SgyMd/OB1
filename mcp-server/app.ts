@@ -19,7 +19,7 @@ import type { Refusal } from "../server-portable/core/refusal.ts";
 import type { LoadedOp, LoadedPlugin } from "../server-portable/core/plugins.ts";
 import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
-import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, type RequestOutcome } from "../server-portable/telemetry.ts";
+import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
 import type { CallCount } from "../server-portable/shutdown.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
 import {
@@ -228,22 +228,28 @@ const WORDS: Record<ToolName, Words> = {
 function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
-  // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250).
-  const register = (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) =>
-    registerTool(name, spec, (input, ctx) => track(() => handler(input, ctx)));
-  // One call's end on the request's record, for its line: how it ended, and the code an error reply carries (index.ts's ended).
-  const ended = (reply: say.Reply, outcome: "ok" | "refused" | "error"): say.Reply => {
-    recordCall(record, outcome, reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined);
+  // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
+  // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
+  // span's traceparent, so the operation's spans are its children, one trace.
+  const register = (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }, span: ToolSpan) => Promise<say.Reply>) =>
+    registerTool(name, spec, (input, ctx) => track(() => withToolSpan(name, (span) => handler(input, ctx, span))));
+  // One call's end on the request's record, for its line, and on its span: how it ended, and the code an error reply carries (index.ts's ended).
+  const ended = (reply: say.Reply, outcome: "ok" | "refused" | "error", span: ToolSpan): say.Reply => {
+    const code = reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined;
+    recordCall(record, outcome, code);
+    span.end(outcome, code);
     return reply;
   };
   /**
    * A fault's reply as the call's end — and a fault reply that itself throws is still an error, counted (index.ts's
-   * registerOp); this server's forwarder refused mid-call said in the log too, as on every route (review pass 6).
+   * registerOp); this server's forwarder refused mid-call said in the log too, as on every route (review pass 6). The
+   * fault's kind on the call's span, never its message (PR 2c); a call this server refused before sending has none.
    */
-  const faulted = (err: unknown, say_: () => say.Reply): say.Reply => {
+  const faulted = (err: unknown, say_: () => say.Reply, span: ToolSpan): say.Reply => {
     if (err instanceof ForwarderRefused) tell(err);
+    if (err !== null) span.fault(err);
     try {
-      return ended(say_(), "error");
+      return ended(say_(), "error", span);
     } catch (err) {
       recordCall(record, "error", undefined);
       throw err;
@@ -252,23 +258,23 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   for (const name of Object.keys(WORDS) as ToolName[]) {
     if (!caller.operations.has(name)) continue;
     const words = WORDS[name];
-    register(name, SPECS[name], async (input: never) => {
+    register(name, SPECS[name], async (input: never, _ctx, span) => {
       // The call and its rendering under one catch, as index.ts's registerOp runs
       // them: a reply that cannot be said is the tool's fault, its code the
       // session hook reads (review pass 1: a throw past it reached the SDK as an
       // uncoded error).
       try {
         let outcome = outcomeOf(await rest.call(name as never, input, { key: caller.key }));
-        if ("fault" in outcome) return faulted(outcome.fault, () => words.fault((outcome as { fault: Error }).fault, input));
+        if ("fault" in outcome) return faulted(outcome.fault, () => words.fault((outcome as { fault: Error }).fault, input), span);
         if (name === "scan_thoughts" && outcome.ok) {
           // The handle's links under this server's endpoint, as atEndpoint puts them (jobs.ts): its /jobs routes, not the REST core's /v1/jobs.
           const handle = outcome.value as { jobId: string };
           outcome = { ok: true, value: { ...handle, poll: `${endpoint}/jobs/${handle.jobId}`, stream: `${endpoint}/jobs/${handle.jobId}/stream` } };
         }
         const reply = words.render(outcome as never, input);
-        return ended(reply, reply.isError ? "refused" : "ok");
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err) {
-        return faulted(err, () => words.fault(err, input));
+        return faulted(err, () => words.fault(err, input), span);
       }
     });
   }
@@ -281,20 +287,20 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   // or a codec ran on its own output); the SDK's validation runs the steps too.
   for (const op of ops) {
     if (!caller.operations.has(op.tool)) continue;
-    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx) => {
+    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx, span) => {
       try {
         const id = JSON.stringify(ctx?.mcpReq?.id);
         const given = raw.get(id);
-        if (given === AMBIGUOUS) return faulted(null, () => say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`)));
+        if (given === AMBIGUOUS) return faulted(null, () => say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`)), span);
         // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
-        if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)));
+        if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)), span);
         const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
         const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
-        if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault));
+        if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault), span);
         const reply = say.renderPlugin(outcome as never);
-        return ended(reply, reply.isError ? "refused" : "ok");
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err) {
-        return faulted(err, () => say.failed(err));
+        return faulted(err, () => say.failed(err), span);
       }
     });
   }
@@ -442,9 +448,13 @@ export function createMcpApp(deps: McpDeps): Hono {
   /**
    * A keyed HEAD: no body to carry an answer, so liveness at once, asking the REST core nothing, a probe never
    * waiting on the registry (review passes 1 and 2 of PR 4b: asking whoami first, a locked registry held it 1.8 s);
-   * its line `ok`, the route named and no key, where index.ts matched the key's hash.
+   * its line `ok`, the route named and no key, where index.ts matched the key's hash. Liveness alone: its line and its
+   * point, its span and record unsent, so a monitor's probes spend none of the budget for requests no key was accepted
+   * for (PR 4c review pass 1).
    */
   const headAtOnce = (c: Context, route: string, tool: ToolName) => {
+    const trace = traceOf(c.req.raw);
+    if (trace) trace.liveness = true;
     nameRoute(c, route, tool);
     return c.text("ok", 200, corsHeaders);
   };
