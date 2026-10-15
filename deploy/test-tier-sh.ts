@@ -130,7 +130,7 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
   const code = (cid: string) => { try { return readFileSync(join(root, `run${runN}`, `code.${cid}`), "utf8").split("\n").filter(Boolean); } catch { return []; } };
   for (const cid of ["cid1", "cid2"]) {
     const files = code(cid);
-    ok(files.includes("db/tier.ts") && files.includes("db/migrate.ts") && files.some((f) => f.startsWith("server-portable/")) && !files.some((f) => /(^|\/)\.env($|\.)/.test(f) && !/\.example$/.test(f)) && !files.some((f) => f.startsWith("deploy/")),
+    ok(files.includes("db/tier.ts") && files.includes("db/migrate.ts") && files.some((f) => f.startsWith("server-portable/")) && files.some((f) => /^plugins\/[^/]+\/index\.ts$/.test(f)) && !files.some((f) => /(^|\/)\.env($|\.)/.test(f) && !/\.example$/.test(f)) && !files.some((f) => f.startsWith("deploy/")),
       `${cid} is handed the code tier.ts runs, from git's list, and no env file (${files.length} files)`);
   }
   ok(/ build .*-t pb-tier:latest/.test(argvLines(r).find((l) => l.startsWith("ARGV build ")) ?? "") && /\bpb-tier:latest\b/.test(src ?? ""), "the image is the --to side's project's, pb-tier");
@@ -144,6 +144,49 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
   ok(!/pa0a|pb0b/.test(r.out + r.err), "no password on tier.sh's output");
   ok(!r.log.includes("ENVLEFT"), "each half's env file is gone from the host before that half starts");
   ok(!existsSync(join(root, `run${runN}`, "ob1-tier-env")) && Bun.spawnSync(["sh", "-c", `ls ${join(root, `run${runN}`)} | grep -c ob1-tier`]).stdout.toString().trim() === "0", "no temporary env file is left");
+}
+
+// The copy rule on a checkout of its own (review pass 5): every tracked file
+// under the directories, an untracked one only when it is code, never an env
+// file's name nor a directory whole (a nested repository's .env and .git), and
+// a tracked file deleted in the work tree, listed last, left out without
+// failing the copy.
+{
+  const scratch = join(root, "checkout");
+  const sh = (cmd: string[]) => Bun.spawnSync(cmd, { cwd: scratch, env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1" } });
+  for (const d of ["deploy", "db", "evals", "plugins/demo", "scripts/nested", "server-portable"]) Bun.spawnSync(["mkdir", "-p", join(scratch, d)]);
+  writeFileSync(join(scratch, "deploy/tier.sh"), readFileSync(TIER_SH, "utf8"));
+  writeFileSync(join(scratch, "db/tier.Dockerfile"), "FROM scratch\n");
+  for (const f of ["db/tier.ts", "evals/e.ts", "plugins/demo/index.ts", "server-portable/zz.ts"]) writeFileSync(join(scratch, f), "// tracked\n");
+  sh(["git", "init", "-q"]);
+  sh(["git", "add", "-A"]);
+  sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "t"]);
+  rmSync(join(scratch, "server-portable/zz.ts"));
+  writeFileSync(join(scratch, "db/092_new.sql"), "-- untracked migration\n");
+  writeFileSync(join(scratch, "db/notes.json"), "{}\n");
+  writeFileSync(join(scratch, "db/.env.test"), "POSTGRES_PASSWORD=leak\n");
+  Bun.spawnSync(["git", "init", "-q"], { cwd: join(scratch, "scripts/nested") });
+  writeFileSync(join(scratch, "scripts/nested/.env"), "SECRET=leak\n");
+  writeFileSync(join(scratch, "scripts/nested/tool.ts"), "// a nested repository's file\n");
+  const dir = join(root, `run${++runN}`);
+  Bun.spawnSync(["mkdir", "-p", dir]);
+  const logFile = join(dir, "log");
+  writeFileSync(logFile, "");
+  const env: Record<string, string> = { PATH: `${bin}:/usr/bin:/bin`, HOME: root, TMPDIR: dir, STUB_LOG: logFile, STUB_DIR: dir };
+  const r = Bun.spawnSync(["bash", join(scratch, "deploy/tier.sh"), "--runtime", "docker", ...CANARY], { env, stdout: "pipe", stderr: "pipe" });
+  let files: string[] = [];
+  try { files = readFileSync(join(dir, "code.cid1"), "utf8").split("\n").filter(Boolean).sort(); } catch { /* none */ }
+  ok(r.exitCode === 0, `a checkout with a tracked file deleted last in git's list still copies (exit ${r.exitCode}: ${r.stderr.toString().trim().split("\n").pop()})`);
+  ok(JSON.stringify(files) === JSON.stringify(["db/092_new.sql", "db/tier.Dockerfile", "db/tier.ts", "evals/e.ts", "plugins/demo/index.ts"]),
+    `only the tracked files and the untracked migration go in: no .json, no env file, nothing of a nested repository, no deleted file (${files.join(", ")})`);
+  // With no untracked code, the deleted tracked file is the last thing listed:
+  // the loop must not take its absence as its status (pipefail would fail the copy).
+  rmSync(join(scratch, "db/092_new.sql"));
+  const dir2 = join(root, `run${++runN}`);
+  Bun.spawnSync(["mkdir", "-p", dir2]);
+  writeFileSync(join(dir2, "log"), "");
+  const r2 = Bun.spawnSync(["bash", join(scratch, "deploy/tier.sh"), "--runtime", "docker", ...CANARY], { env: { ...env, TMPDIR: dir2, STUB_LOG: join(dir2, "log"), STUB_DIR: dir2 }, stdout: "pipe", stderr: "pipe" });
+  ok(r2.exitCode === 0, `…and copies when that deleted file is the last one git lists (exit ${r2.exitCode}: ${r2.stderr.toString().trim().split("\n").pop()})`);
 }
 
 // A failed source half stops the run: no hand-off, no target, its status.

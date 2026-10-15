@@ -105,8 +105,9 @@
 #
 # Nothing else reaches a container: the checkout is not mounted. Each half is
 # handed, by `cp`, the files git lists under the directories tier.ts imports
-# from (db, evals, scripts, server-portable: tracked, or new and not ignored),
-# so no env file, which git ignores, is in either container, and neither
+# from (db, evals, scripts, server-portable, plugins: every tracked file, and
+# an untracked one only when it is code, a .ts, .mjs or .sql; never an env
+# file's name, nor a directory whole), so no env file is in either container, and neither
 # brain's file can be read from the other's half (SMD-2875 review pass 4: the
 # read-only mount carried both brains' env files into both halves). So tier.sh
 # runs from a git checkout. OB1_ENV_FILES=off, `bun --no-env-file` and a
@@ -229,20 +230,19 @@ command -v "$RUNTIME" >/dev/null 2>&1 || { echo "--runtime $RUNTIME is not on PA
 # would read otherwise, `"123"`). FILE FLAG, the flag that names it instead.
 # Called as an assignment, so its exit 2 ends the script under set -e.
 project_of() {
-  local c name="" errf
-  errf="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-project.XXXXXX")"
+  local c name=""
   for c in "$RUNTIME" docker podman; do
     command -v "$c" >/dev/null 2>&1 || continue
-    name="$(printf 'name: open-brain\nservices: {}\n' | "$c" compose --env-file "$1" -f - config 2>"$errf" | sed -n 's/^name: //p' | head -n 1 | tr -d "\"'")" || true
+    # Compose's stderr is dropped, not kept: its words can quote a value of the
+    # file, a password among them (SMD-2875 review passes 4–5). The message
+    # names the command that shows them.
+    name="$(printf 'name: open-brain\nservices: {}\n' | "$c" compose --env-file "$1" -f - config 2>/dev/null | sed -n 's/^name: //p' | head -n 1 | tr -d "\"'")" || true
     [ -z "$name" ] || break
   done
   if [ -z "$name" ]; then
-    # Compose's words are not relayed: they can quote a value of the file, a
-    # password among them (SMD-2875 review pass 4). The command shows them.
-    rm -f "$errf"
-    echo "could not read the stack's project from $1 through compose; name it with $2, or run \`$RUNTIME compose --env-file $1 -f deploy/compose.yaml config --quiet\` to see compose's reason." >&2; exit 2
+    printf 'could not read the stack'"'"'s project from %s through compose; name it with %s, or run `%s compose --env-file %q -f %q config --quiet` to see compose'"'"'s reason.\n' "$1" "$2" "$RUNTIME" "$1" "$REPO/deploy/compose.yaml" >&2
+    exit 2
   fi
-  rm -f "$errf"
   printf '%s' "$name"
 }
 # Where a project came from, for a refusal that names it. FILE
@@ -295,23 +295,38 @@ missing_network() {
 missing_network "$NETWORK" --to "$TO_NET_WHERE" "--project or --network"
 missing_network "$FROM_NETWORK" --from "$FROM_NET_WHERE" "--from-project or --from-network"
 
-# The code each half runs, as git lists it (see the header): checked before
-# anything is made.
-CODE_DIRS=(db evals scripts server-portable)
+# The code each half runs (see the header): checked before anything is made.
+# plugins/ too: migrate.ts reads a plugin's migrations there when the brain
+# runs OB1_PLUGINS (review pass 5: without it a refresh failed after the reset).
+CODE_DIRS=(db evals scripts server-portable plugins)
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "tier.sh runs from a git checkout: it hands each half the files git lists under ${CODE_DIRS[*]}, never the directory (an env file would go with it)." >&2; exit 2; }
-code_tar() {
-  # A tracked file deleted in the work tree is listed and absent: left out.
-  git -C "$REPO" ls-files -z -co --exclude-standard -- "${CODE_DIRS[@]}" \
-    | while IFS= read -r -d '' f; do [ -e "$REPO/$f" ] && printf '%s\0' "$f"; done \
-    | COPYFILE_DISABLE=1 tar -C "$REPO" --null -T - -cf -
+# The files a half is handed, NUL-separated: every file git tracks under the
+# directories, and an untracked one only when it is code (.ts, .mjs, .sql: a
+# migration not yet added), never a name an env file has. Each one a file or a
+# link, and tar does not recurse, so a nested repository or a directory git
+# lists whole brings nothing in (review pass 5: a cloned repo's .env and .git
+# rode along, and an untracked db/.env.test or .npmrc would have).
+code_list() {
+  local f
+  {
+    git -C "$REPO" ls-files -z -c -- "${CODE_DIRS[@]}"
+    git -C "$REPO" ls-files -z -o --exclude-standard -- "${CODE_DIRS[@]}" \
+      | while IFS= read -r -d '' f; do case "$f" in *.ts|*.mjs|*.sql) printf '%s\0' "$f" ;; esac; done
+  } | while IFS= read -r -d '' f; do
+    case "/$f" in */.env|*/.env.*|*.env) case "$f" in *.example) ;; *) continue ;; esac ;; esac
+    # An if, not `[ … ] &&`: as the loop's last command a false test would be
+    # its status, and pipefail would fail the copy (review pass 5).
+    if [ -f "$REPO/$f" ] || [ -L "$REPO/$f" ]; then printf '%s\0' "$f"; fi
+  done
 }
+code_tar() { code_list | COPYFILE_DISABLE=1 tar -C "$REPO" --null --no-recursion -T - -cf -; }
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 TMP_ENV_FROM="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env-from.XXXXXX")"
-COMPOSE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-compose.XXXXXX")" # mktemp creates all three mode 600
+# mktemp creates both mode 600.
 SRC_CID=""
 DST_CID=""
-trap 'rm -f "$TMP_ENV" "$TMP_ENV_FROM" "$COMPOSE_ERR_FILE"; for c in "$SRC_CID" "$DST_CID"; do [ -z "$c" ] || "$RUNTIME" rm -f "$c" >/dev/null 2>&1 || true; done' EXIT
+trap 'rm -f "$TMP_ENV" "$TMP_ENV_FROM"; for c in "$SRC_CID" "$DST_CID"; do [ -z "$c" ] || "$RUNTIME" rm -f "$c" >/dev/null 2>&1 || true; done' EXIT
 # A Ctrl-C is a stop, wherever it lands: bash lets a script run on after a
 # child that did not die of the signal (the buildx probe below, say), and a
 # caller must not read an interrupted run as done.
@@ -333,12 +348,12 @@ resolve_env() {
   local c out err=""
   for c in "$RUNTIME" docker podman; do
     command -v "$c" >/dev/null 2>&1 || continue
-    if out="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$1" -f - config --environment 2>"$COMPOSE_ERR_FILE")" && [ -n "$out" ]; then printf '%s\n' "$out"; return; fi
+    # stderr dropped, not kept: compose's words can quote a value of the file
+    # (SMD-2875 review passes 4–5); the message names the command that shows them.
+    if out="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$1" -f - config --environment 2>/dev/null)" && [ -n "$out" ]; then printf '%s\n' "$out"; return; fi
     [ -n "$err" ] || err="$c"
   done
-  # Compose's words are not relayed: they can quote a value of the file, a
-  # password among them (SMD-2875 review pass 4). The command shows them.
-  printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment". `%s compose --env-file %s -f deploy/compose.yaml config --quiet` shows compose'"'"'s reason.\n' "$1" "${err:-$RUNTIME}" "$1" >&2
+  printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment". `%s compose --env-file %q -f %q config --quiet` shows compose'"'"'s reason.\n' "$1" "${err:-$RUNTIME}" "$1" "$REPO/deploy/compose.yaml" >&2
   exit 2
 }
 RESOLVED="$(resolve_env "$ENV_FILE")"

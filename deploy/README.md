@@ -1830,9 +1830,11 @@ carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
 (`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `<project>-tier:latest`, the `--to` side's project, and runs this
 checkout's `tier.ts` in it as two halves, each in a container of its own
-(SMD-2875). Neither mounts the checkout: each is handed, by `cp`, the files git
-lists under `db`, `evals`, `scripts` and `server-portable`, so no env file (git
-ignores them) is in either container. So `tier.sh` runs from a git checkout.
+(SMD-2875). Neither mounts the checkout: each is handed, by `cp`, every file git
+tracks under `db`, `evals`, `scripts`, `server-portable` and `plugins`, and an
+untracked one there only when it is code (`.ts`, `.mjs`, `.sql`: a migration not
+yet added), never a name an env file has nor a directory whole. So no env file
+is in either container, and `tier.sh` runs from a git checkout.
 - **the source half**, on the `--from` side's `data` network alone, with
   `--from`'s password alone: a refresh's facts and its dump, or a promote's
   read of the canary;
@@ -2015,8 +2017,8 @@ shows (SMD-2119). The hand-off holds the source's whole dump: it is in the
 source half's container until the hand-off is passed (that container is
 removed then), on the CLI's pipe, and in the target's container until the
 wrapper removes it. A `--handoff` given to `tier.ts` itself must not exist yet:
-it is made mode 700. No `.env` file reaches a half: each is handed git's list
-of the code, not the checkout (until review pass 4 the checkout was mounted
+it is made mode 700. No `.env` file reaches a half: each is handed the code
+(above), not the checkout (until review pass 4 the checkout was mounted
 read-only, and both brains' env files with it). `OB1_ENV_FILES=off` and
 `bun --no-env-file`, run from a working directory outside the code, stay, so
 nothing would load one anyway. So only the half's own environment reaches

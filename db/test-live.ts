@@ -7404,6 +7404,18 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
             await sql`DROP TABLE IF EXISTS ob1_tier_rls_probe`;
             rmSync(rlsDir, { recursive: true, force: true });
           }
+          // …nor a large object, which the role may not read (review pass 5: untested).
+          const loDir = join(handDir, "..", `ob1-tier-handoff-lo-${process.pid}`);
+          writeFileSync(argsLog, "");
+          const [{ lo }] = await sql<{ lo: number }[]>`SELECT lo_from_bytea(0, 'tier probe'::bytea)::int AS lo`;
+          try {
+            await refreshSource(URL_!, loDir);
+            const loArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(loArgs) && !/--role=/.test(loArgs), `with a large object the dump runs as the login, not pg_read_all_data (${loArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`SELECT lo_unlink(${lo}::oid)`;
+            rmSync(loDir, { recursive: true, force: true });
+          }
         }
         // The identity's three parts each decide (the halves cannot ask each other's server).
         const me = facts.identity;
