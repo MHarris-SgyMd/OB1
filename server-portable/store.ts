@@ -442,6 +442,14 @@ export type VectorlessRow = {
   content: string;
   updatedAt: string;
   metadata: Record<string, unknown> | null;
+  /**
+   * The door its capture came through — thought_audit.origin on its capture
+   * row (046): a server's name for a key's capture, a tool's (`ingest-records`,
+   * board-sync's) for a pass's; null when no capture row says (a raw insert,
+   * or a store that cannot read the audit). The mender asks the gate the
+   * question that writer's own gate asked.
+   */
+  origin: string | null;
 };
 
 /** One `listVectorless` row from either store: `updated_at` is the COALESCE the query selects. */
@@ -452,6 +460,7 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
     content: String(r.content),
     updatedAt: isoTimestamp(r.updated_at),
     metadata: metadata !== null && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : null,
+    origin: typeof r.origin === "string" ? r.origin : null,
   };
 }
 
@@ -1349,6 +1358,16 @@ export interface ThoughtStore {
   listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]>;
 
   /**
+   * The vector mender's leader lock (SMD-2889): both servers run a mender, and
+   * a tick acts only while it holds this — a session advisory lock on a
+   * connection of its own, so one mender acts at a time across processes and
+   * replicas, and a process that dies lets it go with its connection. The
+   * release, or null when another holds it. The PostgREST store has no
+   * session to hold one: it answers a release that does nothing.
+   */
+  mendLock(): Promise<(() => Promise<void>) | null>;
+
+  /**
    * A window of the brain's logged searches (`query_log`), most recent first, for a
    * log-sourced cross-brain replay (SMD-2245). `since` bounds the window; `limit`
    * caps it (one extra row is read to set `truncated`). Empty when the log is off
@@ -1449,7 +1468,7 @@ export interface ThoughtStore {
      * NULL when the egress gate refused the embedding call (SMD-1903) or the
      * provider did not answer it (SMD-2888): the row lands with its text and
      * fingerprint and no vector — findable by exact text, absent from semantic
-     * search until the MCP server's vector mender embeds it (SMD-2889). Any
+     * search until the servers' vector mender embeds it (SMD-2889). Any
      * other failed call still fails the capture.
      */
     embedding: number[] | null;
@@ -1816,7 +1835,7 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
-  listThoughtIds: true, listVectorless: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,

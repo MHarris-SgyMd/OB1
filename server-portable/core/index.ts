@@ -20,7 +20,7 @@ export { CALLS, pathFields, type Call, type CallOptions, type CoreAnswer } from 
 export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "./plugins.ts";
 /** How long a keyed /health takes at most, the registry's word on its key included: either server's (SMD-2287). */
 export { HEALTH_DEADLINE_MS } from "./reads.ts";
-export { mendIntervalFrom, type MendState, type MendTick } from "./mend.ts";
+export { mendIntervalFrom, newMendState, type MendState, type MendTick } from "./mend.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {

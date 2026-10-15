@@ -216,7 +216,7 @@ async function writeToOB1(classified: Classified): Promise<void> {
   // replaced left the fingerprint NULL, and 016's trigger does not fill it. A
   // server that authenticates a key passes `actor: { name }` in p_payload so
   // 008's audit row names it; this example has no key and names none. No vector is made here: the 2-argument form is resolved and
-  // the row waits for the MCP server's vector mender (SMD-2889) or a re-embed
+  // the row waits for the servers' vector mender (SMD-2889) or a re-embed
   // pass (db/reembed.ts). The OB1 capture MCP tool
   // embeds as it captures — if you use it, call it here instead. The
   // classifier's fields ride in metadata: `thoughts` has no tags/project/

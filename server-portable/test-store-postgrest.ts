@@ -842,6 +842,34 @@ console.log("\n[8c] listThoughtIds — ids in id order, digest null on the shim,
   }
 }
 
+console.log("\n[8c2] listVectorless over PostgREST — the rows with no vector, in id order, keyset paged, no origin (SMD-2889)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const made: string[] = [];
+  try {
+    // Four rows written bare (the 2-argument upsert_thought makes no vector), beside the corpus's vectored ones.
+    for (let i = 0; i < 4; i++) made.push(((await sql`SELECT upsert_thought(${`[8e] a row with no vector ${i}`}, '{"metadata":{}}'::jsonb) AS r`)[0].r as { id: string }).id);
+    const want = (await sql`SELECT id::text AS id FROM thoughts WHERE embedding IS NULL ORDER BY id`).map((r: { id: string }) => r.id);
+    const walked: string[] = [];
+    let after: string | null = null;
+    for (let i = 0; i < 50; i++) {
+      const page = await store.listVectorless({ limit: 2, after });
+      walked.push(...page.map((r) => r.id));
+      if (page.length < 2) break;
+      after = page[page.length - 1].id;
+    }
+    assert(want.length >= 4 && walked.join() === want.join(), `paged by 2, the walk is exactly the rows with no vector, in id order, each once (${walked.length} of ${want.length})`);
+    const [one] = await store.listVectorless({ limit: 1, after: null });
+    assert(one.origin === null && typeof one.updatedAt === "string" && isoTimestampOrNull(one.updatedAt) === one.updatedAt && typeof one.content === "string", `a row: no origin (the audit is not published), the shared ISO stamp (${JSON.stringify({ ...one, content: undefined })})`);
+    const release = await store.mendLock();
+    assert(typeof release === "function", "the leader lock: a release that does nothing, as no session holds one here");
+    await release!();
+  } finally {
+    if (made.length) await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "UUID")}::uuid[])`;
+    await sql.close();
+  }
+}
+
 console.log("\n[8d] listLoggedSearches over PostgREST — the search rows, windowed and bounded (SMD-2245)");
 {
   const raw = new SQL({ url: URL_, max: 1 });

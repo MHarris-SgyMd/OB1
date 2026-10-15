@@ -307,7 +307,7 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   assert(!cap.isError && /Captured as thought — id [0-9a-f-]{36}/.test(cap.text), `the capture succeeds, typed as nothing (${cap.text.split("\n")[0]})`);
   assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea, source:claude-code\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
          "…the reply says the vector is missing, names the rule, the terms and the host");
-  assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /once the egress policy allows the call: the server then embeds it by itself/.test(cap.text), "…how it is reachable meanwhile, and how it gets its vector");
+  assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /once the egress policy allows the call \(a changed policy takes effect when the server restarts\): the server then embeds it by itself/.test(cap.text), "…how it is reachable meanwhile, and how it gets its vector");
   assert(/Note: no topics, people or type were extracted — OB1_EGRESS_POLICY=deny/.test(cap.text), "…and that no tags were extracted, under the same rule");
   assert(/^Captured as thought — id [0-9a-f-]{36}$/.test(cap.text.split("\n")[0]), "the first line carries no type and no topics — nothing was extracted, and nothing is dressed up as if it were");
   assert(seen.length === before, `zero requests reached the stub (${seen.length - before})`);
@@ -456,7 +456,7 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
     `the provider back, the same text sent again lands on the same id with its vector and label (${JSON.stringify(after)})`);
 }
 
-console.log("\n[10] The ticket's Verify, through the server's own process (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step; semantic search finds it, and keyed /health counts none waiting");
+console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step — embedded once, though the MCP server and the REST core both run a mender; semantic search finds it, and keyed /health counts none waiting");
 {
   // A port nothing answers on yet: the provider down. The server's entry is
   // its own process, as the container runs it, so its mender is the one boot
@@ -467,15 +467,17 @@ console.log("\n[10] The ticket's Verify, through the server's own process (SMD-2
   const free2 = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const serverPort = free2.port;
   free2.stop(true);
-  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
-    cwd: import.meta.dir,
-    env: {
-      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(serverPort), OB1_STORE: "sql", DATABASE_URL: URL_,
-      OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
-      MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "1",
-    },
-    stdout: "pipe", stderr: "pipe",
+  const free3 = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const apiPort = free3.port;
+  free3.stop(true);
+  const childEnv = (port: number | undefined) => ({
+    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STORE: "sql", DATABASE_URL: URL_,
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
+    MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "1",
   });
+  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], { cwd: import.meta.dir, env: childEnv(serverPort), stdout: "pipe", stderr: "pipe" });
+  // The REST core beside it, as the stack runs it: a mender of its own, the two taking turns under the leader lock.
+  const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(apiPort), stdout: "pipe", stderr: "pipe" });
   const at = `http://127.0.0.1:${serverPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
     const r = await fetch(at, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
@@ -488,10 +490,10 @@ console.log("\n[10] The ticket's Verify, through the server's own process (SMD-2
   try {
     let up = false;
     for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
-      up = await fetch(`${at}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      up = (await Promise.all([at, `http://127.0.0.1:${apiPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
       if (!up) await Bun.sleep(100);
     }
-    assert(up, "the server's own process answers /health");
+    assert(up, "both servers' own processes answer /health");
     const content = "mend-verify-marker: a note captured while the provider is down, mended without a hand step";
     const cap = await rpc("capture_thought", { content });
     const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
@@ -513,17 +515,48 @@ console.log("\n[10] The ticket's Verify, through the server's own process (SMD-2
     }
     const [row] = await sql`SELECT embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
     assert(mended && row.embedding_model === EMB_MODEL, `the provider back: within the interval the row has its vector and label (${JSON.stringify(row)})`);
+    // Every row that waited mended (the rows behind it in id order may be a tick behind), then counted.
+    for (let deadline = Date.now() + 15_000; (await health()) !== 0 && Date.now() < deadline; ) await Bun.sleep(200);
+    assert((await health()) === 0, "keyed /health: none wait");
+    const embeds = seen.filter((s) => s.path.endsWith("/embeddings") && s.input === content).length;
+    const [events] = await sql`SELECT count(*)::int AS n, count(DISTINCT thought_id)::int AS rows FROM thought_audit WHERE actor_name = 'vector-mender'`;
+    assert(embeds === 1 && events.n === events.rows && events.n === waiting, `two menders, each row embedded and written once (${embeds} embedding call(s) for this text; ${events.n} mender events over ${events.rows} rows, ${waiting} waited)`);
     const found = await rpc("search_thoughts", { query: content, limit: 5 });
     assert(!found.isError && found.text.includes(id!), "semantic search finds it");
-    assert((await health()) === 0, "keyed /health: none wait");
+
+    // The REST core's mender alone: the MCP server stopped (as mcp-server/ in
+    // front of /mcp holds no store, SMD-2287), the provider down again, a
+    // capture through REST; the provider back, the REST core mends it.
+    child.kill();
+    await child.exited;
+    provider?.stop(true);
+    provider = undefined;
+    const apiAt = `http://127.0.0.1:${apiPort}`;
+    const restContent = "mend-verify-marker: a note captured through REST while the provider is down, mended by the REST core";
+    const made = await fetch(`${apiAt}/v1/thoughts`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ content: restContent }) });
+    const madeBody = await made.json() as { id?: string; embeddingAttached?: boolean };
+    assert(made.status === 201 && !!madeBody.id && madeBody.embeddingAttached === false, `through REST with the provider down: saved, no vector attached (${made.status} ${JSON.stringify(madeBody)})`);
+    provider = Bun.serve({ port: providerPort, ...stubOpts });
+    let restMended = false;
+    for (let deadline = Date.now() + 15_000; !restMended && Date.now() < deadline; ) {
+      restMended = (await sql`SELECT embedding IS NOT NULL AS has FROM thoughts WHERE id = ${madeBody.id!}::uuid`)[0].has === true;
+      if (!restMended) await Bun.sleep(200);
+    }
+    const restFound = await (await fetch(`${apiAt}/v1/search`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ query: restContent, limit: 5 }) })).text();
+    assert(restMended && restFound.includes(madeBody.id!), "the MCP server gone, the REST core's own mender gives it its vector, and REST search finds it");
   } finally {
     child.kill();
-    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    await child.exited;
+    api.kill();
+    const hung = setTimeout(() => { child.kill("SIGKILL"); api.kill("SIGKILL"); }, 10_000);
+    const codes = await Promise.all([child.exited, api.exited]);
     clearTimeout(hung);
     provider?.stop(true);
-    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
-    assert(/vector mender: the embedding provider is unavailable/.test(said) && /vector mender: \d+ thoughts? given a vector/.test(said), `the server said the outage once and the mend (${said.split("\n").filter((l) => /vector mender/.test(l)).join(" / ")})`);
+    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()) + (await new Response(api.stdout).text()) + (await new Response(api.stderr).text());
+    const menderLines = said.split("\n").filter((l) => /vector mender/.test(l));
+    // Down for 7 s at a 1 s interval, and two menders: the outage said once by whichever held the lock first, not per tick.
+    const downLines = menderLines.filter((l) => /the embedding provider is unavailable/.test(l)).length;
+    assert(downLines >= 1 && downLines <= 2 && menderLines.some((l) => /\d+ thoughts? given a vector/.test(l)), `the servers said the outage once each at most, and the mend (${menderLines.join(" / ")})`);
+    assert(codes.every((c) => c === 0) && !/the tick failed/.test(said), `both stop cleanly, no tick failing on the closing pool (exit ${codes.join(", ")})`);
     if (!mended) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));
   }
 }

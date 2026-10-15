@@ -148,6 +148,7 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { STALE_AFTER_INTERVALS } from "../server-portable/brain-info.ts";
+import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
@@ -230,7 +231,8 @@ async function poolOf(sql: SQL, pass: PassName, job: string): Promise<Pool> {
  * The newest live event after `after` — a timestamp, or a number of seconds
  * before now() — and the database's now(). A read is a query_log row (when
  * `readsLog`); a write is a thought_audit row whose actor_kind is not
- * 'ingested' (NULL counts as live). Bounded below, so a brain whose newest
+ * 'ingested' (NULL counts as live) and that the servers' vector mender did not
+ * write — background work, as these passes are (SMD-2889). Bounded below, so a brain whose newest
  * audit rows are all sync writes is not read back to its last live one.
  */
 async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
@@ -238,7 +240,8 @@ async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Pr
   const read = readsLog ? sql`(SELECT max(logged_at) FROM query_log WHERE logged_at > ${since})` : sql`NULL::timestamptz`;
   const [r] = await sql`
     SELECT now() AS now, ${read} AS read,
-           (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested') AS write`;
+           (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested'
+              AND actor_name IS DISTINCT FROM ${MENDER_ACTOR}) AS write`;
   return { now: new Date(r.now), read: r.read ? new Date(r.read) : null, write: r.write ? new Date(r.write) : null };
 }
 

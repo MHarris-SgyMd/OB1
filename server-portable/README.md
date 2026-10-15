@@ -78,25 +78,42 @@ no vector is invisible to semantic search. An edit (`update_thought`) whose
 provider does not answer is refused whole, as before: nothing is lost, and
 storing the new text would clear a vector the thought had.
 
-The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought saved
-without a vector its vector, by itself. The MCP server (`index.ts`; the REST
-core starts none, so a stack runs one) reads up to 8 such thoughts every
-`OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set; `0` or `off` for none), in
-id order from where its last tick stopped, embeds each by the capture's own
-path — windows, blurbs and the head-window fallback included — and writes it
-through `update_thought` with the stamp it read: one `update` event per row,
-actor `vector-mender`, the row's own stamp (who wrote the text, its trust)
-kept. A provider still away stops the tick at its row, so an outage costs one
-call a tick and its end is noticed within one; a row whose call fails otherwise
-(a 4xx, the wrong width) is passed over and tried again next sweep, a run of
-such ticks stretching the interval up to 32 times until a row is mended. The
-egress gate is asked twice: as the capture was asked — the key that wrote the
-text, and the text — and as a pass asks of a row, its metadata too; the text is
-sent only when both allow, so a `source:` the caller claimed opens nothing and
-a `source:` deny term keeps the row home. A row edited between the read and the
-write is left for the next sweep (`STALE_READ`). `brain_info` (its `Vectors`
-row) and a keyed `/health` (`database.vectorless`) count the thoughts that
-wait. `db/reembed.ts` stays the tool for a model change or a whole brain at once.
+The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
+no vector its vector, by itself — one the provider did not answer for, one the
+gate refused, or one an import wrote bare. Both servers run one (`index.ts` and
+`api.ts`), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
+`0` or `off` for none), and a tick acts only while it holds a Postgres advisory
+lock (`ob1:vector-mender`, on a connection of its own), so one mends at a time
+across the two and across replicas. A tick reads up to 8 such thoughts in id
+order from where the last stopped, embeds each by the capture's own path —
+windows, blurbs and the head-window fallback included — and writes it through
+`update_thought` with the stamp it read: one `update` event per row, actor
+`vector-mender`, the row's own stamp (who wrote the text, its trust) kept, and
+its `updated_at` moved, as any event moves it — an agent holding the old stamp
+for `if_unchanged_since` re-reads. A provider that does not answer stops the
+tick, one call spent, and the cursor passes the row, so an outage costs one
+call a tick and its end is noticed within one, and a text the provider fails
+alone holds back nothing. A row whose call or write fails otherwise (a 4xx, the
+wrong width, a write the database refuses) is held for 1, 2, 4 … up to 32
+sweeps, doubling with each failure, while every other row goes on at the
+interval. The egress gate is asked what the row's writer asked: a row a key
+captured through a server (its capture's audit `origin` a server's name) as the
+capture was asked — the key and the text — and as a pass asks of a row, its
+metadata too, sent only when both allow, so a `source:` the caller claimed
+opens nothing and a `source:` deny term keeps the row home; any other row — an
+import's, board-sync's — as `db/reembed.ts` asks, its metadata and text and no
+actor, since its `actor_name` is a label the tool chose. Blurbs the gate
+refuses for a row are left off and its windows go in bare, as a capture's do.
+A row edited between the read and the write is left for the next sweep
+(`STALE_READ`). `brain_info` (its `Vectors` row) and a keyed `/health`
+(`database.vectorless`) count the thoughts that wait; `db/sleep.ts` does not
+count the mender's events as live writes. The cost lands as rows do: an import
+written bare for a later `db/reembed.ts`, or a backlog after an outage, is
+embedded 8 rows a tick on the configured provider — a hosted one's bill
+included — unless the knob is off. No mender runs on Cloudflare Workers (the
+PostgREST store, no process to hold the timer), where the replies' "the server
+embeds it by itself" does not hold. `db/reembed.ts` stays the tool for a model
+change or a whole brain at once.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
@@ -368,7 +385,7 @@ slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
 `postgres://` string — is refused by name too, the string masked, rather than
 handed to supabase-js as a base URL.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) and `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks; default 60, `0` or `off` for none — see "The vector mender" above).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) and `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above).
 
 On a container these are ordinary environment variables. On Workers use
 `wrangler secret put NAME` — **never** put them in `wrangler.toml`, which is

@@ -907,9 +907,10 @@ services:
       # less (SMD-2250). Unset, 10 — and stop_grace_period below reads the same
       # variable, so compose waits exactly what the server plans for.
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
-      # Seconds between the vector mender's ticks, 0 or off for none: the MCP
-      # server embeds the thoughts saved without a vector once the provider
-      # answers (SMD-2889). Unset, 60; the REST core starts no mender.
+      # Seconds between the vector mender's ticks, 1 to 86400, 0 or off for
+      # none: the servers embed the thoughts saved without a vector once the
+      # provider answers (SMD-2889). Unset, 60. Both this server and the REST
+      # core read it; a leader lock lets one mend at a time.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:

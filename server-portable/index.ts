@@ -884,10 +884,10 @@ if (SERVES_ON_BUN) {
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   // The vector mender (SMD-2889): rows saved without a vector get one once the
-  // provider answers and the gate allows. This server only — the REST core
-  // (api.ts) shares its database and starts none, so a stack runs one. Not a
-  // tracked call: a stop never waits on a re-embed, and a row it cuts short
-  // stays vectorless for the next start.
+  // provider answers and the gate allows. The REST core (api.ts) starts one
+  // too; a tick acts only under the store's leader lock, so one acts at a
+  // time. Not a tracked call: a stop never waits on a re-embed, and a row it
+  // cuts short stays vectorless for the next start.
   const mend = mendIntervalFrom(process.env.OB1_VECTOR_MEND_INTERVAL);
   if (mend.problem) console.warn(mend.problem);
   const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;

@@ -26,7 +26,7 @@ import { trustAtOrAbove, TRUST } from "./core/filter.ts";
 import { INGESTED_NOTICE } from "./render.ts";
 import { fileURLToPath } from "node:url";
 import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
-import { createCore, type MendState } from "./core/index.ts";
+import { createCore, newMendState } from "./core/index.ts";
 import { createStore, type ThoughtStore } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
@@ -3400,7 +3400,7 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
   const store = await createStore(env as never);
   const core = createCore({ env: () => env as never, store: async () => store, door: "open-brain" });
   const sweep = async (c = core): Promise<{ mended: number; refused: number; raced: number; down: boolean }> => {
-    const state: MendState = { cursor: null };
+    const state = newMendState();
     const total = { mended: 0, refused: 0, raced: 0, down: false };
     for (let i = 0; i < 50; i++) {
       const t = await c.mendOnce(state);
@@ -3429,7 +3429,7 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     const lid = await captureAs("e2e-key", longText);
     const before = { w: await rowOf(wid), h: await rowOf(hid), l: await rowOf(lid) };
     assert(before.w?.bare && before.h?.bare && before.l?.bare && before.l?.windows === 0, `three captures while the provider is down: no vector, no windows (${JSON.stringify(before)})`);
-    assert(/Vectors:\s+3 thoughts wait for a vector — the MCP server's vector mender embeds them/.test(await call("brain_info")), "brain_info counts the three that wait");
+    assert(/Vectors:\s+3 thoughts wait for a vector — the servers' vector mender embeds them/.test(await call("brain_info")), "brain_info counts the three that wait");
     const health = await (await fetch(`${BASE}/health`, { headers: { "x-brain-key": "e2e-key" } })).json() as { database?: { vectorless?: number } };
     assert(health.database?.vectorless === 3, `keyed /health carries the count (${JSON.stringify(health.database?.vectorless)})`);
 
@@ -3448,8 +3448,8 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     const [ev] = await sql`SELECT count(*)::int AS n, min(action) AS action, min(origin) AS origin FROM thought_audit WHERE actor_name = 'vector-mender' AND thought_id = ${wid}::uuid`;
     assert(ev.n === 1 && ev.action === "update" && ev.origin === "open-brain", `one update event per mend, the mender's, through the server's door (${JSON.stringify(ev)})`);
     assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'vector-mender'`)[0].n - auditBefore === 3, "…and none for the down tick");
-    const [lineage] = await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'chunks' AND (artifact_id = ${lid}::uuid OR ${lid}::uuid = ANY(input_ids))`;
-    assert((after.l?.windows ?? 0) > 1 && lineage.n >= 1, `the long thought: its windows written, and their recipe recorded (${after.l?.windows} windows, ${lineage.n} derivation row(s))`);
+    const [lineage] = await sql`SELECT count(*)::int AS n, min(recipe->>'model') AS model, min(recipe->'params'->>'tokens') AS tokens FROM derivations WHERE artifact_kind = 'chunks' AND (artifact_id = ${lid}::uuid OR ${lid}::uuid = ANY(input_ids))`;
+    assert((after.l?.windows ?? 0) > 1 && lineage.n >= 1 && lineage.model === EMBEDDING_MODEL && Number(lineage.tokens) > 0, `the long thought: its windows written, and their recipe recorded — the model and the chunker's sizing (${after.l?.windows} windows, ${JSON.stringify(lineage)})`);
     assert((await call("search_thoughts", { query: "gamma", limit: 20 })).includes(wid), "semantic search finds a mended thought");
     assert(/Vectors:\s+every thought has one/.test(await call("brain_info")), "brain_info: none wait");
 
@@ -3489,6 +3489,35 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     gated.OB1_EGRESS_ALLOW = `actor:${writer}`;
     const allowed = await sweep(gatedCore);
     assert(allowed.mended === 1 && (await rowOf(gid))?.bare === false, `an allow term naming the writer: mended (${JSON.stringify(allowed)}, writer ${writer})`);
+
+    // A row an import wrote bare (db/ingest-records.ts's shape: its own door,
+    // a label for an actor) is asked as db/reembed.ts asks — its metadata, no
+    // actor: a term naming the label opens nothing, its source opens it.
+    const imported = await store.captureThought({ content: "[21] gamma: an imported note, written bare for a later re-embed", payload: { metadata: { source: "e2e-import" } }, embedding: null, actor: { name: "e2e-importer", via: "ingest-records" } } as never);
+    const [origin] = await sql`SELECT origin FROM thought_audit WHERE thought_id = ${imported.id}::uuid AND action = 'capture'`;
+    gated.OB1_EGRESS_ALLOW = "actor:e2e-importer";
+    const byLabel = await sweep(gatedCore);
+    assert(origin?.origin === "ingest-records" && byLabel.refused === 1 && byLabel.mended === 0 && (await rowOf(imported.id))?.bare === true, `an import's row: an actor term naming its label opens nothing (${JSON.stringify({ origin, byLabel })})`);
+    gated.OB1_EGRESS_ALLOW = "source:e2e-import";
+    const bySource = await sweep(gatedCore);
+    assert(bySource.mended === 1 && (await rowOf(imported.id))?.bare === false, `…a source: term over its metadata opens it, as db/reembed.ts's gate would (${JSON.stringify(bySource)})`);
+
+    // More rows the gate refuses than a page holds, on the real store: the
+    // keyset walks every one exactly once and the sweep ends.
+    stubDown = "refused";
+    for (let i = 0; i < 11; i++) await captureAs("e2e-key", `[21] gamma: refused row ${i}`);
+    stubDown = null;
+    gated.OB1_EGRESS_ALLOW = undefined;
+    const waitingNow = (await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`)[0].n;
+    const walk = await sweep(gatedCore);
+    assert(waitingNow >= 11 && walk.refused === waitingNow && walk.mended === 0, `a sweep over ${waitingNow} refused rows, more than a page: each refused once, and the sweep ends (${JSON.stringify(walk)})`);
+
+    // The leader lock: held by another, a tick reads and writes nothing; let go, the next acts.
+    const held = await store.mendLock();
+    const skipped = await core.mendOnce(newMendState());
+    await held!();
+    const acted = await sweep();
+    assert(held !== null && skipped.skipped && skipped.mended === 0 && acted.mended === waitingNow, `the lock held elsewhere: skipped; released, the next sweep mends (${JSON.stringify({ skipped: skipped.skipped, acted })})`);
   } finally {
     stubDown = null;
     await store.close();

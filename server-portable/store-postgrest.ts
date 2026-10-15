@@ -225,7 +225,14 @@ export class PostgrestStore implements ThoughtStore {
     if (after) q = q.gt("id", after);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map((r) => normaliseVectorlessRow({ ...r, updated_at: r.updated_at ?? r.created_at }));
+    // No origin: thought_audit is not published to PostgREST, so each row is
+    // asked of the gate as a pass asks (mend.ts mendAllowed).
+    return ((data ?? []) as Record<string, unknown>[]).map((r) => normaliseVectorlessRow({ ...r, updated_at: r.updated_at ?? r.created_at, origin: null }));
+  }
+
+  async mendLock(): Promise<(() => Promise<void>) | null> {
+    // No session to hold a lock in; this store serves Workers, which starts no mender.
+    return async () => {};
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {

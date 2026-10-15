@@ -1272,7 +1272,7 @@ export function vectorsLine(db: Pick<DatabaseSummary, "vectorless" | "unread">):
   const n = db.vectorless;
   if (n === null) return "vectorless" in db.unread ? `? (thoughts ${unreadWords(db.unread.vectorless)})` : "no table";
   if (n === 0) return "every thought has one";
-  return `${n.toLocaleString("en-US")} thought${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} for a vector — the MCP server's vector mender embeds ${n === 1 ? "it" : "them"} once the provider answers and the egress gate allows the call`;
+  return `${n.toLocaleString("en-US")} thought${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} for a vector — the servers' vector mender embeds ${n === 1 ? "it" : "them"} once the provider answers and the egress gate allows the call`;
 }
 
 /** The Relations row: the standing judged relations by word, none, or why they were not read (SMD-2680). */

@@ -1827,12 +1827,16 @@ with `OB1_EMBEDDING_MODEL`'s spelling — and which are not. The retired
 thought, then `upsert_thought` over a PostgREST this stack does not run
 (SMD-2138).
 
-A thought saved with no vector at all — the provider did not answer the
-capture's call, or the egress gate refused it — needs no run of its own: the
-MCP server's vector mender embeds it once the provider answers and the gate
-allows, a few rows a tick (`server-portable/README.md`, "The vector mender",
-SMD-2889). `reembed.ts` is for a model change, a whole brain, or a brain whose
-mender is off (`OB1_VECTOR_MEND_INTERVAL=off`).
+A thought with no vector at all — the provider did not answer the capture's
+call, the egress gate refused it, or an import wrote it bare — needs no run of
+its own: the servers' vector mender embeds it once the provider answers and
+the gate allows, 8 rows a tick (`server-portable/README.md`, "The vector
+mender", SMD-2889), asking the gate what `reembed.ts` would ask of an import's
+row. `reembed.ts` is for a model change, a whole brain at once — an import of
+thousands is hours at 8 a minute — or a brain whose mender is off
+(`OB1_VECTOR_MEND_INTERVAL=off`). The two run side by side safely: each write
+carries the stamp it read, so a row both reach is written once, though it may
+be embedded twice.
 
 ### `reembed.ts`
 
@@ -2631,8 +2635,9 @@ or no vector yet when the newer side is judged:
   `workers` compose profile, `deploy/README.md`, SMD-2424).
 - **A failed extraction.** `--retry-failed` extracts it, but the newer
   thoughts already judged are not judged again.
-- **A failed embedding.** A candidate needs a vector; `reembed.ts` gives it
-  one, and the same holds.
+- **A failed embedding.** A candidate needs a vector; the servers' vector
+  mender gives it one once the provider answers (SMD-2889), or `reembed.ts`
+  does, and the same holds.
 - **An import dated older than thoughts already judged.** Same: its pairs
   with them are not judged.
 
@@ -3961,8 +3966,8 @@ nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
 `server-portable/metadata.ts` every writer that edits a tagged row shares). A row
 whose tags fell back at capture, with its text unchanged, is not this tool's to
 repair: that is SMD-1975's retag worker, for every thought and not ticket rows
-alone; a row that landed without a vector is `reembed.ts`'s, as any vectorless row
-is. Labels render and store
+alone; a row that landed without a vector is the servers' vector mender's
+(SMD-2889), as any vectorless row is. Labels render and store
 sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
 falls out of the census and its row reads *extra*; a completed one Linear
 archived stays a ticket. `--only` syncs the identifiers named whatever the plan
@@ -4243,7 +4248,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2805 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1279 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

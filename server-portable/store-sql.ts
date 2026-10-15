@@ -360,12 +360,36 @@ export class SqlStore implements ThoughtStore {
     // thoughts the page costs under a millisecond (SMD-2889, measured).
     const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
     const rows = await this.sql`
-      SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata
-      FROM thoughts
+      SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata,
+             (SELECT a.origin FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.created_at ASC, a.id ASC LIMIT 1) AS origin
+      FROM thoughts t
       WHERE embedding IS NULL AND (${after}::uuid IS NULL OR id > ${after}::uuid)
       ORDER BY id ASC
       LIMIT ${opts.limit}::int`;
     return rows.map((r: Record<string, unknown>) => normaliseVectorlessRow(r));
+  }
+
+  async mendLock(): Promise<(() => Promise<void>) | null> {
+    // Session-level, so it outlives the statement and is held for the tick;
+    // on a reserved connection, so it is the same session that lets it go.
+    const conn = await this.sql.reserve();
+    try {
+      const [r] = await conn`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
+      if (r.got !== true) {
+        conn.release();
+        return null;
+      }
+    } catch (e) {
+      conn.release();
+      throw e;
+    }
+    return async () => {
+      try {
+        await conn`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender'))`;
+      } finally {
+        conn.release();
+      }
+    };
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
