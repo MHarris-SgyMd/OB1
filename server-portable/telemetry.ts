@@ -397,6 +397,12 @@ export class RequestTrace {
   /** Set where a plugin accepted a webhook delivery (an answer under 400): its sender verified, it is not held to the anonymous budget (review pass 3). */
   hookAccepted = false;
   /**
+   * Set where a request was liveness alone — the MCP server's keyed HEAD, which asks the REST core nothing, so knows
+   * no key: its line and its point, but no span or record, and none of the anonymous budget, where the keyless probe has
+   * no record at all (SMD-2287 PR 4c review pass 1: a monitor's keyed HEADs spent the budget, and a refusal after went unsent).
+   */
+  liveness = false;
+  /**
    * Whether the SDK was running when the request began: one begun before it loaded, and not accepted, spends none of
    * the anonymous budget and sends no record (review passes 3, 5). Not whether its span records — an unsampled span, or spans turned off, records nothing
    * while the request's log record still goes, and the budget holds that record too (review pass 4).
@@ -409,16 +415,18 @@ export class RequestTrace {
   /** The trace id an incoming `traceparent` names, for the line when the span has none of its own. */
   private readonly incoming?: string;
 
-  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal: AbortSignal, headers: Headers) {
+  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal: AbortSignal, headers: Headers, trustParent = false) {
     OPEN.add(this);
     // A caller's traceparent is its own choice: continued, it would pick this
     // request's trace — joining any trace it knows, colliding with another
     // request's line, deciding the ratio sampler — so by default the request
     // starts its own trace and links the caller's, as OpenTelemetry advises
     // for a public endpoint; an operator whose proxy sets the header trusts it
-    // (OB1_OTEL_TRUST_TRACEPARENT=1) and it is continued (review pass 6).
+    // (OB1_OTEL_TRUST_TRACEPARENT=1) and it is continued (review pass 6), as is
+    // one a server's caller holds a key for (`trustParent`: the REST core's
+    // forwarder, SMD-2287 PR 4c).
     const remote = otel.propagation.extract(otel.ROOT_CONTEXT, headers, HEADERS);
-    const trusted = trustsTraceparent();
+    const trusted = trustParent || trustsTraceparent();
     const parent = trusted ? remote : otel.ROOT_CONTEXT;
     const caller = trusted ? undefined : otel.trace.getSpanContext(remote);
     this.incoming = trusted ? incomingTrace(headers.get("traceparent")) : undefined;
@@ -489,7 +497,7 @@ export class RequestTrace {
       // A request the server did not accept: its span unended (never exported) and no record past the minute's budget; its point always.
       const accepted = (record.agent !== undefined && !this.refusedAtKey) || this.hookAccepted;
       // One begun before the SDK loaded has no span to send and spends none of the budget; its record goes nowhere either (review pass 5).
-      const sent = accepted || sdk === undefined || (this.loaded && anonymousSent());
+      const sent = !this.liveness && (accepted || sdk === undefined || (this.loaded && anonymousSent()));
       // Never the request's undoing: an SDK that throws here loses its span (review pass 2), its point and its record (PR 2c), not the request.
       try {
         this.span.updateName(span.name);
@@ -753,11 +761,32 @@ export async function flushTelemetry(): Promise<FlushResult | undefined> {
   return sdk?.flush();
 }
 
-/** A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest unless a suite says). */
-export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest): RequestTrace {
-  const trace = new RequestTrace(door, req.method, write, req.signal, req.headers);
+/**
+ * A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest
+ * unless a suite says). `trustParent`: its `traceparent` is continued, whatever OB1_OTEL_TRUST_TRACEPARENT says — the
+ * REST core's word for a request its forwarder carried (SMD-2287 PR 4c).
+ */
+export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest, { trustParent = false } = {}): RequestTrace {
+  const trace = new RequestTrace(door, req.method, write, req.signal, req.headers, trustParent);
   RECORDS.set(req, trace);
   return trace;
+}
+
+/** Writes the `traceparent` key alone: a span this server started carries no caller's `tracestate` (HEADERS), and nothing else goes. */
+const TRACEPARENT_ONLY: otel.TextMapSetter<Record<string, string>> = { set: (carrier, key, value) => { if (key === "traceparent") carrier[key] = value; } };
+
+/**
+ * The current span's `traceparent`, for a call this server makes on another
+ * (the MCP server's on the REST core, SMD-2287 PR 4c): the REST core continues
+ * it for its forwarder, so a tool call and the operation it ran are one trace.
+ * None with no SDK, or no span current.
+ */
+export function outgoingTraceparent(): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  try {
+    otel.propagation.inject(otel.context.active(), carrier, TRACEPARENT_ONLY);
+  } catch {}
+  return carrier;
 }
 
 /**
