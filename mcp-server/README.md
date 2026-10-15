@@ -126,11 +126,11 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   on the REST core's span, under this server's; this server's own span has the kind of
   what it met, a 500, since an answer carries no exception.
 - **A keyed HEAD's telemetry.** Knowing no key, it sends no span or log record — its
-  line and its point on the request-duration histogram kept, as the keyless probe has
-  none — so a monitor's probes spend none of the budget for requests no key was
-  accepted for (`telemetry.ts`), where `index.ts` names the key and sends both. A
-  wrong key's HEAD reaches the collector not at all, its line `ok`, where `index.ts`'s
-  is `refused` within the budget. A HEAD at `/mcp` itself is a 405, held to the
+  line and its point on the request-duration histogram kept, where the keyless probe
+  has no record at all — so a monitor's probes spend none of the budget for requests
+  no key was accepted for (`telemetry.ts`), where `index.ts` names the key and sends
+  both. A wrong key's HEAD sends its point alone, its line `ok`, where `index.ts`'s is
+  `refused`, its span and record within the budget. A HEAD at `/mcp` itself is a 405, held to the
   budget as `index.ts`'s is: point a monitor at `/health`.
 
 **Every request's line** is this server's own, `door: "mcp"`, as `index.ts` writes it

@@ -4892,7 +4892,7 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
     // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
     // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
-    // sending them past the budget, passed) — each its line and its point, as the keyless probe has no record.
+    // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
     await stopTelemetry();
     const probed = new InMemorySpanExporter();
     const probedLogs = new InMemoryLogRecordExporter();

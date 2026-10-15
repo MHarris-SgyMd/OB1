@@ -398,7 +398,7 @@ export class RequestTrace {
   hookAccepted = false;
   /**
    * Set where a request was liveness alone — the MCP server's keyed HEAD, which asks the REST core nothing, so knows
-   * no key: its line and its point, but no span or record, and none of the anonymous budget, as the keyless probe has
+   * no key: its line and its point, but no span or record, and none of the anonymous budget, where the keyless probe has
    * no record at all (SMD-2287 PR 4c review pass 1: a monitor's keyed HEADs spent the budget, and a refusal after went unsent).
    */
   liveness = false;
