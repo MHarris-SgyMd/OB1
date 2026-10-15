@@ -844,26 +844,28 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     for (const [k, v] of otelSaved) process.env[k] = v;
   }
   // OTLP/JSON: each export's spans under their resource; a SERVER span is kind 2, and an attribute a key and a typed value.
-  type OtlpSpan = { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: number; attributes?: { key: string; value: { stringValue?: string } }[] };
-  type OtlpResource = { resource: { attributes: { key: string; value: { stringValue?: string } }[] }; scopeSpans: { spans: OtlpSpan[] }[] };
+  type OtlpAttributes = { key: string; value: { stringValue?: string } }[];
+  type OtlpSpan = { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: number; attributes?: OtlpAttributes };
+  type OtlpResource = { resource: { attributes: OtlpAttributes }; scopeSpans: { spans: OtlpSpan[] }[] };
   const sent = (received["/v1/traces"] ?? []).flatMap((t) => (JSON.parse(t) as { resourceSpans: OtlpResource[] }).resourceSpans);
-  const attr = (sp: OtlpSpan | undefined, key: string) => sp?.attributes?.find((a) => a.key === key)?.value.stringValue;
+  const valueOf = (attributes: OtlpAttributes | undefined, key: string) => attributes?.find((a) => a.key === key)?.value.stringValue;
   const spansOf = (rs: OtlpResource[]) => rs.flatMap((r) => r.scopeSpans).flatMap((sc) => sc.spans);
   // The entry's spans and the REST core's, told apart by their service — not by a door, which an export holding only a
   // call's tool span would lack (review pass 1: the batch's timer firing between a call's two spans).
-  const serviceOf = (r: OtlpResource) => r.resource.attributes.find((a) => a.key === "service.name")?.value.stringValue;
+  const serviceOf = (r: OtlpResource) => valueOf(r.resource.attributes, "service.name");
   const entrySent = sent.filter((r) => serviceOf(r) !== tracing.serviceName);
   const service = entrySent[0] && serviceOf(entrySent[0]);
   const mcpSpans = spansOf(entrySent);
   const statsCall = mcpSpans.find((sp) => sp.name === "execute_tool thought_stats");
   const statsRequest = mcpSpans.find((sp) => sp.name === "tools/call thought_stats" && sp.kind === 2);
-  const restStats = spansOf(sent.filter((r) => serviceOf(r) === tracing.serviceName)).find((sp) => sp.kind === 2 && attr(sp, "ob1.tool") === "thought_stats");
+  const restStats = spansOf(sent.filter((r) => serviceOf(r) === tracing.serviceName)).find((sp) => sp.kind === 2 && valueOf(sp.attributes, "ob1.tool") === "thought_stats");
   assert(up && sdk && service === "open-brain-mcp" && statsRequest !== undefined && statsCall?.parentSpanId === statsRequest.spanId && statsCall.traceId === statsRequest.traceId,
     `the entry sends its spans at its stop as open-brain-mcp: a tool call's span under its request's (${service}; ${mcpSpans.map((sp) => sp.name).join(", ")})`);
   assert(statsCall !== undefined && restStats?.traceId === statsCall.traceId && restStats.parentSpanId === statsCall.spanId,
     `the REST core's request continues the tool call's traceparent: one trace across two processes (${restStats?.traceId} ${restStats?.parentSpanId} under ${statsCall?.traceId} ${statsCall?.spanId})`);
-  const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
-  const pluginLine = lines.find((l) => l.door === "mcp" && l.rpc === "tools/call" && l !== lines.find((m) => m.tool === "thought_stats"));
+  // The plugin call's line: the second tools/call, the calls made one after the other.
+  const pluginLine = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.door === "mcp" && l.rpc === "tools/call")[1];
   assert(pluginLine?.tool === "example_recent" && mcpSpans.some((sp) => sp.name === "execute_tool example_recent"),
     `a plugin tool is named on the entry's line and its span, the REST core in another process (${JSON.stringify(pluginLine)})`);
 }

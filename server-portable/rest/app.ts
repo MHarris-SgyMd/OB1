@@ -181,7 +181,10 @@ const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[]
   return [...methods].sort();
 };
 
-/** `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter. */
+/**
+ * `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter.
+ * `carrier`: the forwarder slot's forward-scope key, or null for none — checked once, by the first middleware (carrierOf).
+ */
 type RestEnv = { Variables: { template?: string; carrier?: Principal | null } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
