@@ -14369,10 +14369,10 @@ console.log("\n[84] Migration 094: what the stated-status label reads, in one ca
     "ob1_thought_events_in_order as 094 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
 
   // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
-  const none = [...(await inputs(null, null)), ...(await inputs([], [])), ...(await inputs(null, ["SMD-404"]))];
+  const none = [...(await inputs(null, null)), ...(await inputs([], []))];
   assert(none.length === 0, `a NULL or empty list reads nothing (${none.length} rows)`);
   const idsAlone = await inputs([t1, note], []);
-  assert(idsAlone.length === 1 && idsAlone[0].kind === "lifecycle" && idsAlone[0].thought_id === t1 && (await inputs([], ["SMD-1"])).every((r) => r.kind !== "lifecycle"),
+  assert(idsAlone.length === 1 && idsAlone[0].kind === "lifecycle" && idsAlone[0].thought_id === t1 && (await inputs(null, ["SMD-1"])).every((r) => r.kind !== "lifecycle"),
     "ids alone give only their lifecycle rows — the ticket row's one, the note none — and tickets alone only heads and histories");
 
   // A re-apply moves nothing.

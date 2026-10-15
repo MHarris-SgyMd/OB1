@@ -781,7 +781,7 @@ export function ticketList(tickets: string[]): string[] {
  */
 export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
-  const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
   // A later function may answer one object, a scalar or a list holding nulls
   // over PostgREST (SMD-2540 PR 2a's fourth review pass): no list is no rows,
   // no object no row.
@@ -800,7 +800,7 @@ export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
       const list: Change[] = [];
       for (const e of h as { at?: unknown; status?: unknown; status_type?: unknown }[]) {
         const name = text(e?.status), type = text(e?.status_type);
-        if (typeof e?.at !== "number" || !Number.isFinite(e.at) || !name || !type) { list.length = 0; break; }
+        if (typeof e?.at !== "number" || !Number.isFinite(e.at) || !name || !type) break;
         list.push({ at: e.at, name, type });
       }
       if (list.length === h.length) out.history.set(issue, list);
