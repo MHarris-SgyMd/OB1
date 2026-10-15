@@ -9,7 +9,12 @@
  */
 
 /** A server a suite drives: its fetch, as Bun.serve takes it. */
-export type ServerUnderTest = { fetch: (req: Request) => Response | Promise<Response> };
+export type ServerUnderTest = {
+  fetch: (req: Request) => Response | Promise<Response>;
+  /** The MCP server's own, where index.ts's are its named exports: the tool calls running, and the keepalive's timing. */
+  toolCallsRunning?: () => number;
+  useKeepaliveTiming?: (next: { intervalMs: number; maxMs: number }) => { intervalMs: number; maxMs: number };
+};
 
 /** The forward-scope key mcp-server/stack.ts adds to MCP_ACCESS_KEYS: the carrier (`act`) on every write through it. */
 export const SUITE_CARRIER = "mcp-server-suite";

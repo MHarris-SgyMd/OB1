@@ -166,6 +166,7 @@ main() {
   nodb mcp-server         test-mcp.ts
   OB1_MCP_UNDER_TEST=client nodb server-portable test-auth.ts
   OB1_MCP_UNDER_TEST=client nodb server-portable test-plugins.ts
+  OB1_MCP_UNDER_TEST=client nodb server-portable test-server.ts
   nodb jev                test-jev.ts
   nodb evals              eval-thought-kinds.ts --self-check
   nodb evals              eval-calibration.ts --self-check

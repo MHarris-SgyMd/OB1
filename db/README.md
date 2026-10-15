@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2783 assertions: 2783 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-one (91) migrations applied, and
+`bun test-schema.ts` prints `2805 assertions: 2805 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-two (92) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1214,9 +1214,10 @@ an `issue` it lacked (board-sync's adoption, which writes without one). A
 key's metadata edit does not take it, whatever it adds — a writer's tag, a
 writer filing it under a ticket, `backfill_thought_actors` (which this README
 tells operators to run after `set_agent_kind`), a recipe — nor does a
-vector, a pointer or a fingerprint: a lapse puts a summary the hook superseded
-back to current, so only a write that puts another's text on the row may
-cause one. `ob1_thought_taken` reads the rule for one thought; the server reads
+vector or a fingerprint: a lapse puts a summary the hook superseded back to
+current, so only a write that puts another's text on the row may cause one
+(since 092, a chain that puts the key's text over another's takes it too,
+below). `ob1_thought_taken` reads the rule for one thought; the server reads
 it beside the capture row for every target of a capture-only key's
 `supersedes`. A write key's re-capture that changes nothing writes no event, so
 the stores call `ob1_note_recapture` after a capture without `recapture: 'keep'`
@@ -1432,6 +1433,39 @@ stays insert-only. A data-only reload with triggers enabled rebuilds the
 column from each row's status. A relation needs nothing — it has no reopen,
 and said again it is the judge's verdict again. It refuses to apply without
 067. test-schema [81], test-upgrade [20al], test-live [42].
+
+Migration 092 has a capture-only key's thought taken while its supersedes
+chain reaches a thought the key did not capture (SMD-2708). A reviewer
+accepting a supersession proposal writes the pointer on the thought it makes
+current, through `update_thought`; 082 counted no pointer a taking, so a
+capture-only key's copy accepted over a write key's thought stayed its own,
+and the key could point new text at it and pass the reviewer's standing on
+(SMD-1873's review pass 3, on a scratch server). The harm is the key's text
+current over another key's, and only another key's pointer can put it there,
+so the rule reads that: `ob1_thought_taken` is 082's log read
+(`ob1_capture_taken_by_log`) or `ob1_chain_reaches_outside` — the thought's
+current pointers walked down (cycle-safe, bounded at 1,000 steps, the bound
+read as taken) reach a thought the capturer did not capture, or one 082's log
+took. So an accept, or a write key's link, onto another's thought takes it,
+through any number of links of the key's own; a pointer between two of the
+key's own thoughts — the session-capture recipe's repair — takes neither; and
+a reject clearing the accept's pointer gives the thought back. Two narrower
+rules on the pointer event were each broken by a review pass (the recipe's
+repair; the standing passing one link further) before the rule read the chain.
+The lapse, when the event's row is taken (the bound read as untaken), clears
+the capturer's capture-scoped pointers onto it and onto every row above it —
+each taken through it — without walking down again; the write-time check
+locks the target's chain FOR SHARE from the bottom up, as takers and a
+delete's cascade do, and re-reads it, refusing a chain that moved onto a row
+it did not lock; and `ob1_note_recapture`'s once-only
+guard reads 082's log, so a write key's re-capture of a thought taken only
+through its chain stays on record when the chain is cleared. A pointer
+written before 092 onto a thought an earlier accept took stays until an event
+below it fires the lapse (no sweep; SMD-2934); a lapsed pointer is not put back by a reject (SMD-2933); a thought
+the key wrote with no agent id counts as another's. It refuses to apply
+without 082. test-schema [72] and [82], test-upgrade [20am], test-store-sql
+[8c] and [8f] (the chain locks on two connections), test-store-postgrest [8c],
+test-e2e-sql [13e].
 
 ## What changed relative to the guide
 
@@ -3967,8 +4001,8 @@ ends the fetch and the batches behind it are reported not attempted, for the nex
 pass. The census carries each issue's project, state and label names beside its
 `updatedAt`, so a rename — which never bumps `updatedAt` — makes the ticket stale
 on the next pass. When the text moves, the tags are extracted
-again with the vector (a fallback tag set from a provider outage would otherwise
-stand on current text forever), every facet goes over them (a `status` or an
+again with the vector (a fallback tag set, or a provider outage's marker alone —
+SMD-2888 — would otherwise stand on current text forever), every facet goes over them (a `status` or an
 `issue` the model read out of the description must not win), and a stale
 `metadata_extraction_failed` the fresh tags do not carry is set to null — the
 nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
@@ -4256,7 +4290,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2783 assertions, PGlite, no container
+bun test-schema.ts                          # 2805 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

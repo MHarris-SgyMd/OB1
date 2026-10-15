@@ -238,13 +238,21 @@ jobs:
         run: bun test-auth.ts
 
       # An enabled plugin's operation as the MCP server's tool, called on the
-      # REST core by its route (SMD-2287 PR 4a); its request line is the REST
-      # core's until PR 4b.
+      # REST core by its route (SMD-2287 PR 4a).
       - name: Plugins in the contract, through the MCP server as a REST client
         working-directory: server-portable
         env:
           OB1_MCP_UNDER_TEST: client
         run: bun test-plugins.ts
+
+      # The real server's suite through the MCP server as a REST client
+      # (SMD-2287 PR 4b): its request lines, its refusals, its mirrors and its
+      # stop's count of tool calls — [22]'s spans are PR 4c's, skipped till then.
+      - name: Test against the real server, through the MCP server as a REST client
+        working-directory: server-portable
+        env:
+          OB1_MCP_UNDER_TEST: client
+        run: bun test-server.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
@@ -780,9 +788,8 @@ jobs:
       # The same suite through the MCP server as a client of the REST core
       # (SMD-2287 PR 3b), the REST core in process behind it: the same
       # assertions, but a write records the REST core's door with the MCP
-      # server as its carrier, and the request lines are the REST core's
-      # until the MCP server writes its own (PR 4). The two installs pin its
-      # cross-directory imports; Bun would otherwise fetch them (SMD-2978).
+      # server as its carrier. The two installs pin its cross-directory
+      # imports; Bun would otherwise fetch them (SMD-2978).
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
