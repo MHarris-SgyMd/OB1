@@ -16,7 +16,7 @@ import { SqlStore } from "./store-sql.ts";
 import { createHash } from "node:crypto";
 import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
-import { createStore } from "./store.ts";
+import { createStore, normaliseTicketStatusInputs } from "./store.ts";
 import { SQL } from "bun";
 
 const URL_ = process.env.DATABASE_URL;
@@ -1416,8 +1416,15 @@ console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits wi
   assert(got !== null && got.heads.get("SMD-17001")?.type === "completed" && got.heads.get("SMD-17001")?.name === "Done" && got.heads.size === 1
       && JSON.stringify(h.map((c) => c.name)) === JSON.stringify(["Backlog", "In Progress", "Done"]) && h.every((c) => Number.isFinite(c.at) && c.at > 0),
     `heads and history: SMD-17001 Done now, Backlog → In Progress → Done in the log's order, each with its time; a lower-cased or unknown key reads nothing (${JSON.stringify(h)})`);
-  const empty = await store.ticketStatusInputs([], []);
-  assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0, "nothing asked: an empty answer, no query");
+  const empty = await store.ticketStatusInputs([], []), noTickets = await store.ticketStatusInputs([ticket.id], []);
+  assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0 && noTickets !== null && noTickets.lifecycle.size === 0,
+    "no ticket named: an empty answer, no query — nothing to label, so not even the hits' lifecycle is read");
+  // The normaliser: a history as text is parsed; a kind or a status 092 does not return throws (a changed function surfaces).
+  const asText = normaliseTicketStatusInputs([{ kind: "history", issue: "SMD-1", history: JSON.stringify([{ at: 2, status: "Done", status_type: "completed" }, { at: 1, status: "Backlog", status_type: "backlog" }]) }]);
+  const throwsOn = (rows: Record<string, unknown>[]) => { try { normaliseTicketStatusInputs(rows); return false; } catch { return true; } };
+  assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
+      && throwsOn([{ kind: "event", issue: "SMD-1" }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: [{ at: "x", status: "Done", status_type: "completed" }] }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: {} }]),
+    "the normaliser keeps a history in the order 092 gives it, parses one sent as text, and throws on a kind or a status 092 does not return");
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 092: null — the label is left off, the search goes on");
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("092") });

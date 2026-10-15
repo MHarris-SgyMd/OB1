@@ -650,7 +650,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // weighing that answers and redefines 086's restamp as a call of it,
   // refusing by name without 085 or 086 ([20ak]); 091 adds a column and
   // its trigger to 029's table, refusing by name without 067 ([20al]); 092
-  // adds one read function, refusing by name without 068 or 060 ([20am]) — all
+  // adds one read function and redefines 060's order over its own body,
+  // refusing by name without 068 or 060 ([20am]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -4059,9 +4060,9 @@ console.log("\n[20am] Migration 092: refused by name without 068; onto a populat
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata FROM thoughts ORDER BY id`);
   const before = await rows();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the092 });
-  const read = async () => (await sql`SELECT kind, issue, status, ord FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`) as { kind: string; issue: string; status: string; ord: string | null }[];
+  const read = async () => (await sql`SELECT kind, issue, status, history FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`) as { kind: string; issue: string; status: string; history: { status: string }[] | null }[];
   const got = await read();
-  const events = got.filter((x) => x.kind === "event").sort((a, b) => Number(a.ord) - Number(b.ord)).map((x) => x.status);
+  const events = (got.find((x) => x.kind === "history")?.history ?? []).map((x) => x.status);
   assert((await rows()) === before && JSON.stringify(events) === JSON.stringify(["Backlog", "In Progress", "Done"])
       && got.some((x) => x.kind === "head" && x.status === "Done") && got.some((x) => x.kind === "lifecycle"),
     `onto a brain at 091: the moves made before 092 are read back in order, the head is Done, the ticket row is its own lifecycle, and no row moved (${JSON.stringify(got.map((x) => [x.kind, x.status]))})`);

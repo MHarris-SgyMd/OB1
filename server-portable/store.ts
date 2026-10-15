@@ -769,22 +769,29 @@ export function ticketList(tickets: string[]): string[] {
   return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
 }
 
-/** ticket_status_inputs's rows → TicketStatusInputs; both stores map through here so neither drifts. Events are put in `ord` order whatever order the rows came in. */
+/**
+ * ticket_status_inputs's rows → TicketStatusInputs; both stores map through
+ * here so neither drifts. A history row's elements are the ticket's statuses
+ * in the log's order, kept in it; `at` is ms since the epoch. Throws on a kind
+ * or an element 092 does not return — a changed function, which the stores
+ * let surface rather than read as a brain without 092.
+ */
 export function normaliseTicketStatusInputs(rows: Record<string, unknown>[]): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
-  const events: { issue: string; ord: number; change: Change }[] = [];
   for (const r of rows) {
     const kind = String(r.kind);
     if (kind === "lifecycle") out.lifecycle.add(String(r.thought_id).toLowerCase());
     else if (kind === "head") out.heads.set(String(r.issue), { name: String(r.status), type: String(r.status_type) });
-    else if (kind === "event") events.push({ issue: String(r.issue), ord: Number(r.ord), change: { at: Date.parse(isoTimestamp(r.at)), name: String(r.status), type: String(r.status_type) } });
+    else if (kind === "history") {
+      const h = typeof r.history === "string" ? JSON.parse(r.history) : r.history;
+      if (!Array.isArray(h)) throw new Error(`ticket_status_inputs returned a history that is not a list for ${String(r.issue)}`);
+      out.history.set(String(r.issue), h.map((e: { at?: unknown; status?: unknown; status_type?: unknown }) => {
+        if (typeof e?.at !== "number" || typeof e.status !== "string" || typeof e.status_type !== "string") throw new Error(`ticket_status_inputs returned a malformed status for ${String(r.issue)}`);
+        return { at: e.at, name: e.status, type: e.status_type };
+      }));
+    }
     // 092 returns three kinds; a fourth is a changed function.
     else throw new Error(`ticket_status_inputs returned an unknown kind ${JSON.stringify(kind)}`);
-  }
-  for (const e of events.sort((a, b) => a.ord - b.ord)) {
-    const list = out.history.get(e.issue) ?? [];
-    list.push(e.change);
-    out.history.set(e.issue, list);
   }
   return out;
 }
@@ -1618,10 +1625,11 @@ export interface ThoughtStore {
   /**
    * What the stated-status label reads (migration 092, SMD-2540): which of
    * these hits carry a lifecycle of their own, and each named ticket's status
-   * now and history in the log's order. One query. Best-effort, as
-   * supersededAmong: a database before 092, or a role without node_state's
-   * thought_sources grant, returns null — the hits go unlabelled and the
-   * search goes on.
+   * now and history in the log's order. One query, none when no ticket is
+   * named (nothing to label). Best-effort, as supersededAmong: a database
+   * before 092, or a role without node_state's thought_sources or the order's
+   * ob1_config grant, returns null — the hits go unlabelled and the search
+   * goes on. A row 092 does not return throws: a changed function surfaces.
    */
   ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
 

@@ -641,16 +641,20 @@ export class PostgrestStore implements ThoughtStore {
 
   async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
     const valid = idList(ids), keys = ticketList(tickets);
-    if (valid.length === 0 && keys.length === 0) return normaliseTicketStatusInputs([]);
+    if (keys.length === 0) return normaliseTicketStatusInputs([]);
     // Best-effort, as supersededAmong: before 092 the RPC is unknown, and the
-    // label is left off rather than failing the search.
+    // label is left off rather than failing the search. The rows are read
+    // outside the catch, so a changed function is not mistaken for a brain
+    // without it. One row per ticket (092), so db-max-rows cuts no history.
+    let rows: Record<string, unknown>[];
     try {
       const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });
       if (error) return null;
-      return normaliseTicketStatusInputs((data ?? []) as Record<string, unknown>[]);
+      rows = (data ?? []) as Record<string, unknown>[];
     } catch {
       return null;
     }
+    return normaliseTicketStatusInputs(rows);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

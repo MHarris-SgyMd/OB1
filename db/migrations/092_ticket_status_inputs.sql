@@ -32,17 +32,26 @@
 --       kind 'head'      — each ticket named (p_issues) that ob1_ticket_head
 --                          (068) holds with a known lifecycle type
 --                          (node_lifecycle_types()): its status now;
---       kind 'event'     — every status each named ticket's rows held, one row
---                          per audit event carrying it, in the log's order
---                          (`ord`): 060's ob1_thought_events_in_order over the
---                          rows that carry the ticket's key now. Board-sync
---                          updates a ticket row in place, so its events hold
---                          each status it had (055's payload). Not thought_audit's
---                          seq order: 046's backfill numbered a ticket's older
---                          events after newer ones (the eval's first graded
---                          run found it).
---     An event row's `at` is its event's created_at (the transaction's clock);
---     the reader takes the last event in `ord` order at or before a time.
+--       kind 'history'   — one row per named ticket: every status its rows
+--                          held, one element per audit event carrying it
+--                          ({at, status, status_type}, `at` in ms since the
+--                          epoch, the event's created_at), in the log's order:
+--                          060's ob1_thought_events_in_order over the rows that
+--                          carry the ticket's key now. Board-sync updates a
+--                          ticket row in place, so its events hold each status
+--                          it had (055's payload). Not thought_audit's seq
+--                          order: 046's backfill numbered a ticket's older
+--                          events after newer ones (the eval's first graded run
+--                          found it). One row per ticket, not per event: a
+--                          set-returning RPC behind PostgREST is cut at
+--                          db-max-rows, silently, from the newest statuses.
+--     The reader takes the last status in the log's order at or before a time.
+--     A head with no status is left out.
+--   * ob1_thought_events_in_order, 060's, redefined to return the same rows in
+--     the same order with a list read by thought_audit_thought_id_idx: its one
+--     filter, `p_thoughts IS NULL OR thought_id = ANY(p_thoughts)`, read the
+--     whole log whenever its body was not inlined — and it is not, as called
+--     here (the first review pass). Two arms, each a one-time filter.
 --
 -- NOT HERE
 --   * The reading and the label (server-portable/stated-status.ts and the
@@ -50,9 +59,10 @@
 --     moves and no column is reshaped.
 --   * Grants: none. EXECUTE is PUBLIC; the server's role reads thoughts,
 --     thought_audit and ob1_ticket_head already (db/config.mjs's capture
---     group). node_state reads thought_sources, a soft grant: a role without
---     it fails this call, and the server shows no label rather than failing
---     the search (the store's best-effort read, as supersededAmong's).
+--     group). node_state reads thought_sources and the log's order reads
+--     ob1_config, both soft grants (the server group): a role without either
+--     fails this call, and the server shows no label rather than failing the
+--     search (the store's best-effort read, as supersededAmong's).
 --   * A ticket row deleted, or one whose `issue` facet was taken off, leaves
 --     its events out: the rows read are those carrying the key now (068's
 --     thoughts_issue_key_idx), not every audit row that ever carried it —
@@ -61,12 +71,14 @@
 --
 -- SAFETY
 --   Additive: one function, LANGUAGE sql with a string body (no recorded
---   dependency, so a reset drops it in any order), STABLE, SECURITY INVOKER.
---   No table, column or trigger. MINOR under the version rules.
+--   dependency, so a reset drops it in any order), STABLE, SECURITY INVOKER;
+--   and 060's ob1_thought_events_in_order redefined over the same signature,
+--   rows and order (CREATE OR REPLACE: a --reapply runs 060's body, then this
+--   one). No table, column or trigger. MINOR under the version rules.
 --
 -- Expected outcome
---   SELECT kind, issue, status_type FROM ticket_status_inputs(ARRAY[]::uuid[], ARRAY['SMD-1'])
---   returns SMD-1's head and its events, oldest first.
+--   SELECT kind, issue, status_type, history FROM ticket_status_inputs(ARRAY[]::uuid[], ARRAY['SMD-1'])
+--   returns SMD-1's head and one history row, its statuses oldest first.
 -- Dependencies: 058 (node_state, node_lifecycle_types), 060
 --   (ob1_thought_events_in_order), 068 (ob1_ticket_head, thoughts_issue_key_idx).
 -- =============================================================================
@@ -92,42 +104,78 @@ BEGIN
 END
 $g$;
 
-CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
-RETURNS TABLE (kind text, thought_id uuid, issue text, ord bigint, at timestamptz, status text, status_type text)
+-- 060's order, unchanged in what it returns, rewritten so a list is an index
+-- probe. Its one filter, `p_thoughts IS NULL OR a.thought_id = ANY(p_thoughts)`,
+-- cannot use thought_audit_thought_id_idx when the body is not inlined — and
+-- it is not, with a sub-select argument or WITH ORDINALITY, as 092 calls it —
+-- so every call read the whole log (the first review pass). Two arms, each a
+-- one-time filter on the argument: the list's rows by index, or every row.
+CREATE OR REPLACE FUNCTION ob1_thought_events_in_order(p_thoughts uuid[] DEFAULT NULL)
+RETURNS SETOF thought_audit
 LANGUAGE sql
 STABLE
+AS $$
+  SELECT a.*
+    FROM (SELECT * FROM thought_audit WHERE p_thoughts IS NOT NULL AND thought_id = ANY(p_thoughts)
+          UNION ALL
+          SELECT * FROM thought_audit WHERE p_thoughts IS NULL) a,
+         (SELECT COALESCE((SELECT c.value::timestamptz FROM ob1_config c WHERE c.key = 'audit_seq_exact_since'), 'infinity'::timestamptz) AS b) k
+   ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq
+$$;
+
+COMMENT ON FUNCTION ob1_thought_events_in_order(uuid[]) IS
+  'The log in the order a fold replays it (SMD-1997, step 2): every thought_audit row — or the rows of the thoughts named — with the rows before ob1_config.audit_seq_exact_since first, by (created_at, seq), then the rows since, by seq alone (055''s rule: seq is exact insertion order since 050 and heap order before; created_at is the transaction''s clock and inverts a row''s history). The one copy of the rule; ob1_project_thought_event with p_replay walks it, and ticket_status_inputs reads a ticket''s statuses through it. A list is read by thought_audit_thought_id_idx, whatever the plan (092). Migration 060 / SMD-2116; index-friendly, 092 / SMD-2540.';
+
+CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
+RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb)
+LANGUAGE sql
+STABLE
+-- No parallel workers: the order's every-row arm is estimated at the whole log
+-- under the generic plan its body gets, and starting two workers cost more
+-- than reading the few hundred events a search names (ten hits: 11 ms with
+-- them, 7 without, on a copy of stable).
+SET max_parallel_workers_per_gather = 0
 AS $f$
-  WITH keys AS MATERIALIZED (
-    SELECT DISTINCT k AS issue, md5(k)::uuid AS issue_key
+  -- Arrays and = ANY throughout, and each event's fields read out of its
+  -- jsonb once: under a generic plan (a prepared statement's sixth call) an
+  -- IN (SELECT …) over the keys joined every event to every key and re-read
+  -- the diff per pair — 1,032 keys took 5.3 s against 148 ms custom (the
+  -- first review pass, on a copy of stable).
+  WITH want AS MATERIALIZED (
+    SELECT coalesce(array_agg(DISTINCT k), ARRAY[]::text[]) AS issues,
+           coalesce(array_agg(DISTINCT md5(k)::uuid), ARRAY[]::uuid[]) AS issue_keys
       FROM unnest(coalesce(p_issues, ARRAY[]::text[])) AS k
      WHERE k IS NOT NULL
   ),
-  known AS MATERIALIZED (SELECT unnest(node_lifecycle_types()) AS t),
-  carriers AS MATERIALIZED (
-    -- 068's thoughts_issue_key_idx serves this: the expression and the partial
-    -- predicate are its own.
-    SELECT t.id
-      FROM thoughts t
-     WHERE t.metadata ? 'issue'
-       AND md5(t.metadata->>'issue')::uuid IN (SELECT issue_key FROM keys)
+  ev AS MATERIALIZED (
+    SELECT a.ordinality AS ord, a.created_at AS at, x.md->>'issue' AS issue, x.md->>'status' AS status, x.md->>'status_type' AS status_type
+      FROM ob1_thought_events_in_order(ARRAY(
+             -- 068's thoughts_issue_key_idx serves this: its expression and its partial predicate.
+             SELECT t.id FROM thoughts t, want w
+              WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = ANY(w.issue_keys))) WITH ORDINALITY AS a
+      CROSS JOIN LATERAL (SELECT coalesce(a.diff #> '{metadata,after}', CASE WHEN a.action = 'capture' THEN a.diff -> 'metadata' END) AS md) x
+     WHERE a.action IN ('capture', 'update') AND x.md ? 'status'
   )
-  SELECT 'lifecycle'::text, n.thought_id, NULL::text, NULL::bigint, NULL::timestamptz, NULL::text, NULL::text
+  SELECT 'lifecycle'::text, n.thought_id, NULL::text, NULL::text, NULL::text, NULL::jsonb
     FROM node_state(coalesce(p_ids, ARRAY[]::uuid[])) n
    WHERE n.open IS NOT NULL
   UNION ALL
-  SELECT 'head', NULL, h.issue, NULL, NULL, h.status, h.status_type
-    FROM ob1_ticket_head h
-   WHERE h.issue_key IN (SELECT issue_key FROM keys)
-     AND h.status_type IN (SELECT t FROM known)
+  SELECT 'head', NULL, h.issue, h.status, h.status_type, NULL
+    FROM ob1_ticket_head h, want w
+   WHERE h.issue_key = ANY(w.issue_keys)
+     AND h.status_type = ANY(node_lifecycle_types())
+     AND coalesce(h.status, '') <> ''
   UNION ALL
-  SELECT 'event', NULL, x.md->>'issue', a.ordinality, a.created_at, x.md->>'status', x.md->>'status_type'
-    FROM ob1_thought_events_in_order(ARRAY(SELECT id FROM carriers)) WITH ORDINALITY AS a
-    CROSS JOIN LATERAL (SELECT coalesce(a.diff #> '{metadata,after}', CASE WHEN a.action = 'capture' THEN a.diff -> 'metadata' END) AS md) x
-   WHERE a.action IN ('capture', 'update')
-     AND x.md ? 'status'
-     AND x.md->>'issue' IN (SELECT issue FROM keys)
-     AND x.md->>'status_type' IN (SELECT t FROM known)
+  -- One row per ticket, its statuses in the log's order: a set-returning RPC
+  -- behind PostgREST is cut at db-max-rows (Supabase's 1,000), silently and
+  -- from the tail — the newest statuses — so a row per event would mislabel.
+  SELECT 'history', NULL, e.issue, NULL, NULL,
+         jsonb_agg(jsonb_build_object('at', (extract(epoch FROM e.at) * 1000)::float8, 'status', e.status, 'status_type', e.status_type) ORDER BY e.ord)
+    FROM ev e, want w
+   WHERE e.issue = ANY(w.issues)
+     AND e.status_type = ANY(node_lifecycle_types())
+   GROUP BY e.issue
 $f$;
 
 COMMENT ON FUNCTION ticket_status_inputs(uuid[], text[]) IS
-  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type, its status now; kind event — every status those tickets'' rows held, one row per capture or update event carrying it, ord its place in the log (060''s ob1_thought_events_in_order, never thought_audit''s seq alone), at its created_at. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; node_state reads thought_sources, so a role without that soft grant fails the call and the server shows no label. Migration 092 / SMD-2540.';
+  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type and a status, its status now; kind history — one row per such ticket with every status its rows held, one element per capture or update event carrying it (at in ms since the epoch, status, status_type), in the log''s order (060''s ob1_thought_events_in_order, never thought_audit''s seq alone). A NULL or empty list reads nothing. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; node_state reads thought_sources and the order reads ob1_config, so a role without either soft grant fails the call and the server shows no label. Migration 092 / SMD-2540.';

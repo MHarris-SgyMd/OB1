@@ -873,17 +873,20 @@ export class SqlStore implements ThoughtStore {
 
   async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
     const valid = idList(ids), keys = ticketList(tickets);
-    if (valid.length === 0 && keys.length === 0) return normaliseTicketStatusInputs([]);
+    if (keys.length === 0) return normaliseTicketStatusInputs([]);
     // Best-effort, as supersededAmong: before 092, or without node_state's
-    // thought_sources grant, the label is left off and the search goes on.
+    // thought_sources or the order's ob1_config grant, the label is left off
+    // and the search goes on. The rows are read outside the catch, so a
+    // changed function is not mistaken for a brain without it.
+    let rows: Record<string, unknown>[];
     try {
-      const rows = await this.sql`
-        SELECT kind, thought_id::text AS thought_id, issue, ord, at, status, status_type
+      rows = await this.sql`
+        SELECT kind, thought_id::text AS thought_id, issue, status, status_type, history
           FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
-      return normaliseTicketStatusInputs(rows as Record<string, unknown>[]);
     } catch {
       return null;
     }
+    return normaliseTicketStatusInputs(rows);
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {

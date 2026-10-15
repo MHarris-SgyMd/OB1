@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2794 assertions: 2794 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2796 assertions: 2796 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports ninety-two (92) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1437,15 +1437,21 @@ Migration 092 gives the stated-status label its inputs in one call
 (SMD-2540): `ticket_status_inputs(p_ids, p_issues)` returns, tagged by
 `kind`, the hits with a lifecycle of their own (`node_state`'s open IS NOT
 NULL, never labelled), each named ticket's status now (`ob1_ticket_head`, a
-known lifecycle type), and every status those tickets' rows held, one row per
-capture or update event, `ord` its place in 060's `ob1_thought_events_in_order`
-— never `seq` alone, which 046's backfill breaks. A NULL or empty list reads
-nothing (`node_state(NULL)` would read every thought). The label is read in
+known lifecycle type, a head with no status left out), and one row per ticket
+with every status its rows held — one element per capture or update event,
+`at` in ms — in 060's `ob1_thought_events_in_order` order, never `seq` alone,
+which 046's backfill breaks. One row per ticket so PostgREST's db-max-rows
+cannot cut the newest statuses. A NULL or empty list reads nothing
+(`node_state(NULL)` would read every thought). It redefines 060's
+`ob1_thought_events_in_order` to the same rows in the same order, its list read
+by `thought_audit_thought_id_idx` whatever the plan: the old `p_thoughts IS
+NULL OR …` filter read the whole log when the body was not inlined. The label is read in
 the server (`server-portable/stated-status.ts`, the reading
 `evals/eval-stated-status.ts` measured and chose, held to it by the eval's
 self-check), so no search function changes and no rank moves. No grant; the
 server's role reads the three tables already, and a role without
-`node_state`'s `thought_sources` gets no label rather than a failed search. It
+`node_state`'s `thought_sources` or the order's `ob1_config` gets no label
+rather than a failed search. It
 refuses to apply without 068 or 060. test-schema [82], test-upgrade [20am],
 server-portable/test-store-sql and test-store-postgrest.
 
@@ -4217,7 +4223,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2794 assertions, PGlite, no container
+bun test-schema.ts                          # 2796 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1278 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
