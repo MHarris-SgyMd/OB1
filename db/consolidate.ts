@@ -710,10 +710,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * it); "no-093" on a brain short of the file. On an undirected verdict
    * with no --direction the flags are each open side's (`how: "if"`): the
    * WRITER refusal defers to 029's request for a direction, and a lineage
-   * refusal still names them (review pass 3). `forced` names the other
-   * check a --force would also waive.
+   * refusal still names them (review pass 3). `edited`: a text moved since
+   * judged, the other check a --force would also waive; `sides`: what each
+   * side's accept would lapse, for the refusal's words.
    */
-  async function writersOf(id: string): Promise<{ flags: StandingFlag[]; older: ProposalWriter; newer: ProposalWriter; forced: string[]; status: string; lapses: { older: { lapses: unknown[] }; newer: { lapses: unknown[] } } } | "no-093" | null> {
+  async function writersOf(id: string): Promise<{ flags: StandingFlag[]; older: ProposalWriter; newer: ProposalWriter; edited: boolean; status: string; sides: { older: { lapses: unknown[] }; newer: { lapses: unknown[] } } } | "no-093" | null> {
     let rows: Record<string, unknown>[];
     try {
       rows = (await sql`
@@ -738,9 +739,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       DIRECTION === "newer" || DIRECTION === "older" ? DIRECTION : undefined);
     // A row goes stale when a text moved under its verdict (063), and what a
     // --force waives there is that move, 029's edit check (review pass 2).
-    const forced = r.older_moved === true || r.newer_moved === true ? ["a text edited since judged"] : [];
     const arr = (v: unknown): unknown[] => { const a = typeof v === "string" ? JSON.parse(v) : v; return Array.isArray(a) ? a : []; };
-    return { flags, older, newer, forced, status: String(r.proposal_status), lapses: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
+    return { flags, older, newer, edited: r.older_moved === true || r.newer_moved === true, status: String(r.proposal_status),
+      sides: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
   }
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
@@ -870,9 +871,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // or of lower trust than the other, is refused unless --force — the
       // maintainer's choice, 070's rule for a lineage pair: the reviewer reads
       // both writers first. The same rule the listing flags by (standingFlags),
-      // with --direction as the review takes it.
-      // Read on a lineage pair too, so its refusal names a flag the --force
-      // would also waive (review pass 2).
+      // with --direction as the review takes it; read on a lineage pair too,
+      // so its refusal names a flag the --force would also waive (pass 2).
       const writers = decision === "accept" && !FORCE ? await writersOf(id) : null;
       const review = async (q: typeof sql) => (await q`
         SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as ReviewResult;
@@ -885,7 +885,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             : decision === "accept"
               // SMD-2707: the accept and a read of what its lapse cleared, in one
               // transaction — 082's lapse writes each cleared pointer as an update
-              // event under this actor, stamped with the transaction's now().
+              // event of this transaction's, under this actor.
               ? await sql.begin(async (tx) => {
                   const r = await review(tx as unknown as typeof sql);
                   if (r.ok) {
@@ -921,7 +921,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           NOT_FOUND: "no such proposal (or the thought it names is gone)",
           // The flags with the pointers the accept would also clear: the last
           // text read before --force (review pass 5).
-          WRITER: `${writers && writers !== "no-093" ? writerFlagsText(res.flags ?? [], writers.lapses) : (res.flags ?? []).map(standingFlagText).join("; ")}. ${writers && writers !== "no-093" ? `newer ${proposalWriterLine(writers.newer)}; older ${proposalWriterLine(writers.older)}. ` : ""}Read both with --list ${writers && writers !== "no-093" ? writers.status : "pending"} and pass --force if that side should stand${writers && writers !== "no-093" && writers.forced.length ? ` (--force also accepts over ${writers.forced.join(" and ")})` : ""}${writers && writers !== "no-093" && writers.status === "rejected" ? "; left as it is, it stays rejected" : `, or --reject ${id}`}`,
+          WRITER: `${writers && writers !== "no-093" ? writerFlagsText(res.flags ?? [], writers.sides) : (res.flags ?? []).map(standingFlagText).join("; ")}. ${writers && writers !== "no-093" ? `newer ${proposalWriterLine(writers.newer)}; older ${proposalWriterLine(writers.older)}. ` : ""}Read both with --list ${writers && writers !== "no-093" ? writers.status : "pending"} and pass --force if that side should stand${writers && writers !== "no-093" && writers.edited ? " (--force also accepts over a text edited since judged)" : ""}${writers && writers !== "no-093" && writers.status === "rejected" ? "; left as it is, it stays rejected" : `, or --reject ${id}`}`,
           LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${writers && writers !== "no-093" && writers.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : `${rejectLineage(id)} is the expected decision`}; pass --force (with --direction on an undirected verdict) if the pointer is what you mean${writers && writers !== "no-093" && writers.flags.length ? ` — it also accepts over its WRITER flag: ${writers.flags.map(standingFlagText).join("; ")}` : ""}`,
           DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
           ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
