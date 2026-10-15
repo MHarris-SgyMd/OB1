@@ -35,8 +35,6 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
-/** The moved tickets a hit's line and title name; the rest are counted. A thought names up to 12 on stable, 3 at p90 (PR 1's census). */
-export const MOVED_SHOWN = 3;
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
   const out = new Set<string>();
@@ -104,14 +102,18 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
 /**
  * Each hit's moved tickets, by id — only the hits the measurement labelled:
  * none `superseded` names (the eval sampled no superseded thought) and none
- * with a lifecycle of its own. A hit whose stored time does not parse is read
- * at its session line, and with none is labelled nothing (no change is at or
- * before an unknown time); one with nothing moved is absent.
+ * with a lifecycle of its own. Nor a ticket row (`metadata.issue`) whose type
+ * gives it none: a duplicate's row is lifecycle-less to node_state (16 of
+ * stable's 721 rows), so the measurement labelled the tickets its body
+ * quotes, but a ticket row tells its own status, never others'. A hit whose
+ * stored time does not parse is read at its session line, and with none is
+ * labelled nothing (no change is at or before an unknown time); one with
+ * nothing moved is absent.
  */
-export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, Moved[]> {
+export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, Moved[]> {
   const out: Record<string, Moved[]> = {};
   for (const h of hits) {
-    if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase())) continue;
+    if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase()) || h.metadata?.issue !== undefined) continue;
     const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => inputs.heads.get(t), (t) => inputs.history.get(t) ?? []);
     if (moved.length > 0) out[h.id] = moved;
   }
@@ -121,10 +123,13 @@ export function movedAmong(hits: readonly { id: string; content: string; created
 /** A status name as a reply prints it: the board's free text on one line, no control character, at most 40 characters. */
 const said = (name: string) => name.replace(/[\p{C}\s]+/gu, " ").trim().slice(0, 40) || "?";
 
-/** The moved tickets in words — `SMD-2306 In Progress → Done; … (+N more)` — the first MOVED_SHOWN by key; null when none moved. */
+/**
+ * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one,
+ * by key; null when none moved. Not cut to the first few: stable's dd70dccc
+ * names seven, and the one its reader came for (SMD-2306) is the fifth (the
+ * maintainer's call; up to 12 on one thought, 3 at p90, PR 1's census).
+ */
 export function movedWords(moved: readonly Moved[]): string | null {
   if (moved.length === 0) return null;
-  const shown = moved.slice(0, MOVED_SHOWN).map((m) => `${m.ticket} ${said(m.then.name)} → ${said(m.now.name)}`).join("; ");
-  const more = moved.length - MOVED_SHOWN;
-  return `${shown}${more > 0 ? ` (+${more} more)` : ""}`;
+  return moved.map((m) => `${m.ticket} ${said(m.then.name)} → ${said(m.now.name)}`).join("; ");
 }

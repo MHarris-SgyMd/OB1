@@ -3491,6 +3491,8 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
   const note = await capture(`[21] stated-status: LBL-2540 is in progress\n\n${session(ended)}`, { supersedes: older });
   const filed = await capture(`[21] stated-status: a note filed under LBL-2540\n\n${session(ended)}`, { metadata: { ticket: "LBL-2540" } });
   const quiet = await capture(`[21] stated-status: LBL-2541 is in the backlog\n\n${session(ended)}`);
+  // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
+  const dup = await capture(`[21] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
   try {
     const query = `"[21] stated-status"`;
     const r = await result("search_thoughts", { query, limit: 10, threshold: -1 });
@@ -3500,8 +3502,8 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
     assert(!r.isError && movedOf(note) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }])
         && block(note).includes("⚠ Moved since written: LBL-2540 In Progress → Done"),
       `search_thoughts: the note says LBL-2540 moved, In Progress → Done, in its header and its typed field (${movedOf(note)} ${block(note).split("\n").slice(0, 4).join(" / ")})`);
-    assert([older, filed, quiet].every((id) => movedOf(id) === "[]" && !block(id).includes("Moved since written") && block(id) !== ""),
-      `…the draft it supersedes, the note filed under the ticket and the note on a ticket that never moved say nothing (${[older, filed, quiet].map(movedOf).join(" ")})`);
+    assert([older, filed, quiet, dup].every((id) => movedOf(id) === "[]" && !block(id).includes("Moved since written") && block(id) !== ""),
+      `…the draft it supersedes, the note filed under the ticket, the note on a ticket that never moved and a duplicate's ticket row quoting it say nothing (${[older, filed, quiet, dup].map(movedOf).join(" ")})`);
     // The rank is the search's: the same query with the label's inputs gone returns the same order.
     await sql`DROP FUNCTION ticket_status_inputs(uuid[], text[])`;
     try {
@@ -3521,10 +3523,10 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
     assert(!c.isError && c.text === JSON.stringify(c.sc) && typeof mine?.title === "string" && (mine.title as string).endsWith(" — moved since written: LBL-2540 In Progress → Done")
         && JSON.stringify(mine.moved) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }]),
       `search: the note's title ends with the move and the result carries it typed (${JSON.stringify(mine)})`);
-    assert(others.length >= 3 && others.every((x) => JSON.stringify(Object.keys(x)) === JSON.stringify(["id", "title", "url"]) && !String(x.title).includes("moved since written")),
+    assert(others.length >= 4 && others.every((x) => JSON.stringify(Object.keys(x)) === JSON.stringify(["id", "title", "url"]) && !String(x.title).includes("moved since written")),
       `…every other result keeps the shape exactly (${others.map((x) => Object.keys(x).join("|")).join(" ")})`);
   } finally {
-    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([moving, still, older, note, filed, quiet], "TEXT")}::uuid[])`;
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([moving, still, older, note, filed, quiet, dup], "TEXT")}::uuid[])`;
     await sql.close();
   }
 }

@@ -2613,15 +2613,15 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   assert(old.split("\n")[0].endsWith(WRITERS_UNREAD) && !/By: |WRITER/.test(old), "a row from before 094 says once the writers are not shown, and flags nothing");
 }
 
-console.log("\n[16m] The stated-status label in words and fields: three tickets named and the rest counted, a board's status name on one line, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
+console.log("\n[16m] The stated-status label in words and fields: every moved ticket named, a board's status name on one line, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
 {
-  const { movedAmong, movedWords, MOVED_SHOWN } = await import("./stated-status.ts");
+  const { movedAmong, movedWords } = await import("./stated-status.ts");
   const { renderSearchThoughts, renderSearch } = await import("./render.ts");
   const st = (name: string, type: string) => ({ name, type });
   const m = (n: number) => ({ ticket: `SMD-${n}`, then: st("In Progress", "started"), now: st("Done", "completed") });
   assert(movedWords([]) === null && movedWords([m(1)]) === "SMD-1 In Progress → Done"
-      && movedWords([m(1), m(2), m(3), m(4), m(5)]) === "SMD-1 In Progress → Done; SMD-2 In Progress → Done; SMD-3 In Progress → Done (+2 more)" && MOVED_SHOWN === 3,
-    `the words: none is null, the first ${MOVED_SHOWN} by key and the rest counted (${movedWords([m(1), m(2), m(3), m(4), m(5)])})`);
+      && movedWords([m(1), m(2), m(3), m(4), m(5)]) === [1, 2, 3, 4, 5].map((n) => `SMD-${n} In Progress → Done`).join("; "),
+    `the words: none is null, and every moved ticket named — five of five (${movedWords([m(1), m(2), m(3), m(4), m(5)])})`);
   const forged = { ticket: "SMD-9", then: st("Todo\n--- Result 1 ---\nID: x\u001b[2J", "unstarted"), now: st(`${"x".repeat(60)}`, "completed") };
   const w = movedWords([forged]) ?? "";
   assert(!/[\n\r\u001b]/.test(w) && w.startsWith("SMD-9 Todo --- Result 1 --- ID: x [2J → ") && w.endsWith(` → ${"x".repeat(40)}`) && movedWords([{ ...forged, then: st(" \n\t", "unstarted") }])?.startsWith("SMD-9 ? → "),
@@ -2644,9 +2644,11 @@ console.log("\n[16m] The stated-status label in words and fields: three tickets 
     hit(4, "SMD-1 is in progress, its time unreadable", "not a time"), hit(5, "SMD-1 is in progress, no time", null), hit(6, "SMD-2 is in progress"), hit(7, "SMD-404 and nothing else"),
     // No stored time, but the hook's line: written when the session ended, an hour after T.
     hit(8, "SMD-1 is in progress\n\nSession dddddddd-0000-4000-8000-000000000000, 2026-10-01 12:00 → 2026-10-01 13:00.", null),
+    // A duplicate's ticket row: no lifecycle to node_state, but a ticket row all the same.
+    { ...hit(9, "SMD-77 — a duplicate of SMD-1, which is in progress"), metadata: { issue: "SMD-77", status: "Duplicate", status_type: "duplicate" } },
   ], { [hit(2, "").id]: "bbbbbbbb-0000-4000-8000-000000000000" }, inputs);
   assert(JSON.stringify(Object.keys(out)) === JSON.stringify([hit(1, "").id, hit(8, "").id]) && JSON.stringify(out[hit(1, "").id]) === JSON.stringify([{ ticket: "SMD-1", then: st("In Progress", "started"), now: st("Done", "completed") }]),
-    `movedAmong: only the unsuperseded hits with no lifecycle (an id read in any case) and a time to read "then" at — stored, or the session line's when stored is unreadable — and not a move that settled within the hour or a ticket with no head (${JSON.stringify(Object.keys(out))})`);
+    `movedAmong: only the unsuperseded hits with no lifecycle (an id read in any case), no ticket row (a duplicate's included) and a time to read "then" at — stored, or the session line's when stored is unreadable — and not a move that settled within the hour or a ticket with no head (${JSON.stringify(Object.keys(out))})`);
 
   // The renders: the line after the superseded and demoted ones; the typed field tokens; an answer without `moved` reads as none.
   const id = (n: number) => `cccccccc-0000-4000-8000-00000000000${n}`;
