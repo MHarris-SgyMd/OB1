@@ -3185,9 +3185,9 @@ const durationPoints = (exporter: { getMetrics(): { scopeMetrics: { metrics: { d
   (exporter.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as DurationPoint[]);
 
 console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent linked (continued where trusted), its trace id on the line — and no key, URL or text in any span");
-// Through the MCP server, its spans and the traceparent it sends are SMD-2287 PR 4c's: the section is index.ts's alone till then.
-if (mcpTarget() === "client") console.log("  (through the MCP server: SMD-2287 PR 4c's — its spans, and the traceparent it sends the REST core)");
-else {
+// Through the MCP server (SMD-2287 PR 4c) the REST core's spans are in the same exporter, under the MCP server's: a
+// request's span is the one its door names `mcp`, and a tool call's the execute_tool span no REST core span is the parent of.
+{
   const { useRequestLog } = await import("./telemetry.ts");
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
@@ -3613,12 +3613,22 @@ else {
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
   const parentOf = (s: Span | undefined) => s?.parentSpanContext?.spanId;
+  /** The MCP server's request spans: index.ts's, or the MCP server's — never the REST core's behind it, whose door is `api`. */
+  const requestSpans = (spans: Span[] = exporter.getFinishedSpans()) => spans.filter((s) => s.kind === SpanKind.SERVER && attrs(s)["ob1.door"] === "mcp");
+  const requestSpan = (spans?: Span[]) => requestSpans(spans)[0];
+  /** Whether `span` is `ancestor`'s descendant among `spans`. */
+  const under = (spans: Span[], span: Span, ancestor: string | undefined) => {
+    const byId = new Map(spans.map((sp) => [sp.spanContext().spanId, sp]));
+    for (let at = parentOf(span); at !== undefined; at = parentOf(byId.get(at))) if (at === ancestor) return true;
+    return false;
+  };
   try {
     // A failed search, its key in ?key= and its text planted, under a client's traceparent.
     const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}` }));
     const spans = exporter.getFinishedSpans();
-    const server = spans.find((s) => s.kind === SpanKind.SERVER);
-    const tool = spans.find((s) => s.name === "execute_tool search_thoughts");
+    const server = requestSpan(spans);
+    const restSide = new Set(spans.filter((s) => attrs(s)["ob1.door"] === "api").map((s) => s.spanContext().spanId));
+    const tool = spans.find((s) => s.name === "execute_tool search_thoughts" && !restSide.has(parentOf(s) ?? ""));
     const link = server?.links[0]?.context;
     assert(server?.name === "tools/call search_thoughts" && server.spanContext().traceId !== TID && parentOf(server) === undefined && server.links.length === 1 && link?.traceId === TID && link.spanId === PARENT,
       `the request's span is named for its call and starts its own trace, the caller's linked, not continued (${server?.name} ${server?.spanContext().traceId} ${parentOf(server)} ${JSON.stringify(link)})`);
@@ -3632,6 +3642,13 @@ else {
       && !("gen_ai.operation.name" in attrs(tool)) && attrs(tool)["ob1.outcome"] === "error" && attrs(tool)["error.type"] === "FAILED" && tool.status.code === SpanStatusCode.ERROR,
       `the call's span is the request's child: execute_tool, the tool's name, \`error\` FAILED, ERROR (${tool?.name} ${parentOf(tool)} ${JSON.stringify(attrs(tool))})`);
     assert(searched[0]?.trace === server?.spanContext().traceId, `the line names the span's own trace (${searched[0]?.trace})`);
+    // One trace (SMD-2287 PR 4c): every span the call made is its request's descendant, and the operation it ran —
+    // through the MCP server, the REST core's request and its spans — runs under the call's span, continued, not linked.
+    const strays = spans.filter((s) => s !== server && !under(spans, s, server?.spanContext().spanId));
+    const operation = spans.filter((s) => attrs(s)["ob1.door"] === "api" && attrs(s)["ob1.tool"] === "search_thoughts");
+    assert(server !== undefined && tool !== undefined && strays.length === 0 && operation.every((s) => under(spans, s, tool.spanContext().spanId) && s.links.length === 0)
+      && operation.length === (mcpTarget() === "client" ? 1 : 0),
+      `the call is one trace: each span its request's descendant, the operation's under the call's span (${JSON.stringify(spans.map((s) => [s.name, attrs(s)["ob1.door"], parentOf(s), s.spanContext().spanId]))})`);
     // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
     const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
     assert(thrown.length === 1 && thrown[0][0] === "exception" && /^exception\.type(,ob1\.fault\.code)?$/.test(String(thrown[0][1])) && /^[A-Z][A-Za-z0-9]*$/.test(String(tool?.events[0]?.attributes?.["exception.type"])),
@@ -3639,7 +3656,7 @@ else {
     // Trusted, the caller's trace is continued: the request's span its span's child, the line its trace.
     exporter.reset();
     const trustedLine = await trusting(() => linesOf(() => post(callOf("brain_info", {}), { traceparent })));
-    const continued = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    const continued = requestSpan();
     assert(continued?.spanContext().traceId === TID && parentOf(continued) === PARENT && continued.links.length === 0 && trustedLine[0]?.trace === TID,
       `with OB1_OTEL_TRUST_TRACEPARENT=1 the caller's trace is continued, and the line names it (${continued?.spanContext().traceId} ${parentOf(continued)})`);
     // A throw in the MCP route (the registry's) has its kind on the request's span, as the REST core's onError's does (review pass 3).
@@ -3656,9 +3673,14 @@ else {
       registry.resolve = resolveReal;
       console.error = errorReal;
     }
-    const routeThrew = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
-    assert(JSON.stringify(routeThrew?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]),
-      `a throw in the MCP route: its kind on the request's span, no message (${JSON.stringify(routeThrew?.events)})`);
+    const routeSpans = exporter.getFinishedSpans();
+    const routeThrew = requestSpan(routeSpans);
+    // Through the MCP server the registry is the REST core's: the throw's kind is on its request's span, under the MCP
+    // server's (PR 4c), whose own span has the kind of what it met — a 500 — since an answer carries no exception's.
+    const threwAt = mcpTarget() === "client" ? routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId)) : routeThrew;
+    const routeEvents = (sp: Span | undefined) => JSON.stringify(sp?.events.map((e) => [e.name, e.attributes]));
+    assert(routeEvents(threwAt) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]) && routeEvents(routeThrew)?.includes('"exception"') === true && !JSON.stringify(routeSpans.map((sp) => sp.events)).includes(PLANTED),
+      `a throw in the MCP route: its kind on the request's span — through the MCP server, the REST core's under it — no message (${routeEvents(threwAt)} ${routeEvents(routeThrew)})`);
     // A keyless caller at a mirror is refused at its key: its point labels no tool (PR 2c review pass 3).
     await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
     await tracing.flush();
@@ -3681,13 +3703,13 @@ else {
     exporter.reset();
     await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
     await fetch(`${BASE}/mcp/worker-retry-failed`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
-    const mirrorFaults = exporter.getFinishedSpans().filter((sp) => sp.kind === SpanKind.SERVER).map((sp) => [sp.name, sp.events.map((e) => e.name)]);
+    const mirrorFaults = requestSpans().map((sp) => [sp.name, sp.events.map((e) => e.name)]);
     assert(JSON.stringify(mirrorFaults) === JSON.stringify([["GET /worker-status", ["exception"]], ["POST /worker-retry-failed", ["exception"]]]),
       `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
     await post(callOf("brain_info", {}), {}, "/mcp");
-    const refusedAtKey = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    const refusedAtKey = requestSpan();
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
     // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
@@ -3696,7 +3718,7 @@ else {
       const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
       Object.assign(t, { rpc: "tools/call", tool: "brain_info", outcome, code, refusedAtKey: atKey });
       t.end();
-      return attrs(exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER))["gen_ai.tool.name"];
+      return attrs(requestSpan())["gen_ai.tool.name"];
     };
     const counted = ["UNAUTHORIZED", "BUSY", "REVOKED", "AUTH_UNREACHABLE"].map((code) => byTool(code, false, "refused"));
     assert(counted.every((n) => n === "brain_info") && byTool("UNAUTHORIZED", true, "refused") === undefined && byTool("FAILED", false, "unrun") === undefined,
@@ -3705,7 +3727,7 @@ else {
     // A call that answers, with no traceparent: a trace of its own, on the line too; no ERROR.
     exporter.reset();
     const listed = await linesOf(() => post(callOf("brain_info", {})));
-    const own = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const own = requestSpan();
     assert(own !== undefined && /^[0-9a-f]{32}$/.test(own.spanContext().traceId) && own.spanContext().traceId !== TID && listed[0]?.trace === own.spanContext().traceId
       && own.parentSpanContext === undefined && own.status.code === SpanStatusCode.UNSET && attrs(own)["ob1.outcome"] === "ok" && !("error.type" in attrs(own)),
       `with none, the request starts its own trace, which its line names; an \`ok\` span has no error (${own?.spanContext().traceId} ${listed[0]?.trace} ${own?.status.code})`);
@@ -3716,7 +3738,7 @@ else {
     gone.abort();
     await Promise.resolve(worker.fetch(new Request(`http://mcp/mcp/worker-status`, { headers: { "x-brain-key": KEY }, signal: gone.signal }))).then((r) => r.text()).catch(() => {});
     await Bun.sleep(50);
-    const left = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const left = requestSpan();
     assert(attrs(left)["ob1.outcome"] === "abandoned" && !("http.response.status_code" in attrs(left)) && attrs(left)["http.route"] === "/worker-status" && left?.name === "GET /worker-status" && left.status.code === SpanStatusCode.UNSET,
       `an abandoned request's span carries no status it was never handed, and no error (${left?.name} ${JSON.stringify(attrs(left))})`);
 
@@ -3725,13 +3747,14 @@ else {
     await post([callOf("brain_info", {}, 121), callOf("search_thoughts", { query: "batched" }, 122)]);
     await Bun.sleep(50);
     const batchSpans = exporter.getFinishedSpans();
-    const batch = batchSpans.find((s) => s.kind === SpanKind.SERVER);
-    const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId);
+    const batch = requestSpan(batchSpans);
+    // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
+    const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();
     await Promise.resolve(worker.fetch(new Request("http://mcp/mcp", { method: "PROPFIND" }))).then((r) => r.text());
-    const odd = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const odd = requestSpan();
     assert(odd?.name === "HTTP" && attrs(odd)["http.request.method"] === "_OTHER", `a method outside the known set is _OTHER, its span HTTP (${odd?.name} ${JSON.stringify(attrs(odd))})`);
 
     // Nothing a client sent reaches a span: the key (in the query and a header), the planted text, a tool name carrying it.
@@ -3763,7 +3786,7 @@ else {
     cutOpenRequests();
     const cutSpans = exporter.getFinishedSpans();
     const cutTool = cutSpans.find((sp) => sp.name === "execute_tool brain_info");
-    const cutRequest = cutSpans.find((sp) => sp.kind === SpanKind.SERVER);
+    const cutRequest = requestSpan(cutSpans);
     assert(cutTool !== undefined && attrs(cutTool)["ob1.outcome"] === "cut" && cutTool.status.code === SpanStatusCode.ERROR && cutTool.parentSpanContext?.spanId === cutRequest?.spanContext().spanId && attrs(cutRequest)["ob1.outcome"] === "cut",
       `a tool call the stop cuts ends \`cut\`, ERROR, under its request's \`cut\` span (${JSON.stringify(cutSpans.map((sp) => [sp.name, attrs(sp)["ob1.outcome"]]))})`);
   } finally {
@@ -3776,14 +3799,18 @@ else {
   // A real `bun index.ts` with a collector named: it says where its spans,
   // metrics and log records go, and its stop sends what is batched (the span
   // batch's own delay is 5 s) and the metrics' last reading before it exits. A
-  // keyless tools/list, refused at the key, reads no store.
+  // keyless tools/list, refused at the key, reads no store. Through the MCP
+  // server, its own entry (SMD-2287 PR 4c), which refuses that request before
+  // it calls the REST core: a port that never answers stands in for one.
   const received: Record<string, string[]> = {};
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const mcp = await serveChild(import.meta.dir, "index.ts", {
+  const throughClient = mcpTarget() === "client";
+  const mcp = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}`,
     OTEL_SERVICE_NAME: "ob1-mcp-probe",
+    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "" } : {}),
   }, { waitForSdk: true });
   let out = "";
   try {
@@ -4903,6 +4930,40 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     }
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
+    // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
+    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
+    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
+    await stopTelemetry();
+    const probed = new InMemorySpanExporter();
+    const probedLogs = new InMemoryLogRecordExporter();
+    const probedPoints = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const { useRequestLog } = await import("./telemetry.ts");
+    const probeLines: string[] = [];
+    const beforeLog = useRequestLog((l) => probeLines.push(l));
+    const VALID = ANONYMOUS_PER_MINUTE + 10, WRONG = 3;
+    try {
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: probed, logs: probedLogs, metrics: probedPoints }) }));
+      now += 60_000;
+      const head = async (key: string) => (await worker.fetch(new Request("http://mcp/mcp/health", { method: "HEAD", headers: { "x-brain-key": key } }))).text();
+      for (let i = 0; i < VALID; i++) await head(KEY);
+      for (let i = 0; i < WRONG; i++) await head(`wrong-${i}`);
+      await (await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }))).text();
+      await flushTelemetry();
+    } finally {
+      useRequestLog(beforeLog);
+    }
+    const probeRecords = probeLines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const isHead = (attrs: Record<string, unknown> | undefined) => attrs?.["http.request.method"] === "HEAD" || attrs?.method === "HEAD";
+    const headSpans = probed.getFinishedSpans().filter((sp) => isHead(sp.attributes as Record<string, unknown>)).length;
+    const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
+    const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
+    const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
+    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
+    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
+      && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
+      `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
   } finally {
     await stopTelemetry();
     useBudgetClock(realClock);
