@@ -44,6 +44,8 @@ const TABLES = [
   "thought_facets",
   "thought_audit",
   "thought_chunks",
+  // 093's kept windows (SMD-2694): a foreign key to the claims, so before them.
+  "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
   "ob1_entity_edges",
@@ -138,6 +140,8 @@ const FUNCTIONS = [
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
   "renew_claims(text, text, int)",
+  "save_extraction_window(uuid, text, text, text, text, int, int, jsonb)",
+  "note_extraction_stop(uuid, text, text, text, text, boolean)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",

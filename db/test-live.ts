@@ -4189,7 +4189,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let hardStop: PassStop | undefined;
   const hardFrom = calls;
   slowMs = 5000;
-  const hardRun = extractInProcess({ workers: 1, onPass: (s) => { hardStop = s; } });
+  // A floor of 1 ms, so the stop is long: one-window notes stall at a long stop (review pass 2).
+  const hardRun = extractInProcess({ workers: 1, stallFloorMs: 1, onPass: (s) => { hardStop = s; } });
   await inHand(hardFrom);
   const firstStop = hardStop?.();
   const hardAt = Date.now();
@@ -4206,6 +4207,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
+  // …but its stop is counted on it before the lease went back (093,
+  // SMD-2694): a one-window note keeps no window, so the stop is stalled.
+  const stopsCounted = (await sql`SELECT stops, stalled, parts FROM extraction_progress WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[])`) as { stops: number; stalled: number; parts: Record<string, unknown> }[];
+  assert(stopsCounted.length === 1 && stopsCounted[0].stops === 1 && stopsCounted[0].stalled === 1 && Object.keys(stopsCounted[0].parts).length === 0,
+         `…its stop counted on the thought in hand alone, stalled, no window kept (${JSON.stringify(stopsCounted)})`);
   // The CLI's signals, installed from onPass (db/lease.ts's stopOnSignals):
   // one SIGINT stops after the thought in hand and exits 130; a second exits
   // 130 at once, with the thought still in hand and its lease returned.
@@ -4867,6 +4873,394 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   assert(mixed === `; the first call was aborted, or cut by the provider's repeat limit, on the stream 3.0 s in — ${ITEM}, or ${UNIT} — and the escalation to big-stub, read whole, did not converge either`,
     `…mixed windows name each reason once, the longest abort's time, and the escalation (${mixed})`);
   loopModel.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 093, SMD-2694)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const KEY = "extract:stub-meta@p2";
+  /** Each extraction call's part marker, in order; `slowMs` holds every answer. */
+  const sent: string[] = [];
+  let slowMs = 0;
+  const atlasModel = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      sent.push(/\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole");
+      await Bun.sleep(5 + slowMs);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Atlas", type: "project", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const rawKey = "d".repeat(64);
+  const env: Record<string, string | undefined> = {
+    ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${atlasModel.port}/v1`, OB1_LLM_LOCAL: "1",
+    OB1_METADATA_MODEL: "stub-meta", OB1_EXTRACT_CHUNK_TOKENS: "300", OB1_WORKER_KEY: rawKey, MCP_ACCESS_KEYS: `atlas-worker:write:${hashKey(rawKey)}`,
+  };
+  const inProcess = async (opts: Omit<ExtractOptions, "writer"> = {}): Promise<{ code: number; out: string }> => {
+    const lines: string[] = [];
+    const code = await runExtract({ url: URL_!, env, workers: 1, ...opts, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    return { code, out: lines.join("\n") };
+  };
+  // Six paragraphs of ~130 estimated tokens against 300-token windows, as [10]'s ledger.
+  const atlasText = Array.from({ length: 6 }, (_, p) => `The atlas rewrite, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Point ${p}.${i} about the atlas.`).join(" ")}`).join("\n\n");
+  const atlas = ((await sql`SELECT upsert_thought(${atlasText}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const progress = async () => (await sql`
+    SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled
+      FROM extraction_progress WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`)[0] as { keys: string | null; windows: number; stops: number; stalled: number } | undefined;
+
+  // The first run is hard-stopped with its third window in hand: the two
+  // answered are kept, the stop counted, the claim back in the pool.
+  slowMs = 400;
+  let stop: PassStop | undefined;
+  const first = inProcess({ onPass: (s) => { stop = s; } });
+  for (let i = 0; i < 200 && sent.length < 3; i++) await Bun.sleep(25);
+  stop?.();
+  await stop?.();
+  const firstRun = await first;
+  slowMs = 0;
+  const windows = (await progress())?.windows ?? 0;
+  const kept = await progress();
+  const [claim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`;
+  assert(firstRun.code === 130 && sent.join(",") === "1,2,3" && windows >= 4 && claim?.status === "pending",
+    `the first run is hard-stopped during the third of the thought's ${windows} windows, its claim back in the pool (exit ${firstRun.code}, sent ${sent.join(",")}, ${claim?.status})`);
+  assert(kept?.keys === "0,1" && kept.stops === 1 && kept.stalled === 0,
+    `…the two windows answered before the stop are kept, and the stop is counted on the row, not stalled (${JSON.stringify(kept)})`);
+
+  const status = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
+  assert(status.code === 0 && status.out.includes(`windows kept or stops counted on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
+    `--status names the thought, its windows kept and its stop (${status.out.split("\n").filter((l) => /kept/.test(l)).join(" | ")})`);
+
+  // The second run resumes: only the windows still to do are sent, and the
+  // thought is written whole — the kept windows' entity among the rest. The
+  // second window's request hash is altered first, as a chunker change would
+  // leave it: that window is asked again, the first is not.
+  await sql`UPDATE extraction_progress SET parts = jsonb_set(parts, '{1,h}', '"another request"') WHERE thought_id = ${atlas}::uuid`;
+  sent.length = 0;
+  const second = await inProcess();
+  const [done] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${atlas}::uuid AND work_type = ${KEY}`;
+  assert(second.code === 0 && sent.join(",") === Array.from({ length: windows - 1 }, (_, i) => String(i + 2)).join(",") && done?.status === "succeeded",
+    `the next run sends only windows 2 to ${windows} — the first reused, the second's request no longer the one it answered — and the thought is extracted (sent ${sent.join(",")}, ${done?.status})`);
+  assert(new RegExp(`${windows - 1} model call\\(s\\)`).test(second.out),
+    `…its summary counts the ${windows - 1} calls it made, not the kept window (${second.out.split("\n").find((l) => /model call\(s\)/.test(l))?.trim()})`);
+  const [mention] = await sql`SELECT count(*)::int AS n FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${atlas}::uuid AND e.normalized_name = normalize_entity_name('Atlas')`;
+  assert(mention.n === 1 && (await progress()) === undefined, `…written once, and its kept windows deleted at the succeeded release (${mention.n} mention(s))`);
+
+  // A failed release keeps the windows, so --retry-failed resumes: the third
+  // window times out (--timeout 1), the thought is failed with two kept.
+  const globe = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "globe")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  let hangPart = "3";
+  const hanging = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const part = /\[Part (\d+) of \d+/.exec(body.messages?.find((m) => m.role === "user")?.content ?? "")?.[1] ?? "whole";
+      sent.push(part);
+      if (part === hangPart) await Bun.sleep(2500);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Globe", type: "project", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const hangEnv = { ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${hanging.port}/v1` };
+  sent.length = 0;
+  const failedRun = await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const globeKept = (await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${globe}::uuid`)[0] as { keys: string } | undefined;
+  const [globeClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${globe}::uuid AND work_type = ${KEY}`;
+  assert(failedRun === 1 && globeClaim?.status === "failed" && globeKept?.keys === "0,1",
+    `a thought failed by its third window's timeout keeps the two windows before it (exit ${failedRun}, ${globeClaim?.status}, kept ${globeKept?.keys})`);
+  const failedStatus = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: hangEnv as Record<string, string>, cwd: HERE });
+  assert(failedStatus.out.includes(`${globe}  failed, 2 of 6 window(s) kept, 0 stop(s)\n`),
+    `--status lists the failed thought with its kept windows, which --retry-failed resumes (${failedStatus.out.split("\n").filter((l) => l.includes(globe)).join(" | ")})`);
+  hangPart = "none";
+  sent.length = 0;
+  const retried = await runExtract({ url: URL_!, env: hangEnv, workers: 1, retryFailed: true, writer: { out: () => {}, err: () => {} } });
+  const [globeDone] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${globe}::uuid AND work_type = ${KEY}`;
+  assert(retried === 0 && globeDone?.status === "succeeded" && sent[0] === "3" && !sent.includes("1") && !sent.includes("2"),
+    `…and --retry-failed resumes it from the third window (exit ${retried}, ${globeDone?.status}, sent ${sent.join(",")})`);
+  // An edit is other text: its windows are not the kept ones, even where a
+  // window's own request reads the same — the thought starts afresh.
+  const sphereText = atlasText.replaceAll("atlas", "sphere");
+  const sphere = ((await sql`SELECT upsert_thought(${sphereText}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  hangPart = "3";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const sphereKept = (await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${sphere}::uuid`)[0] as { keys: string } | undefined;
+  // Through update_thought, as a client edits: the fingerprint follows the text (a raw UPDATE leaves it).
+  const edited = ((await sql`SELECT update_thought(${sphere}::uuid, ${sphereText.replace("Point 5.23 about the sphere.", "Point 5.23 about the sphere, edited.")}) AS r`)[0].r as { ok: boolean });
+  // The row is of the earlier text now: --status no longer lists it as kept (review pass 1).
+  const editedStatus = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: hangEnv as Record<string, string>, cwd: HERE });
+  hangPart = "none";
+  sent.length = 0;
+  const afterEdit = await runExtract({ url: URL_!, env: hangEnv, workers: 1, writer: { out: () => {}, err: () => {} } });
+  assert(!editedStatus.out.includes(sphere) && editedStatus.code === 0, `--status leaves out a row of the text before an edit, which the next claim replaces (${editedStatus.out.split("\n").filter((l) => l.includes(sphere)).join(" | ") || "not listed"})`);
+  assert(sphereKept?.keys === "0,1" && edited.ok && afterEdit === 0 && sent.join(",") === "1,2,3,4,5,6",
+    `a thought edited after two of its windows were kept is extracted afresh — every window sent, the first two unchanged among them (kept ${sphereKept?.keys}, sent ${sent.join(",")})`);
+  // A long text with two windows kept, edited to a one-window text that keeps
+  // none: its succeeded release takes the earlier text's row too, which a
+  // revert to that text would otherwise revive, stall and all (review pass 4).
+  const reverted = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "revert")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  hangPart = "3";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, timeout: 1, writer: { out: () => {}, err: () => {} } });
+  const [revertKept] = await sql`SELECT count(*)::int AS n FROM extraction_progress WHERE thought_id = ${reverted}::uuid`;
+  await sql`SELECT update_thought(${reverted}::uuid, ${"A one-window note now."})`;
+  hangPart = "none";
+  await runExtract({ url: URL_!, env: hangEnv, workers: 1, writer: { out: () => {}, err: () => {} } });
+  const [revertLeft] = await sql`SELECT count(*)::int AS n FROM extraction_progress WHERE thought_id = ${reverted}::uuid`;
+  const [revertDone] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${reverted}::uuid AND work_type = ${KEY}`;
+  assert(revertKept.n === 1 && revertDone?.status === "succeeded" && revertLeft.n === 0,
+    `the succeeded release deletes the kept row of the earlier text too (kept ${revertKept.n}, ${revertDone?.status}, ${revertLeft.n} left)`);
+  hanging.stop(true);
+
+  // Two follower workers and one long thought, the second worker idle — the
+  // sleep scheduler's shape under --workers 2: the hard stop's count lands
+  // before either release, so the stop is counted (review pass 1: the idle
+  // worker's own release won the race in every trial, and the stop was lost).
+  const orbit = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "orbit")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  // The count slowed half a second, so the stop's own release, sent beside it
+  // rather than after, would land first every time (review pass 2: chained by
+  // chance otherwise, and the race came back unseen).
+  await sql`ALTER FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean) RENAME TO note_extraction_stop_real`;
+  await sql.unsafe(`CREATE FUNCTION note_extraction_stop(a uuid, b text, c text, d text, e text, f boolean) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.5); RETURN note_extraction_stop_real(a, b, c, d, e, f); END $$`);
+  for (let trial = 0; trial < 3; trial++) {
+    sent.length = 0;
+    slowMs = 300;
+    let racedStop: PassStop | undefined;
+    const raced = inProcess({ workers: 2, follow: 1, onPass: (s) => { racedStop = s; } });
+    for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+    racedStop?.();
+    await racedStop?.();
+    await raced;
+    slowMs = 0;
+  }
+  // A count stuck for 3 s — a lock on the claim, say — does not hold the
+  // lease: the stop returns it within its bound (review pass 2: the CLI exits
+  // 3 s after a second signal, before a release that waited).
+  await sql.unsafe(`CREATE OR REPLACE FUNCTION note_extraction_stop(a uuid, b text, c text, d text, e text, f boolean) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN note_extraction_stop_real(a, b, c, d, e, f); END $$`);
+  sent.length = 0;
+  slowMs = 300;
+  let stuckStop: PassStop | undefined;
+  const stuckRun = inProcess({ onPass: (x) => { stuckStop = x; } });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+  stuckStop?.();
+  const stuckAt = Date.now();
+  await stuckStop?.();
+  const stuckMs = Date.now() - stuckAt;
+  await stuckRun;
+  slowMs = 0;
+  assert(stuckMs < 2500, `a count stuck for 3 s does not hold the hard stop's release past its bound (${stuckMs} ms)`);
+  await Bun.sleep(3500);
+  await sql.unsafe(`DROP FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean)`);
+  await sql`ALTER FUNCTION note_extraction_stop_real(uuid, text, text, text, text, boolean) RENAME TO note_extraction_stop`;
+  const [orbitRow] = await sql`SELECT stops, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${orbit}::uuid AND work_type = ${KEY}`;
+  assert(Number(orbitRow?.stops) === 3 && Number(orbitRow?.kept) >= 3,
+    `two follower workers, one long thought: each of three hard stops is counted on it, and its windows kept (${JSON.stringify(orbitRow)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${orbit}::uuid`;
+
+  // The kept row locked by another session — a count and a save blocked on it
+  // held their share lock on the claim, and the release waited for the lock
+  // (review pass 3): the stop still returns the lease within its bound.
+  const locked = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "locked")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  sent.length = 0;
+  slowMs = 300;
+  let lockStop: PassStop | undefined;
+  const lockRun = inProcess({ onPass: (x) => { lockStop = x; } });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+  // The holder on a client of its own — the suite's is one connection by
+  // here — and the lock let go after 4 s whatever happens, so a regression
+  // fails this assertion rather than hanging the suite.
+  const lockSql = new SQL({ url: URL_!, max: 1 });
+  let unlock!: () => void;
+  const lockHeld = Promise.race([new Promise<void>((r) => { unlock = r; }), Bun.sleep(4000)]);
+  const holder = lockSql.begin(async (tx) => {
+    await tx`SELECT 1 FROM extraction_progress WHERE thought_id = ${locked}::uuid FOR UPDATE`;
+    await lockHeld;
+  });
+  await Bun.sleep(400);
+  lockStop?.();
+  const lockAt = Date.now();
+  await lockStop?.();
+  const lockMs = Date.now() - lockAt;
+  // Read while the lock is still held: the lease is back in the pool already.
+  await Bun.sleep(1000);
+  const [lockClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${locked}::uuid AND work_type = ${KEY}`;
+  unlock();
+  await holder;
+  await lockSql.close();
+  await lockRun;
+  slowMs = 0;
+  assert(lockMs < 2500 && lockClaim?.status === "pending",
+    `with the kept row locked by another session, the stop returns the lease within its bound, while the lock is held (${lockMs} ms, ${lockClaim?.status})`);
+  await sql`DELETE FROM thoughts WHERE id = ${locked}::uuid`;
+
+  // A release that is no longer the holder's — its lease lapsed and another
+  // worker took the thought and kept a window — deletes nothing: the delete
+  // in the release's statement is held to the release (review pass 3).
+  const thief = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "thief")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const { resolveEmbedConfig: resolveG } = await import("../server-portable/embed.ts");
+  const { windowingFor: windowingG } = await import("../server-portable/entities.ts");
+  const sigG = JSON.stringify(windowingG(resolveG(env as Record<string, string>)));
+  const [{ fpT }] = await sql`SELECT content_fingerprint AS "fpT" FROM thoughts WHERE id = ${thief}::uuid`;
+  slowMs = 200;
+  sent.length = 0;
+  const thiefRun = inProcess();
+  for (let i = 0; i < 200 && sent.length < 1; i++) await Bun.sleep(25);
+  await sql`UPDATE thought_work_claims SET worker_id = 'another-worker' WHERE thought_id = ${thief}::uuid AND work_type = ${KEY}`;
+  await sql`SELECT save_extraction_window(${thief}::uuid, ${KEY}, 'another-worker', ${fpT}, ${sigG}, 6, 5, ${{ index: 5, tokens: 1, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: "x" }}::jsonb)`;
+  await thiefRun;
+  slowMs = 0;
+  const [thiefRow] = await sql`SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys FROM extraction_progress WHERE thought_id = ${thief}::uuid`;
+  assert(thiefRow !== undefined && /\b5\b/.test(String(thiefRow.keys)), `a release no longer the holder's deletes nothing: the new holder's kept window stands (${JSON.stringify(thiefRow)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${thief}::uuid`;
+
+  // The table gone during a call: the release in its statement fails on it,
+  // and the release alone goes, said once (review pass 3).
+  const gone = ((await sql`SELECT upsert_thought(${"A one-window note, its table gone mid-call."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 1500;
+  sent.length = 0;
+  const goneRun = inProcess();
+  for (let i = 0; i < 200 && sent.length < 1; i++) await Bun.sleep(25);
+  await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+  const goneOut = await goneRun.finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
+  slowMs = 0;
+  const [goneClaim] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${gone}::uuid AND work_type = ${KEY}`;
+  assert(goneClaim?.status === "succeeded" && goneOut.out.split("\n").filter((l) => /could not clear a long thought's kept windows/.test(l)).length === 1,
+    `the table gone mid-call: the release goes alone and succeeds, said once (${goneClaim?.status})`);
+  await sql`DELETE FROM thoughts WHERE id = ${gone}::uuid`;
+
+  // The clock is the thought's, not its batch's: the second of a batch of two,
+  // stopped half a second into its call some three seconds after the claim,
+  // is a short stop under a 2 s floor (review pass 3).
+  const firstOfTwo = ((await sql`SELECT upsert_thought(${"The first note of a batch of two."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const secondOfTwo = ((await sql`SELECT upsert_thought(${"The second note of a batch of two."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 2500;
+  sent.length = 0;
+  let batchStop: PassStop | undefined;
+  const batchRun = inProcess({ batch: 2, stallFloorMs: 2000, onPass: (x) => { batchStop = x; } });
+  for (let i = 0; i < 400 && sent.length < 2; i++) await Bun.sleep(25);
+  await Bun.sleep(500);
+  batchStop?.();
+  await batchStop?.();
+  await batchRun;
+  slowMs = 0;
+  // The batch's order is the claim's, not the capture's: the thought still
+  // pending is the one the stop took (review pass 4 — the full suite's run
+  // took them the other way round, and the row read was the finished one's).
+  const batchRows = (await sql`
+    SELECT c.thought_id::text AS id, c.status, e.stops, e.stalled FROM thought_work_claims c LEFT JOIN extraction_progress e USING (thought_id, work_type)
+     WHERE c.work_type = ${KEY} AND c.thought_id IN (${firstOfTwo}::uuid, ${secondOfTwo}::uuid)`) as { id: string; status: string; stops: number | null; stalled: number | null }[];
+  const inHandRow = batchRows.find((r) => r.status === "pending");
+  assert(batchRows.filter((r) => r.status === "succeeded").length === 1 && inHandRow?.stops === 1 && inHandRow.stalled === 0,
+    `the second of a batch stopped half a second into its call is a short stop, its clock its own (${JSON.stringify(batchRows)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${firstOfTwo}::uuid, ${secondOfTwo}::uuid)`;
+
+  // A one-window thought stopped at once: a stop, not a stall, under the
+  // minute's floor; under a floor it outlasts, a stall (review pass 2).
+  const brief = ((await sql`SELECT upsert_thought(${"A short atlas note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const stopBrief = async (floor?: number) => {
+    sent.length = 0;
+    slowMs = 3000;
+    let s: PassStop | undefined;
+    const r = inProcess({ ...(floor !== undefined ? { stallFloorMs: floor } : {}), onPass: (x) => { s = x; } });
+    for (let i = 0; i < 200 && sent.length < 1; i++) await Bun.sleep(25);
+    await Bun.sleep(100);
+    s?.();
+    await s?.();
+    await r;
+    slowMs = 0;
+    return (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${brief}::uuid AND work_type = ${KEY}`)[0] as { stops: number; stalled: number } | undefined;
+  };
+  const shortStop = await stopBrief();
+  const longStop = await stopBrief(50);
+  assert(shortStop?.stops === 1 && shortStop.stalled === 0 && longStop?.stops === 2 && longStop.stalled === 1,
+    `a one-window thought stopped after under the floor is a stop and no stall; held past the floor, a stall (${JSON.stringify({ shortStop, longStop })})`);
+  // --status lists its row, and leaves it out once kept under another windowing (review pass 1's filter).
+  const statusOf = async () => (await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE })).out;
+  const listed = (await statusOf()).includes(`${brief}  pending, no window kept, 2 stop(s), the last 1 with none gained`);
+  await sql`UPDATE extraction_progress SET windowing = 'another windowing' WHERE thought_id = ${brief}::uuid`;
+  const rewindowed = (await statusOf()).includes(brief);
+  assert(listed && !rewindowed, `--status lists a stopped thought's row, and leaves it out under another windowing (listed ${listed}, after ${rewindowed})`);
+  await sql`DELETE FROM thoughts WHERE id = ${brief}::uuid`;
+
+  // A kept window of another shape is asked again, not merged (review pass 1's
+  // guard): the stop keeps two windows, the first is planted with entities
+  // that are not a list, and the next run sends it again and succeeds.
+  const shape = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "shape")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 300;
+  let shapeStop: PassStop | undefined;
+  sent.length = 0;
+  const shapeFirst = inProcess({ onPass: (x) => { shapeStop = x; } });
+  for (let i = 0; i < 200 && sent.length < 3; i++) await Bun.sleep(25);
+  shapeStop?.();
+  // Three hard calls — a wake and the operator's signal on one pass: one stop counted (review pass 2).
+  await Promise.all([shapeStop?.(), shapeStop?.(), shapeStop?.()]);
+  await shapeFirst;
+  const [{ shapeStops }] = await sql`SELECT stops AS "shapeStops" FROM extraction_progress WHERE thought_id = ${shape}::uuid`;
+  slowMs = 0;
+  await sql`UPDATE extraction_progress SET parts = jsonb_set(parts, '{0,entities}', '"not a list"') WHERE thought_id = ${shape}::uuid`;
+  const [{ keepsShape }] = await sql`SELECT count(*)::int AS "keepsShape" FROM extraction_progress WHERE thought_id = ${shape}::uuid`;
+  sent.length = 0;
+  const shapeRun = await inProcess();
+  const [shapeDone] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${shape}::uuid AND work_type = ${KEY}`;
+  assert(Number(shapeStops) === 1, `three hard calls on one pass count one stop (${shapeStops})`);
+  assert(Number(keepsShape) === 1 && shapeRun.code === 0 && shapeDone?.status === "succeeded" && sent[0] === "1" && !sent.includes("2"),
+    `a kept window whose answer is of another shape is sent again, the rest reused, and the thought succeeds (sent ${sent.join(",")}, ${shapeDone?.status})`);
+  await sql`DELETE FROM thoughts WHERE id = ${shape}::uuid`;
+
+  // A first stop — a deploy's SIGTERM, a caller's signal — ends a windowed
+  // thought at its next window, those answered kept, where it waited out the
+  // whole document, killed past a grace with its lease held (review pass 5).
+  const soft = ((await sql`SELECT upsert_thought(${atlasText.replaceAll("atlas", "soft")}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  slowMs = 600;
+  sent.length = 0;
+  const softAc = new AbortController();
+  const softRun = inProcess({ signal: softAc.signal });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await Bun.sleep(25);
+  const softAt = Date.now();
+  softAc.abort();
+  const softOut = await softRun;
+  const softMs = Date.now() - softAt;
+  slowMs = 0;
+  const [softRow] = await sql`SELECT stops, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${soft}::uuid AND work_type = ${KEY}`;
+  const [softClaim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${soft}::uuid AND work_type = ${KEY}`;
+  assert(softOut.code === 130 && softMs < 1500 && sent.length <= 3 && softClaim?.status === "pending" && softClaim.attempt_count === 0 && Number(softRow?.kept) >= 1 && Number(softRow?.stops) === 0,
+    `a first stop ends a long thought at its next window: back to the pool at once, its attempt refunded, its windows kept, no stop counted (${softMs} ms, ${sent.length} sent, ${JSON.stringify({ softClaim, softRow })})`);
+  await sql`DELETE FROM thoughts WHERE id = ${soft}::uuid`;
+
+  // Each run prunes the rows no reader can use (review pass 5): one beside a
+  // claim released succeeded, one of text its thought no longer holds; one
+  // beside a failed claim at its text stays, for --retry-failed.
+  const pruneOk = ((await sql`SELECT upsert_thought(${"A pruned note, succeeded."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const pruneOld = ((await sql`SELECT upsert_thought(${"A pruned note, edited since."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const pruneKeep = ((await sql`SELECT upsert_thought(${"A kept note, failed at its text."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  await sql`SELECT enqueue_thoughts(${KEY}, ARRAY[${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid])`;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${pruneOk}::uuid`;
+  await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now() WHERE work_type = ${KEY} AND thought_id IN (${pruneOld}::uuid, ${pruneKeep}::uuid)`;
+  const { resolveEmbedConfig: resolveP } = await import("../server-portable/embed.ts");
+  const { windowingFor: windowingP } = await import("../server-portable/entities.ts");
+  const sigP = JSON.stringify(windowingP(resolveP(env as Record<string, string>)));
+  for (const [tid, fp] of [[pruneOk, null], [pruneOld, "an earlier text"], [pruneKeep, null]] as [string, string | null][]) {
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled)
+              SELECT id, ${KEY}, COALESCE(${fp}, content_fingerprint), ${sigP}, 1, 0 FROM thoughts WHERE id = ${tid}::uuid`;
+  }
+  await inProcess();
+  const left = (await sql`SELECT thought_id::text AS id FROM extraction_progress WHERE thought_id IN (${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid)`) as { id: string }[];
+  assert(left.length === 1 && left[0].id === pruneKeep, `a run prunes the rows beside a succeeded claim and of earlier text, and keeps a failed one's at its text (${left.map((l) => l.id === pruneKeep ? "kept" : l.id === pruneOk ? "succeeded" : "earlier").join(",") || "none"} left)`);
+  await sql`DELETE FROM thoughts WHERE id IN (${pruneOk}::uuid, ${pruneOld}::uuid, ${pruneKeep}::uuid)`;
+
+  // A brain without the table (a role without its grant reads the same):
+  // the worker keeps nothing, says so once, and extracts as before.
+  await sql`UPDATE thoughts SET content = ${`${atlasText}\n\nAn edit.`} WHERE id = ${atlas}::uuid`;
+  await sql`SELECT requeue_thought_work(${KEY}, ${atlas}::uuid)`;
+  await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+  sent.length = 0;
+  const without = await inProcess().finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
+  const saidOnce = without.out.split("\n").filter((l) => /could not .* a long thought's kept windows/.test(l));
+  assert(without.code === 0 && saidOnce.length === 1 && /no window is kept across a stop this run/.test(saidOnce[0]) && sent.length >= 4,
+    `without the table the worker says once that it keeps no window, and extracts the thought whole (exit ${without.code}, ${saidOnce.length} line(s), ${sent.length} sent)`);
+  atlasModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
 }
@@ -11407,6 +11801,431 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await sql`DELETE FROM query_log`;
+    await sql.close();
+  }
+}
+
+console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694)");
+{
+  const sql = new SQL({ url: URL_, max: 4 });
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM query_log`;
+  await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+  const MODEL = "stub-long";
+  const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
+  // The extraction key [38] leaves recorded is another model's, which every
+  // pass's start would refuse: set aside, and put back at the end.
+  const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  /** Each extraction call's window ("whole" for a one-window thought) and the text's marker; each judgement's time. */
+  const extracts: { marker: string; part: string }[] = [];
+  const judged: number[] = [];
+  /** When each judgement's answer went back, and when each call for the stuck window began: the slot's order (review pass 5). */
+  const judgedEnd: number[] = [];
+  const stuckStarts: number[] = [];
+  /** Each call for the stuck window, [start, end], the end its answer or a stop's abort. */
+  const stuckCalls: [number, number][] = [];
+  /** When each scheduler line was written. */
+  const lineAt: { l: string; at: number }[] = [];
+  /** How long a judgement takes; and when each call for the note a sync writes while extraction is set aside began (review pass 6). */
+  let judgeHold38b = 300;
+  const noteStarts: number[] = [];
+  /** When the scheduler read the logs for a wake: one read a poll, so a spinning poll shows (review pass 5). */
+  const wakeReads: number[] = [];
+  const counting = new Proxy(sql, {
+    apply(t, self, args) {
+      if (Array.isArray(args[0]) && (args[0] as string[]).join("$").includes("FROM thought_audit WHERE created_at >")) wakeReads.push(Date.now());
+      return Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
+    },
+  }) as unknown as SQL;
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (/<thought_a>/.test(prompt)) {
+        judged.push(Date.now());
+        await Bun.sleep(judgeHold38b);
+        judgedEnd.push(Date.now());
+        return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
+      }
+      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : "short";
+      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole" });
+      if (marker === "stuck") stuckStarts.push(Date.now());
+      if (marker === "stuck") {
+        // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
+        const t0 = Date.now();
+        await Promise.race([Bun.sleep(8000), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        stuckCalls.push([t0, Date.now()]);
+        return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
+      }
+      if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
+      // A window of the long document takes a second (the stuck thought's one window eight, above); the rest are quick.
+      await Bun.sleep(marker === "long" ? 1000 : 100);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
+    },
+  });
+  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL, OB1_EXTRACT_CHUNK_TOKENS: "300" };
+  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL"]) delete env[k];
+  await sql`SELECT set_agent_kind('op-long', 'operator')`;
+  const capture = async (content: string, daysAgo = 0, axis = 0) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "op-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    if (daysAgo) await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const status = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+  const beat = async () => {
+    const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    return r ? JSON.parse(r.value) as { held?: { total: number; thoughts: { id: string; stops: number; stalled: number; kept: number; windows: number | null }[] } } : null;
+  };
+  const lines: string[] = [];
+  /**
+   * A --follow scheduler (quiet 1 s, poll 1 s) woken 3.5 s into every sleep
+   * by a logged search, until `done` holds or `cap` sleeps have begun: the
+   * sleeps it took, and its exit code once stopped — bounded, so a scheduler
+   * that never gets there fails its assertion rather than hanging the suite.
+   */
+  const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>, onWake?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
+    lines.length = 0;
+    lineAt.length = 0;
+    const ac = new AbortController();
+    // A 1 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
+    wakeReads.length = 0;
+    const run = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 1000, signal: ac.signal, writer: { out: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); }, err: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); } } });
+    let sleeps = 0, reached = false;
+    const asleep = () => lines.filter((l) => /asleep: no live call/.test(l)).length;
+    const deadline = Date.now() + cap * 8000;
+    while (Date.now() < deadline) {
+      if (await done()) { reached = true; break; }
+      if (asleep() > sleeps) {
+        sleeps = asleep();
+        if (sleeps > cap) break;
+        await Bun.sleep(3500);
+        if (await done()) { reached = true; break; }
+        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake 3.5 s into the sleep')`;
+        // Awake now: work captured in the awake period, before the next sleep —
+        // after the scheduler has taken the wake (its tail move done), as an
+        // awake period's captures come, not in the poll before it noticed.
+        if (onWake) {
+          const woken = lines.filter((l) => /awake: a live/.test(l)).length;
+          await pollUntil(async () => lines.filter((l) => /awake: a live/.test(l)).length > woken, 5000);
+          await Bun.sleep(200);
+          await onWake();
+        }
+      } else await Bun.sleep(50);
+    }
+    // The sleeps begun when it got there, read from its lines: one may have begun since the last count.
+    const begun = asleep();
+    if (reached && whileRunning) await whileRunning();
+    ac.abort();
+    const code = await Promise.race([run, Bun.sleep(30_000).then(() => -1)]);
+    return { sleeps: begun, code, reached };
+  };
+  try {
+    // The ticket's reproduction (review pass 2 of SMD-1794): one thought
+    // longer than every sleep — six windows of a second each against sleeps
+    // of 3.5 s — captured first, so it is the first claim; six short ones; a
+    // pair for consolidation to judge, days apart on one axis.
+    const longText = Array.from({ length: 6 }, (_, p) => `The longdoc chapter ${p}. ${Array.from({ length: 24 }, (__, i) => `Line ${p}.${i} of the longdoc.`).join(" ")}`).join("\n\n");
+    const long = await capture(longText, 0, 5);
+    const shorts: string[] = [];
+    for (let i = 0; i < 6; i++) shorts.push(await capture(`A short note, number ${i}.`, 0, 10 + i));
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    const longDone = async () => (await status(long)) === "succeeded" && judged.length > 0;
+    const a = await wokenEvery(longDone, 8);
+    const longCalls = extracts.filter((e) => e.marker === "long");
+    const wakes = a.sleeps;
+    const all = [long, ...shorts];
+    const statuses = await Promise.all(all.map(status));
+    assert(a.reached && statuses.every((s) => s === "succeeded") && judged.length > 0 && a.code === 0,
+      `woken 3.5 s into every sleep, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} sleep(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
+    assert(a.sleeps >= 2 && longCalls.length <= 6 + wakes && new Set(longCalls.map((c) => c.part)).size === 6,
+      `…across more than one sleep, no window sent again but the one each wake took in hand: ${longCalls.length} window calls for 6 windows over ${wakes} sleep(s) (${longCalls.map((c) => c.part).join(",")})`);
+    assert(lines.some((l) => /extraction drained — consolidating beside it/.test(l)) && !lines.some((l) => /extraction holds only/.test(l)),
+      "…consolidation joined because extraction drained, not past a stalled thought — the document gained windows at every sleep");
+
+    // A single window longer than every sleep: eight seconds against 3.5 s.
+    // Its stops gain nothing, so after three in a row consolidation joins past
+    // it while it is still pending, and the row names it.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    extracts.length = 0;
+    judged.length = 0;
+    judgedEnd.length = 0;
+    stuckStarts.length = 0;
+    stuckCalls.length = 0;
+    const stuck = await capture("The stuckdoc note: one window the model takes eight seconds over.", 0, 7);
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    // Read the moment consolidation has judged, before the stop lets the thought in hand finish.
+    let heldSeen = null as Awaited<ReturnType<typeof beat>>;
+    let stuckStatus: string | undefined;
+    let prog: { stops: number; stalled: number } | undefined;
+    const dryLines: string[] = [];
+    let dryHeld = -1;
+    const joinedPast = async () => {
+      if (judged.length === 0) return false;
+      heldSeen = await beat();
+      stuckStatus = await status(stuck);
+      [prog] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${stuck}::uuid AND work_type = ${EX}`) as typeof prog[];
+      // The dry run beside the scheduler: it reads, and names what is held.
+      dryHeld = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => dryLines.push(l), err: (l) => dryLines.push(l) } });
+      return true;
+    };
+    // Then no more wakes: the thought finishes in this sleep, and the row stops
+    // naming it within a stamp or two, not at the next live call (review pass 1).
+    let heldAfter: unknown = "unread";
+    const finishes = async () => {
+      await pollUntil(async () => (await status(stuck)) === "succeeded", 20_000);
+      await pollUntil(async () => (heldAfter = (await beat())?.held) === undefined, 10_000);
+    };
+    // A sync write while extraction is set aside wakes nothing; it goes ahead
+    // of the stalled thought when extraction resumes, not behind its window
+    // (review pass 6). The judgement held 1.5 s, so it lands while parked.
+    judgeHold38b = 1500;
+    await sql`SELECT set_agent_kind('sync-long', 'ingested')`;
+    let parkedNote = "";
+    const parkedCapture = (async () => {
+      if (!(await pollUntil(async () => lineAt.some((x) => /consolidating first/.test(x.l)), 120_000))) return;
+      parkedNote = ((await sql`SELECT upsert_thought(${"The parkednote, written by a sync while extraction is set aside."}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(13)}::vector) AS r`)[0].r as { id: string }).id;
+    })();
+    const b = await wokenEvery(joinedPast, 7, finishes).finally(() => { judgeHold38b = 300; });
+    await parkedCapture;
+    assert(b.reached && stuckStatus !== "succeeded" && judged.length > 0 && lines.some((l) => /extraction holds only 1 thought\(s\) that 3 or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains/.test(l)),
+      `a single window longer than every sleep: consolidation joins past it while it is still pending (reached ${b.reached} in ${b.sleeps} sleep(s), the thought ${stuckStatus}, ${judged.length} judgement(s))`);
+    // Consolidation goes first: no call for the stuck window between the join
+    // and the judgement's answer — on a one-slot model that window held the
+    // slot the judge waited for until the wake aborted it (review pass 5) —
+    // and extraction resumes once consolidation drains, the stuck one last.
+    const joinAt = lineAt.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
+    const resumeAt = lineAt.find((x) => /consolidation drained — extracting beside it/.test(x.l))?.at ?? Infinity;
+    const lastJudged = judgedEnd.find((t) => t > joinAt) ?? -Infinity;
+    const stuckBetween = stuckStarts.filter((t) => t > joinAt && t < lastJudged).length;
+    assert(joinAt < lastJudged && stuckBetween === 0 && resumeAt >= lastJudged && stuckStarts.some((t) => t >= resumeAt),
+      `consolidation goes first: no stuck call between the join and the judgement's answer, extraction resumed after it and took the stuck thought (${stuckBetween} between, resumed ${resumeAt === Infinity ? "never" : `${resumeAt - lastJudged} ms after the answer`})`);
+    const noteAt = noteStarts[0] ?? Infinity;
+    const stuckAfterResume = stuckStarts.find((t) => t >= resumeAt) ?? Infinity;
+    assert(parkedNote !== "" && noteAt < stuckAfterResume && (await status(parkedNote)) === "succeeded",
+      `a note a sync writes while extraction is set aside goes ahead of the stalled thought when it resumes (note +${noteAt - resumeAt} ms, stuck +${stuckAfterResume - resumeAt} ms after the resume; ${parkedNote ? await status(parkedNote) : "not written"})`);
+    assert(Number(prog?.stalled) === 3 && Number(prog?.stops) === 3 && b.sleeps >= 4,
+      `…after three stalled stops, the fourth sleep the first it could join in, consolidating first with no stop of its own (review pass 5; the set-aside at the sleep's start is a surviving mutant: the mid-sleep join also stops extraction before it claims) (stops ${prog?.stops}, stalled ${prog?.stalled}, ${b.sleeps} sleep(s))`);
+    assert(heldSeen?.held?.total === 1 && heldSeen.held.thoughts[0].id === stuck && heldSeen.held.thoughts[0].stalled >= 3 && heldSeen.held.thoughts[0].kept === 0,
+      `…and heartbeat:sleep names it, stalled, no window kept (${JSON.stringify(heldSeen?.held)})`);
+    assert((await status(stuck)) === "succeeded" && heldAfter === undefined,
+      `…and once it finishes in a sleep with no wake, the row stops naming it before any live call (${JSON.stringify(heldAfter)})`);
+
+    // A capture in every awake period: each is extracted early in the next
+    // sleep, ahead of the stalled thought, and consolidation still joins past
+    // it — the wake's tail move dated the stalled thought at the wake, the
+    // awake period's captures queued behind it, and with one worker they
+    // waited all day while the pool was never all stalled (review pass 5).
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    judged.length = 0;
+    judgedEnd.length = 0;
+    stuckCalls.length = 0;
+    const stuck2 = await capture("The stuckdoc note, again: one window the model takes eight seconds over.", 0, 13);
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    const awakeNotes: string[] = [];
+    const noteAwake = async () => { awakeNotes.push(await capture(`A note captured while awake, number ${awakeNotes.length}.`, 0, 20 + awakeNotes.length)); };
+    let notesAt: (string | undefined)[] = [];
+    let stuck2At: string | undefined;
+    // Read the moment it holds, before the stop lets a one-window thought in hand finish.
+    const caughtUp = async () => {
+      if (judged.length === 0 || awakeNotes.length < 2) return false;
+      notesAt = await Promise.all(awakeNotes.slice(0, -1).map(status));
+      stuck2At = await status(stuck2);
+      return notesAt.every((st) => st === "succeeded");
+    };
+    const c = await wokenEvery(caughtUp, 9, undefined, noteAwake);
+    assert(c.reached && stuck2At !== "succeeded" && lines.some((l) => /consolidating first/.test(l)),
+      `a capture in every awake period is extracted ahead of the stalled thought, and consolidation still joins past it (reached ${c.reached} in ${c.sleeps} sleep(s), ${awakeNotes.length} captured, earlier ones ${notesAt.join(",")})`);
+    // Joined mid-sleep, the captures done first: the stuck call in hand is
+    // stopped, and none is in flight while consolidation judges (review pass 5).
+    // The first join and the judgement that answered after it: a later sleep's
+    // ordinary extraction is no overlap.
+    const joinAtC = lineAt.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
+    const judgedC = judgedEnd.find((t) => t > joinAtC) ?? -Infinity;
+    const overlapC = stuckCalls.filter(([a, b]) => a < judgedC && b > joinAtC + 1500).length;
+    const relC = (t: number) => t - joinAtC;
+    const resumeAtC = lineAt.find((x) => x.at > joinAtC && /consolidation drained — extracting beside it/.test(x.l))?.at ?? Infinity;
+    // A poll a second after the join, not a spin: the stopped extraction's
+    // settling aborted the poll's wait for the rest of the sleep (review pass 5).
+    const readsAfterJoin = wakeReads.filter((t) => t > joinAtC && t < joinAtC + 3000).length;
+    assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
+    assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
+
+    // A kept row speaks for the thought only at its text and windowing now:
+    // one of other text (an edit since) or another windowing is not counted
+    // stalled, nor named — the dry run reads the scheduler's own gate.
+    await sql`DELETE FROM thoughts`;
+    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
+    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
+    const planted = await capture("The stuckdoc note, planted.", 0, 8);
+    await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted}::uuid])`;
+    const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${planted}::uuid`;
+    const gate = async (fingerprint: string, windowing: string, gained = 0) => {
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled, gained) VALUES (${planted}::uuid, ${EX}, ${fingerprint}, ${windowing}, 3, 3, ${gained})
+                ON CONFLICT (thought_id, work_type) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, windowing = EXCLUDED.windowing, gained = EXCLUDED.gained`;
+      const out: string[] = [];
+      await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => out.push(l), err: (l) => out.push(l) } });
+      return { joins: out.some((l) => /which consolidation would join past/.test(l)), named: out.some((l) => /held back across wakes/.test(l)), text: out.join("\n") };
+    };
+    const current = await gate(fp, sig), edited = await gate("another text", sig), rewindowed = await gate(fp, "another windowing");
+    assert(current.joins && current.named && !edited.joins && !edited.named && !rewindowed.joins && !rewindowed.named,
+      `a stalled row is counted and named at the thought's text and windowing, and not under another of either (${JSON.stringify({ current: current.joins, edited: edited.joins, rewindowed: rewindowed.joins })})`);
+    // A window saved since its last stop: gaining now, whatever stalled said
+    // then — named with no stall, and not joined past (review pass 1).
+    const gaining = await gate(fp, sig, 1);
+    assert(gaining.named && !gaining.joins && new RegExp(`${planted}, no window kept over 3 stop\\(s\\)(;|$)`, "m").test(gaining.text),
+      `a stalled row that has saved a window since is gaining now: named with no stall, not joined past (${gaining.text.split("\n").filter((l) => /held|stalled/.test(l)).join(" | ").trim()})`);
+    // Beside a thought extraction can still finish, a stalled one is named but
+    // not joined past: the other's entities come first.
+    const beside = await capture("A short note beside the stalled one.", 0, 9);
+    await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${beside}::uuid])`;
+    const mixed = await gate(fp, sig);
+    await sql`DELETE FROM thoughts WHERE id = ${beside}::uuid`;
+    assert(mixed.named && !mixed.joins, `beside a thought not stalled, a stalled one is named and not joined past (${JSON.stringify({ joins: mixed.joins, named: mixed.named })})`);
+    // …nor beside a thought not yet in the pool.
+    // The key recorded by the runs above enqueues a capture at once: its claim
+    // row goes, so the thought is one extraction would add to the pool.
+    const unpooled = await capture("A note extraction has not pooled yet.", 0, 11);
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${unpooled}::uuid AND work_type = ${EX}`;
+    const beforePool = await gate(fp, sig);
+    await sql`DELETE FROM thoughts WHERE id = ${unpooled}::uuid`;
+    assert(beforePool.named && !beforePool.joins && /1 not yet in the pool/.test(beforePool.text), `beside a thought not yet in the pool, a stalled one is not joined past (${JSON.stringify({ joins: beforePool.joins, named: beforePool.named })})`);
+    // A pool is read in one snapshot: a thought enqueued between two reads of
+    // it was counted neither pending nor unpooled, so a pool being claimed
+    // read drained — extraction resumed 14 ms after consolidation joined,
+    // before it had judged (review pass 5). Enqueued here as the claims are
+    // read, it is counted once, as it stood.
+    const racing = await capture("A note enqueued while the pool is read.", 0, 13);
+    await sql`DELETE FROM thought_work_claims WHERE thought_id = ${racing}::uuid AND work_type = ${EX}`;
+    let raced = false;
+    const between = new Proxy(sql, {
+      apply(t, self, args) {
+        const q = Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
+        if (raced || !Array.isArray(args[0]) || !(args[0] as string[]).join("$").includes("FROM thought_work_claims WHERE work_type =")) return q;
+        raced = true;
+        return (async () => {
+          const r = await (q as Promise<unknown>);
+          await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${racing}::uuid])`;
+          return r;
+        })();
+      },
+    }) as unknown as SQL;
+    const snapOut: string[] = [];
+    await runSleep({ url: URL_!, sql: between, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => snapOut.push(l), err: (l) => snapOut.push(l) } });
+    await sql`DELETE FROM thoughts WHERE id = ${racing}::uuid`;
+    const snapLine = snapOut.find((l) => /^\s*extract \(/.test(l)) ?? "";
+    assert(raced && /1 not yet in the pool/.test(snapLine), `a pool is read in one snapshot: a thought enqueued as its claims are read is counted once (${snapLine.trim()})`);
+    // A failed row is the operator's: beside a stalled one it neither blocks
+    // the join nor counts pending (review pass 6).
+    const failedOne = await capture("A note whose extraction failed.", 0, 14);
+    await sql`UPDATE thought_work_claims SET status = 'failed' WHERE thought_id = ${failedOne}::uuid AND work_type = ${EX}`;
+    const besideFailed = await gate(fp, sig);
+    await sql`DELETE FROM thoughts WHERE id = ${failedOne}::uuid`;
+    assert(besideFailed.joins && /1 failed/.test(besideFailed.text), `beside a failed row a stalled one is still joined past, the failed row counted failed (${besideFailed.text.split("\n").find((l) => /^\s*extract \(/.test(l))?.trim()})`);
+    // Two held: the more stalled first.
+    const planted2 = await capture("The stuckdoc note, planted twice.", 0, 12);
+    await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted2}::uuid])`;
+    const [{ fp2 }] = await sql`SELECT content_fingerprint AS fp2 FROM thoughts WHERE id = ${planted2}::uuid`;
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${planted2}::uuid, ${EX}, ${fp2}, ${sig}, 5, 5)`;
+    const two = await gate(fp, sig);
+    assert(two.joins && new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 5 stop\\(s\\), the last 5 with none gained; ${planted}`).test(two.text),
+      `two held: the more stalled named first (${two.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // As a sleep begins the stopped thoughts go behind new captures, the least
+    // stalled first, then in the order they had: dated alike, claim_thoughts'
+    // tie fell the same way every sleep (review pass 6). The more stalled one
+    // is the older here, so its old place alone would put it first.
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    const orderLines: string[] = [];
+    // Stopped hard as soon as it is read: consolidation's pool here is empty, so
+    // extraction resumes at once, and a soft stop would let it finish a planted one.
+    let stopOrder: PassStop | null = null;
+    const orderRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopOrder = s; }, writer: { out: (l) => orderLines.push(l), err: (l) => orderLines.push(l) } });
+    await pollUntil(async () => orderLines.some((l) => /consolidating first/.test(l)), 15_000);
+    const [order] = (await sql`
+      SELECT array_agg(thought_id::text ORDER BY enqueued_at) AS ids, count(DISTINCT enqueued_at)::int AS n, bool_and(enqueued_at > now() - interval '1 minute') AS moved
+        FROM thought_work_claims WHERE work_type = ${EX} AND thought_id IN (${planted}::uuid, ${planted2}::uuid)`) as { ids: string[]; n: number; moved: boolean }[];
+    (stopOrder as PassStop | null)?.();
+    await (stopOrder as PassStop | null)?.();
+    await Promise.race([orderRun, Bun.sleep(15_000)]);
+    assert(order.moved && order.n === 2 && order.ids[0] === planted,
+      `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
+    // A scheduler started while thoughts are held names them before its first sleep.
+    // The row case C's scheduler ended names its own stuck thought: gone first.
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    const acHeld = new AbortController();
+    const heldRun = runSleep({ url: URL_!, env, quiet: 300, poll: 1, follow: true, minStampEveryS: 1, signal: acHeld.signal, writer: { out: () => {}, err: () => {} } });
+    let startHeld = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (startHeld = await beat())?.held !== undefined, 10_000);
+    // Awake, it reads them again at its stamps: one finished meanwhile (a hand run) leaves the row.
+    await sql`DELETE FROM extraction_progress WHERE thought_id = ${planted2}::uuid`;
+    let awakeHeld = null as Awaited<ReturnType<typeof beat>>;
+    await pollUntil(async () => (awakeHeld = await beat())?.held?.total === 1, 10_000);
+    acHeld.abort();
+    await Promise.race([heldRun, Bun.sleep(15_000)]);
+    assert(startHeld?.held?.total === 2 && awakeHeld?.held?.total === 1,
+      `a scheduler started while thoughts are held names them on its row before any sleep, and awake reads them again at its stamps (${JSON.stringify(startHeld?.held?.total)} → ${JSON.stringify(awakeHeld?.held?.total)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${planted2}::uuid`;
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    // The row's end reads them again: one finished by hand while it ran is not left named (review pass 2).
+    const acEnd = new AbortController();
+    const endRun = runSleep({ url: URL_!, env, quiet: 300, poll: 1, follow: true, minStampEveryS: 60, signal: acEnd.signal, writer: { out: () => {}, err: () => {} } });
+    await pollUntil(async () => (await beat())?.held !== undefined, 10_000);
+    await sql`DELETE FROM extraction_progress WHERE thought_id = ${planted}::uuid`;
+    acEnd.abort();
+    await Promise.race([endRun, Bun.sleep(15_000)]);
+    const endedBeat = await beat() as { ended?: boolean; held?: unknown } | null;
+    assert(endedBeat?.ended === true && endedBeat.held === undefined, `the row's end reads the held thoughts again: none left named (${JSON.stringify(endedBeat)})`);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+    // The table gone after the start found it (a grant revoked reads the
+    // same): the first sleep's stalled read meets it, says so once, and the
+    // scheduler goes on (review pass 2: the read ran inside reading(), which
+    // rethrew it, and the scheduler ended). Renamed once the start has
+    // probed — its passes' checks print — and before the first sleep reads.
+    const goneLines: string[] = [];
+    const acGone = new AbortController();
+    const goneRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, signal: acGone.signal, writer: { out: (l) => goneLines.push(l), err: (l) => goneLines.push(l) } });
+    await pollUntil(async () => goneLines.some((l) => /\[extract\]/.test(l)), 15_000);
+    await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+    let goneCode = -2;
+    try {
+      await pollUntil(async () => goneLines.some((l) => /could not read the stalled thoughts/.test(l)), 15_000);
+      await Bun.sleep(1500);
+      acGone.abort();
+      goneCode = await Promise.race([goneRun, Bun.sleep(30_000).then(() => -1)]);
+    } finally {
+      await sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`;
+    }
+    assert(goneCode === 0 && goneLines.filter((l) => /could not read the stalled thoughts/.test(l)).length === 1,
+      `the stalled read failing mid-run is said once, and the scheduler goes on to a clean stop (exit ${goneCode})`);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+
+    // A brain without 093's table (a role without its grant reads the same):
+    // the start says so, and the dry run reads the pools as before.
+    await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
+    lines.length = 0;
+    const dry = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      .finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
+    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once extraction is drained/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
+      `without the table the start says consolidation joins only once extraction drains, and the dry run reads the pools (exit ${dry})`);
+    // With it, the dry run beside the scheduler named the held thought and the pool it joins past.
+    assert(dryHeld === 0 && dryLines.some((l) => new RegExp(`held back across wakes \\(1 of 1\\): ${stuck}, no window kept over \\d+ stop\\(s\\), the last \\d+ with none gained`).test(l)) && dryLines.some((l) => /only 1 stalled thought\(s\), which consolidation would join past/.test(l)),
+      `the dry run names the held thought and says consolidation would join past it (${dryLines.filter((l) => /held|stalled/.test(l)).join(" | ").trim()})`);
+  } finally {
+    stub.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await sql`DELETE FROM query_log`;
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    if (keptKey) await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${keptKey.value})`;
     await sql.close();
   }
 }
