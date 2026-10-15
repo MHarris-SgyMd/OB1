@@ -836,7 +836,12 @@ async function syncTicket(w: Writer, issue: LinearIssue, rows: BrainRow[], deriv
       // which for a fallback or a refusal is the clobber tagsOverExisting
       // prevents on the edit path. Said plainly, with the row, so the operator
       // can look; the window is a race this tool cannot close from outside.
-      w.log(`  ! ${issue.identifier}: ${captured.id} took the text in the last instant; the fresh tags${"metadata_extraction_failed" in tags ? " (a FALLBACK set — check that row's tags)" : ""} and the facets merged onto it`);
+      // Which tags merged: a refusal's or an outage's marker alone leaves the row's own tags standing (SMD-2888); a fallback set is placeholders.
+      const which = !("metadata_extraction_failed" in tags) ? ""
+        : tags.metadata_extraction_failed === "egress_denied" ? " (no tags — the gate refused the chat call; the row's own tags stand, beside the marker)"
+        : tags.topics === undefined && tags.type === undefined ? " (no tags — the chat call failed; the row's own tags stand, beside the marker)"
+        : " (a FALLBACK set — check that row's tags)";
+      w.log(`  ! ${issue.identifier}: ${captured.id} took the text in the last instant; the fresh tags${which} and the facets merged onto it`);
       return { outcome: "patched", noVector: false, twinsMarked: 0 };
     }
     w.log(`  + ${issue.identifier}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}${caveat(embedded)}`);

@@ -27,9 +27,9 @@
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
- *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (093)
+ *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
  *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate
- *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (093)
+ *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
  *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
@@ -364,7 +364,7 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" |
     return `${report} reports on the pass, and ${list !== undefined ? "--list" : "--stale"} takes the pass's place, so ${report} would be dropped without a word; pass one.`;
   }
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
-  if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (093).";
+  if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (094).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
   // listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
   if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts them all).";
@@ -669,7 +669,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     `     lineage pair: one side's derived_from names the other (a derivation and its input) — never proposed since 066${p.status === "pending" || p.status === "stale" ? `; reject it: ${rejectLineage(p.id)}` : p.status === "accepted" ? `; accepted while the derivation names its input — --reject ${p.id} clears the pointer (029)` : ""}`;
   /**
    * SMD-2707: one side of a row — its text, the ID line, then who wrote it
-   * (093) and what supersedes it, as the tool's reply prints them. An ingested
+   * (094) and what supersedes it, as the tool's reply prints them. An ingested
    * side's notice goes before its text, the text then behind a label of its
    * own (SMD-1724's rule).
    */
@@ -704,17 +704,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   /**
    * SMD-2707: a row's writers and its WRITER flags for this accept, read as
-   * the listing reads them (list_proposal_writers, 093) — pending, stale or
+   * the listing reads them (list_proposal_writers, 094) — pending, stale or
    * rejected, each of which 029 accepts (review pass 1: a rejected flagged
    * row was accepted without --force); null on an accepted row (029 answers
-   * it); "no-093" on a brain short of the file. On an undirected verdict
+   * it); "no-094" on a brain short of the file. On an undirected verdict
    * with no --direction the flags are each open side's (`how: "if"`): the
    * WRITER refusal defers to 029's request for a direction, and a lineage
    * refusal still names them (review pass 3). `edited`: a text moved since
    * judged, the other check a --force would also waive; `sides`: what each
    * side's accept would lapse, for the refusal's words.
    */
-  async function writersOf(id: string): Promise<{ flags: StandingFlag[]; older: ProposalWriter; newer: ProposalWriter; edited: boolean; status: string; sides: { older: { lapses: unknown[] }; newer: { lapses: unknown[] } } } | "no-093" | null> {
+  async function writersOf(id: string): Promise<{ flags: StandingFlag[]; older: ProposalWriter; newer: ProposalWriter; edited: boolean; status: string; sides: { older: { lapses: unknown[] }; newer: { lapses: unknown[] } } } | "no-094" | null> {
     let rows: Record<string, unknown>[];
     try {
       rows = (await sql`
@@ -726,7 +726,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           CROSS JOIN LATERAL list_proposal_writers(ARRAY[p.id]) w
          WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as Record<string, unknown>[];
     } catch (e) {
-      if (WRITERS_MISSING.test((e as Error).message)) return "no-093";
+      if (WRITERS_MISSING.test((e as Error).message)) return "no-094";
       throw e;
     }
     if (!rows.length) return null;
@@ -757,9 +757,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // stale, each most confident first.
     const lineageMode = status === "lineage";
     const listedRows = lineageMode ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
-    // 093 (SMD-2707): each side's writer, its superseder, what an accept
+    // 094 (SMD-2707): each side's writer, its superseder, what an accept
     // would lapse, and whether one agent captured both, by the page's ids —
-    // none on a brain short of 093, said once; a row the read did not return
+    // none on a brain short of 094, said once; a row the read did not return
     // is a proposal gone in between, dropped (review pass 4).
     let writers: Record<string, unknown>[] = [];
     let read = false;
@@ -876,11 +876,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const writers = decision === "accept" && !FORCE ? await writersOf(id) : null;
       const review = async (q: typeof sql) => (await q`
         SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as ReviewResult;
-      // A brain short of 093: said, and the other checks answer as before.
-      if (writers === "no-093") err(`  ${WRITERS_UNREAD} The writer check did not run: cd db && bun migrate.ts --url <url>`);
+      // A brain short of 094: said, and the other checks answer as before.
+      if (writers === "no-094") err(`  ${WRITERS_UNREAD} The writer check did not run: cd db && bun migrate.ts --url <url>`);
       const res: ReviewResult = lineageRow[0]?.lineage === true
         ? { ok: false, error: "LINEAGE_PAIR" }
-        : writers !== "no-093" && writers?.flags.some((f) => f.how !== "if")
+        : writers !== "no-094" && writers?.flags.some((f) => f.how !== "if")
             ? { ok: false, error: "WRITER", flags: writers.flags }
             : decision === "accept"
               // SMD-2707: the accept and a read of what its lapse cleared, in one
@@ -921,8 +921,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           NOT_FOUND: "no such proposal (or the thought it names is gone)",
           // The flags with the pointers the accept would also clear: the last
           // text read before --force (review pass 5).
-          WRITER: `${writers && writers !== "no-093" ? writerFlagsText(res.flags ?? [], writers.sides) : (res.flags ?? []).map(standingFlagText).join("; ")}. ${writers && writers !== "no-093" ? `newer ${proposalWriterLine(writers.newer)}; older ${proposalWriterLine(writers.older)}. ` : ""}Read both with --list ${writers && writers !== "no-093" ? writers.status : "pending"} and pass --force if that side should stand${writers && writers !== "no-093" && writers.edited ? " (--force also accepts over a text edited since judged)" : ""}${writers && writers !== "no-093" && writers.status === "rejected" ? "; left as it is, it stays rejected" : `, or --reject ${id}`}`,
-          LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${writers && writers !== "no-093" && writers.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : `${rejectLineage(id)} is the expected decision`}; pass --force (with --direction on an undirected verdict) if the pointer is what you mean${writers && writers !== "no-093" && writers.flags.length ? ` — it also accepts over its WRITER flag: ${writers.flags.map(standingFlagText).join("; ")}` : ""}`,
+          WRITER: `${writers && writers !== "no-094" ? writerFlagsText(res.flags ?? [], writers.sides) : (res.flags ?? []).map(standingFlagText).join("; ")}. ${writers && writers !== "no-094" ? `newer ${proposalWriterLine(writers.newer)}; older ${proposalWriterLine(writers.older)}. ` : ""}Read both with --list ${writers && writers !== "no-094" ? writers.status : "pending"} and pass --force if that side should stand${writers && writers !== "no-094" && writers.edited ? " (--force also accepts over a text edited since judged)" : ""}${writers && writers !== "no-094" && writers.status === "rejected" ? "; left as it is, it stays rejected" : `, or --reject ${id}`}`,
+          LINEAGE_PAIR: `one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${writers && writers !== "no-094" && writers.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : `${rejectLineage(id)} is the expected decision`}; pass --force (with --direction on an undirected verdict) if the pointer is what you mean${writers && writers !== "no-094" && writers.flags.length ? ` — it also accepts over its WRITER flag: ${writers.flags.map(standingFlagText).join("; ")}` : ""}`,
           DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
           ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
           EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,

@@ -162,7 +162,7 @@ export interface paths {
         };
         /**
          * List Supersession Proposals
-         * @description List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 093).
+         * @description List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 094).
          */
         get: operations["list_supersession_proposals"];
         put?: never;
@@ -508,7 +508,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -571,7 +571,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -613,7 +613,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -676,7 +676,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -720,7 +720,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -783,7 +783,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -840,7 +840,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -903,7 +903,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -986,7 +986,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1049,7 +1049,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1122,7 +1122,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1185,7 +1185,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1234,7 +1234,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1297,7 +1297,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1341,7 +1341,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 090); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone — carried by a forwarder, the whole value, which the MCP server words for that key. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`, and carried by a forwarder its `refusal` too, the words the MCP server says it in. */
+            /** @description The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call, or the provider did not answer it — `vectorFailed`, a reader's with the endpoint and what happened there, and its word alone for a key that cannot read); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 090); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures`, `vectorFailed` and `embeddingAttached` alone — carried by a forwarder, the whole value, which the MCP server words for that key. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`, and carried by a forwarder its `refusal` too, the words the MCP server says it in. */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -1359,7 +1359,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1422,7 +1422,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1465,7 +1465,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1528,7 +1528,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1571,7 +1571,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1634,7 +1634,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1678,7 +1678,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1741,7 +1741,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1781,7 +1781,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1844,7 +1844,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1890,7 +1890,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1953,7 +1953,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1993,7 +1993,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2056,7 +2056,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2096,7 +2096,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2159,7 +2159,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2201,7 +2201,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2264,7 +2264,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2311,7 +2311,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2374,7 +2374,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2420,7 +2420,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2483,7 +2483,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2530,7 +2530,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2593,7 +2593,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2644,7 +2644,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2707,7 +2707,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2758,7 +2758,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2830,7 +2830,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2861,7 +2861,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2888,7 +2888,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2930,7 +2930,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2957,7 +2957,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2990,7 +2990,7 @@ export interface operations {
                     "text/event-stream": unknown;
                 };
             };
-            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3035,7 +3035,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or SUPERSEDES_UNJUDGED. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

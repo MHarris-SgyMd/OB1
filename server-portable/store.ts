@@ -681,19 +681,19 @@ export type SupersessionProposal = {
   newer: ProposalSide;
   /** Since migration 070 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject; false when the column is absent from a row. */
   lineage: boolean;
-  /** Since migration 093 (SMD-2707): one agent captured both sides (ob1_capturer_of); false on a brain short of 093. */
+  /** Since migration 094 (SMD-2707): one agent captured both sides (ob1_capturer_of); false on a brain short of 094. */
   sameCapturer: boolean;
 };
 
 /**
- * Who wrote a proposal's side (093, SMD-2707): the keys 050 and 073 stamp on
+ * Who wrote a proposal's side (094, SMD-2707): the keys 050 and 073 stamp on
  * the row — the read tools' `By:` line — and whether its text is still a
  * capture-only key's alone (ob1_capture_only_text: captured under that scope,
  * and no key that can read has re-captured or moved it since).
  */
 export type ProposalWriter = { name: string | null; kind: string | null; trust: string | null; captureOnly: boolean };
 
-/** One side of a proposal. `writer` is null, `supersededBy` null and `lapses` empty on a brain short of 093, whose listing returns none of them. */
+/** One side of a proposal. `writer` is null, `supersededBy` null and `lapses` empty on a brain short of 094, whose listing returns none of them. */
 export type ProposalSide = {
   id: string; content: string; created_at: string | null; edited: boolean;
   writer: ProposalWriter | null;
@@ -731,10 +731,10 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 }
 
 /**
- * The listing's rows with list_proposal_writers' columns beside each (093,
+ * The listing's rows with list_proposal_writers' columns beside each (094,
  * SMD-2707), by proposal id. When the writers were read, a row they did not
  * return is a proposal gone between the two statements (a side's thought
- * deleted: 029 cascades) and is dropped — not shown as a brain short of 093
+ * deleted: 029 cascades) and is dropped — not shown as a brain short of 094
  * (review pass 4). When they were not read, every row keeps none, and
  * normaliseProposal reads it as unread.
  */
@@ -743,7 +743,7 @@ export function withWriters(rows: Record<string, unknown>[], writers: Record<str
   return (read ? rows.filter((r) => by.has(String(r.id))) : rows).map((r) => ({ ...(by.get(String(r.id)) ?? {}), ...r }));
 }
 
-/** The error a brain short of 093 answers list_proposal_writers with — the driver's and PostgREST's schema cache's. */
+/** The error a brain short of 094 answers list_proposal_writers with — the driver's and PostgREST's schema cache's. */
 export const WRITERS_MISSING = /(list_proposal_writers|ob1_capture_only_text|ob1_accept_lapses).*(does not exist|Could not find)|Could not find the function public\.list_proposal_writers/;
 
 /** The lapses column, a jsonb array of {id, onto} — parsed by either driver, or its text; anything else is none. */
@@ -755,7 +755,7 @@ function lapseList(v: unknown): { id: string; onto: string }[] {
     : [];
 }
 
-/** One side of a listing row; the 093 columns read only when the row carries them. */
+/** One side of a listing row; the 094 columns read only when the row carries them. */
 function proposalSide(r: Record<string, unknown>, side: "older" | "newer"): ProposalSide {
   const text = (v: unknown) => (v == null ? null : String(v));
   const by = r[`${side}_superseded_by`];
@@ -1103,6 +1103,15 @@ export type Actor = {
    * another key or board-sync takes that thought. Absent for any other key.
    */
   scope?: "capture";
+  /**
+   * Why a capture whose embedding call the gate allowed landed without its
+   * vector (SMD-2888): the provider did not answer — providerDown's word,
+   * `provider_unreachable`, `provider_timeout` or `provider_<status>`. Lands
+   * in thought_audit.actor_context as `vector_failed`, beside `egress`, so
+   * the audit row says which of the two left the row vectorless. Absent
+   * when the vector landed or the call was not made.
+   */
+  vectorFailed?: string;
 };
 
 /**
@@ -1125,6 +1134,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     // agent_id, not agentId — the trigger's spelling, as for the actor itself.
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
     ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
+    ...(actor.vectorFailed !== undefined ? { vector_failed: actor.vectorFailed } : {}),
   };
 }
 

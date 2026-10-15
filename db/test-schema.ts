@@ -14207,7 +14207,92 @@ console.log("\n[82] Migration 092: a capture-only key's thought is taken while i
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[83] Migration 093: list_proposal_writers names who wrote each side of the proposals listed — its name, kind and trust, whether its text is a capture-only key's alone, what supersedes it and whether that pointer lapses on an accept, and whether one key captured both; 070's listing untouched; a re-apply a no-op (SMD-2707)");
+console.log("\n[83] Migration 093: extraction_progress — a long thought's windows kept for the claim's holder only, replaced under another text or windowing, the stops counted and a stop that gained nothing stalled; the row goes with its claim (SMD-2694)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
+    .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone",
+    `the table's columns, only windows nullable (${cols})`);
+  const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
+  assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
+  const sc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["save_extraction_window(uuid, text, text, text, text, int, int, jsonb)"])).c ?? "";
+  const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text, boolean)"])).c ?? "";
+  assert([tc, sc, nc].every((c) => /Migration 093 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 093, the ticket and the holder rule");
+  const lockCfg = (await q<{ n: string; c: string[] | null }>(`SELECT proname AS n, proconfig AS c FROM pg_proc WHERE proname IN ('save_extraction_window', 'note_extraction_stop') ORDER BY proname`)).map((r) => `${r.n}:${(r.c ?? []).join(",")}`).join(" ");
+  assert(lockCfg === "note_extraction_stop:lock_timeout=1s save_extraction_window:lock_timeout=1s", `both functions give up a lock wait after a second, so the stop's release is not queued behind them (review pass 3) (${lockCfg})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "extract:stub-80@p2";
+  const thought = async (text: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [text])).id;
+  const id = await thought("[83] a long document");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
+  const [claimed] = await q<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'w-80', 1, 900)`, [JOB]);
+  assert(claimed?.thought_id === id, "the thought claimed by w-80");
+  const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
+  const save = (worker: string, fp: string, win: string, i: number, tid = id, windows = 4) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, $8, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i), windows]).then((r) => r.ok);
+  const note = (worker: string, fp: string, win: string, tid = id, long = true) =>
+    one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5, $6) AS ok`, [tid, JOB, worker, fp, win, long]).then((r) => r.ok);
+  const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; gained: number; fingerprint: string }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
+
+  assert((await save("w-80", "fpA", "winA", 0)) && (await save("w-80", "fpA", "winA", 1)), "the holder keeps two windows");
+  assert((await row())?.keys === "0,1" && (await row())?.windows === 4, "…keyed by index, with the thought's window count");
+  assert((await save("w-other", "fpA", "winA", 2)) === false && (await row())?.keys === "0,1", "a worker that does not hold the claim keeps nothing");
+  assert((await save("w-80", "fpA", "winA", 1)) && (await row())?.keys === "0,1" && (await row())?.gained === 3, "a window saved again under its index replaces the one kept, no duplicate — every save counted as gained");
+  let r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 1 && r.stalled === 0 && r.gained === 0, `a stop after windows were saved: one stop, not stalled, gained back to 0 (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 2 && r.stalled === 1 && r.gained === 0, `a stop with no window saved since the last: stalled one (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 3 && r.stalled === 2, `…and another: stalled two (${JSON.stringify(r)})`);
+  // A window saved over an index already kept — one whose request changed
+  // under it, a chunker's — is a window gained, though the row holds no more
+  // keys (review pass 1: counting keys read it stalled).
+  r = (await save("w-80", "fpA", "winA", 1)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 4 && r.stalled === 0 && r.keys === "0,1", `a stop after a window was saved, over a kept index, resets stalled (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && await row();
+  assert(r && r.gained === 1 && r.stalled === 0, `a save between stops counts in gained, which a reader takes for gaining now (${JSON.stringify(r)})`);
+  // Another window count under the same text and settings (a chunker
+  // changed): the old indexes are of other windows, so the row's windows go;
+  // its stops were this text's and stay.
+  r = (await save("w-80", "fpA", "winA", 0, id, 5)) && await row();
+  assert(r && r.keys === "0" && r.windows === 5 && r.stops === 4, `a window saved under another window count replaces the windows kept, and keeps the stops (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 5 && r.stalled === 0 && r.gained === 0, `…and the stop after it, windows saved, is not stalled (${JSON.stringify(r)})`);
+  assert((await note("w-other", "fpA", "winA")) === false && (await row())?.stops === 5, "a stop counted by a worker that does not hold the claim counts nothing");
+  r = (await save("w-80", "fpB", "winA", 3)) && await row();
+  assert(r && r.keys === "3" && r.stops === 0 && r.stalled === 0 && r.fingerprint === "fpB", `a window of other text replaces the row: its windows and its stops were the old text's (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpB", "winB")) && await row();
+  assert(r && r.keys === null && r.windows === null && r.stops === 1 && r.stalled === 1, `a stop under another windowing replaces the row too, this stop its first (${JSON.stringify(r)})`);
+  assert(/an index of at least 0/.test(await save("w-80", "fpB", "winB", -1).then(() => "", (e: Error) => e.message)), "a window with a negative index is refused");
+
+  await q(`SELECT release_claims_for_worker($1, 'w-80')`, [JOB]);
+  assert((await save("w-80", "fpB", "winB", 0)) === false && (await note("w-80", "fpB", "winB")) === false && (await row())?.stops === 1,
+    "once the lease is returned the old holder's save and stop write nothing — the row stands as it was");
+
+  // A single-window thought keeps no window: its first stop makes the row.
+  const lone = await thought("[83] one window");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, lone]);
+  await q(`SELECT claim_thoughts($1, 'w-80b', 2, 900)`, [JOB]);
+  r = (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 1 && r.stalled === 0 && r.keys === null, `a short stop with no window kept makes the row, one stop and no stall: a short sleep is no slow window (review pass 2) (${JSON.stringify(r)})`);
+  r = (await note("w-80b", "fpL", "winA", lone)) && (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 3 && r.stalled === 1, `a long stop stalls it, and a short one after leaves the stall as it was (${JSON.stringify(r)})`);
+
+  const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
+  await reapply("093");
+  assert(JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "093 re-applied: the rows stand");
+  await db.exec(`DELETE FROM thought_work_claims WHERE work_type = '${JOB}' AND thought_id = '${lone}'`);
+  assert((await row(lone)) === undefined && (await row()) !== undefined, "a claim row deleted by hand takes its kept windows with it, and only its own");
+  await db.exec(`DELETE FROM thoughts WHERE id = '${id}'`);
+  assert((await row()) === undefined, "…and a thought deleted takes them through its claim");
+}
+
+console.log("\n[84] Migration 094: list_proposal_writers names who wrote each side of the proposals listed — its name, kind and trust, whether its text is a capture-only key's alone, what supersedes it and whether that pointer lapses on an accept, and whether one key captured both; 070's listing untouched; a re-apply a no-op (SMD-2707)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -14220,12 +14305,12 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("093") && lastDefinerOf("ob1_capture_only_text").startsWith("093")
+  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("094") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
       && lastDefinerOf("list_supersession_proposals").startsWith("070") && /ob1:listing-names-the-writers/.test(await src(SIG))
-      && lastDefinerOf("ob1_accept_lapses").startsWith("093") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /093 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
-      && lastDefinerOf("ob1_accept_takes").startsWith("093") && /093 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
-      && /093 \/ SMD-2707/.test(await comment(SIG)) && /093 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
-    "the writers' read, ob1_capture_only_text and ob1_accept_lapses 093's, each its comment, the sentinels in the bodies; 070's listing untouched");
+      && lastDefinerOf("ob1_accept_lapses").startsWith("094") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
+      && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
+      && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
+    "the writers' read, ob1_capture_only_text and ob1_accept_lapses 094's, each its comment, the sentinels in the bodies; 070's listing untouched");
   assert(cols === "id,older_actor_name,older_actor_kind,older_trust,older_capture_only,older_superseded_by,older_lapses,older_takes,newer_actor_name,newer_actor_kind,newer_trust,newer_capture_only,newer_superseded_by,newer_lapses,newer_takes,same_capturer",
     `the proposal's id, each side's writer and superseder, then same_capturer (${cols})`);
 
@@ -14239,7 +14324,7 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
       [content, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(83)])).r.id;
   let conf = 0.99;
   const propose = async (older: string, newer: string, verdict = "newer_supersedes_older") =>
-    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, $3, $4, '[83]', 0.9, 'consolidate:stub@p83') AS id`, [older, newer, verdict, (conf -= 0.01)])).id;
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, $3, $4, '[84]', 0.9, 'consolidate:stub@p83') AS id`, [older, newer, verdict, (conf -= 0.01)])).id;
   const link = async (id: string, to: string) =>
     one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [id, JSON.stringify(WRITER), JSON.stringify({ supersedes: to })]);
   type Row = Record<string, unknown>;
@@ -14267,8 +14352,8 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   };
 
   // SMD-1873's case: the hook's text proposed to stand over the writer's.
-  const W = await cap("[83] the writer's rota: weekly", WRITER);
-  const C = await cap("[83] the hook's rota: daily, replacing the weekly one", HOOK);
+  const W = await cap("[84] the writer's rota: weekly", WRITER);
+  const C = await cap("[84] the hook's rota: daily, replacing the weekly one", HOOK);
   const p1 = await propose(W, C);
   let r = await row(p1);
   assert(JSON.stringify(side(r, "older")) === JSON.stringify(["writer-83", "operator", "operator", false, null, []])
@@ -14278,7 +14363,7 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // The hook supersedes its own text: the superseder named, and what an
   // accept making C stand would lapse — the hook's capture-scoped pointer —
   // as the accept, run and rolled back, does.
-  const N = await cap("[83] the hook's next word on the rota", HOOK, C);
+  const N = await cap("[84] the hook's next word on the rota", HOOK, C);
   r = await row(p1);
   let ag = await agrees(p1, "newer");
   assert(r.newer_superseded_by === N && lapsesOf(r, "newer") === JSON.stringify([N]) && r.older_superseded_by === null && lapsesOf(r, "older") === "[]" && ag.ok,
@@ -14287,22 +14372,22 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   assert(ag.ok, `…and the accept the other way, the writer's side standing, lapses nothing, as predicted (${ag.said})`);
   // Re-pointed by a write key since — its own, no longer the capture's — and
   // the hook's later pointer onto that row, up the chain (review pass 1).
-  const X = await cap("[83] the writer's note the hook's row is re-pointed at", WRITER);
+  const X = await cap("[84] the writer's note the hook's row is re-pointed at", WRITER);
   await link(N, X);
   await link(N, C);
   r = await row(p1);
   ag = await agrees(p1, "newer");
   assert(r.newer_superseded_by === N && lapsesOf(r, "newer") === "[]" && ag.ok, `a pointer a write key has re-pointed since is not the capture's: superseded, nothing lapses (${ag.said})`);
-  const N2 = await cap("[83] the hook's word above the re-pointed row", HOOK, N);
+  const N2 = await cap("[84] the hook's word above the re-pointed row", HOOK, N);
   r = await row(p1);
   ag = await agrees(p1, "newer");
   assert(r.newer_superseded_by === N && JSON.stringify(pairsOf(r, "newer")) === JSON.stringify([{ id: N2, onto: N }]) && ag.ok,
     `…and the hook's pointer one link up, onto that row, is what the accept lapses — the walk up the chain, named with the row it pointed at, as predicted (${ag.said})`);
   // No event, no lapse (review pass 2): the side already points somewhere —
   // 029 refuses a third thought (ALREADY_SUPERSEDES) — and an accepted row.
-  const C7 = await cap("[83] the hook's note on the oncall", HOOK);
-  const C8 = await cap("[83] the hook's next note on the oncall, after the first", HOOK, C7);
-  await cap("[83] the hook's last note on the oncall", HOOK, C8);
+  const C7 = await cap("[84] the hook's note on the oncall", HOOK);
+  const C8 = await cap("[84] the hook's next note on the oncall, after the first", HOOK, C7);
+  await cap("[84] the hook's last note on the oncall", HOOK, C8);
   const p8 = await propose(W, C8);
   r = await row(p8);
   assert(lapsesOf(r, "newer") === "[]" && (await actually(p8, "newer")).startsWith(`refused {"`) && (await actually(p8, "newer")).includes("ALREADY_SUPERSEDES"),
@@ -14311,17 +14396,17 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // the hook's, so the accept is refused (WOULD_CYCLE) — and a raw self-loop
   // below the other side, which update_thought's walk refuses past its bound
   // (review pass 3).
-  const S9 = await cap("[83] the hook's note a writer's supersedes", HOOK);
-  await cap("[83] the hook's word after it", HOOK, S9);
-  const P9 = await cap("[83] the writer's note over the hook's", WRITER);
+  const S9 = await cap("[84] the hook's note a writer's supersedes", HOOK);
+  await cap("[84] the hook's word after it", HOOK, S9);
+  const P9 = await cap("[84] the writer's note over the hook's", WRITER);
   await link(P9, S9);
   const p9 = await propose(P9, S9);
   r = await row(p9);
   const loop9 = await actually(p9, "newer");
   assert(lapsesOf(r, "newer") === "[]" && loop9.includes("WOULD_CYCLE"), `a side whose accept would close a loop: refused, and no lapse promised (${loop9.slice(0, 80)})`);
-  const S10 = await cap("[83] the hook's note over a looped row", HOOK);
-  await cap("[83] the hook's word after that note", HOOK, S10);
-  const O10 = await cap("[83] the writer's row a raw write loops", WRITER);
+  const S10 = await cap("[84] the hook's note over a looped row", HOOK);
+  await cap("[84] the hook's word after that note", HOOK, S10);
+  const O10 = await cap("[84] the writer's row a raw write loops", WRITER);
   await db.query(`UPDATE thoughts SET supersedes = id WHERE id = $1::uuid`, [O10]);
   const p10 = await propose(O10, S10);
   r = await row(p10);
@@ -14332,11 +14417,11 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // before 082: a write key moved the hook's later text, then the hook
   // pointed again onto it (planted with the check off). Its own lapse event
   // walks from it, and the read follows.
-  const S11 = await cap("[83] the hook's note on the retro", HOOK);
-  const H11 = await cap("[83] the hook's later note on the retro", HOOK, S11);
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb)`, [H11, "[83] the hook's later note on the retro, as the writer put it", JSON.stringify(WRITER)]);
+  const S11 = await cap("[84] the hook's note on the retro", HOOK);
+  const H11 = await cap("[84] the hook's later note on the retro", HOOK, S11);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb)`, [H11, "[84] the hook's later note on the retro, as the writer put it", JSON.stringify(WRITER)]);
   await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
-  const H12 = await cap("[83] the hook's word on the writer's version", HOOK, H11);
+  const H12 = await cap("[84] the hook's word on the writer's version", HOOK, H11);
   await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`);
   const p11 = await propose(W, S11);
   r = await row(p11);
@@ -14345,9 +14430,9 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
     `a cleared row 082's log already took walks on: both pointers named, each with the row it pointed at, as the accept clears them (${ag.said})`);
   // A write key's thought superseding the hook's text: named; the hook's own
   // later pointer onto it, behind it by capture time, still lapses (review pass 1).
-  const C3 = await cap("[83] the hook's note a writer supersedes", HOOK);
-  const Y = await cap("[83] the writer's note superseding the hook's", WRITER);
-  const N4 = await cap("[83] the hook's later word on its note", HOOK, C3);
+  const C3 = await cap("[84] the hook's note a writer supersedes", HOOK);
+  const Y = await cap("[84] the writer's note superseding the hook's", WRITER);
+  const N4 = await cap("[84] the hook's later word on its note", HOOK, C3);
   await link(Y, C3);
   const p3 = await propose(W, C3);
   r = await row(p3);
@@ -14357,23 +14442,23 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // Another capture-only key's capture-scoped pointer onto the hook's text —
   // 082's check refuses one today, so planted with it off, as a brain from
   // before 082 holds it: not the side's capturer's, so it does not lapse.
-  const C4 = await cap("[83] the hook's note another hook supersedes", HOOK);
+  const C4 = await cap("[84] the hook's note another hook supersedes", HOOK);
   const p4 = await propose(W, C4);
   await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
-  const O4 = await cap("[83] the other hook's word", HOOK2, C4);
+  const O4 = await cap("[84] the other hook's word", HOOK2, C4);
   await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`);
   r = await row(p4);
   ag = await agrees(p4, "newer");
   assert(r.newer_superseded_by === O4 && lapsesOf(r, "newer") === "[]" && ag.ok, `superseded by another capture key's capture-scoped pointer: named, nothing lapses (${ag.said})`);
 
   // One capturer for both sides; none for neither.
-  const H1 = await cap("[83] the hook's older note", HOOK);
-  const H2 = await cap("[83] the hook's newer note", HOOK);
-  const W2 = await cap("[83] the writer's newer note", WRITER);
-  const HN = await cap("[83] the hook's word after its newer note", HOOK, H2);
+  const H1 = await cap("[84] the hook's older note", HOOK);
+  const H2 = await cap("[84] the hook's newer note", HOOK);
+  const W2 = await cap("[84] the writer's newer note", WRITER);
+  const HN = await cap("[84] the hook's word after its newer note", HOOK, H2);
   const ph = await propose(H1, H2), pw = await propose(W, W2);
-  const raw1 = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[83] a raw row') RETURNING id::text AS id`)).id;
-  const raw2 = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[83] another raw row') RETURNING id::text AS id`)).id;
+  const raw1 = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[84] a raw row') RETURNING id::text AS id`)).id;
+  const raw2 = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[84] another raw row') RETURNING id::text AS id`)).id;
   const pr = await propose(raw1, raw2);
   r = await row(pr);
   assert((await row(ph)).same_capturer === true && (await row(pw)).same_capturer === true && r.same_capturer === false
@@ -14386,9 +14471,9 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
     "takes: an accept between the hook's own two takes neither; the hook's over the writer's takes it, and the writer's over the hook's is taken by its chain too");
   // Review pass 4: one capturer's two, the other side taken since — a write
   // key's edit moves its text — so the accept takes the side after all.
-  const B13 = await cap("[83] the hook's note a writer edits", HOOK);
-  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb)`, [B13, "[83] the hook's note, as a writer edited it", JSON.stringify(WRITER)]);
-  const A13 = await cap("[83] the hook's near-copy of its note", HOOK);
+  const B13 = await cap("[84] the hook's note a writer edits", HOOK);
+  await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb)`, [B13, "[84] the hook's note, as a writer edited it", JSON.stringify(WRITER)]);
+  const A13 = await cap("[84] the hook's near-copy of its note", HOOK);
   const p13 = await propose(B13, A13);
   r = await row(p13);
   ag = await agrees(p13, "newer");
@@ -14397,11 +14482,11 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // …and the side itself taken by the log (a write key re-captured it), over
   // another of the hook's own: taken, and the hook's pointer onto it — planted
   // with the check off, as a brain from before 082 holds it — lapses.
-  const S14 = await cap("[83] the hook's note a writer re-captures later", HOOK);
-  const O14 = await cap("[83] the hook's earlier note it replaces", HOOK);
+  const S14 = await cap("[84] the hook's note a writer re-captures later", HOOK);
+  const O14 = await cap("[84] the hook's earlier note it replaces", HOOK);
   await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb)`, [S14, JSON.stringify(WRITER)]);
   await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
-  const N14 = await cap("[83] the hook's word after the re-captured note", HOOK, S14);
+  const N14 = await cap("[84] the hook's word after the re-captured note", HOOK, S14);
   await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`);
   const p14 = await propose(O14, S14);
   r = await row(p14);
@@ -14410,14 +14495,14 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
     `a side 082's log already took, over the hook's own: the accept takes it all the same, and the hook's pointer onto it lapses, as predicted (${ag.said})`);
 
   // A capture-only key's text a key that can read has since re-captured is no longer its alone.
-  const C5 = await cap("[83] the hook's note the writer re-captures", HOOK);
+  const C5 = await cap("[84] the hook's note the writer re-captures", HOOK);
   const p5 = await propose(W, C5);
   assert((await row(p5)).newer_capture_only === true, "setup: the hook's text, its alone");
   await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb)`, [C5, JSON.stringify(WRITER)]);
   assert((await row(p5)).newer_capture_only === false,
     "…a write key re-capturing it (082's log takes it): no longer a capture-only key's text alone");
   // An accept's taking leaves the text the key's: the chain is not the log.
-  const C6 = await cap("[83] the hook's note a reviewer accepts", HOOK);
+  const C6 = await cap("[84] the hook's note a reviewer accepts", HOOK);
   const p6 = await propose(W, C6);
   const acc = (await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, false) AS r`, [p6, JSON.stringify(REVIEWER)])).r;
   r = await row(p6);
@@ -14428,13 +14513,13 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   // …even once its pointer is cleared by hand, the hook pointing on at the
   // side again: still accepted, still no accept to take.
   await one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [C6, JSON.stringify(WRITER), JSON.stringify({ supersedes: null })]);
-  const N6 = await cap("[83] the hook's word after its accepted note", HOOK, C6);
+  const N6 = await cap("[84] the hook's word after its accepted note", HOOK, C6);
   r = await row(p6);
   const direct6 = (await one<{ l: Lapse[] }>(`SELECT ob1_accept_lapses($1::uuid, $2::uuid) AS l`, [C6, W])).l;
   assert(r.status === "accepted" && lapsesOf(r, "newer") === "[]" && JSON.stringify(direct6.map((l) => l.id)) === JSON.stringify([N6]) && (await actually(p6, "newer")).includes("ALREADY_ACCEPTED"),
     `an accepted row whose pointer was cleared since: the read alone would name ${N6}, the listing promises nothing — the accept is refused`);
   // An ingested writer's trust.
-  const I = await cap("[83] a page the importer captured", PAGE);
+  const I = await cap("[84] a page the importer captured", PAGE);
   r = await row(await propose(W, I));
   assert(r.newer_trust === "ingested" && r.newer_actor_kind === "ingested" && r.newer_capture_only === false, `an ingested side's trust (${r.newer_trust})`);
 
@@ -14450,10 +14535,10 @@ console.log("\n[83] Migration 093: list_proposal_writers names who wrote each si
   const read = async () => JSON.stringify(await q(`SELECT * FROM list_proposal_writers($1::uuid[])`, [listed]));
   const before = await read();
   const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
-  await reapply("093");
+  await reapply("094");
   assert((await read()) === before && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await functionsNamed("list_proposal_writers")) === 1,
-    "093 re-applied: one form, the same rows, no event");
+    "094 re-applied: one form, the same rows, no event");
   await db.exec(`DELETE FROM thoughts`);
 }
 

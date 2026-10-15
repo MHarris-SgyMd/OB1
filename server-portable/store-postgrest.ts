@@ -621,8 +621,8 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as Record<string, unknown>[];
-    // 093 (SMD-2707): each side's writer, by the page's ids; a brain short of
-    // 093 lists without them (the reply says so).
+    // 094 (SMD-2707): each side's writer, by the page's ids; a brain short of
+    // 094 lists without them (the reply says so).
     let writers: Record<string, unknown>[] = [];
     let read = false;
     if (rows.length) {

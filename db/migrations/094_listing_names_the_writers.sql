@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 093: a proposal's review names who wrote each side —
+-- Migration 094: a proposal's review names who wrote each side —
 --                list_proposal_writers returns each listed side's writer,
 --                trust, whether its text is a capture-only key's, and what
 --                supersedes it, so a reviewer can see that the side proposed
@@ -97,7 +97,7 @@
 --   on the listing, and no grant group in db/config.mjs names any of them. A brain
 --   at 092 under a server from this tree lists without the writers, and the
 --   reply says so; the CLI's accept guard warns and goes on without it.
---   test-schema [83], test-upgrade [20an], test-live [16], test-store-sql
+--   test-schema [84], test-upgrade [20ao], test-live [16], test-store-sql
 --   and test-store-postgrest [10], test-e2e-sql [13i], test-server [16l].
 --
 -- Prerequisites
@@ -112,7 +112,7 @@ DO $qc$
 BEGIN
   IF to_regprocedure('content_fingerprint_of(text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 093 needs 016 (content_fingerprint_of); this schema lacks it',
+      MESSAGE = 'migration 094 needs 016 (content_fingerprint_of); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -120,25 +120,25 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'derived_from') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 093 needs 025 (thoughts.derived_from); this schema lacks it',
+      MESSAGE = 'migration 094 needs 025 (thoughts.derived_from); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('supersession_proposals') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 093 needs 029 (supersession_proposals); this schema lacks it',
+      MESSAGE = 'migration 094 needs 029 (supersession_proposals); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_capturer_of(uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 093 needs 082 (ob1_capturer_of); this schema lacks it',
+      MESSAGE = 'migration 094 needs 082 (ob1_capturer_of); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_capture_taken_by_log(uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 093 needs 092 (ob1_capture_taken_by_log); this schema lacks it',
+      MESSAGE = 'migration 094 needs 092 (ob1_capture_taken_by_log); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -161,7 +161,7 @@ AS $$
      AND NOT ob1_capture_taken_by_log(p_id)
 $$;
 COMMENT ON FUNCTION ob1_capture_only_text(uuid) IS
-  'Whether a thought''s text is still a capture-only key''s alone: its first capture audit row (the one ob1_capturer_of reads) carries "scope": "capture" in its actor_context (SMD-1298), and 082''s log has not taken it (ob1_capture_taken_by_log: no re-capture by a key that can read, no text move, no adoption). An accept''s taking (the chain, 092) leaves it true. False with no capture row. Migration 093 / SMD-2707.';
+  'Whether a thought''s text is still a capture-only key''s alone: its first capture audit row (the one ob1_capturer_of reads) carries "scope": "capture" in its actor_context (SMD-1298), and 082''s log has not taken it (ob1_capture_taken_by_log: no re-capture by a key that can read, no text move, no adoption). An accept''s taking (the chain, 092) leaves it true. False with no capture row. Migration 094 / SMD-2707.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Whether an accept would take the side, and what it would lapse.
@@ -182,7 +182,7 @@ AS $$
     FROM (SELECT ob1_capturer_of(p_side) AS agent) c
 $$;
 COMMENT ON FUNCTION ob1_accept_takes(uuid, uuid) IS
-  'Whether an accept making p_side supersede p_other would take p_side from its capturer: 092''s taken read (ob1_capture_taken_by_log, or ob1_chain_reaches_outside with p_side''s pointer read as p_other; past the bound, not taken, as the lapse reads it). False for a thought no attributable agent captured. The gate ob1_accept_lapses reads once the accept would write an event, and the listing''s WRITER flag reads between one capturer''s two thoughts. Migration 093 / SMD-2707.';
+  'Whether an accept making p_side supersede p_other would take p_side from its capturer: 092''s taken read (ob1_capture_taken_by_log, or ob1_chain_reaches_outside with p_side''s pointer read as p_other; past the bound, not taken, as the lapse reads it). False for a thought no attributable agent captured. The gate ob1_accept_lapses reads once the accept would write an event, and the listing''s WRITER flag reads between one capturer''s two thoughts. Migration 094 / SMD-2707.';
 
 CREATE OR REPLACE FUNCTION ob1_accept_lapses(p_side uuid, p_other uuid)
 RETURNS jsonb
@@ -268,7 +268,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_accept_lapses(uuid, uuid) IS
-  'The pointers 082''s lapse, as 092 runs it, would clear if an accept made p_side supersede p_other, as [{id, onto}] — the thought whose pointer is cleared and the thought it pointed at: none when the accept writes no event (p_side already points somewhere: 029 writes nothing or refuses ALREADY_SUPERSEDES; the pointer would close a loop, or the chain below p_other runs past update_thought''s 1,001-row walk: WOULD_CYCLE) or the new pointer does not take p_side (082''s log, or its chain read with it reaching outside its capturer''s own); else its capturer''s capture-scoped, never re-pointed pointers onto it, and up the chain through the pointers that stay, each row''s capturer''s onto that row (never p_side''s own; to 1,000 rows above; on from a cleared row 082''s log had already taken). A read of ob1_lapse_capture_pointers, kept in step with it. Migration 093 / SMD-2707.';
+  'The pointers 082''s lapse, as 092 runs it, would clear if an accept made p_side supersede p_other, as [{id, onto}] — the thought whose pointer is cleared and the thought it pointed at: none when the accept writes no event (p_side already points somewhere: 029 writes nothing or refuses ALREADY_SUPERSEDES; the pointer would close a loop, or the chain below p_other runs past update_thought''s 1,001-row walk: WOULD_CYCLE) or the new pointer does not take p_side (082''s log, or its chain read with it reaching outside its capturer''s own); else its capturer''s capture-scoped, never re-pointed pointers onto it, and up the chain through the pointers that stay, each row''s capturer''s onto that row (never p_side''s own; to 1,000 rows above; on from a cleared row 082''s log had already taken). A read of ob1_lapse_capture_pointers, kept in step with it. Migration 094 / SMD-2707.';
 
 -- ---------------------------------------------------------------------------
 -- 3. Each listed proposal's writers.
@@ -327,4 +327,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION list_proposal_writers(uuid[]) IS
-  'Who wrote each side of the supersession proposals named (any status; the first 200 ids read): its actor_name, actor_kind and trust (050, 073), whether its text is still a capture-only key''s alone (ob1_capture_only_text), the first thought superseding it, the pointers an accept making it stand over the other side would lapse, as [{id, onto}] (ob1_accept_lapses; none on an accepted row), whether that accept would take it (ob1_accept_takes), and whether one agent captured both sides (same_capturer). The companion of list_supersession_proposals (070); an id naming no proposal returns nothing. Migration 093 / SMD-2707.';
+  'Who wrote each side of the supersession proposals named (any status; the first 200 ids read): its actor_name, actor_kind and trust (050, 073), whether its text is still a capture-only key''s alone (ob1_capture_only_text), the first thought superseding it, the pointers an accept making it stand over the other side would lapse, as [{id, onto}] (ob1_accept_lapses; none on an accepted row), whether that accept would take it (ob1_accept_takes), and whether one agent captured both sides (same_capturer). The companion of list_supersession_proposals (070); an id naming no proposal returns nothing. Migration 094 / SMD-2707.';

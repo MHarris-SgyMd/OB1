@@ -833,8 +833,8 @@ export class SqlStore implements ThoughtStore {
     // and fails; three resolve (preflight's lineage check names the leftover).
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
-    // 093 (SMD-2707): each side's writer, by the page's ids. A brain short of
-    // 093 has no such function: the page goes out without writers, and the
+    // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
+    // 094 has no such function: the page goes out without writers, and the
     // reply says so.
     let writers: Record<string, unknown>[] = [];
     let read = false;

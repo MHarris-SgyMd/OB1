@@ -44,6 +44,8 @@ const TABLES = [
   "thought_facets",
   "thought_audit",
   "thought_chunks",
+  // 093's kept windows (SMD-2694): a foreign key to the claims, so before them.
+  "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
   "ob1_entity_edges",
@@ -138,6 +140,8 @@ const FUNCTIONS = [
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
   "renew_claims(text, text, int)",
+  "save_extraction_window(uuid, text, text, text, text, int, int, jsonb)",
+  "note_extraction_stop(uuid, text, text, text, text, boolean)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",
@@ -328,7 +332,7 @@ const FUNCTIONS = [
   // 092 (SMD-2708): 082's log read by name, and the chain.
   "ob1_capture_taken_by_log(uuid)",
   "ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)",
-  // 093 (SMD-2707): whether a thought's text is a capture-only key's alone, whether an accept would take it and what it would lapse, and each listed proposal's writers.
+  // 094 (SMD-2707): whether a thought's text is a capture-only key's alone, whether an accept would take it and what it would lapse, and each listed proposal's writers.
   "ob1_capture_only_text(uuid)",
   "ob1_accept_takes(uuid, uuid)",
   "ob1_accept_lapses(uuid, uuid)",

@@ -183,10 +183,11 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   answer = async () => ok({});
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-02T00:00:00Z", reason: null };
   r = await json(await hit("/v1/stats", { key: "read-raw" }));
-  assert(r.status === 401 && r.body.code === "REVOKED", `a revoked key → 401 REVOKED (${r.status} ${r.body.code})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && !("name" in r.body), `a revoked key → 401 REVOKED, its name told to no one but a forwarder (${JSON.stringify(r.body)})`);
   identity = { status: "busy" } as AgentOutcome;
   const busy = await hit("/v1/stats", { key: "read-raw" });
-  assert(busy.status === 503 && busy.headers.get("retry-after") === "2", `a busy registry → 503 with Retry-After (${busy.status})`);
+  const busyBody = await busy.clone().json() as Record<string, unknown>;
+  assert(busy.status === 503 && busy.headers.get("retry-after") === "2" && !("name" in busyBody), `a busy registry → 503 with Retry-After, no name (${busy.status} ${JSON.stringify(busyBody)})`);
   identity = { status: "ok", agentId: "agent-1" };
   calls.length = 0;
   await hit("/v1/stats", { key: "write-raw" });
@@ -269,11 +270,17 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `the forwarder slot alone, no caller's key → the caller's 401 (${JSON.stringify(r.body)})`);
   identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null };
   r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
-  assert(r.status === 401 && r.body.code === "REVOKED" && !("credential" in r.body), `a revoked caller beside a sound forwarder → the caller's REVOKED (${JSON.stringify(r.body)})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && !("credential" in r.body) && r.body.name === "r", `a revoked caller beside a sound forwarder → the caller's REVOKED, its key named to the forwarder for its line (SMD-2287 PR 4b) (${JSON.stringify(r.body)})`);
+  identity = { status: "busy" } as AgentOutcome;
+  r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.name === "r", `a busy caller beside a sound forwarder → BUSY, named too (${JSON.stringify(r.body)})`);
   identity = { status: "ok", agentId: "agent-1" };
   carrierIdentity = { status: "revoked", agentId: "agent-f", revokedAt: "2026-10-05T00:00:00Z", reason: null };
   r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
-  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(r.body)})`);
+  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder" && !("name" in r.body), `a revoked forwarder → 401 REVOKED, credential forwarder, no caller named (${JSON.stringify(r.body)})`);
+  carrierIdentity = { status: "busy" } as AgentOutcome;
+  r = await json(await fwd("/v1/whoami", "read-raw", "fwd-raw"));
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.credential === "forwarder" && r.body.name === "r", `a busy forwarder → 503 BUSY, credential forwarder, the caller named for the forwarder's line (${JSON.stringify(r.body)})`);
   carrierIdentity = { status: "busy" } as AgentOutcome;
   const busy = await fwd("/v1/whoami", "read-raw", "fwd-raw");
   const busyBody = await busy.clone().json() as Record<string, unknown>;
@@ -386,6 +393,19 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   answer = async () => ok({ id: "bare-id", reader: true, embeddings: { allowed: false, reason: "refused: deny" } });
   const bare = await (await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
   assert(bare.embeddingAttached === false, `a capture whose embedding the gate refused is saved without a vector, and says so (${bare.embeddingAttached})`);
+  // The call allowed and made, and the provider did not answer it (SMD-2888):
+  // saved without a vector all the same — a reader told why and where, a
+  // capture key the word alone, never the endpoint.
+  const awayValue = { id: "away-id", reader: true, tags: { type: "observation" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null,
+    embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://ollama:11434/v1" },
+    vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" } };
+  answer = async () => ok(awayValue);
+  const away = await (await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
+  assert(away.embeddingAttached === false && JSON.stringify(away.vectorFailed) === JSON.stringify(awayValue.vectorFailed),
+    `a capture whose provider did not answer is saved without a vector: embeddingAttached false, and a reader is told why and where (${JSON.stringify(away)})`);
+  const awayHook = await (await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) })).json() as Record<string, unknown>;
+  assert(same(awayHook, { id: "away-id", embeddingCall: true, chunks: 0, contextFailures: 0, vectorFailed: "provider_unreachable", embeddingAttached: false }),
+    `…a capture key the word alone, no endpoint (${JSON.stringify(awayHook)})`);
   answer = async () => ok({ jobId: "j1", status: "accepted", poll: "/jobs/j1", stream: "/jobs/j1/stream" });
   r = await json(await hit("/v1/scans", { key: "read-raw", method: "POST", body: "{}" }));
   assert(r.status === 202 && r.body.poll === "/v1/jobs/j1" && r.body.stream === "/v1/jobs/j1/stream", `a job's handle points at this server's routes (${JSON.stringify(r.body)})`);
