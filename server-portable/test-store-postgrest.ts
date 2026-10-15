@@ -169,13 +169,21 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   const older = await capture("[8c] an older thought the writer points the hook's at", hook);
   assert((await taken(own.id)) === false, "the capturer's own thought, untouched: not taken");
   await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${own.id}::uuid`;
-  assert((await store.updateThought({ id: own.id, provenance: { supersedes: older.id }, actor: writer })).ok === true, "setup: the writer's pointer-only edit lands");
   await store.updateThought({ id: own.id, metadataPatch: { note: "its own" }, actor: hook });
   await store.updateThought({ id: own.id, metadataPatch: { enriched: true }, actor: backfill });
   const quiet = await rows(own.id);
-  assert(quiet.length === 4 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === writerId && "supersedes" in r.diff).length === 1,
-    `setup: a vector row and an unattributed metadata row with no agent, the writer's pointer row, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
-  assert((await taken(own.id)) === false, "…a vector, a pointer set by another, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  assert(quiet.length === 3 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === hookId).length === 1,
+    `setup: a vector row and an unattributed metadata row with no agent, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
+  assert((await taken(own.id)) === false, "…a vector, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  // 092 (SMD-2708): a pointer another key sets on the hook's thought, naming
+  // a thought the hook did not capture, is that key's standing on it, and
+  // takes it; one naming another of the hook's own takes nothing.
+  const pointed = await capture("[8c] the hook's thought the writer points at a thought of the writer's own", hook);
+  const outside = await capture("[8c] the writer's own older thought", writer);
+  const within = await capture("[8c] the hook's thought the writer points at the hook's older one", hook);
+  assert((await store.updateThought({ id: pointed.id, provenance: { supersedes: outside.id }, actor: writer })).ok === true && (await taken(pointed.id)) === true
+      && (await store.updateThought({ id: within.id, provenance: { supersedes: older.id }, actor: writer })).ok === true && (await taken(within.id)) === false,
+    "…while a pointer the writer sets on the hook's thought, naming its own, takes it, and one naming the hook's other thought does not (092)");
   const kept = await capture("[8c] the hook's thought another capture key re-sends", hook);
   await capture("[8c] the hook's thought another capture key re-sends", { ...hook, name: "other-hook", agentId: otherId }, { recapture: "keep" });
   assert((await rows(kept.id)).length === 0 && (await taken(kept.id)) === false, "a capture-only key's re-capture ('keep') records nothing and does not take it");
@@ -1144,7 +1152,7 @@ console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture
   await raw.close();
 }
 
-console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 092 answers null and the search goes on (SMD-2540)");
+console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 093 answers null and the search goes on (SMD-2540)");
 {
   const raw = new SQL({ url: URL_, max: 1 });
   const ticket = await store.captureThought({ content: "ticket SMD-17001 for the label", payload: { metadata: { source: "linear", issue: "SMD-17001", status: "Backlog", status_type: "backlog" } }, embedding: vec(3) });
@@ -1160,23 +1168,23 @@ console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits wi
   const empty = await store.ticketStatusInputs([], []), noTickets = await store.ticketStatusInputs([ticket.id], []);
   assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0 && noTickets !== null && noTickets.lifecycle.size === 0,
     "no ticket named: an empty answer, no query — nothing to label, so not even the hits' lifecycle is read");
-  // The normaliser: a history as text is parsed; a kind or a status 092 does not return throws (a changed function surfaces).
+  // The normaliser: a history as text is parsed; a kind or a status 093 does not return throws (a changed function surfaces).
   const asText = normaliseTicketStatusInputs([{ kind: "history", issue: "SMD-1", history: JSON.stringify([{ at: 2, status: "Done", status_type: "completed" }, { at: 1, status: "Backlog", status_type: "backlog" }]) }]);
   const throwsOn = (rows: Record<string, unknown>[]) => { try { normaliseTicketStatusInputs(rows); return false; } catch { return true; } };
   assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
       && throwsOn([{ kind: "event", issue: "SMD-1" }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: [{ at: "x", status: "Done", status_type: "completed" }] }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: {} }]),
-    "the normaliser keeps a history in the order 092 gives it, parses one sent as text, and throws on a kind or a status 092 does not return");
-  // A changed function surfaces through the store, not read as a brain without 092.
+    "the normaliser keeps a history in the order 093 gives it, parses one sent as text, and throws on a kind or a status 093 does not return");
+  // A changed function surfaces through the store, not read as a brain without 093.
   await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
     RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
     AS $$ SELECT 'event'::text, NULL::uuid, 'SMD-17001'::text, 'Done'::text, 'completed'::text, NULL::jsonb $$`);
   let surfaced = "";
   try { await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch (e) { surfaced = (e as Error).message; }
-  assert(/unknown kind "event"/.test(surfaced), `a row 092 does not return throws through the store rather than reading as a brain without it (${surfaced.slice(0, 80)})`);
+  assert(/unknown kind "event"/.test(surfaced), `a row 093 does not return throws through the store rather than reading as a brain without it (${surfaced.slice(0, 80)})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
-  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 092: null — the label is left off, the search goes on");
-  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("092") });
-  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "092 re-applied: answers again");
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 093: null — the label is left off, the search goes on");
+  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("093") });
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "093 re-applied: answers again");
   await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
   await raw.close();
 }

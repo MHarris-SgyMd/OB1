@@ -2,7 +2,7 @@
  * stated-status.ts — which tickets a search hit no longer tells right
  * (SMD-2540): the reading evals/eval-stated-status.ts measured and chose,
  * moved-session-settled. No imports: the core calls it over a hit's text and
- * migration 092's ticket_status_inputs, and the eval's self-check holds it to
+ * migration 093's ticket_status_inputs, and the eval's self-check holds it to
  * evals/stated-status.ts's labelsOf("moved-session-settled", …) on hand cases
  * and a fuzz, so the label shipped is the label measured.
  *

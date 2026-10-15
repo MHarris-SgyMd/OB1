@@ -370,8 +370,12 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
-    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
-    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
+    // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,
+    // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
+    // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
+    const named = carrier ? { name: principal.name } : {};
+    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named }, { "WWW-Authenticate": "Bearer" });
+    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     if (carrier) {
@@ -380,8 +384,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // lock, and the forwarder's answer is the agent cache's for its TTL in
       // any case (SMD-2287 PR 3a review pass 2, not taken).
       const carried = await deps.resolve(carrier);
+      // The caller, resolved, named beside the forwarder's busy registry, for the forwarder's line (SMD-2287 PR 4b review
+      // pass 5); a revoked forwarder is the server's misconfiguration, whose line names no caller.
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
-      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
+      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder", name: principal.name }, RETRY_AFTER);
       principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
     }
     return principal;

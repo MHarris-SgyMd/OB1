@@ -687,13 +687,21 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   const older = await capture("[8c] an older thought the writer points the hook's at", hook);
   assert((await taken(own.id)) === false, "the capturer's own thought, untouched: not taken");
   await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${own.id}::uuid`;
-  assert((await store.updateThought({ id: own.id, provenance: { supersedes: older.id }, actor: writer })).ok === true, "setup: the writer's pointer-only edit lands");
   await store.updateThought({ id: own.id, metadataPatch: { note: "its own" }, actor: hook });
   await store.updateThought({ id: own.id, metadataPatch: { enriched: true }, actor: backfill });
   const quiet = await rows(own.id);
-  assert(quiet.length === 4 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === writerId && "supersedes" in r.diff).length === 1,
-    `setup: a vector row and an unattributed metadata row with no agent, the writer's pointer row, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
-  assert((await taken(own.id)) === false, "…a vector, a pointer set by another, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  assert(quiet.length === 3 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === hookId).length === 1,
+    `setup: a vector row and an unattributed metadata row with no agent, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
+  assert((await taken(own.id)) === false, "…a vector, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  // 092 (SMD-2708): a pointer another key sets on the hook's thought, naming
+  // a thought the hook did not capture, is that key's standing on it, and
+  // takes it; one naming another of the hook's own takes nothing.
+  const pointed = await capture("[8c] the hook's thought the writer points at a thought of the writer's own", hook);
+  const outside = await capture("[8c] the writer's own older thought", writer);
+  const within = await capture("[8c] the hook's thought the writer points at the hook's older one", hook);
+  assert((await store.updateThought({ id: pointed.id, provenance: { supersedes: outside.id }, actor: writer })).ok === true && (await taken(pointed.id)) === true
+      && (await store.updateThought({ id: within.id, provenance: { supersedes: older.id }, actor: writer })).ok === true && (await taken(within.id)) === false,
+    "…while a pointer the writer sets on the hook's thought, naming its own, takes it, and one naming the hook's other thought does not (092)");
   const kept = await capture("[8c] the hook's thought another capture key re-sends", hook);
   await capture("[8c] the hook's thought another capture key re-sends", { ...hook, name: "other-hook", agentId: otherId }, { recapture: "keep" });
   assert((await rows(kept.id)).length === 0 && (await taken(kept.id)) === false, "a capture-only key's re-capture ('keep') records nothing and does not take it");
@@ -1036,6 +1044,107 @@ console.log("\n[8e] The operator's reset of a capture-only key's settled or move
   await sql`ALTER FUNCTION ob1_reset_capture_stamp_real(uuid, jsonb) RENAME TO ob1_reset_capture_stamp`;
   assert(/no envelope this server reads/.test(odd) && /SOMETHING_NEW/.test(odd), `an error the function does not name throws, quoting the answer (${odd.slice(0, 120)})`);
   await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+  await sql.close();
+}
+
+console.log("\n[8f] Migration 092's chain locks, on two connections: a capture naming a row waits behind an accept re-pointing a row below it and is refused after it, and one waiting behind a taker's row lock does not deadlock with the taker's lapse (SMD-2708)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const a = new SQL({ url: URL_, max: 1 });
+  const b = new SQL({ url: URL_, max: 1 });
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-8f", agent_id: await agentOf("3", "hook-8f", "capture"), via: "store-test", scope: "capture" };
+  const WRITER = { name: "writer-8f", agent_id: await agentOf("2", "writer-8f", "write"), via: "store-test" };
+  const REVIEWER = { name: "consolidate-8f", via: "consolidate" };
+  const toVector = (v: number[]) => `[${v.join(",")}]`;
+  const made: string[] = [];
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) => {
+    const id = ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${toVector(unit(8))}::vector) AS r`)[0].r as { id: string }).id;
+    made.push(id);
+    return id;
+  };
+  const pointerOf = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null }).s;
+  const propose = async (older: string, newer: string) => ((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.9, '[8f]', 0.9, 'consolidate:stub@8f') AS id`)[0] as { id: string }).id;
+  // A capture on connection a, started now: settles to "written" or the error.
+  const captureOn = (content: string, supersedes: string) =>
+    a`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor: HOOK, recapture: "keep", supersedes }}::jsonb, ${toVector(unit(8))}::vector) AS r`.execute()
+      .then(() => "written", (e: Error) => `${(e as { errno?: string }).errno ?? ""} ${e.message}`);
+  const stillWaiting = async (p: Promise<string>) => (await Promise.race([p, Bun.sleep(400).then(() => "waiting")])) === "waiting";
+
+  // The hook captures C naming R, above a write key's link R -> T onto its
+  // own T, while a reviewer's accept of T over the writer's W is open on b:
+  // the capture waits on T's row (the chain locked from the bottom up), and
+  // once the accept commits it reads R taken through the chain and is refused.
+  const W = await cap("[8f] the writer's rota", WRITER);
+  const T = await cap("[8f] the hook's rota, a copy", HOOK);
+  const R = await cap("[8f] the hook's rota, linked above it", HOOK);
+  await sql`SELECT update_thought(p_id := ${R}::uuid, p_actor := ${WRITER}::jsonb, p_provenance := ${{ supersedes: T }}::jsonb)`;
+  const pid = await propose(W, T);
+  await b`BEGIN`;
+  await b`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false)`;
+  const raced = captureOn("[8f] the hook's unreviewed rota, raced", R);
+  const waited = await stillWaiting(raced);
+  await b`COMMIT`;
+  const outcome = await raced;
+  const [{ n }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = '[8f] the hook''s unreviewed rota, raced' AND supersedes IS NOT NULL`;
+  assert(waited && /ob1_check_capture_pointer/.test(outcome) && n === 0,
+    `a capture naming a row above an accept in flight waits for it and is refused after it — no capture-scoped pointer on a taken row (${waited ? "waited" : "did not wait"}; ${outcome.slice(0, 90)})`);
+
+  // The hook's chain S1 <- S2 <- S3; a taker holds S1 (as the review's row
+  // lock does) and then accepts it over the writer's W2, whose lapse needs
+  // S2: the capture naming S3 locks S1 first and waits, so it holds nothing
+  // the lapse needs — no deadlock (review pass 3: top-down locks gave 40P01).
+  const W2 = await cap("[8f] the writer's budget", WRITER);
+  const S1 = await cap("[8f] the hook's budget, summary one", HOOK);
+  const S2 = await cap("[8f] the hook's budget, summary two", HOOK, S1);
+  const S3 = await cap("[8f] the hook's budget, summary three", HOOK, S2);
+  const pid2 = await propose(W2, S1);
+  await b`BEGIN`;
+  await b`SELECT 1 FROM thoughts WHERE id = ${S1}::uuid FOR NO KEY UPDATE`;
+  const next = captureOn("[8f] the hook's budget, summary four", S3);
+  const blocked = await stillWaiting(next);
+  let takerError = "";
+  try { await b`SELECT review_supersession_proposal(${pid2}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false)`; await b`COMMIT`; }
+  catch (e) { takerError = (e as Error).message; await b`ROLLBACK`.catch(() => {}); }
+  const landed = await next;
+  const [four] = await sql`SELECT id::text AS id, supersedes::text AS s FROM thoughts WHERE content = '[8f] the hook''s budget, summary four'`;
+  if (four?.id) made.push(four.id);
+  assert(blocked && takerError === "" && landed === "written" && four?.s === S3 && (await pointerOf(S2)) === null,
+    `a capture waiting behind a taker's row lock does not deadlock with its lapse: both land, S2's pointer lapsed, the new summary on S3 (${blocked ? "waited" : "did not wait"}; ${takerError.slice(0, 60) || "taker ok"}; ${landed.slice(0, 60)})`);
+
+  // The chain moving between the check's two reads (review pass 4): a holder
+  // pauses the capture on the chain's deepest row, a write key re-points a
+  // middle row it has not reached, and the capture — reading the chain again
+  // after its locks — is refused rather than written onto a chain it never
+  // locked.
+  const h = new SQL({ url: URL_, max: 1 });
+  const Y = await cap("[8f] the hook's plan, the deepest", HOOK);
+  const M = await cap("[8f] the hook's plan, the middle", HOOK);
+  const X = await cap("[8f] the hook's plan, the top", HOOK);
+  const Z = await cap("[8f] the hook's plan, elsewhere", HOOK);
+  await sql`SELECT update_thought(p_id := ${M}::uuid, p_actor := ${WRITER}::jsonb, p_provenance := ${{ supersedes: Y }}::jsonb)`;
+  await sql`SELECT update_thought(p_id := ${X}::uuid, p_actor := ${WRITER}::jsonb, p_provenance := ${{ supersedes: M }}::jsonb)`;
+  await h`BEGIN`;
+  await h`SELECT 1 FROM thoughts WHERE id = ${Y}::uuid FOR NO KEY UPDATE`;
+  const moved = captureOn("[8f] the hook's plan, its next word", X);
+  const paused = await stillWaiting(moved);
+  // The re-point must not wait on the capture: were the chain locked top-down
+  // it would hold M already, and the holder is released only after — so a
+  // bound, and the holder released either way, keep a regression from
+  // hanging the suite.
+  const repoint = sql`SELECT update_thought(p_id := ${M}::uuid, p_actor := ${WRITER}::jsonb, p_provenance := ${{ supersedes: Z }}::jsonb)`.execute()
+    .then(() => "done", (e: Error) => e.message);
+  const repointed = await Promise.race([repoint, Bun.sleep(5000).then(() => "stuck")]);
+  await h`ROLLBACK`;
+  await repoint;
+  const movedOutcome = await moved;
+  assert(paused && repointed === "done" && /ob1_check_capture_pointer/.test(movedOutcome) && /moved/.test(movedOutcome),
+    `a chain re-pointed between the check's unlocked read and its locks is refused, not written (${paused ? "paused" : "did not pause"}; the re-point ${repointed}; ${movedOutcome.slice(0, 100)})`);
+  await h.close();
+
+  await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(made, "TEXT")}::uuid[])`;
+  await a.close();
+  await b.close();
   await sql.close();
 }
 
@@ -1403,7 +1512,7 @@ console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture
   await raw.close();
 }
 
-console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 092 answers null and the search goes on (SMD-2540)");
+console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 093 answers null and the search goes on (SMD-2540)");
 {
   const raw = new SQL({ url: URL_, max: 1 });
   const ticket = await store.captureThought({ content: "ticket SMD-17001 for the label", payload: { metadata: { source: "linear", issue: "SMD-17001", status: "Backlog", status_type: "backlog" } }, embedding: unit(3) });
@@ -1419,23 +1528,23 @@ console.log("\n[17] ticketStatusInputs: migration 092's one call — the hits wi
   const empty = await store.ticketStatusInputs([], []), noTickets = await store.ticketStatusInputs([ticket.id], []);
   assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0 && noTickets !== null && noTickets.lifecycle.size === 0,
     "no ticket named: an empty answer, no query — nothing to label, so not even the hits' lifecycle is read");
-  // The normaliser: a history as text is parsed; a kind or a status 092 does not return throws (a changed function surfaces).
+  // The normaliser: a history as text is parsed; a kind or a status 093 does not return throws (a changed function surfaces).
   const asText = normaliseTicketStatusInputs([{ kind: "history", issue: "SMD-1", history: JSON.stringify([{ at: 2, status: "Done", status_type: "completed" }, { at: 1, status: "Backlog", status_type: "backlog" }]) }]);
   const throwsOn = (rows: Record<string, unknown>[]) => { try { normaliseTicketStatusInputs(rows); return false; } catch { return true; } };
   assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
       && throwsOn([{ kind: "event", issue: "SMD-1" }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: [{ at: "x", status: "Done", status_type: "completed" }] }]) && throwsOn([{ kind: "history", issue: "SMD-1", history: {} }]),
-    "the normaliser keeps a history in the order 092 gives it, parses one sent as text, and throws on a kind or a status 092 does not return");
-  // A changed function surfaces through the store, not read as a brain without 092.
+    "the normaliser keeps a history in the order 093 gives it, parses one sent as text, and throws on a kind or a status 093 does not return");
+  // A changed function surfaces through the store, not read as a brain without 093.
   await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
     RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
     AS $$ SELECT 'event'::text, NULL::uuid, 'SMD-17001'::text, 'Done'::text, 'completed'::text, NULL::jsonb $$`);
   let surfaced = "";
   try { await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch (e) { surfaced = (e as Error).message; }
-  assert(/unknown kind "event"/.test(surfaced), `a row 092 does not return throws through the store rather than reading as a brain without it (${surfaced.slice(0, 80)})`);
+  assert(/unknown kind "event"/.test(surfaced), `a row 093 does not return throws through the store rather than reading as a brain without it (${surfaced.slice(0, 80)})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
-  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 092: null — the label is left off, the search goes on");
-  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("092") });
-  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "092 re-applied: answers again");
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 093: null — the label is left off, the search goes on");
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("093") });
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "093 re-applied: answers again");
   await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
   await raw.close();
 }

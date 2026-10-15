@@ -758,7 +758,7 @@ export type ChangeFilters = {
 };
 
 /**
- * What migration 092's ticket_status_inputs gives the stated-status label
+ * What migration 093's ticket_status_inputs gives the stated-status label
  * (SMD-2540): the hits with a lifecycle of their own (never labelled), and per
  * ticket its status now and every status its rows held, in the log's order.
  */
@@ -773,8 +773,8 @@ export function ticketList(tickets: string[]): string[] {
  * ticket_status_inputs's rows → TicketStatusInputs; both stores map through
  * here so neither drifts. A history row's elements are the ticket's statuses
  * in the log's order, kept in it; `at` is ms since the epoch. Throws on a kind
- * or an element 092 does not return — a changed function, which the stores
- * let surface rather than read as a brain without 092.
+ * or an element 093 does not return — a changed function, which the stores
+ * let surface rather than read as a brain without 093.
  */
 export function normaliseTicketStatusInputs(rows: Record<string, unknown>[]): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
@@ -790,7 +790,7 @@ export function normaliseTicketStatusInputs(rows: Record<string, unknown>[]): Ti
         return { at: e.at, name: e.status, type: e.status_type };
       }));
     }
-    // 092 returns three kinds; a fourth is a changed function.
+    // 093 returns three kinds; a fourth is a changed function.
     else throw new Error(`ticket_status_inputs returned an unknown kind ${JSON.stringify(kind)}`);
   }
   return out;
@@ -1582,8 +1582,11 @@ export interface ThoughtStore {
   /**
    * Whether another key or board-sync has taken the thought from the agent
    * that captured it: migration 082's ob1_thought_taken, the one rule — a
-   * re-capture by a key that can read, a text edit, or board-sync (no agent
-   * id) giving the metadata a ticket's `issue`; a key's metadata edit never. Read beside
+   * re-capture by a key that can read, a text edit, board-sync (no agent id)
+   * giving the metadata a ticket's `issue`, or (092, SMD-2708) its
+   * supersedes chain reaching a thought its capturer did not capture — a
+   * reviewer's accept or another key's pointer, through any number of links;
+   * a key's metadata edit never. Read beside
    * captureActorOf for every target of a capture-only key's `supersedes`
    * (SMD-2638). A malformed id is true, never owned; a database before 082
    * throws (the function is missing), and the pointer is the server's to
@@ -1623,13 +1626,13 @@ export interface ThoughtStore {
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   /**
-   * What the stated-status label reads (migration 092, SMD-2540): which of
+   * What the stated-status label reads (migration 093, SMD-2540): which of
    * these hits carry a lifecycle of their own, and each named ticket's status
    * now and history in the log's order. One query, none when no ticket is
    * named (nothing to label). Best-effort, as supersededAmong: a database
-   * before 092, or a role without node_state's thought_sources or the order's
+   * before 093, or a role without node_state's thought_sources or the order's
    * ob1_config grant, returns null — the hits go unlabelled and the search
-   * goes on. A row 092 does not return throws: a changed function surfaces.
+   * goes on. A row 093 does not return throws: a changed function surfaces.
    */
   ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
 

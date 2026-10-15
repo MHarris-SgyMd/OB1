@@ -7658,7 +7658,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && restored[7].startsWith("092") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && restored[7].startsWith("093") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9135,7 +9135,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert((await snapshots()) === snapN + 1 && (await snapshotOf(fpA2))?.vec === unit(8), "…and a second re-apply is a no-op: the live rows keep the trigger's vectors");
   // 060 re-applied by hand recreates its 10-argument update_thought beside
   // 061's eleven; the shipped file restored drops it again (SMD-1731). It
-  // also put back 060's ob1_thought_events_in_order, which 092 redefines:
+  // also put back 060's ob1_thought_events_in_order, which 093 redefines:
   // restored too, so every later section reads the shipped order (SMD-2540).
   await restoreShipped("update_thought", "ob1_thought_events_in_order");
   assert((await functionsNamed("update_thought")) === 1, "…and 061 restored after it leaves one update_thought again");
@@ -12385,6 +12385,8 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
     ["a diff that is not an object, naming `content`", ["content"], Y, X, false],
     ["a metadata move keeping an `issue` it had, no agent id", meta({ issue: "TKT-1" }, { issue: "TKT-1", status: "Done" }), null, X, false],
     ["a vector arriving with no agent id", { embedding_present: true }, null, X, false],
+    // The pointer event itself takes nothing; since 092 (SMD-2708) the chain
+    // it builds can (ob1_thought_taken, [81]).
     ["a pointer set by another agent", { supersedes: { before: null, after: Y } }, Y, X, false],
     ["its capturer's own metadata move", meta({}, { project: "p" }), X, X, false],
     ["its capturer's own text edit", { content: { before: "a", after: "b" } }, X, X, false],
@@ -12462,11 +12464,15 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   } catch (e) { unscopedError = (e as Error).message; }
   assert(unscopedPointer === fresh.t, `the check is a capture-only key's: a write key's capture naming the same target is written (${unscopedError.slice(0, 80) || unscopedPointer})`);
   const taken = async (id: string) => (await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [id])).t;
-  assert((await taken(merged.t)) === true && (await taken(noop.t)) === true && (await taken(merged.s)) === false && (await taken(writers.id)) === false,
-    "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own, and a write key's re-captured note not taken");
+  assert((await taken(merged.t)) === true && (await taken(noop.t)) === true && (await taken(noop.s)) === false && (await taken(merged.s)) === true && (await taken(writers.id)) === false,
+    "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own — the one a write key then pointed at a thought another key took, taken through its chain (092) — and a write key's re-captured note not taken");
 
   // A re-apply moves nothing.
   await reapply("082");
+  // 082 re-applied puts its own taken read, lapse, check and WHEN back; 092
+  // is their last definer since SMD-2708, and the sections after run on the
+  // shipped state.
+  await restoreShipped("ob1_thought_taken");
   const [{ trg }] = await q<{ trg: number }>(`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`);
   assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "082 re-applied: one trigger, and the standing pointer still stands");
   await db.exec(`DELETE FROM thoughts`);
@@ -14024,7 +14030,186 @@ console.log("\n[81] Migration 091: every time the consolidation pass settled a p
   await db.exec(`DELETE FROM derivations`);
 }
 
-console.log("\n[82] Migration 092: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and one row per ticket with every status its rows held in the log's order (060's, not seq's, planted where they disagree); an unknown status type or a head with no status left out; a NULL list is none, never every thought; 060's order redefined to the same rows; a re-apply a no-op (SMD-2540)");
+console.log("\n[82] Migration 092: a capture-only key's thought is taken while its supersedes chain reaches a thought the key did not capture — a reviewer's accept, another key's pointer, through any number of links — the lapse runs up the chain, the check locks it; a pointer between the key's own thoughts takes nothing; a re-apply a no-op (SMD-2708)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  await restoreShipped("ob1_thought_taken");
+  await db.exec(`DELETE FROM thoughts`);
+
+  // The shape.
+  const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const [trg] = await q<{ d: string | null }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers' AND tgrelid = 'thought_audit'::regclass`);
+  assert(/092 \/ SMD-2708/.test(await comment("ob1_thought_taken(uuid)")) && /082 \/ SMD-2638/.test(await comment("ob1_thought_taken(uuid)"))
+      && /092 \/ SMD-2708/.test(await comment("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)")) && /092 \/ SMD-2708/.test(await comment("ob1_capture_taken_by_log(uuid)"))
+      && /ob1:capture-chain-reaches-outside/.test(await src("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)"))
+      && /ob1:capture-pointer-lapses/.test(await src("ob1_lapse_capture_pointers()")) && /ob1:capture-pointer-checked-at-write/.test(await src("ob1_check_capture_pointer()"))
+      && ["ob1_thought_taken", "ob1_lapse_capture_pointers", "ob1_check_capture_pointer", "ob1_note_recapture", "ob1_chain_reaches_outside", "ob1_capture_taken_by_log"].every((f) => lastDefinerOf(f).startsWith("092"))
+      && lastDefinerOf("ob1_takes_thought").startsWith("082") && /'supersedes'/.test(trg?.d ?? ""),
+    `092's chain, its log read, the taken read, the lapse and the check, each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
+
+  const HOOK = { name: "hook-82", agent_id: await agent("7", "hook-82", "capture"), via: "test-door", scope: "capture" };
+  const NO_AGENT = { name: "hook-82", via: "test-door", scope: "capture" };
+  const WRITER = { name: "writer-82", agent_id: await agent("6", "writer-82", "write"), via: "test-door" };
+  const REVIEWER = { name: "consolidate-82", via: "consolidate", session: "job-82" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(82)])).r.id;
+  const pointerOf = async (id: string) => (await one<{ s: string | null }>(`SELECT supersedes::text AS s FROM thoughts WHERE id = $1::uuid`, [id])).s;
+  const taken = async (id: string) => (await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [id])).t;
+  const propose = async (older: string, newer: string) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, '[82]', 0.9, 'consolidate:stub@p82') AS id`, [older, newer])).id;
+  const review = async (pid: string, decision: "accept" | "reject") =>
+    (await one<{ r: { ok: boolean; error?: string; written?: boolean } }>(`SELECT review_supersession_proposal($1::uuid, $2, NULL, NULL, $3::jsonb, false) AS r`, [pid, decision, JSON.stringify(REVIEWER)])).r;
+  const link = async (id: string, to: string) =>
+    one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [id, JSON.stringify(WRITER), JSON.stringify({ supersedes: to })]);
+  const refused = async (content: string, target: string) => {
+    try { await cap(content, HOOK, target); return false; } catch (e) { return /ob1_check_capture_pointer/.test((e as Error).message); }
+  };
+
+  // SMD-1873's chain: the hook's newer note accepted over the writer's; its
+  // earlier pointer onto that note lapses under the reviewer, and the hook
+  // can no longer point new text at it.
+  const W = await cap("[82] the writer's rota: weekly", WRITER);
+  const C = await cap("[82] the hook's rota: daily, replacing the weekly one", HOOK);
+  const N = await cap("[82] the hook's next word on the rota", HOOK, C);
+  assert((await pointerOf(N)) === C && (await taken(C)) === false, "setup: the hook's own thought, its own pointer onto it, nothing taken");
+  const accepted = await review(await propose(W, C), "accept");
+  const [lapse] = await q<{ actor_name: string | null; diff: Record<string, { before?: string; after?: string | null }> }>(
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' ORDER BY seq DESC LIMIT 1`, [N]);
+  assert(accepted.ok === true && accepted.written === true && (await pointerOf(C)) === W && (await taken(C)) === true,
+    `a reviewer's accept putting the hook's thought over the writer's takes it (${JSON.stringify(accepted)})`);
+  assert((await pointerOf(N)) === null && lapse?.actor_name === "consolidate-82" && lapse?.diff?.supersedes?.before === C,
+    `…and the hook's earlier pointer onto it lapses, an event under the reviewer (${JSON.stringify(lapse)})`);
+  assert(await refused("[82] the hook's unreviewed word on the rota", C), "…and a capture naming it as supersedes is refused at the write");
+
+  // A write key's edit ranking the hook's row over another's takes it.
+  const C2 = await cap("[82] the hook's note a writer files as the current one", HOOK);
+  const X2 = await cap("[82] the writer's older note", WRITER);
+  await link(C2, X2);
+  assert((await taken(C2)) === true, "a write key ranking the hook's row over the writer's takes it");
+
+  // Between the hook's own thoughts nothing is taken: the recipe's repair
+  // keeps the hook's chain, and an accept between two of its thoughts takes
+  // neither.
+  const Sa = await cap("[82] the hook's summary a", HOOK);
+  const Sb = await cap("[82] the hook's summary b, which lost its pointer", HOOK);
+  const Sc = await cap("[82] the hook's summary c", HOOK, Sb);
+  await link(Sb, Sa);
+  const Sd = await cap("[82] the hook's summary d", HOOK, Sc);
+  assert((await pointerOf(Sb)) === Sa && (await pointerOf(Sc)) === Sb && (await pointerOf(Sd)) === Sc && !(await taken(Sb)) && !(await taken(Sc)),
+    "the recipe's repair: a write key linking two of the hook's summaries takes neither, and the hook's next summary still lands with its pointer");
+  const H1 = await cap("[82] the hook's older note", HOOK);
+  const H2 = await cap("[82] the hook's newer note", HOOK);
+  assert((await review(await propose(H1, H2), "accept")).ok === true && (await pointerOf(H2)) === H1 && !(await taken(H2)),
+    "an accept between two of the hook's own thoughts, nothing below them another's, takes nothing");
+
+  // Re-pointing: onto another's thought takes, onto the hook's own does not.
+  const P1 = await cap("[82] the hook's earlier note it points at", HOOK);
+  const R1 = await cap("[82] the hook's note a writer re-points outside", HOOK, P1);
+  const P3 = await cap("[82] the hook's other earlier note", HOOK);
+  const R2 = await cap("[82] the hook's note a writer re-points within", HOOK, P3);
+  const OUT = await cap("[82] the writer's note it is re-pointed at", WRITER);
+  const P2 = await cap("[82] the hook's third earlier note", HOOK);
+  await link(R1, OUT);
+  await link(R2, P2);
+  assert((await taken(R1)) === true && (await taken(R2)) === false, "a write key re-pointing the hook's row onto another's thought takes it; onto another of the hook's own, it does not");
+
+  // Through more links (review pass 2): a second accept between two of the
+  // hook's thoughts over one already put over another's; a write key's link
+  // onto such a thought; an accept arriving after the hook's pointer above a
+  // link.
+  const W5 = await cap("[82] the writer's plan", WRITER);
+  const C51 = await cap("[82] the hook's plan, a copy", HOOK);
+  await review(await propose(W5, C51), "accept");
+  const C52 = await cap("[82] the hook's plan, a later copy", HOOK);
+  assert((await review(await propose(C51, C52), "accept")).ok === true && (await pointerOf(C52)) === C51 && (await taken(C52)) === true
+      && await refused("[82] the hook's unreviewed plan", C52),
+    "two accepts: the hook's later copy accepted over its earlier, itself accepted over the writer's, is taken, and the hook cannot point past it");
+  const W6 = await cap("[82] the writer's budget", WRITER);
+  const D1 = await cap("[82] the hook's budget, a copy", HOOK);
+  await review(await propose(W6, D1), "accept");
+  const D2 = await cap("[82] the hook's budget, a later copy", HOOK);
+  await link(D2, D1);
+  assert((await taken(D2)) === true && await refused("[82] the hook's unreviewed budget", D2),
+    "a write key's link onto an accepted copy: the newer is taken too, and the hook cannot point past it");
+  const W7 = await cap("[82] the writer's roster", WRITER);
+  const T7 = await cap("[82] the hook's roster, a copy", HOOK);
+  const R7 = await cap("[82] the hook's roster, linked above it", HOOK);
+  await link(R7, T7);
+  const N7 = await cap("[82] the hook's roster, its next word", HOOK, R7);
+  assert((await pointerOf(N7)) === R7 && !(await taken(R7)), "setup: the hook's pointer above a write key's link between its own thoughts lands");
+  await review(await propose(W7, T7), "accept");
+  assert((await taken(T7)) === true && (await taken(R7)) === true && (await pointerOf(N7)) === null && (await pointerOf(R7)) === T7,
+    "an accept arriving after: the row below the link taken, the linked row above it too, and the hook's pointer above the link lapses — the write key's link stands");
+
+  // A reject takes nothing; an accept then a reject gives the thought back,
+  // the pointer the accept lapsed not restored (SMD-2933).
+  const W3 = await cap("[82] the writer's note a reviewer keeps", WRITER);
+  const C3 = await cap("[82] the hook's note a reviewer turns down", HOOK);
+  const rejected = await review(await propose(W3, C3), "reject");
+  assert(rejected.ok === true && (await taken(C3)) === false && (await pointerOf(C3)) === null, "a rejected proposal takes nothing");
+  const W4 = await cap("[82] the writer's note a reviewer keeps after all", WRITER);
+  const C4 = await cap("[82] the hook's note accepted, then turned down", HOOK);
+  const N4 = await cap("[82] the hook's next word after it", HOOK, C4);
+  const p4 = await propose(W4, C4);
+  await review(p4, "accept");
+  const undone = await review(p4, "reject");
+  assert(undone.ok === true && (await pointerOf(C4)) === null && (await taken(C4)) === false && (await pointerOf(N4)) === null,
+    "an accept then a reject: the pointer cleared and the thought the hook's again — the pointer the accept lapsed stays cleared");
+
+  // A write key re-capturing a thought taken only through its chain is
+  // recorded, so it stays taken when the chain is cleared (review pass 3:
+  // the note read the chain, and a reject gave back a thought a write key
+  // held).
+  const W8 = await cap("[82] the writer's standup notes", WRITER);
+  const H8 = await cap("[82] the hook's standup notes, a copy", HOOK);
+  const p8 = await propose(W8, H8);
+  await review(p8, "accept");
+  await one(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["[82] the hook's standup notes, a copy", JSON.stringify({ metadata: { source: "mcp" }, actor: WRITER }), unit(82)]);
+  const noted8 = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [H8, JSON.stringify(WRITER)])).r;
+  await review(p8, "reject");
+  assert(noted8 === true && (await pointerOf(H8)) === null && (await taken(H8)) === true && await refused("[82] the hook's unreviewed standup notes", H8),
+    "a write key's re-capture of a thought taken through its chain is noted, so a reject clearing the chain leaves it taken — the write key holds its text");
+
+  // A thought the hook wrote while the registry could not attribute it
+  // counts as another's (082 refuses ownership by name): a link onto it takes.
+  const Z = await cap("[82] the hook's summary from an outage", NO_AGENT);
+  const Y = await cap("[82] the hook's summary after it", HOOK);
+  await link(Y, Z);
+  assert((await taken(Y)) === true, "a write key linking the hook's summary to one written with no agent id takes it — the documented limit");
+
+  // A cycle a raw write closed through the hook's own capture pointer: the
+  // lapse walking up from a write key's taking never clears the event's own
+  // row, so the write lands (review pass 4: it refused it, OB002).
+  const V9 = await cap("[82] the hook's note a raw write loops", HOOK);
+  const X9 = await cap("[82] the hook's next note in the loop", HOOK, V9);
+  await db.query(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [X9, V9]);
+  let loopNote = "noted", loopEdit = "edited";
+  try {
+    await one(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["[82] the hook's next note in the loop", JSON.stringify({ metadata: { source: "mcp" }, actor: WRITER }), unit(82)]);
+    await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [X9, JSON.stringify(WRITER)]);
+  } catch (e) { loopNote = (e as Error).message; }
+  try { await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [V9, "[82] the hook's note a raw write loops, edited", JSON.stringify(WRITER)]); } catch (e) { loopEdit = (e as Error).message; }
+  assert(loopNote === "noted" && loopEdit === "edited", `a write key's re-capture and edit inside a raw write's loop land (${loopNote.slice(0, 80)}; ${loopEdit.slice(0, 80)})`);
+
+  // The walk is cycle-safe and bounded.
+  const cyc = await one<{ r: boolean | null }>(`SELECT ob1_chain_reaches_outside($1::uuid, $2::uuid, $1::uuid, $1::uuid) AS r`, [Sa, HOOK.agent_id]);
+  assert(cyc.r === false, `a pointer read as onto itself is a cycle, and the walk stops (${cyc.r})`);
+
+  // A re-apply moves nothing.
+  const rows = JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`));
+  const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
+  await reapply("092");
+  assert(JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
+      && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`)).n === 1,
+    "092 re-applied: one trigger, no row and no event moved");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[83] Migration 093: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and one row per ticket with every status its rows held in the log's order (060's, not seq's, planted where they disagree); an unknown status type or a head with no status left out; a NULL list is none, never every thought; 060's order redefined to the same rows; a re-apply a no-op (SMD-2540)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   await db.exec(`DELETE FROM thoughts`);
@@ -14035,12 +14220,12 @@ console.log("\n[82] Migration 092: what the stated-status label reads, in one ca
     `SELECT pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proacl::text AS acl, p.proconfig AS cfg
        FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname = 'ticket_status_inputs'`);
   assert(fn && fn.args === "p_ids uuid[], p_issues text[]" && fn.result === "TABLE(kind text, thought_id uuid, issue text, status text, status_type text, history jsonb)"
-      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("092") && (await functionsNamed("ticket_status_inputs")) === 1,
-    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 092 defines it (${JSON.stringify(fn)})`);
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("093") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 093 defines it (${JSON.stringify(fn)})`);
   const [order] = await q<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure('ob1_thought_events_in_order(uuid[])')`);
-  assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("092") && (await functionsNamed("ob1_thought_events_in_order")) === 1
+  assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("093") && (await functionsNamed("ob1_thought_events_in_order")) === 1
       && /UNION ALL/.test(order.src) && /p_thoughts IS NOT NULL AND thought_id = ANY\(p_thoughts\)/.test(order.src) && /WHERE p_thoughts IS NULL\)/.test(order.src),
-    "092 redefines 060's ob1_thought_events_in_order over its one signature, and the body live here is 092's two arms — not 060's, which an earlier re-apply puts back");
+    "093 redefines 060's ob1_thought_events_in_order over its one signature, and the body live here is 093's two arms — not 060's, which an earlier re-apply puts back");
 
   // Ticket rows moved as board-sync moves them: in place, each status an audit event.
   const put = async (content: string, metadata: Record<string, unknown>) =>
@@ -14095,7 +14280,7 @@ console.log("\n[82] Migration 092: what the stated-status label reads, in one ca
       WHERE $1::uuid[] IS NULL OR a.thought_id = ANY($1::uuid[]) ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`, [ids])).map((r) => r.id).join();
   const now060 = async (ids: string[] | null) => (await q<{ id: string }>(`SELECT id FROM ob1_thought_events_in_order($1::uuid[])`, [ids])).map((r) => r.id).join();
   assert((await now060([t1, t3])) === (await ref([t1, t3])) && (await now060(null)) === (await ref(null)) && (await now060([])) === "",
-    "ob1_thought_events_in_order as 092 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
+    "ob1_thought_events_in_order as 093 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
 
   // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
   const none = [...(await inputs(null, null)), ...(await inputs([], [])), ...(await inputs(null, ["SMD-404"]))];
@@ -14104,8 +14289,8 @@ console.log("\n[82] Migration 092: what the stated-status label reads, in one ca
 
   // A re-apply moves nothing.
   const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));
-  await reapply("092");
-  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "092 re-applied: one function, the same rows");
+  await reapply("093");
+  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "093 re-applied: one function, the same rows");
   await db.exec(`DELETE FROM thoughts`);
 }
 
