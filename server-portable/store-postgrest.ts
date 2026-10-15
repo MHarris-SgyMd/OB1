@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -47,6 +47,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  TicketStatusInputs,
   UpdateProvenance,
   UpdateResult,
   WriteEvent,
@@ -647,6 +648,24 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseChange);
+  }
+
+  async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
+    const valid = idList(ids), keys = ticketList(tickets);
+    if (keys.length === 0) return normaliseTicketStatusInputs([]);
+    // Best-effort, as supersededAmong: before 095 the RPC is unknown, and the
+    // label is left off rather than failing the search; a row 095 does not
+    // return is skipped by the normaliser, which never throws. One row per
+    // ticket (095), so db-max-rows cuts no history.
+    let rows: Record<string, unknown>[];
+    try {
+      const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });
+      if (error) return null;
+      rows = data as Record<string, unknown>[]; // the normaliser reads anything that is not a list as no rows
+    } catch {
+      return null;
+    }
+    return normaliseTicketStatusInputs(rows);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

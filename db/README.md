@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2861 assertions: 2861 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-four (94) migrations applied, and
+`bun test-schema.ts` prints `2874 assertions: 2874 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-five (95) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1541,6 +1541,30 @@ not run. It refuses to apply without
 016, 025, 029, 082 or 092. test-schema [84], test-upgrade [20ao], test-live
 [16], test-store-sql and test-store-postgrest [10], test-e2e-sql [13i],
 test-server [16l].
+
+Migration 095 gives the stated-status label its inputs in one call
+(SMD-2540): `ticket_status_inputs(p_ids, p_issues)` returns, tagged by
+`kind`, the hits with a lifecycle of their own (`node_state`'s open IS NOT
+NULL, never labelled), each named ticket's status now (`ob1_ticket_head`, a
+known lifecycle type, a head with no status left out), and one row per ticket
+with every status its rows held — one element per capture or update event,
+`at` in ms — in 060's `ob1_thought_events_in_order` order, never `seq` alone,
+which 046's backfill breaks. One row per ticket so PostgREST's db-max-rows
+cannot cut the newest statuses. A NULL or empty list of tickets reads no
+ticket, of ids no hit (`node_state(NULL)` would read every thought).
+
+It redefines 060's `ob1_thought_events_in_order` to the same rows in the same
+order, its list read by `thought_audit_thought_id_idx` whatever the plan: the
+old `p_thoughts IS NULL OR …` filter read the whole log when the body was not
+inlined. The label is read in the server (`server-portable/stated-status.ts`,
+the reading `evals/eval-stated-status.ts` measured and chose, held to it by the
+eval's self-check), so no search function changes and no rank moves. No grant:
+the server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
+`ob1_superseded_by` already, and a role without the order's `ob1_config` gets
+no label rather than a failed search (`node_state`'s `thought_sources` is not
+read when only `open` is). It refuses to apply without 068 or 060. test-schema
+[85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
+test-store-sql and test-store-postgrest [17].
 
 ## What changed relative to the guide
 
@@ -4388,8 +4412,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2861 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1340 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2874 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1344 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

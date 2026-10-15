@@ -7658,7 +7658,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 7 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && restored[7].startsWith("095") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9134,8 +9134,10 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   await reapply("060");
   assert((await snapshots()) === snapN + 1 && (await snapshotOf(fpA2))?.vec === unit(8), "…and a second re-apply is a no-op: the live rows keep the trigger's vectors");
   // 060 re-applied by hand recreates its 10-argument update_thought beside
-  // 061's eleven; the shipped file restored drops it again (SMD-1731).
-  await restoreShipped("update_thought");
+  // 061's eleven; the shipped file restored drops it again (SMD-1731). It
+  // also put back 060's ob1_thought_events_in_order, which 095 redefines:
+  // restored too, so every later section reads the shipped order (SMD-2540).
+  await restoreShipped("update_thought", "ob1_thought_events_in_order");
   assert((await functionsNamed("update_thought")) === 1, "…and 061 restored after it leaves one update_thought again");
 
   // The grants: a role holding the capture group — and what 016's extraction
@@ -14539,6 +14541,93 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   assert((await read()) === before && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await functionsNamed("list_proposal_writers")) === 1,
     "094 re-applied: one form, the same rows, no event");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[85] Migration 095: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and one row per ticket with every status its rows held in the log's order (060's, not seq's, planted where they disagree); an unknown status type or a head with no status left out; a NULL list is none, never every thought; 060's order redefined to the same rows; a re-apply a no-op (SMD-2540)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // The contract.
+  const [fn] = await q<{ args: string; result: string; vol: string; lang: string; definer: boolean; acl: string | null; cfg: string[] | null }>(
+    `SELECT pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proacl::text AS acl, p.proconfig AS cfg
+       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname = 'ticket_status_inputs'`);
+  assert(fn && fn.args === "p_ids uuid[], p_issues text[]" && fn.result === "TABLE(kind text, thought_id uuid, issue text, status text, status_type text, history jsonb)"
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("095") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 095 defines it (${JSON.stringify(fn)})`);
+  const [order] = await q<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure('ob1_thought_events_in_order(uuid[])')`);
+  assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("095") && (await functionsNamed("ob1_thought_events_in_order")) === 1
+      && /UNION ALL/.test(order.src) && /p_thoughts IS NOT NULL AND thought_id = ANY\(p_thoughts\)/.test(order.src) && /WHERE p_thoughts IS NULL\)/.test(order.src),
+    "095 redefines 060's ob1_thought_events_in_order over its one signature, and the body live here is 095's two arms — not 060's, which an earlier re-apply puts back");
+
+  // Ticket rows moved as board-sync moves them: in place, each status an audit event.
+  const put = async (content: string, metadata: Record<string, unknown>) =>
+    (await q<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { type: "note", ...metadata } }), unit(0)]))[0].r.id;
+  const stamp = (id: string, keys: Record<string, unknown>) => db.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1`, [id, JSON.stringify(keys)]);
+  const ticket = async (key: string, ...statuses: [string, string][]) => {
+    const id = await put(`ticket ${key}`, { kind: "ticket" });
+    for (const [status, status_type] of statuses) await stamp(id, { source: "linear", issue: key, status, status_type, linear_updated_at: new Date().toISOString() });
+    return id;
+  };
+  const t1 = await ticket("SMD-1", ["Backlog", "backlog"], ["In Progress", "started"], ["Done", "completed"]);
+  await stamp(t1, { priority: "High" }); // a move of another facet: an event carrying the same status again
+  await ticket("SMD-2", ["Backlog", "backlog"]);
+  await ticket("SMD-9", ["Backlog", "backlog"], ["Odd", "weird"]);
+  await ticket("SMD-7", ["Todo", "unstarted"]);
+  const t6 = await ticket("SMD-6", ["Done", "completed"]);
+  await db.query(`UPDATE ob1_ticket_head SET status = NULL WHERE issue = 'SMD-6'`); // a head with no status
+  // SMD-3's older statuses predate audit_seq_exact_since, planted with seq
+  // reversed against their clock — 046's backfill did this — so the log's
+  // order (by the clock before the boundary) and seq's disagree.
+  const t3 = await ticket("SMD-3", ["Done", "completed"]);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
+    ('${t3}', 'update', '{"metadata": {"before": {}, "after": {"issue": "SMD-3", "status": "Backlog", "status_type": "backlog"}}}'::jsonb, (SELECT value::timestamptz - interval '2 days' FROM ob1_config WHERE key = 'audit_seq_exact_since'), 900000202),
+    ('${t3}', 'update', '{"metadata": {"before": {}, "after": {"issue": "SMD-3", "status": "In Progress", "status_type": "started"}}}'::jsonb, (SELECT value::timestamptz - interval '1 day' FROM ob1_config WHERE key = 'audit_seq_exact_since'), 900000201),
+    ('${t3}', 'update', '{"metadata": {"before": {}, "after": {"issue": "SMD-3", "status": null, "status_type": "started"}}}'::jsonb, (SELECT value::timestamptz - interval '12 hours' FROM ob1_config WHERE key = 'audit_seq_exact_since'), 900000203)`);
+  const note = await put("Session summary — SMD-1, 2 and SMD-9 are moving", {});
+  const filed = await put("a note filed under a ticket", { ticket: "SMD-2" });
+
+  type R = { kind: string; thought_id: string | null; issue: string | null; status: string | null; status_type: string | null; history: { at: number; status: string; status_type: string }[] | null };
+  const inputs = (ids: string[] | null, issues: string[] | null) => q<R>(`SELECT * FROM ticket_status_inputs($1::uuid[], $2::text[])`, [ids, issues]);
+  const ALL_KEYS = ["SMD-1", "SMD-2", "SMD-3", "SMD-6", "SMD-9", "SMD-404"];
+  const rows = await inputs([t1, note, filed], ALL_KEYS);
+  const lifecycle = rows.filter((r) => r.kind === "lifecycle").map((r) => r.thought_id).sort();
+  assert(JSON.stringify(lifecycle) === JSON.stringify([t1, filed].sort()) && rows.every((r) => r.kind !== "lifecycle" || (r.issue === null && r.history === null)),
+    `lifecycle: the ticket row and the note filed under a ticket (node_state's open IS NOT NULL), not the session note (${lifecycle.join(", ")})`);
+  const heads = rows.filter((r) => r.kind === "head").map((r) => `${r.issue}:${r.status}:${r.status_type}`).sort();
+  assert(JSON.stringify(heads) === JSON.stringify(["SMD-1:Done:completed", "SMD-2:Backlog:backlog", "SMD-3:Done:completed"]),
+    `head: each ticket named with a known type and a status — SMD-9's "weird" and SMD-6's missing status left out, SMD-7 not named, SMD-404 held by no row (${heads.join(" ")})`);
+  const hist = new Map(rows.filter((r) => r.kind === "history").map((r) => [r.issue!, r.history!] as const));
+  const statusesOf = (k: string) => (hist.get(k) ?? []).map((e) => e.status);
+  assert(rows.filter((r) => r.kind === "history").length === hist.size && JSON.stringify(statusesOf("SMD-1")) === JSON.stringify(["Backlog", "In Progress", "Done", "Done"])
+      && JSON.stringify(statusesOf("SMD-9")) === JSON.stringify(["Backlog"]) && !hist.has("SMD-7") && !hist.has("SMD-404"),
+    `history: one row per ticket, every status its row held, oldest first, a facet move repeating it; SMD-9's "weird" left out, its Backlog kept (${JSON.stringify([...hist].map(([k, v]) => [k, v.map((e) => e.status)]))})`);
+  assert(JSON.stringify(statusesOf("SMD-3")) === JSON.stringify(["Backlog", "In Progress", "Done"]),
+    `the log's order, not seq's: SMD-3's planted statuses before the boundary read by their clock (Backlog, seq 202, before In Progress, seq 201), then its live Done; a planted status of JSON null left out, as a head's is (${statusesOf("SMD-3").join(", ")})`);
+  const clocks = await q<{ ms: number }>(`SELECT (extract(epoch FROM created_at) * 1000)::float8 AS ms FROM ob1_thought_events_in_order(ARRAY[$1::uuid]) a WHERE coalesce(a.diff #> '{metadata,after}', a.diff -> 'metadata')->>'status' <> ''`, [t3]);
+  assert(JSON.stringify((hist.get("SMD-3") ?? []).map((e) => e.at)) === JSON.stringify(clocks.map((c) => Number(c.ms))) && [...hist.values()].flat().every((e) => typeof e.at === "number" && Number.isFinite(e.at)),
+    "each status's at is its audit event's created_at, in ms, in the log's order");
+  // 060's order, redefined, returns what its old filter did: the list's rows, or every row.
+  const ref = async (ids: string[] | null) => (await q<{ id: string }>(
+    `SELECT a.id FROM thought_audit a, (SELECT COALESCE((SELECT c.value::timestamptz FROM ob1_config c WHERE c.key = 'audit_seq_exact_since'), 'infinity'::timestamptz) AS b) k
+      WHERE $1::uuid[] IS NULL OR a.thought_id = ANY($1::uuid[]) ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`, [ids])).map((r) => r.id).join();
+  const now060 = async (ids: string[] | null) => (await q<{ id: string }>(`SELECT id FROM ob1_thought_events_in_order($1::uuid[])`, [ids])).map((r) => r.id).join();
+  assert((await now060([t1, t3])) === (await ref([t1, t3])) && (await now060(null)) === (await ref(null)) && (await now060([])) === "",
+    "ob1_thought_events_in_order as 095 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
+
+  // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
+  const none = [...(await inputs(null, null)), ...(await inputs([], []))];
+  assert(none.length === 0, `a NULL or empty list reads nothing (${none.length} rows)`);
+  const idsAlone = await inputs([t1, note], []);
+  assert(idsAlone.length === 1 && idsAlone[0].kind === "lifecycle" && idsAlone[0].thought_id === t1 && (await inputs(null, ["SMD-1"])).every((r) => r.kind !== "lifecycle"),
+    "ids alone give only their lifecycle rows — the ticket row's one, the note none — and tickets alone only heads and histories");
+
+  // A re-apply moves nothing.
+  const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));
+  await reapply("095");
+  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "095 re-applied: one function, the same rows");
   await db.exec(`DELETE FROM thoughts`);
 }
 

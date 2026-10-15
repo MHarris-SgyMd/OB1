@@ -534,8 +534,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // did to a capture-only key's label, SMD-2898), 091 (each settle by the
   // pass kept on its proposal, SMD-2913), 092 (another key's pointer
   // takes a capture-only key's thought, SMD-2708), 093 (a long thought's
-  // extraction windows kept, SMD-2694) and 094 (a proposal's listing names
-  // who wrote each side, SMD-2707)
+  // extraction windows kept, SMD-2694), 094 (a proposal's listing names
+  // who wrote each side, SMD-2707) and 095 (what the stated-status label
+  // reads, SMD-2540)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -655,13 +656,15 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // redefines 082's taken read, lapse and check and adds the chain, refusing
   // by name without 082 ([20am]); 093 adds a table and two functions over
   // 015's claims ([20an]); 094 adds the writers' read beside 070's listing,
-  // refusing by name without 016, 025, 029, 082 or 092 ([20ao]) — all
+  // refusing by name without 016, 025, 029, 082 or 092 ([20ao]); 095 adds one
+  // read function and redefines 060's order over its own signature, refusing
+  // by name without 068 or 060 ([20ap]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 65, `030 is among the last sixty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 66, `030 is among the last sixty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4169,6 +4172,37 @@ console.log("\n[20ao] Migration 094: refused by name without 092; onto a populat
   // 070 re-applied over it — the re-apply order passes through 070 first — stands, and the writers still read.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("070_") });
   assert((await read()) === readBefore && (await listing()) === listedBefore, "070 re-applied after it: its listing and 094's read both stand");
+  await sql.close();
+}
+
+console.log("\n[20ap] Migration 095: refused by name without 068; onto a populated brain at the file before it — the label's inputs read the tickets board-sync moved before it, in the log's order, and no row moved; a re-apply a no-op (SMD-2540)");
+{
+  const the094 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "068" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 095 needs 068 (ob1_ticket_head, node_state); this schema lacks it",
+    `095 on a schema stopped before 068 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the094 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const [{ r }] = await sql`SELECT upsert_thought('ticket SMD-1'::text, ${{ metadata: { source: "linear", issue: "SMD-1", status: "Backlog", status_type: "backlog" } }}::jsonb, ${vec}::vector) AS r`;
+  const id = (r as { id: string }).id;
+  for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await sql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${id}::uuid`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata FROM thoughts ORDER BY id`);
+  const before = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  const read = async () => (await sql`SELECT kind, issue, status, history FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`) as { kind: string; issue: string; status: string; history: { status: string }[] | null }[];
+  const got = await read();
+  const events = (got.find((x) => x.kind === "history")?.history ?? []).map((x) => x.status);
+  assert((await rows()) === before && JSON.stringify(events) === JSON.stringify(["Backlog", "In Progress", "Done"])
+      && got.some((x) => x.kind === "head" && x.status === "Done") && got.some((x) => x.kind === "lifecycle"),
+    `onto a brain at 094: the moves made before 095 are read back in order, the head is Done, the ticket row is its own lifecycle, and no row moved (${JSON.stringify(got.map((x) => [x.kind, x.status]))})`);
+  const beforeReapply = JSON.stringify(await read());
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  assert(JSON.stringify(await read()) === beforeReapply && (await rows()) === before, "a re-apply of 095 is a no-op");
   await sql.close();
 }
 

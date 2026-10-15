@@ -32,6 +32,7 @@ import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
+import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 
 export type ThoughtMatch = {
@@ -818,6 +819,59 @@ export type ChangeFilters = {
   actions?: string[] | null;
   limit: number;
 };
+
+/**
+ * What migration 095's ticket_status_inputs gives the stated-status label
+ * (SMD-2540): the hits with a lifecycle of their own (never labelled), and per
+ * ticket its status now and every status its rows held, in the log's order.
+ */
+export type TicketStatusInputs = { lifecycle: Set<string>; heads: Map<string, Status>; history: Map<string, Change[]> };
+
+/** A ticket key as a store sends it: 077's TEAM-123 shape, each once. */
+export function ticketList(tickets: string[]): string[] {
+  return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
+}
+
+/**
+ * ticket_status_inputs's rows → TicketStatusInputs; both stores map through
+ * here so neither drifts. A history row's elements are the ticket's statuses
+ * in the log's order, kept in it; `at` is ms since the epoch. Never throws:
+ * a kind it does not know is skipped, and a head or a history it cannot read
+ * leaves that ticket out (no label for it) — so a server older than its
+ * brain's function, an ordinary state through an upgrade, loses labels and
+ * never a search (SMD-2540 PR 2a's third review pass; the label is an
+ * enhancement, as supersededAmong's).
+ */
+export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
+  const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  // A later function may answer one object, a scalar or a list holding nulls
+  // over PostgREST (SMD-2540 PR 2a's fourth review pass): no list is no rows,
+  // no object no row.
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as Record<string, unknown>[]) {
+    if (!r || typeof r !== "object") continue;
+    const kind = r.kind, issue = text(r.issue);
+    if (kind === "lifecycle") { const id = text(r.thought_id); if (id) out.lifecycle.add(id.toLowerCase()); }
+    else if (kind === "head") {
+      const name = text(r.status), type = text(r.status_type);
+      if (issue && name && type) out.heads.set(issue, { name, type });
+    } else if (kind === "history" && issue) {
+      let h: unknown = r.history;
+      if (typeof h === "string") { try { h = JSON.parse(h); } catch { h = null; } }
+      if (!Array.isArray(h)) continue;
+      const list: Change[] = [];
+      for (const e of h as { at?: unknown; status?: unknown; status_type?: unknown }[]) {
+        const name = text(e?.status), type = text(e?.status_type);
+        if (typeof e?.at !== "number" || !Number.isFinite(e.at) || !name || !type) break;
+        list.push({ at: e.at, name, type });
+      }
+      if (list.length === h.length) out.history.set(issue, list);
+    }
+    // Any other kind: a later function's, skipped.
+  }
+  return out;
+}
 
 const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
 
@@ -1659,6 +1713,18 @@ export interface ThoughtStore {
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   /**
+   * What the stated-status label reads (migration 095, SMD-2540): which of
+   * these hits carry a lifecycle of their own, and each named ticket's status
+   * now and history in the log's order. One query, none when no ticket is
+   * named (nothing to label). Best-effort, as supersededAmong: a database
+   * before 095, or a role without the order's ob1_config grant, returns null —
+   * the hits go unlabelled and the search goes on. Never throws: a row 095
+   * does not return is skipped (normaliseTicketStatusInputs), so a server
+   * older than its brain's function loses labels, not searches.
+   */
+  ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
+
+  /**
    * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
    * judged to conflict, in one status (null for every status), most confident
    * first, each with both thoughts. Read-only — accepting or rejecting is the
@@ -1848,7 +1914,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 

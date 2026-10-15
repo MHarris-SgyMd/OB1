@@ -1155,5 +1155,49 @@ console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture
   await raw.close();
 }
 
+console.log("\n[17] ticketStatusInputs: migration 095's one call — the hits with a lifecycle of their own, each ticket's status now and its history in the log's order, malformed inputs dropped; best-effort, so a brain without 095 answers null and the search goes on (SMD-2540)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  const ticket = await store.captureThought({ content: "ticket SMD-17001 for the label", payload: { metadata: { source: "linear", issue: "SMD-17001", status: "Backlog", status_type: "backlog" } }, embedding: vec(3) });
+  for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await raw`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${ticket.id}::uuid`;
+  const note = await store.captureThought({ content: "a session note naming SMD-17001", payload: { metadata: {} }, embedding: vec(4) });
+  const got = await store.ticketStatusInputs([ticket.id, note.id, "not-a-uuid"], ["SMD-17001", "smd-17001", "SMD-17404", "x"]);
+  assert(got !== null && got.lifecycle.has(ticket.id) && !got.lifecycle.has(note.id) && got.lifecycle.size === 1,
+    "lifecycle: the ticket row, not the note; a malformed id dropped");
+  const h = got?.history.get("SMD-17001") ?? [];
+  assert(got !== null && got.heads.get("SMD-17001")?.type === "completed" && got.heads.get("SMD-17001")?.name === "Done" && got.heads.size === 1
+      && JSON.stringify(h.map((c) => c.name)) === JSON.stringify(["Backlog", "In Progress", "Done"]) && h.every((c) => Number.isFinite(c.at) && c.at > 0),
+    `heads and history: SMD-17001 Done now, Backlog → In Progress → Done in the log's order, each with its time; a lower-cased or unknown key reads nothing (${JSON.stringify(h)})`);
+  const empty = await store.ticketStatusInputs([], []), noTickets = await store.ticketStatusInputs([ticket.id], []);
+  assert(empty !== null && empty.lifecycle.size === 0 && empty.heads.size === 0 && empty.history.size === 0 && noTickets !== null && noTickets.lifecycle.size === 0,
+    "no ticket named: an empty answer, no query — nothing to label, so not even the hits' lifecycle is read");
+  // The normaliser's own cases (text, odd rows, no list) are test-store-sql.ts [17]'s: the same code.
+  // A later function's row is skipped through the store: the call answers what it can read, never throws, never reads as a brain without 095.
+  await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
+    RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
+    AS $$ SELECT 'event'::text, NULL::uuid, 'SMD-17001'::text, 'Done'::text, 'completed'::text, NULL::jsonb
+          UNION ALL SELECT 'head', NULL, 'SMD-17001', 'Done', 'completed', NULL $$`);
+  let later: Awaited<ReturnType<typeof store.ticketStatusInputs>> | "threw" = "threw";
+  try { later = await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { later = "threw"; }
+  assert(later !== "threw" && later !== null && later.heads.get("SMD-17001")?.type === "completed" && later.history.size === 0,
+    "a later function's kind is skipped through the store: the head it also returns is read, nothing throws, and it is not read as a brain without 095");
+  // Over PostgREST a later function answering one object, not a row set, is read as no rows — never a throw.
+  await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
+  await raw.unsafe(`CREATE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[]) RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT '{"kind": "head", "issue": "SMD-17001"}'::jsonb $$`);
+  // The shim reads a function's return type once per connection URL for the process, and the swap
+  // changed it: a URL of its own (the same database) reads the swapped function afresh.
+  const fresh = new PostgrestStore("unused", "unused", createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=stated-status-swap`) as never);
+  let single: Awaited<ReturnType<typeof store.ticketStatusInputs>> | "threw" = "threw";
+  try { single = await fresh.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { single = "threw"; }
+  assert(single !== "threw" && single !== null && single.heads.size === 0 && single.history.size === 0,
+    `a later function answering one object over PostgREST is read as no rows, not a throw (${single === "threw" ? "threw" : JSON.stringify(single && { heads: single.heads.size })})`);
+  await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 095: null — the label is left off, the search goes on");
+  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.endsWith("_ticket_status_inputs.sql") });
+  assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "095 re-applied: answers again");
+  await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
+  await raw.close();
+}
+
 await store.close();
 report();

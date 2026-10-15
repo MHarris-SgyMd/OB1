@@ -13080,6 +13080,64 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
   }
 }
 
+console.log("\n[43] Migration 095: the stated-status label's inputs read the hits, not the log, under either plan — 060's order an index probe for a list (its every-row arm never runs), and the tickets matched by = ANY, with no join filter that pairs each event with each key (SMD-2540)");
+{
+  const tsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    // Sixty ticket rows, each moved through three statuses in place, as board-sync moves them.
+    const KEYS = Array.from({ length: 60 }, (_, i) => `ZS-${1000 + i}`);
+    const ids: string[] = [];
+    for (const key of KEYS) {
+      const [{ id }] = await tsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${`${key} — a ticket (label-inputs fixture)`}, ${{ source: "linear", issue: key, status: "Backlog", status_type: "backlog" }}::jsonb, content_fingerprint_of(${`${key} — a ticket (label-inputs fixture)`})) RETURNING id::text AS id`;
+      for (const [status, status_type] of [["In Progress", "started"], ["Done", "completed"]]) await tsql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type }}::jsonb WHERE id = ${id}::uuid`;
+      ids.push(id);
+    }
+    const plan = async (body: string, types: string, args: string, mode: "force_custom_plan" | "force_generic_plan") =>
+      tsql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
+        await tx.unsafe(`SET LOCAL max_parallel_workers_per_gather = 0`); // ticket_status_inputs' own setting
+        // A small table is scanned whole whatever the body; with that discouraged, only an index-able
+        // filter reaches thought_audit_thought_id_idx — 060's `$1 IS NULL OR …` under a generic plan cannot.
+        await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+        await tx.unsafe(`PREPARE label_inputs_plan(${types}) AS ${body}`);
+        // A generic plan is chosen after the custom ones the planner tries first; five warm calls get there.
+        for (let i = 0; i < 6; i++) await tx.unsafe(`EXECUTE label_inputs_plan(${args})`);
+        const rows = await tx.unsafe(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) EXECUTE label_inputs_plan(${args})`);
+        await tx.unsafe(`DEALLOCATE label_inputs_plan`);
+        return (rows as Record<string, string>[]).map((r) => r["QUERY PLAN"]).join("\n");
+      });
+    const src = async (sig: string) => String((await tsql`SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure(${sig})`)[0].prosrc);
+
+    // 060's order, as 095 redefines it: a list is read by the thought-id index, and the every-row arm never runs.
+    const order = (await src("ob1_thought_events_in_order(uuid[])")).replace(/\bp_thoughts\b/g, "$1");
+    const list = `'{${ids.slice(0, 10).join(",")}}'::uuid[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(order, "uuid[]", list, mode);
+      const seqLines = p.split("\n").filter((l) => /Seq Scan on thought_audit/.test(l));
+      assert(/(Index Scan|Index Only Scan|Bitmap Index Scan) (using|on) thought_audit_thought_id_idx/.test(p) && seqLines.every((l) => /never executed/.test(l)),
+        `${mode.replace("force_", "").replace("_plan", "")} plan, ten ids: ob1_thought_events_in_order reads them by thought_audit_thought_id_idx, and any scan of the whole log is never executed (${seqLines.map((l) => l.trim()).join(" | ") || "no seq scan"})`);
+    }
+
+    // 095's tickets matched by = ANY on each event's fields read once: no join filter pairs every event with every key.
+    const inputs = (await src("ticket_status_inputs(uuid[],text[])")).replace(/\bp_ids\b/g, "$1").replace(/\bp_issues\b/g, "$2");
+    const keys = `ARRAY[${KEYS.map((k) => `'${k}'`).join(",")}]::text[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(inputs, "uuid[], text[]", `'{${ids.slice(0, 10).join(",")}}'::uuid[], ${keys}`, mode);
+      const removed = [...p.matchAll(/Rows Removed by Join Filter: (\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+      // The first cut paired every event with every key: 180 events × 60 keys, 5,790 removed on a fresh
+      // database under the generic plan. What the shipped body removes is the brain's other ticket heads,
+      // a count of this database's tickets, not of the keys asked.
+      assert(removed < (KEYS.length * KEYS.length) / 2,
+        `${mode.replace("force_", "").replace("_plan", "")} plan, sixty tickets: ticket_status_inputs removes ${removed} rows by a join filter — not one per event per key, the generic-plan join the first cut made (1,032 keys: 5.3 s)`);
+    }
+  } catch (err) {
+    assert(false, `[43] stopped: ${(err as Error).stack}`);
+  } finally {
+    await tsql`DELETE FROM thoughts WHERE metadata->>'issue' LIKE 'ZS-%' AND content LIKE '% — a ticket (label-inputs fixture)'`;
+    await tsql.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

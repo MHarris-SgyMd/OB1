@@ -337,6 +337,8 @@ const FUNCTIONS = [
   "ob1_accept_takes(uuid, uuid)",
   "ob1_accept_lapses(uuid, uuid)",
   "list_proposal_writers(uuid[])",
+  // 095 (SMD-2540): what the stated-status label reads.
+  "ticket_status_inputs(uuid[], text[])",
 ];
 
 /**

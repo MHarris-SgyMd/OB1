@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -59,6 +59,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  TicketStatusInputs,
   PluginSql,
   UpdateProvenance,
   UpdateResult,
@@ -881,6 +882,23 @@ export class SqlStore implements ThoughtStore {
     } catch {
       return {};
     }
+  }
+
+  async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
+    const valid = idList(ids), keys = ticketList(tickets);
+    if (keys.length === 0) return normaliseTicketStatusInputs([]);
+    // Best-effort, as supersededAmong: before 095, or without the order's
+    // ob1_config grant, the label is left off and the search goes on. A row
+    // 095 does not return is skipped by the normaliser, which never throws.
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT kind, thought_id::text AS thought_id, issue, status, status_type, history
+          FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
+    } catch {
+      return null;
+    }
+    return normaliseTicketStatusInputs(rows);
   }
 
   async logSearch(row: QuerySearchLog): Promise<void> {
