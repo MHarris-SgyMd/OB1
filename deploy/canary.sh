@@ -564,8 +564,13 @@ set_canary_own() {
   local lines
   lines="$(CANARY_PORT="$PORT" env_file own-lines "$CANARY_ENV")" || { echo "could not read $CANARY_ENV through compose." >&2; exit 2; }
   [ -n "$lines" ] || return 0
-  CANARY_TMP="$(dirname "$CANARY_ENV")/.env.canary-$$-$RANDOM.local"
-  (umask 077 && set -o noclobber && cat "$CANARY_ENV" > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not copy $CANARY_ENV beside it." >&2; exit 1; }
+  # Through a symlink, to the file it names, so the link stays a link and
+  # the file it names is the one written (code review; deploy/env-file.ts's
+  # setEnvValues does the same).
+  local target
+  target="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$CANARY_ENV")"
+  CANARY_TMP="$(dirname "$target")/.env.canary-$$-$RANDOM.local"
+  (umask 077 && set -o noclobber && cat "$target" > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not copy $target beside it." >&2; exit 1; }
   [ -z "$(tail -c 1 "$CANARY_TMP")" ] || echo >> "$CANARY_TMP"
   printf '# deploy/canary.sh up, %s: the canary'"'"'s own settings\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lines" >> "$CANARY_TMP"
   if [ -n "$(CANARY_PORT="$PORT" env_file own "$CANARY_TMP" 2>&1)" ]; then
@@ -574,7 +579,7 @@ set_canary_own() {
     echo "could not write $(tr '\n' ' ' <<<"$lines")to $CANARY_ENV (compose could not read the copy, or read other values back): set them there yourself and re-run up." >&2
     exit 2
   fi
-  mv "$CANARY_TMP" "$CANARY_ENV"
+  mv "$CANARY_TMP" "$target"
   CANARY_TMP=""
   local was=""
   case "$lines" in *SERVER_PORT=*) was="${FILE_PORT_SAID:+ (its SERVER_PORT was $FILE_PORT_SAID)}" ;; esac
@@ -732,14 +737,18 @@ endpoint_of() {
 # SMD-2294 to SMD-2874, is stable's port, and not the canary's to remove.
 # OURS_PORTS, when set, is canary_ports read once (`down`).
 ours() {
-  local p ports="${OURS_PORTS:-}"
-  [ -n "$ports" ] || ports="$(canary_ports)"
+  local p ports
+  if [ -n "${OURS_PORTS+set}" ]; then ports="$OURS_PORTS"; else ports="$(canary_ports)"; fi
   for p in $ports; do
     case "$1" in "http://127.0.0.1:$p"|"http://127.0.0.1:$p/"*|"http://127.0.0.1:$p?"*|"http://localhost:$p"|"http://localhost:$p/"*|"http://localhost:$p?"*) return 0 ;; esac
   done
   return 1
 }
 
+# Every runtime call below, and every compose read of an env file, assumes the
+# runtime answers: said once here, first, rather than as a bare `ps` failure
+# under set -e or a compose read waiting out its timeout (code review).
+"$RUNTIME" ps -q > /dev/null 2>&1 || { echo "$RUNTIME does not answer (\`$RUNTIME ps\` failed): start it (podman machine start, or Docker's daemon) and re-run." >&2; exit 2; }
 # The port the canary's env file names (SMD-2874), when it names one: `up`
 # takes it when no --port is given, and `down` counts a connector there as
 # the canary's. Only from a file that holds the canary's own tier, which `up`
@@ -756,9 +765,6 @@ if [ -f "$CANARY_ENV" ]; then
   case "$FILE_PORT" in *[!0-9]*|0*) FILE_PORT="" ;; esac
   [ -z "$FILE_PORT" ] || [ "$FILE_PORT" -le 65535 ] || FILE_PORT=""
 fi
-# Every runtime call below assumes the runtime answers: said once here, rather
-# than as a bare `ps` failure under set -e (code review).
-"$RUNTIME" ps -q > /dev/null 2>&1 || { echo "$RUNTIME does not answer (\`$RUNTIME ps\` failed): start it (podman machine start, or Docker's daemon) and re-run." >&2; exit 2; }
 # Stable's port: the one stable's env file names (SERVER_PORT, else
 # compose.yaml's 8000). `up` refuses it as the canary's, and no connector at it
 # is the canary's.
@@ -829,7 +835,13 @@ if [ "$CMD" = down ]; then
       else say "connector $NAME: \`claude mcp remove --scope user $NAME\` failed — remove it by hand"
       fi ;;
     other-scope) say "connector $NAME is in $CONN_SCOPE scope, not user — left as it is (claude mcp remove -s $CONN_SCOPE $NAME)" ;;
-    foreign) say "connector $NAME points at $(shown "${CONN_URL:-no URL (a stdio entry)}"), not this canary's (a port of its proxy on loopback${SEEN_PORTS:+: $SEEN_PORTS}) — left as it is (if it is a canary proxy's, pass the --port it was stood up with)" ;;
+    foreign)
+      at="$(endpoint_of "$CONN_URL")"
+      if [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
+        say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874 — stable's URL now, left as it is: claude mcp remove --scope $CONN_SCOPE $NAME removes it"
+      else
+        say "connector $NAME points at $(shown "${CONN_URL:-no URL (a stdio entry)}"), not this canary's (a port of its proxy on loopback${SEEN_PORTS:+: $SEEN_PORTS}) — left as it is (if it is a canary proxy's, pass the --port it was stood up with)"
+      fi ;;
   esac
   if [ $VOLUMES = 0 ]; then say "canary down; $STABLE untouched"
   elif [ -n "$HAS_VOLUME" ]; then say "canary down, its database deleted; $STABLE untouched"
@@ -936,6 +948,10 @@ if [ $CONNECT = 1 ]; then
     at="$(endpoint_of "$CONN_URL")"
     if [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
       echo "(it is where the canary answered on $STABLE's origin before SMD-2874; it moves to its own port: claude mcp remove --scope $CONN_SCOPE $NAME, then this up --connect again)" >&2
+    elif [ "${at#* }" = /mcp ] && ! stable_port "${at%% *}"; then
+      # A port the canary has moved off, in a run that failed after the move
+      # (code review): no longer the canary's to replace.
+      echo "(if it is this canary's at a port it has since moved off, remove it: claude mcp remove --scope $CONN_SCOPE $NAME, then this up --connect again)" >&2
     fi
     exit 2
   fi

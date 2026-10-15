@@ -2500,7 +2500,7 @@ jobs:
           grep -F "not this canary's" /tmp/canary-down3.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a connector at stable's own /mcp" >&2; exit 1; }
           FAKE_URL='http://127.0.0.1:8010/canary/mcp?key=x' ./canary.sh down | tee /tmp/canary-down4.out
-          grep -F "not this canary's" /tmp/canary-down4.out
+          grep -F "on open-brain's origin, where the canary answered before SMD-2874 — stable's URL now, left as it is: claude mcp remove --scope user open-brain-canary removes it" /tmp/canary-down4.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a connector at /canary/mcp on stable's origin" >&2; exit 1; }
           docker volume create open-brain-canary_pgdata
           docker run -d --name ob1-volume-squat -e POSTGRES_PASSWORD=squat -e POSTGRES_DB=openbrain -v open-brain-canary_pgdata:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg16
