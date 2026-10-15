@@ -1840,10 +1840,14 @@ in it, mounted read-only, on the stack's `data` network, where Postgres is.
 docker compose --env-file ~/OB1/deploy/.env -f deploy/compose.yaml exec postgres createdb -U postgres openbrain_working
 deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postgres/openbrain_working --tier working
 # replay stable's logged searches on stable and on the canary deploy/canary.sh
-# stood up, each over HTTP with a read key, and diff the ids: each brain is a
-# connector name or an http(s):// URL (key in OB1_COMPARE_KEY, --from-key and
-# --to-key, or ?key=), as with --compare below
-bun db/tier.ts --diff --from open-brain --to open-brain-canary --since 2026-01-01
+# stood up, each over HTTP with a read key, and diff the ids. Each brain is a
+# connector name (its key is the connector's x-brain-key; canary.sh up --connect
+# registers the canary's) or an http(s):// URL; a URL's key is --from-key /
+# --to-key, else its ?key=, else OB1_COMPARE_KEY, which then goes to both
+# brains. The variable or the connector keeps a key off the command line.
+bun --no-env-file db/tier.ts --diff --from open-brain --to open-brain-canary --since 2026-01-01
+OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff \
+  --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8000/canary/mcp
 # the three-tier stack's own database network and services
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
 ```
@@ -1855,8 +1859,8 @@ beside the stack", below).
 
 A `--diff` or `--replay` replays what stable logged on both brains, so:
 - stable must run with `OB1_QUERY_LOG=on`, which is off by default;
-- the window is what `--since` names, else the most recent page of stable's
-  log (`list_logged_searches`);
+- the window is the most recent searches stable logged after `--since` (or at
+  all), at most a page of them (`list_logged_searches`, 200);
 - each brain embeds its own query, so every arm replays with no model here.
   A search both brains refuse is skipped; one that only one brain fails, the
   other answering, fails the run (exit 1 on both verbs), naming that brain;
@@ -2230,8 +2234,7 @@ stable is redeployed:
    `git describe`, unless the shell sets it.
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
-   `smoke.sh` leaves out and a `--diff` replays only with a provider
-   configured. A candidate thought is searched for by its own text, with
+   `smoke.sh` leaves out. A candidate thought is searched for by its own text, with
    every literal that search matches exactly taken out: SMD keys, dates,
    paths and identifiers, as `extract_search_needles` finds them. It must
    come back as Result 1, at 50% or more. Up to five candidates are tried,

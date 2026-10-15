@@ -738,7 +738,7 @@ async function main(): Promise<void> {
 
   const oneVerb = (n: number): void => {
     if (n !== 1) {
-      console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${n}.`);
+      console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${n}.\n${VERB_USAGE}`);
       process.exit(2);
     }
   };

@@ -128,7 +128,8 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
     // show only the part before any query string (review pass 2 — a key-safety tidy
     // in already-merged code, reachable via --a/--b too).
-    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
+    // Neither a ?key= nor a user and password in it is echoed (review pass 4: `http://u:pw@bad host/mcp`).
+    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.split("?")[0].replace(/^([a-z]+:\/\/)[^/]*@/i, "$1…@"))} is not a valid URL.`);
     // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
     // /mcp against /canary/mcp, and a host alone would label both alike.
     const at = new URL(parsed.base);
@@ -190,7 +191,10 @@ async function fetchOrThrow(ep: BrainEndpoint, url: string, init: RequestInit): 
   try {
     const headers = new Headers(init.headers);
     if (ep.basic) headers.set("authorization", `Basic ${ep.basic}`);
-    return await fetch(url, { ...init, headers, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+    // No redirect is followed: fetch keeps x-brain-key on a hop to another
+    // host (it drops only Authorization), so a redirect would hand the brain's
+    // key to wherever it points (SMD-2875 review pass 4).
+    return await fetch(url, { ...init, headers, redirect: "error", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
   } catch (e) {
     const why = e instanceof Error && e.name === "TimeoutError" ? `no reply within ${HTTP_TIMEOUT_MS} ms` : (e as Error).message;
     throw new Error(`${ep.label}: could not be reached — ${why}`);
@@ -857,7 +861,7 @@ export function renderComparison(c: Comparison): string {
     lines.push("  skipped — pass --replay with --query/--queries-file, or --from-log <brain> to source the queries from a brain's own log.");
   } else if (c.retrieval.sourceError) {
     // A --from-log source that resolved but whose log could not be read.
-    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError}; identity and freshness above still compare.`);
+    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError.replace(/\.$/, "")}; identity and freshness above still compare.`);
   } else if (c.retrieval.queries === 0) {
     // A --from-log source that yielded nothing (OB1_QUERY_LOG off, or an empty window).
     lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);

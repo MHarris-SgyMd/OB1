@@ -1003,6 +1003,20 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   refused(["--diff", "--refresh", "--from", "a", "--to", "b"], /Give exactly one verb/, "--diff with --refresh");
   refused(["--diff", "--from", "a"], /--diff needs --from and --to\./, "--diff with no --to");
   refused(["--diff", "--from", "a", "--to", "b", "--since", "yesterday"], /--since must be an ISO-8601 time/, "--diff with a malformed --since");
+  // A redirect is not followed with the key (review pass 4): a 307 elsewhere is a failed read.
+  {
+    let elsewhere = 0;
+    const sink = Bun.serve({ port: 0, fetch() { elsewhere++; return new Response("ok"); } });
+    const hop = Bun.serve({ port: 0, fetch() { return new Response(null, { status: 307, headers: { location: `http://localhost:${sink.port}/health` } }); } });
+    let threw = "";
+    try { await getBrainInfo({ label: "hop", base: `http://localhost:${hop.port}`, key: KEY }); } catch (e) { threw = (e as Error).message; }
+    finally { sink.stop(true); hop.stop(true); }
+    ok(elsewhere === 0 && /hop: could not be reached/.test(threw), `a redirect to another host is not followed with the key (${elsewhere} request(s) reached it; ${threw.slice(0, 80)})`);
+  }
+  {
+    const child = Bun.spawnSync(["bun", "--no-env-file", "tier.ts", "--diff", "--from", "http://edge:s3cret-pw@bad host/mcp", "--to", "http://127.0.0.1:1/mcp"], { cwd: import.meta.dir, env: { ...process.env, OB1_COMPARE_KEY: "k" } });
+    ok(!child.stderr.toString().includes("s3cret-pw") && /is not a valid URL/.test(child.stderr.toString()), `an invalid URL's user and password are not echoed (${child.stderr.toString().trim().slice(0, 100)})`);
+  }
   refused(["--diff", "--from", "a", "--to", "b", "--tier", "canary"], /unknown argument 6: not a flag this script has/, "--diff with --tier, a --refresh flag");
 }
 
