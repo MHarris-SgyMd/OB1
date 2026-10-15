@@ -892,11 +892,14 @@ function explainRecaptureLabel(v: Captured): string {
  * the text. A capture-only key's does not (080, SMD-2539) and is not told
  * whether the text was new, so its note says what each case got and names the
  * re-embed pass alone (review pass 2: "stored" claimed a write a 'keep'
- * re-capture never made).
+ * re-capture never made). It is also whether the provider's words are said:
+ * they name its endpoint, which a key that cannot read is not told (SMD-2888).
  */
 function explainHeadWindow(e: HeadWindow | null, recaptures = true): string {
   if (!e?.fellBack || e.refused) return "";
-  const head = `\n\nNote: the whole content could not be embedded in one call (${e.error ?? "no detail"}); the head window's vector stands in for it. `;
+  // The provider's words name its endpoint, which a key that cannot read is
+  // not told (rest/app.ts capturedFor; SMD-2888 review pass 2).
+  const head = `\n\nNote: the whole content could not be embedded in one call${recaptures ? ` (${e.error ?? "no detail"})` : ""}; the head window's vector stands in for it. `;
   return recaptures
     ? `${head}The thought is stored and searchable, and every search chunk has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
     : `${head}A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks. A re-embed pass gives a head window's vector the whole-content one once the provider answers.`;
@@ -954,6 +957,9 @@ function captureRefusal(r: Refusal): string {
 const safeCapture: Safe<Captured> = (v) => ({
   id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }),
   embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures,
+  // The call was made and the provider did not answer (SMD-2888): its word
+  // alone — not the endpoint, which a key that cannot read is not told.
+  ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}),
   // The outcome, and for a settle by a restamp whether the label is the
   // caller's — "settled" alone cannot say (review pass 1).
   ...(v.label ? { label: v.label.outcome, ...(v.label.outcome === "settled" && v.label.by === "restamp" ? { labelMine: v.label.mine } : {}) } : {}),
@@ -986,7 +992,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     // story of a row that may be keeping its vector (second review pass).
     if (!embeddings.allowed) {
       confirmation += existed === true
-        ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
+        ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had, if it had one.`
         : existed === false
           ? `\n\nNote: saved WITHOUT a vector — ${embeddings.reason}. ` +
             `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
@@ -995,6 +1001,22 @@ export function renderCapture(o: Outcome<Captured>): Reply {
             `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
             // A key that cannot read is not told which (SMD-1298); a database
             // from before 035 cannot say.
+            (reader ? `This database does not say which this was.` : `This reply does not say which.`);
+    }
+    // The call was allowed and made, and the provider did not answer
+    // (SMD-2888): saved all the same, as a refused call's capture is, with
+    // the endpoint and what happened there — to a reader. A key that cannot
+    // read is not told the provider's address (rest/app.ts capturedFor), nor
+    // whether the text was new.
+    if (v.vectorFailed) {
+      const { detail, base } = v.vectorFailed;
+      const where = reader ? `the embedding provider at ${base} was unavailable (${detail})` : `the embedding provider was unavailable`;
+      const later = `re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts)`;
+      confirmation += existed === true
+        ? `\n\nNote: no vector was made for this capture — ${where}. This text was already a thought, and it keeps the vector it had, if it had one.`
+        : existed === false
+          ? `\n\nNote: saved WITHOUT a vector — ${where}. It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: ${later}.`
+          : `\n\nNote: no vector was made for this capture — ${where}. A new thought has no vector — findable by exact text (search_thoughts_keyword) until it is embedded: ${later}; text already captured keeps the vector it had. ` +
             (reader ? `This database does not say which this was.` : `This reply does not say which.`);
     }
 
@@ -1011,8 +1033,8 @@ export function renderCapture(o: Outcome<Captured>): Reply {
           `their situating context — the call failed, or returned a blurb too long to be one. ` +
           // A capture-only key's re-capture writes no windows (080, SMD-2539),
           // and it is not told whether the text was new.
-          (reader ? `They are stored and searchable; re-capture to regenerate, or check the model at ` : `A new thought stores them so, searchable; text already captured gets none of them. Check the model at `) +
-          `${chat.base}.`
+          // The endpoint to a reader only (SMD-2888 review pass 2).
+          (reader ? `They are stored and searchable; re-capture to regenerate, or check the model at ${chat.base}.` : `A new thought stores them so, searchable; text already captured gets none of them. The operator can check the chat model.`)
         // The blurbs are chat calls, and the gate refused the chat endpoint
         // (SMD-1903): not a model to check, and the reason is the one the
         // tagging note below carries.
@@ -1065,6 +1087,18 @@ export function renderCapture(o: Outcome<Captured>): Reply {
           // `existed` unsaid: a key that cannot read, whose re-capture merges
           // nothing (080, SMD-2539), or a database before 035, which merges.
           : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags${reader ? ", with the refusal marker merged in" : ""}.`;
+    } else if (typeof meta.metadata_extraction_failed === "string" && meta.topics === undefined && meta.type === undefined) {
+      // The marker alone: the chat provider did not answer (metadataUnavailable,
+      // SMD-2888), so no tags were made — none, not placeholders, so a
+      // re-capture during the outage leaves an existing thought's tags as they
+      // were. The endpoint to a reader only, as the vector's note.
+      const word = metaText(meta.metadata_extraction_failed, TYPE_MAX);
+      const why = reader ? `the chat provider at ${chat.base} was unavailable (${word})` : `the chat provider was unavailable (${word})`;
+      confirmation += existed === true
+        ? `\n\nNote: no tags were extracted for this capture — ${why}. The existing thought keeps its tags; its metadata now carries the marker.`
+        : existed === false
+          ? `\n\nNote: no topics, people or type were extracted — ${why}.`
+          : `\n\nNote: no tags were extracted for this capture — ${why}. A new thought has no topics or type; text already captured keeps its tags${reader ? ", with the marker merged in" : ""}.`;
     } else if (typeof meta.metadata_extraction_failed === "string") {
       confirmation +=
         // A key that cannot read is not told whether the text was new, and
@@ -1075,7 +1109,9 @@ export function renderCapture(o: Outcome<Captured>): Reply {
         // The marker is the server's reason code (extractMetadata keeps a
         // model's own out of the tags), on the one line all the same (SMD-2510).
         `(${metaText(meta.metadata_extraction_failed, TYPE_MAX)}) — ${reader ? "topics and people are placeholders" : "a new thought's topics and people are placeholders; text already captured keeps its tags"}. ` +
-        `Check the chat endpoint (${chat.base}), its credential, and the server logs.`;
+        // The endpoint to a reader only: a key that cannot read is not told
+        // the provider's address (rest/app.ts capturedFor; SMD-2888 review pass 1).
+        (reader ? `Check the chat endpoint (${chat.base}), its credential, and the server logs.` : `The operator can check the chat endpoint, its credential, and the server logs.`);
     }
     return confirmation;
   }, captureRefusal, safeCapture);
