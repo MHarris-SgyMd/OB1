@@ -650,7 +650,7 @@ export class PostgrestStore implements ThoughtStore {
     try {
       const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });
       if (error) return null;
-      rows = (data ?? []) as Record<string, unknown>[];
+      rows = data as Record<string, unknown>[]; // the normaliser reads anything that is not a list as no rows
     } catch {
       return null;
     }

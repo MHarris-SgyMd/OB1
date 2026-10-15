@@ -1173,10 +1173,13 @@ console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits wi
   const odd = normaliseTicketStatusInputs([
     { kind: "event", issue: "SMD-1" }, { kind: "head", issue: "SMD-2", status: "Done", status_type: "completed" }, { kind: "head", issue: "SMD-3", status: null, status_type: "completed" },
     { kind: "history", issue: "SMD-2", history: [{ at: 1, status: "Done", status_type: "completed" }] }, { kind: "history", issue: "SMD-4", history: [{ at: 1, status: "Done", status_type: "completed" }, { at: "x", status: "Done", status_type: "completed" }] },
-    { kind: "history", issue: "SMD-5", history: {} }, { kind: "history", issue: "SMD-6", history: "not json" }, { kind: "lifecycle", thought_id: null }]);
+    { kind: "history", issue: "SMD-5", history: {} }, { kind: "history", issue: "SMD-6", history: "not json" }, { kind: "lifecycle", thought_id: null },
+    { kind: "history", issue: "SMD-7", history: [{ at: Infinity, status: "Done", status_type: "completed" }] }, { kind: "history", issue: "SMD-8", history: '[{"at": -1e400, "status": "Done", "status_type": "completed"}]' }, null as never]);
+  const notList = [normaliseTicketStatusInputs({ kind: "head", issue: "SMD-1", status: "Done", status_type: "completed" }), normaliseTicketStatusInputs(5), normaliseTicketStatusInputs(null)];
   assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
-      && JSON.stringify([...odd.heads.keys()]) === JSON.stringify(["SMD-2"]) && JSON.stringify([...odd.history.keys()]) === JSON.stringify(["SMD-2"]) && odd.lifecycle.size === 0,
-    "the normaliser keeps a history in the order 093 gives it and parses one sent as text; it skips a kind 093 does not return, and leaves out a head with no status and a history it cannot read whole");
+      && JSON.stringify([...odd.heads.keys()]) === JSON.stringify(["SMD-2"]) && JSON.stringify([...odd.history.keys()]) === JSON.stringify(["SMD-2"]) && odd.lifecycle.size === 0
+      && notList.every((n) => n.heads.size === 0 && n.history.size === 0 && n.lifecycle.size === 0),
+    "the normaliser keeps a history in the order 093 gives it and parses one sent as text; it skips a kind 093 does not return and a row that is not an object, leaves out a head with no status and a history it cannot read whole (an infinite at included), and reads an answer that is not a list as no rows");
   // A later function's row is skipped through the store: the call answers what it can read, never throws, never reads as a brain without 093.
   await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
     RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
@@ -1186,6 +1189,13 @@ console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits wi
   try { later = await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { later = "threw"; }
   assert(later !== "threw" && later !== null && later.heads.get("SMD-17001")?.type === "completed" && later.history.size === 0,
     "a later function's kind is skipped through the store: the head it also returns is read, nothing throws, and it is not read as a brain without 093");
+  // Over PostgREST a later function answering one object, not a row set, is read as no rows — never a throw.
+  await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
+  await raw.unsafe(`CREATE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[]) RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT '{"kind": "head", "issue": "SMD-17001"}'::jsonb $$`);
+  let single: Awaited<ReturnType<typeof store.ticketStatusInputs>> | "threw" = "threw";
+  try { single = await store.ticketStatusInputs([ticket.id], ["SMD-17001"]); } catch { single = "threw"; }
+  assert(single !== "threw" && (single === null || (single.heads.size === 0 && single.history.size === 0)),
+    `a later function answering one object over PostgREST is read as no rows, not a throw (${single === "threw" ? "threw" : JSON.stringify(single && { heads: single.heads.size })})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 093: null — the label is left off, the search goes on");
   await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("093") });

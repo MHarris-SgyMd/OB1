@@ -779,10 +779,14 @@ export function ticketList(tickets: string[]): string[] {
  * never a search (the third review pass; the label is an enhancement, as
  * supersededAmong's).
  */
-export function normaliseTicketStatusInputs(rows: Record<string, unknown>[]): TicketStatusInputs {
+export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
   const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
-  for (const r of rows) {
+  // A later function may answer one object, a scalar or a list holding nulls
+  // over PostgREST (the fourth review pass): no list is no rows, no object no row.
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as Record<string, unknown>[]) {
+    if (!r || typeof r !== "object") continue;
     const kind = r.kind, issue = text(r.issue);
     if (kind === "lifecycle") { const id = text(r.thought_id); if (id) out.lifecycle.add(id.toLowerCase()); }
     else if (kind === "head") {

@@ -1533,10 +1533,13 @@ console.log("\n[17] ticketStatusInputs: migration 093's one call — the hits wi
   const odd = normaliseTicketStatusInputs([
     { kind: "event", issue: "SMD-1" }, { kind: "head", issue: "SMD-2", status: "Done", status_type: "completed" }, { kind: "head", issue: "SMD-3", status: null, status_type: "completed" },
     { kind: "history", issue: "SMD-2", history: [{ at: 1, status: "Done", status_type: "completed" }] }, { kind: "history", issue: "SMD-4", history: [{ at: 1, status: "Done", status_type: "completed" }, { at: "x", status: "Done", status_type: "completed" }] },
-    { kind: "history", issue: "SMD-5", history: {} }, { kind: "history", issue: "SMD-6", history: "not json" }, { kind: "lifecycle", thought_id: null }]);
+    { kind: "history", issue: "SMD-5", history: {} }, { kind: "history", issue: "SMD-6", history: "not json" }, { kind: "lifecycle", thought_id: null },
+    { kind: "history", issue: "SMD-7", history: [{ at: Infinity, status: "Done", status_type: "completed" }] }, { kind: "history", issue: "SMD-8", history: '[{"at": -1e400, "status": "Done", "status_type": "completed"}]' }, null as never]);
+  const notList = [normaliseTicketStatusInputs({ kind: "head", issue: "SMD-1", status: "Done", status_type: "completed" }), normaliseTicketStatusInputs(5), normaliseTicketStatusInputs(null)];
   assert(JSON.stringify(asText.history.get("SMD-1")?.map((c) => c.name)) === JSON.stringify(["Done", "Backlog"])
-      && JSON.stringify([...odd.heads.keys()]) === JSON.stringify(["SMD-2"]) && JSON.stringify([...odd.history.keys()]) === JSON.stringify(["SMD-2"]) && odd.lifecycle.size === 0,
-    "the normaliser keeps a history in the order 093 gives it and parses one sent as text; it skips a kind 093 does not return, and leaves out a head with no status and a history it cannot read whole");
+      && JSON.stringify([...odd.heads.keys()]) === JSON.stringify(["SMD-2"]) && JSON.stringify([...odd.history.keys()]) === JSON.stringify(["SMD-2"]) && odd.lifecycle.size === 0
+      && notList.every((n) => n.heads.size === 0 && n.history.size === 0 && n.lifecycle.size === 0),
+    "the normaliser keeps a history in the order 093 gives it and parses one sent as text; it skips a kind 093 does not return and a row that is not an object, leaves out a head with no status and a history it cannot read whole (an infinite at included), and reads an answer that is not a list as no rows");
   // A later function's row is skipped through the store: the call answers what it can read, never throws, never reads as a brain without 093.
   await raw.unsafe(`CREATE OR REPLACE FUNCTION ticket_status_inputs(p_ids uuid[], p_issues text[])
     RETURNS TABLE (kind text, thought_id uuid, issue text, status text, status_type text, history jsonb) LANGUAGE sql STABLE
