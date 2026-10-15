@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -52,6 +52,7 @@ import type {
   ReleaseLeasesResult,
   DryRunClaimResult,
   ThoughtIdPage,
+  VectorlessRow,
   ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
@@ -352,6 +353,19 @@ export class SqlStore implements ThoughtStore {
       digest = (agg.digest as string | null) ?? null;
     }
     return { ids, total, digest, cursor };
+  }
+
+  async listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]> {
+    // A sequential scan: no index reads `embedding IS NULL`, and at 2,000
+    // thoughts the page costs under a millisecond (SMD-2889, measured).
+    const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
+    const rows = await this.sql`
+      SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata
+      FROM thoughts
+      WHERE embedding IS NULL AND (${after}::uuid IS NULL OR id > ${after}::uuid)
+      ORDER BY id ASC
+      LIMIT ${opts.limit}::int`;
+    return rows.map((r: Record<string, unknown>) => normaliseVectorlessRow(r));
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {

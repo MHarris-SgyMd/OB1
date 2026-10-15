@@ -100,6 +100,13 @@ export interface DatabaseFacts {
   /** pg_database_size(current_database()), in bytes; null when not read. */
   databaseBytes: number | null;
   /**
+   * Thoughts with no vector (`embedding IS NULL`) — saved while the provider
+   * did not answer, or refused by the egress gate — which the MCP server's
+   * vector mender embeds (SMD-2889). Null when not read (`stats: false`, or
+   * `unread` says why).
+   */
+  vectorless: number | null;
+  /**
    * The board-sync watermark (SMD-2261): the newest Linear `updatedAt` any
    * thought reflects — max metadata.linear_updated_at, which sync-linear.ts
    * writes — as an ISO instant in UTC. Null when no thought carries a usable one
@@ -893,6 +900,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       highestMigration: null,
       counts: stats ? Object.fromEntries(COUNTED_TABLES.map((t) => [t, null])) as Record<CountedTable, number | null> : null,
       databaseBytes: null,
+      vectorless: null,
       boardSync: null,
       workers: null,
       proposals: null,
@@ -945,6 +953,8 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       ...(stats
         ? [
             ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
+            // A sequential scan, as listVectorless's page is: no index reads `embedding IS NULL` (SMD-2889).
+            { field: "vectorless", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.vectorless = Number((await sp`SELECT count(*)::float8 AS n FROM thoughts WHERE embedding IS NULL`)[0].n); }, clear: () => { facts.vectorless = null; } },
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
             { field: "relations", table: "thought_facets" as const, read: async (sp: SqlTag) => { facts.relations = relationsValue((await RELATIONS_SQL(sp))[0]); }, clear: () => { facts.relations = null; } },
@@ -1257,6 +1267,14 @@ function proposalsLine(db: DatabaseSummary): string {
   return `${p.pending} pending (the oldest judged ${p.oldestPendingS === null ? "?" : `${ago(p.oldestPendingS)} ago`}${boardTail(p.boardPairs, db.unread["proposals.boardPairs"])})${stale}`;
 }
 
+/** The Vectors row: how many thoughts wait for a vector, none, or why not read (SMD-2889). */
+export function vectorsLine(db: Pick<DatabaseSummary, "vectorless" | "unread">): string {
+  const n = db.vectorless;
+  if (n === null) return "vectorless" in db.unread ? `? (thoughts ${unreadWords(db.unread.vectorless)})` : "no table";
+  if (n === 0) return "every thought has one";
+  return `${n.toLocaleString("en-US")} thought${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} for a vector — the MCP server's vector mender embeds ${n === 1 ? "it" : "them"} once the provider answers and the egress gate allows the call`;
+}
+
 /** The Relations row: the standing judged relations by word, none, or why they were not read (SMD-2680). */
 function relationsLine(db: DatabaseSummary): string {
   const r = db.relations;
@@ -1342,6 +1360,7 @@ export function renderBrainInfo(info: BrainInfo): string {
   if (counts) {
     lines.push(
       row("Rows", `${num("thoughts")} thoughts · ${num("thought_audit")} audit events · ${num("thought_chunks")} chunks · ${num("ob1_entities")} entities`),
+      row("Vectors", vectorsLine(db)),
       row("Database size", db.databaseBytes === null ? "?" : formatBytes(db.databaseBytes)),
       row("Board sync", db.boardSync ?? ("boardSync" in db.unread ? "?" : "none — no thought carries a usable Linear watermark")),
       row("Relations", relationsLine(db)),

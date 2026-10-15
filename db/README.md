@@ -1827,6 +1827,13 @@ with `OB1_EMBEDDING_MODEL`'s spelling — and which are not. The retired
 thought, then `upsert_thought` over a PostgREST this stack does not run
 (SMD-2138).
 
+A thought saved with no vector at all — the provider did not answer the
+capture's call, or the egress gate refused it — needs no run of its own: the
+MCP server's vector mender embeds it once the provider answers and the gate
+allows, a few rows a tick (`server-portable/README.md`, "The vector mender",
+SMD-2889). `reembed.ts` is for a model change, a whole brain, or a brain whose
+mender is off (`OB1_VECTOR_MEND_INTERVAL=off`).
+
 ### `reembed.ts`
 
 ```bash

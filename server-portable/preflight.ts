@@ -790,7 +790,7 @@ if (!egress.problems.length) {
   }
 }
 /** What a refused call costs, per endpoint, for the rows below. */
-const EMB_REFUSED = "captures land without a vector, findable by exact text only, until a re-embed pass against an endpoint the gate allows";
+const EMB_REFUSED = "captures land without a vector, findable by exact text only, until the gate allows the call — the MCP server's vector mender then embeds them (SMD-2889)";
 const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what

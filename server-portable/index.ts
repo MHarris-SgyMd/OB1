@@ -5,7 +5,7 @@ import { authenticateRequest, CLIENT_SCOPES, presentedKeys, routable, type Princ
 import { FORK_VERSION } from "./version.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { atEndpoint, subscribe as subscribeJob, markRunningLost } from "./jobs.ts";
-import { createCore, runOperation, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
+import { createCore, mendIntervalFrom, runOperation, SPECS, type Input, type Outcome, type RefusalCode } from "./core/index.ts";
 import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
@@ -883,6 +883,14 @@ if (SERVES_ON_BUN) {
   void startTelemetry(SERVER_NAME);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
+  // The vector mender (SMD-2889): rows saved without a vector get one once the
+  // provider answers and the gate allows. This server only — the REST core
+  // (api.ts) shares its database and starts none, so a stack runs one. Not a
+  // tracked call: a stop never waits on a re-embed, and a row it cuts short
+  // stays vectorless for the next start.
+  const mend = mendIntervalFrom(process.env.OB1_VECTOR_MEND_INTERVAL);
+  if (mend.problem) console.warn(mend.problem);
+  const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
     server: () => bunServer,
@@ -892,7 +900,11 @@ if (SERVES_ON_BUN) {
     flush: flushTelemetry,
     // A record the runtime no longer counts but that is still open — a mirror whose client left while it waits on the
     // registry — ends before that flush, on every path, though no cut came: a drained stop runs no onCut (PR 2c review pass 3).
-    endOpen: cutOpenRequests,
+    // The mender stops beside it, before the pool closes: no further row starts.
+    endOpen: () => {
+      mender?.stop();
+      cutOpenRequests();
+    },
     onCut: () => {
       cutByStop = true;
       // Every request still open gets its line — `cut`, or `abandoned` for a

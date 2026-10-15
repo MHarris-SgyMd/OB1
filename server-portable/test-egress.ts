@@ -307,7 +307,7 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   assert(!cap.isError && /Captured as thought — id [0-9a-f-]{36}/.test(cap.text), `the capture succeeds, typed as nothing (${cap.text.split("\n")[0]})`);
   assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea, source:claude-code\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
          "…the reply says the vector is missing, names the rule, the terms and the host");
-  assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /re-embed pass/.test(cap.text), "…and the two ways it is still reachable");
+  assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /once the egress policy allows the call: the server then embeds it by itself/.test(cap.text), "…how it is reachable meanwhile, and how it gets its vector");
   assert(/Note: no topics, people or type were extracted — OB1_EGRESS_POLICY=deny/.test(cap.text), "…and that no tags were extracted, under the same rule");
   assert(/^Captured as thought — id [0-9a-f-]{36}$/.test(cap.text.split("\n")[0]), "the first line carries no type and no topics — nothing was extracted, and nothing is dressed up as if it were");
   assert(seen.length === before, `zero requests reached the stub (${seen.length - before})`);
@@ -454,6 +454,78 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
   const [after] = await sql`SELECT embedding IS NOT NULL AS has, embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
   assert(!again.isError && again.text.includes(id!) && !/WITHOUT a vector|was unavailable/.test(again.text) && after.has === true && after.embedding_model === EMB_MODEL,
     `the provider back, the same text sent again lands on the same id with its vector and label (${JSON.stringify(after)})`);
+}
+
+console.log("\n[10] The ticket's Verify, through the server's own process (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step; semantic search finds it, and keyed /health counts none waiting");
+{
+  // A port nothing answers on yet: the provider down. The server's entry is
+  // its own process, as the container runs it, so its mender is the one boot
+  // starts (index.ts under import.meta.main), here every second.
+  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const providerPort = free.port;
+  free.stop(true);
+  const free2 = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const serverPort = free2.port;
+  free2.stop(true);
+  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+    cwd: import.meta.dir,
+    env: {
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(serverPort), OB1_STORE: "sql", DATABASE_URL: URL_,
+      OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
+      MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "1",
+    },
+    stdout: "pipe", stderr: "pipe",
+  });
+  const at = `http://127.0.0.1:${serverPort}`;
+  const rpc = async (name: string, args: Record<string, unknown>) => {
+    const r = await fetch(at, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
+  };
+  let provider: ReturnType<typeof Bun.serve> | undefined;
+  let mended = false;
+  try {
+    let up = false;
+    for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
+      up = await fetch(`${at}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      if (!up) await Bun.sleep(100);
+    }
+    assert(up, "the server's own process answers /health");
+    const content = "mend-verify-marker: a note captured while the provider is down, mended without a hand step";
+    const cap = await rpc("capture_thought", { content });
+    const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
+    assert(!cap.isError && !!id && /saved WITHOUT a vector/.test(cap.text) && /the server embeds it by itself once the provider answers/.test(cap.text),
+      `the provider down: saved without a vector, and the reply says the server will embed it (${cap.text.replace(/\n+/g, " / ").slice(0, 200)})`);
+    const health = async () => (await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).json() as { database?: { vectorless?: number } }).database?.vectorless;
+    // [6]'s refused rows wait too: this server declares its provider local, so the gate refuses none of them.
+    const waiting = (await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`)[0].n;
+    assert(waiting >= 1 && (await health()) === waiting, `keyed /health counts the rows that wait, this one among them (${waiting})`);
+    // Two of the mender's ticks with the provider still down: nothing changes.
+    await Bun.sleep(7_000);
+    const [still] = await sql`SELECT embedding IS NULL AS bare FROM thoughts WHERE id = ${id!}::uuid`;
+    assert(still.bare === true, "the provider still down after the first ticks: the row waits");
+    // The provider back on its port; no hand step.
+    provider = Bun.serve({ port: providerPort, ...stubOpts });
+    for (let deadline = Date.now() + 15_000; !mended && Date.now() < deadline; ) {
+      mended = (await sql`SELECT embedding IS NOT NULL AS has FROM thoughts WHERE id = ${id!}::uuid`)[0].has === true;
+      if (!mended) await Bun.sleep(200);
+    }
+    const [row] = await sql`SELECT embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
+    assert(mended && row.embedding_model === EMB_MODEL, `the provider back: within the interval the row has its vector and label (${JSON.stringify(row)})`);
+    const found = await rpc("search_thoughts", { query: content, limit: 5 });
+    assert(!found.isError && found.text.includes(id!), "semantic search finds it");
+    assert((await health()) === 0, "keyed /health: none wait");
+  } finally {
+    child.kill();
+    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    await child.exited;
+    clearTimeout(hung);
+    provider?.stop(true);
+    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
+    assert(/vector mender: the embedding provider is unavailable/.test(said) && /vector mender: \d+ thoughts? given a vector/.test(said), `the server said the outage once and the mend (${said.split("\n").filter((l) => /vector mender/.test(l)).join(" / ")})`);
+    if (!mended) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));
+  }
 }
 
 await sql.close();

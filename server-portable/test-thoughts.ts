@@ -19,6 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture } from "./core/writes.ts";
+import { MEND_BATCH, MENDER_ACTOR, mendIntervalFrom, mendOnce, startVectorMender, type MendState } from "./core/mend.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
@@ -1025,6 +1026,162 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   } finally {
     plain.stop(true);
   }
+}
+
+console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; an outage stops the tick on its row; the gate is asked as the capture and as the row; a refused or failing row never holds back the rows behind it; failures back the loop off and a mend resets it");
+{
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  // A provider that answers an embedding of the configured width, or a 400.
+  let mode: "ok" | "400" = "ok";
+  let calls = 0;
+  const provider = Bun.serve({ port: 0, async fetch(req) {
+    calls++;
+    if (mode === "400") return new Response(JSON.stringify({ error: "bad input" }), { status: 400 });
+    const body = await req.json() as { input: string | string[]; model: string };
+    const n = Array.isArray(body.input) ? body.input.length : 1;
+    return Response.json({ model: body.model, data: Array.from({ length: n }, () => ({ embedding: [0.1, 0.2, 0.3, 0.4] })) });
+  } });
+  type Row = { id: string; content: string; updatedAt: string; metadata: Record<string, unknown> | null; vector?: boolean };
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const row = (n: number, actor: string | null, extra: Record<string, unknown> = {}): Row => ({ id: id(n), content: `vectorless thought ${n}`, updatedAt: `2026-10-15T00:00:0${n % 10}.000Z`, metadata: { ...(actor ? { actor_name: actor } : {}), ...extra } });
+  const harness = (rows: Row[], env: Record<string, string>, answer: (args: Record<string, any>) => Record<string, unknown> = () => ({ ok: true })) => {
+    const writes: Record<string, any>[] = [];
+    const store = {
+      listVectorless: async ({ limit, after }: { limit: number; after: string | null }) =>
+        rows.filter((r) => !r.vector && (after === null || r.id > after)).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, limit).map(({ vector: _, ...r }) => r),
+      updateThought: async (args: Record<string, any>) => {
+        writes.push(args);
+        const out = answer(args);
+        if (out.ok) { const r = rows.find((x) => x.id === args.id); if (r) r.vector = true; }
+        return out;
+      },
+    };
+    const ctx = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...env }), store: async () => store as never, door: "test-door" });
+    return { ctx, writes };
+  };
+  const at = (port: number | undefined) => `http://127.0.0.1:${port}/v1`;
+  try {
+    // Mended: through update_thought with the text it read, the stamp it read,
+    // the mender as actor and the model beside the vector — no patch, so the
+    // row's own stamp (who wrote the text) stands.
+    {
+      const rows = [row(1, "writer"), row(2, "hook")];
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+      const state: MendState = { cursor: null };
+      const t = await mendOnce(ctx, state);
+      assert(t.mended === 2 && t.failed === 0 && t.down === null && writes.length === 2, `two vectorless rows, two writes (${JSON.stringify(t)})`);
+      const w = writes[0];
+      assert(w.id === id(1) && w.content === "vectorless thought 1" && w.ifUnchangedSince === rows[0].updatedAt && w.embedding?.length === 4 && typeof w.embeddingModel === "string" && w.metadataPatch === undefined,
+        `the write: the text and the stamp it read, a vector, its model, no patch (${JSON.stringify({ ...w, embedding: w.embedding?.length })})`);
+      assert(w.actor?.name === MENDER_ACTOR && w.actor?.via === "test-door", `the actor is the mender, through this server's door (${JSON.stringify(w.actor)})`);
+      assert(state.cursor === null, "a short page ends the sweep: the cursor starts over");
+      const again = await mendOnce(ctx, state);
+      assert(again.mended === 0 && writes.length === 2, "a row that has its vector is not read again");
+    }
+    // An outage stops the tick on its row: one call a tick until the provider
+    // answers, and the cursor stays where the row is — past the refused row
+    // before it, not past the row that met the outage.
+    {
+      const rows = [row(1, "other"), row(2, "writer"), row(3, "writer")];
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(closedNow()), OB1_EGRESS_ALLOW: "actor:writer" });
+      const state: MendState = { cursor: null };
+      const t = await mendOnce(ctx, state);
+      assert(t.down?.reason === "provider_unreachable" && t.refused === 1 && t.mended === 0 && writes.length === 0, `an outage: the tick stops, nothing written (${JSON.stringify(t)})`);
+      assert(state.cursor === id(1), `the cursor stays on the outage's row, past the refused one before it (${state.cursor})`);
+    }
+    // The keyset walk: a row the gate refuses costs no call and does not hold
+    // back the row behind it; a non-local endpoint under deny with an actor term.
+    {
+      const rows = [row(1, "other"), row(2, "writer")];
+      const before = calls;
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t = await mendOnce(ctx, { cursor: null });
+      assert(t.refused === 1 && t.mended === 1 && writes.length === 1 && writes[0].id === id(2) && calls - before === 1, `the refused row: no call; the row behind it mended (${JSON.stringify(t)}, ${calls - before} call(s))`);
+    }
+    // Asked as the capture AND as the row. A deny term over the row's source
+    // keeps it home though the capture's subject passes (as db/reembed.ts's
+    // gate would); a source the caller claimed does not open the gate though
+    // the row's subject passes (SMD-1941); an actor term opens both.
+    {
+      const denied = harness([row(1, "writer", { source: "private-notes" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:private-notes" });
+      const t1 = await mendOnce(denied.ctx, { cursor: null });
+      assert(t1.refused === 1 && denied.writes.length === 0, `allow mode, a source: deny term: the row stays home (${JSON.stringify(t1)})`);
+      const claimed = harness([row(1, "other", { source: "linear" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "source:linear" });
+      const t2 = await mendOnce(claimed.ctx, { cursor: null });
+      assert(t2.refused === 1 && claimed.writes.length === 0, `deny mode, a source: allow term alone: a claimed source does not open the gate (${JSON.stringify(t2)})`);
+      const opened = harness([row(1, "writer", { source: "linear" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t3 = await mendOnce(opened.ctx, { cursor: null });
+      assert(t3.mended === 1 && opened.writes.length === 1, `deny mode, the writer's actor term: sent (${JSON.stringify(t3)})`);
+    }
+    // A failure that is no outage — a 400 — skips the row and moves on; a
+    // write that lost a race is counted apart, not as a failure.
+    {
+      mode = "400";
+      const rows = [row(1, "writer"), row(2, "writer")];
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+      const t = await mendOnce(ctx, { cursor: null });
+      assert(t.failed === 2 && t.down === null && writes.length === 0 && /400/.test(t.firstError ?? ""), `a 400: each row failed and passed, none written (${JSON.stringify(t)})`);
+      mode = "ok";
+      const raced = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" }, () => ({ ok: false, error: "STALE_READ" }));
+      const t2 = await mendOnce(raced.ctx, { cursor: null });
+      assert(t2.raced === 1 && t2.failed === 0 && t2.mended === 0, `STALE_READ: raced, for the next sweep to read afresh (${JSON.stringify(t2)})`);
+    }
+    // A full page keeps the cursor on its last row; the next tick reads on.
+    {
+      const rows = Array.from({ length: MEND_BATCH + 2 }, (_, i) => row(i + 1, "writer"));
+      const { ctx } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+      const state: MendState = { cursor: null };
+      const t1 = await mendOnce(ctx, state);
+      assert(t1.mended === MEND_BATCH && state.cursor === id(MEND_BATCH), `a full page: the cursor on its last row (${state.cursor})`);
+      const t2 = await mendOnce(ctx, state);
+      assert(t2.mended === 2 && state.cursor === null, `the next tick reads on, and the short page ends the sweep (${JSON.stringify(t2)})`);
+    }
+    // A stop starts no further call.
+    {
+      const before = calls;
+      const { ctx, writes } = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+      const t = await mendOnce(ctx, { cursor: null }, () => true);
+      assert(t.mended === 0 && writes.length === 0 && calls === before, "stopped: no call, no write");
+    }
+    // The loop: a provider that refuses every row backs it off — far fewer
+    // ticks than the interval allows — and says so once; a mend resets the
+    // wait to the interval.
+    {
+      mode = "400";
+      const rows = [row(1, "writer")];
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+      const said: string[] = [];
+      const loop = startVectorMender(ctx, { intervalS: 0.04, firstDelayMs: 0, log: (l) => said.push(l) });
+      try {
+        await sleep(1000);
+        const failing = loop.ticks();
+        // Bounds wide for a loaded runner: 40, 80, 160, 320 ms waits are 4–5 ticks; no backoff is 25.
+        assert(failing >= 2 && failing <= 8, `a refusing provider backs the loop off: ${failing} ticks in a second at a 40 ms interval (25 without)`);
+        assert(said.filter((l) => /left without a vector/.test(l)).length === 1, `said once, not per tick (${said.length} line(s))`);
+        mode = "ok";
+        for (let i = 0; i < 60 && writes.length === 0; i++) await sleep(50);
+        assert(writes.length === 1 && said.some((l) => /1 thought given a vector/.test(l)), `the provider answers: the row mended, and said (${said.join(" / ")})`);
+        const atMend = loop.ticks();
+        await sleep(400);
+        assert(loop.ticks() - atMend >= 3, `a mend resets the wait to the interval: ${loop.ticks() - atMend} ticks in 400 ms`);
+      } finally {
+        loop.stop();
+      }
+      const stoppedAt = loop.ticks();
+      await sleep(150);
+      assert(loop.ticks() === stoppedAt, "stopped: no further tick");
+    }
+  } finally {
+    provider.stop(true);
+  }
+  // OB1_VECTOR_MEND_INTERVAL: whole seconds, 0 or off for none; anything
+  // else is the default, said.
+  const m = (raw: string | undefined) => mendIntervalFrom(raw);
+  assert(m(undefined).intervalS === 60 && m(" ").intervalS === 60 && m(undefined).problem === null, "unset: every 60 s");
+  assert(m("0").intervalS === 0 && m(" OFF ").intervalS === 0 && m("off").problem === null, "0 or off: no mender");
+  assert(m("30").intervalS === 30 && m("30").problem === null, "30: every 30 s");
+  assert(m("1.5").intervalS === 60 && /OB1_VECTOR_MEND_INTERVAL="1.5"/.test(m("1.5").problem ?? "") && m("-1").intervalS === 60 && m("fast").problem !== null, "a value that does not read: the default, said");
 }
 
 report();

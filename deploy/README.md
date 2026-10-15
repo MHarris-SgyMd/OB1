@@ -1686,8 +1686,9 @@ Once newer thoughts have been judged, three cases miss their pairs however
 the passes are run (`db/README.md`, "Consolidation: proposing which thoughts
 supersede which"):
 - an older thought whose extraction failed (`--retry-failed` extracts it);
-- an older thought whose embedding failed (`db/reembed.ts` embeds it; no
-  service runs it);
+- an older thought whose embedding failed (the MCP server's vector mender
+  embeds it once the provider answers and the gate allows, SMD-2889;
+  `db/reembed.ts` does a whole brain);
 - an import dated older than thoughts already judged.
 
 **Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged

@@ -431,6 +431,31 @@ export type ThoughtIdPage = {
 };
 
 /**
+ * A thought saved without a vector — the provider did not answer, or the
+ * egress gate refused the call — as the vector mender reads it (SMD-2889).
+ * `updatedAt` is `COALESCE(updated_at, created_at)`, the stamp
+ * update_thought's guard compares against, so the mender's write never lands
+ * over an edit made since this read.
+ */
+export type VectorlessRow = {
+  id: string;
+  content: string;
+  updatedAt: string;
+  metadata: Record<string, unknown> | null;
+};
+
+/** One `listVectorless` row from either store: `updated_at` is the COALESCE the query selects. */
+export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRow {
+  const metadata = r.metadata;
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    updatedAt: isoTimestamp(r.updated_at),
+    metadata: metadata !== null && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : null,
+  };
+}
+
+/**
  * One logged search from `query_log` (SMD-2245), for a log-sourced cross-brain
  * replay. Telemetry, not thought content: the query text, which arm ran it, the
  * tier that logged it, when, and the search's own arguments. `result_ids` (the
@@ -1315,6 +1340,15 @@ export interface ThoughtStore {
   listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage>;
 
   /**
+   * A page of the thoughts with no vector (`embedding IS NULL`), in id order
+   * after the keyset cursor `after` (exclusive; null for the first page), for
+   * the vector mender (SMD-2889). Id order, as listThoughtIds pages: a row the
+   * mender skips — refused by the gate, or failed — never holds back the rows
+   * behind it.
+   */
+  listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]>;
+
+  /**
    * A window of the brain's logged searches (`query_log`), most recent first, for a
    * log-sourced cross-brain replay (SMD-2245). `since` bounds the window; `limit`
    * caps it (one extra row is read to set `truncated`). Empty when the log is off
@@ -1412,11 +1446,11 @@ export interface ThoughtStore {
     actor?: Actor;
     payload: { metadata: Record<string, unknown> };
     /**
-     * NULL when the egress gate refused the embedding call (SMD-1903): the row
-     * lands with its text and fingerprint and no vector — findable by exact
-     * text, absent from semantic search until a re-embed pass against an
-     * endpoint the gate allows. The only path that stores a row without a
-     * vector on purpose; a failed call still fails the capture.
+     * NULL when the egress gate refused the embedding call (SMD-1903) or the
+     * provider did not answer it (SMD-2888): the row lands with its text and
+     * fingerprint and no vector — findable by exact text, absent from semantic
+     * search until the MCP server's vector mender embeds it (SMD-2889). Any
+     * other failed call still fails the capture.
      */
     embedding: number[] | null;
     /**
@@ -1782,7 +1816,7 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
-  listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  listThoughtIds: true, listVectorless: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,

@@ -995,10 +995,10 @@ export function renderCapture(o: Outcome<Captured>): Reply {
         ? `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. This text was already a thought, and it keeps the vector it had, if it had one.`
         : existed === false
           ? `\n\nNote: saved WITHOUT a vector — ${embeddings.reason}. ` +
-            `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
-            `(db/reembed.ts) against an endpoint the gate allows.`
+            `It is findable by exact text (search_thoughts_keyword), and joins semantic search once the egress policy allows the call: ` +
+            `the server then embeds it by itself (SMD-2889).`
           : `\n\nNote: the embedding call for this capture was not made — ${embeddings.reason}. A new thought has no vector — findable by exact text ` +
-            `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
+            `(search_thoughts_keyword), embedded by the server itself once the egress policy allows the call; text already captured keeps the vector it had. ` +
             // A key that cannot read is not told which (SMD-1298); a database
             // from before 035 cannot say.
             (reader ? `This database does not say which this was.` : `This reply does not say which.`);
@@ -1011,7 +1011,8 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     if (v.vectorFailed) {
       const { detail, base } = v.vectorFailed;
       const where = reader ? `the embedding provider at ${base} was unavailable (${detail})` : `the embedding provider was unavailable`;
-      const later = `re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts)`;
+      // The MCP server's vector mender embeds it once the provider answers (SMD-2889).
+      const later = `the server embeds it by itself once the provider answers`;
       confirmation += existed === true
         ? `\n\nNote: no vector was made for this capture — ${where}. This text was already a thought, and it keeps the vector it had, if it had one.`
         : existed === false
@@ -1255,7 +1256,7 @@ export function renderUpdate(o: Outcome<Updated>): Reply {
     ].filter(Boolean).join(", ");
     return `Updated ${v.id} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${explainKept(v)}${
       v.noVectorReason !== undefined
-        ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
+        ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text, and joins semantic search once the egress policy allows the call: the server then embeds it by itself (SMD-2889).`
         : ""}`;
   }, mutationRefusalText, safeUpdate);
 }
