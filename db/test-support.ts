@@ -44,7 +44,7 @@ const TABLES = [
   "thought_facets",
   "thought_audit",
   "thought_chunks",
-  // 092's kept windows (SMD-2694): a foreign key to the claims, so before them.
+  // 093's kept windows (SMD-2694): a foreign key to the claims, so before them.
   "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
@@ -329,6 +329,9 @@ const FUNCTIONS = [
   "ob1_weigh_recapture(uuid, text, jsonb, text)",
   // 091 (SMD-2913): the trigger that keeps each settle by the pass.
   "ob1_keep_proposal_settles()",
+  // 092 (SMD-2708): 082's log read by name, and the chain.
+  "ob1_capture_taken_by_log(uuid)",
+  "ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)",
 ];
 
 /**

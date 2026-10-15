@@ -169,13 +169,21 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   const older = await capture("[8c] an older thought the writer points the hook's at", hook);
   assert((await taken(own.id)) === false, "the capturer's own thought, untouched: not taken");
   await sql`UPDATE thoughts SET embedding = NULL WHERE id = ${own.id}::uuid`;
-  assert((await store.updateThought({ id: own.id, provenance: { supersedes: older.id }, actor: writer })).ok === true, "setup: the writer's pointer-only edit lands");
   await store.updateThought({ id: own.id, metadataPatch: { note: "its own" }, actor: hook });
   await store.updateThought({ id: own.id, metadataPatch: { enriched: true }, actor: backfill });
   const quiet = await rows(own.id);
-  assert(quiet.length === 4 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === writerId && "supersedes" in r.diff).length === 1,
-    `setup: a vector row and an unattributed metadata row with no agent, the writer's pointer row, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
-  assert((await taken(own.id)) === false, "…a vector, a pointer set by another, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  assert(quiet.length === 3 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === hookId).length === 1,
+    `setup: a vector row and an unattributed metadata row with no agent, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
+  assert((await taken(own.id)) === false, "…a vector, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
+  // 092 (SMD-2708): a pointer another key sets on the hook's thought, naming
+  // a thought the hook did not capture, is that key's standing on it, and
+  // takes it; one naming another of the hook's own takes nothing.
+  const pointed = await capture("[8c] the hook's thought the writer points at a thought of the writer's own", hook);
+  const outside = await capture("[8c] the writer's own older thought", writer);
+  const within = await capture("[8c] the hook's thought the writer points at the hook's older one", hook);
+  assert((await store.updateThought({ id: pointed.id, provenance: { supersedes: outside.id }, actor: writer })).ok === true && (await taken(pointed.id)) === true
+      && (await store.updateThought({ id: within.id, provenance: { supersedes: older.id }, actor: writer })).ok === true && (await taken(within.id)) === false,
+    "…while a pointer the writer sets on the hook's thought, naming its own, takes it, and one naming the hook's other thought does not (092)");
   const kept = await capture("[8c] the hook's thought another capture key re-sends", hook);
   await capture("[8c] the hook's thought another capture key re-sends", { ...hook, name: "other-hook", agentId: otherId }, { recapture: "keep" });
   assert((await rows(kept.id)).length === 0 && (await taken(kept.id)) === false, "a capture-only key's re-capture ('keep') records nothing and does not take it");
