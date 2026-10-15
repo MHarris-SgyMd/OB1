@@ -202,6 +202,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { movedSince, SETTLE_MS } from "../server-portable/stated-status.ts";
 import { CANDIDATES, chainRoot, keysOf, LAG_MS, labelsOf, mentionsOf, SECOND, sessionEnd, statedAfter, statusAt, THIRD, writtenAt, type Candidate, type ChainRow, type Change, type Label, type Reading, type Status } from "./stated-status.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -774,6 +775,39 @@ function selfCheck() {
   ok(!judgeHeldOut(t("moved-session-lag", {}), { graded: 0, wrong: 0 }).ok, "judgeHeldOut: nothing pooled is no evidence");
   ok(judgeHeldOut(t("moved-session-lag", {}), { graded: 60, wrong: 3 }).ok && !judgeHeldOut(t("moved-session-lag", {}), { graded: 60, wrong: 4 }).ok && !judgeHeldOut(t("moved-session-lag", { wrong: 2 }), { graded: 60, wrong: 2 }).ok, "judgeHeldOut: pooled 57/60 qualifies, 56/60 does not; the held-out (b) still applies");
   ok(kappa([["useful", "useful"], ["noise", "noise"]]).kappa === 1 && kappa([]).n === 0, "kappa: perfect agreement is 1; no items is none");
+
+  // The shipped reading (server-portable/stated-status.ts, SMD-2540 PR 2) is
+  // the measured one: movedSince equals labelsOf("moved-session-settled", …)
+  // on the hand cases above and on a seeded fuzz of notes, histories and heads.
+  ok(SETTLE_MS === LAG_MS, "the shipped settle window is the measured one");
+  const shipped = (rd: Reading) => movedSince(rd.content, rd.stored, rd.head, rd.timeline).map((m) => `${m.ticket}:${m.then.type}>${m.now.type}`).join();
+  const measured = (rd: Reading) => labelsOf("moved-session-settled", rd).map((l) => `${l.key}:${l.claim.type}>${l.now.type}`).join();
+  const hand = [real(sess("2026-10-03 03:02"), stored10_08, root10_03), real(lagged, stored10_08), mid(sess("2026-10-02 21:59")), typed(sess("2026-10-03 03:02")), rd(dd, 500), rd(dd, 50), rd(quoted, 0)];
+  // Same type, another name: In Progress when written, Backlog half an hour on, In Review now — no label (the type never moved).
+  const tlsName = new Map<string, Change[]>([["SMD-2306", [{ at: T("2026-10-01T12:00:00Z"), name: "In Progress", type: "started" }, { at: T("2026-10-03T03:30:00Z"), name: "Backlog", type: "backlog" }, { at: T("2026-10-04T12:00:00Z"), name: "In Review", type: "started" }]]]);
+  const named = { ...rd(sess("2026-10-03 03:02"), stored10_08), head: (k: string) => (k === "SMD-2306" ? { name: "In Review", type: "started" } : undefined), timeline: (k: string) => tlsName.get(k) ?? [] };
+  hand.push(named);
+  ok(shipped(named) === "" && hand.every((x) => shipped(x) === measured(x)), "the shipped reading equals the measured one on every hand case above, and a status renamed within its type is no move");
+  let seed = 2540;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 2 ** 32; };
+  const pickOf = <T,>(xs: readonly T[]) => xs[Math.floor(rnd() * xs.length)];
+  const STATES: Status[] = [{ name: "Backlog", type: "backlog" }, { name: "Todo", type: "unstarted" }, { name: "In Progress", type: "started" }, { name: "In Review", type: "started" }, { name: "Done", type: "completed" }, { name: "Canceled", type: "canceled" }];
+  const KEYS = ["SMD-1001", "SMD-1002", "SMD-1003", "SMD-1004", "SMD-202", "ABC-1001"];
+  const FRAG = ["SMD-1001", "SMD-1001, 1002", "SMD-1001 and 1003 or 1004", "SMD-1002/1003", "SMD-1001 → 1004", "(SMD-202, 1001)", "SMD-1003, 2026-10-03", "ABC-1001", "1001 is done", "SMD-1004.", "xSMD-1001", "SMD-1002, 99 tests", "PR #1003", "\n"];
+  const T0 = Date.parse("2026-10-01T00:00:00Z");
+  let fuzzed = 0, differ = 0;
+  for (let i = 0; i < 2000; i++) {
+    const text = Array.from({ length: 1 + Math.floor(rnd() * 5) }, () => pickOf(FRAG)).join(" ")
+      + (rnd() < 0.6 ? `\nSession 3a5c3458-9a28-4681-8812-16209c1209ba, 2026-10-01 00:00 → 2026-10-0${1 + Math.floor(rnd() * 5)} ${String(Math.floor(rnd() * 24)).padStart(2, "0")}:${String(Math.floor(rnd() * 60)).padStart(2, "0")}.` : "");
+    // Half the changes land within ±2 h of a session's possible end, where the settle rule decides.
+    const near = T0 + Math.floor(rnd() * 5) * 86_400_000 + Math.floor(rnd() * 24) * 3_600_000;
+    const hist = new Map<string, Change[]>(KEYS.map((k) => [k, Array.from({ length: Math.floor(rnd() * 4) }, () => ({ ...pickOf(STATES), at: rnd() < 0.5 ? near + Math.floor((rnd() - 0.5) * 4 * 3_600_000) : T0 + Math.floor(rnd() * 6 * 86_400_000) }))]));
+    const heads = new Map<string, Status | undefined>(KEYS.map((k) => [k, rnd() < 0.85 ? pickOf(STATES) : undefined]));
+    const x: Reading = { content: text, stored: T0 + Math.floor(rnd() * 8 * 86_400_000), chainRoot: T0, head: (k) => heads.get(k), timeline: (k) => hist.get(k) ?? [], vocabulary: vocab };
+    fuzzed++;
+    if (shipped(x) !== measured(x)) differ++;
+  }
+  ok(fuzzed === 2000 && differ === 0, `the shipped reading equals the measured one on a seeded fuzz (${differ} of ${fuzzed} differ), out-of-order histories included`);
 
   // The gold.
   ok(throws(() => readGold(join(HERE, "fixtures", "no-such-gold.json"))), "readGold refuses a missing file");
