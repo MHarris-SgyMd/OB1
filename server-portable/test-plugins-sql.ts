@@ -23,6 +23,7 @@ import { hashKey } from "./auth.ts";
 import type { PluginSql } from "./plugin-sdk.ts";
 import { migrationSha } from "../db/version.mjs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
+import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -211,7 +212,9 @@ process.env.OB1_HOOKS = "example";
 process.env.OB1_HOOK_SECRETS = `example=${HOOK_SECRET}`;
 const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [`writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`, `hook:capture:${hashKey(KEYS.hook)}`].join(",");
-const mcpServer = Bun.serve({ port: 0, fetch: (await import("./index.ts")).default.fetch });
+// index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287 PR 4a).
+const mcpServer = Bun.serve({ port: 0, fetch: (await mcpUnderTest()).fetch });
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
 const MCP = `http://localhost:${mcpServer.port}`;
 const API = `http://localhost:${apiServer.port}`;

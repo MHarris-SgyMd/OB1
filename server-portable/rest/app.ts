@@ -10,7 +10,7 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
-import { SPECS, type Core } from "../core/index.ts";
+import { HEALTH_DEADLINE_MS, SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
 import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
@@ -181,7 +181,7 @@ const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[]
   return [...methods].sort();
 };
 
-/** `template`: a plugin operation's route, for the request line — its Hono route is the one wildcard. */
+/** `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter. */
 type RestEnv = { Variables: { template?: string } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
@@ -215,13 +215,15 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // stream's end. The record (telemetry.ts's RequestTrace) is made here,
   // first, so every answer below is counted, and the handlers fill in what
   // they learn (notFound makes one for a path this middleware never sees) —
-  // but the liveness probe, a GET or HEAD of /health, gets none: the
-  // container's healthcheck asks every 30 s, and half the log was its 200
-  // (SMD-2284 PR 3 review pass 1). Decided as it arrives, so nothing (PR 2b's
-  // span included) starts for it; the route answers it 200 every time, and an
-  // environment that will not seed is a 500 the healthcheck itself reports.
+  // but the liveness probe, a GET or HEAD of /health that presents no key,
+  // gets none: the container's healthcheck asks every 30 s, and half the log
+  // was its 200 (SMD-2284 PR 3 review pass 1). Decided as it arrives, so
+  // nothing (PR 2b's span included) starts for it; the route answers it 200
+  // every time, and an environment that will not seed is a 500 the
+  // healthcheck itself reports. A keyed /health is a request like any other
+  // (SMD-2287).
   app.use("*", async (c, next) => {
-    if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/health") {
+    if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/health" && headerKeys(c.req.raw).length === 0) {
       deps.init();
       return next();
     }
@@ -240,7 +242,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       throw err;
     }
     if (trace.deferred || trace.ended) return;
-    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the wildcard's.
+    // A plugin operation's or a hook's route is the template its handler set ("-" for none it takes), not the catch-all route's.
     const template = c.get("template");
     trace.route ??= template !== undefined ? (template === "-" ? undefined : template) : c.req.routePath === "*" || c.req.routePath === "/*" ? undefined : c.req.routePath;
     // An error answer's code is the one set as it was answered (answerError, or the hook route from its handler's checked JSON), never read back from the answer (PR 2c).
@@ -252,8 +254,55 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   });
 
   // Liveness, for the container's healthcheck: no key, no store, no answer
-  // about the brain. Internal only — the public /health is the MCP server's.
-  app.get("/health", (c) => c.json({ status: "ok" }));
+  // about the brain. Internal only — the public /health is the MCP server's,
+  // which reads its keyed record here (SMD-2287): a key that may read
+  // brain_info, which the registry clears within HEALTH_DEADLINE_MS, is
+  // answered the brain's record on the health surface (brain-info.ts's
+  // statements capped to fit the deadline). Any other key — a wrong one, one
+  // whose scope lacks the tool, a revoked one, one the registry is busy on or
+  // does not answer for in time — is answered liveness as no key is: this
+  // route shows nothing, and refuses no one. The rules are server-portable
+  // index.ts's /health's. The forwarder slot is not read: the record is the
+  // caller's key's to see, whoever carried it.
+  app.get("/health", async (c) => {
+    const keys = headerKeys(c.req.raw);
+    if (keys.length === 0) return c.json({ status: "ok" });
+    const trace = traceOf(c.req.raw);
+    if (trace) {
+      trace.route = "/health";
+      trace.tool = "brain_info";
+    }
+    /** Shown liveness, nothing about the brain; the line says it refused, with the registry's word where it gave one. */
+    const shown = (word?: "REVOKED" | "BUSY") => {
+      if (trace) {
+        trace.outcome = "refused";
+        trace.refusedAtKey = true;
+        if (word) trace.code = word;
+      }
+      return c.json({ status: "ok" });
+    };
+    let principal: Principal | null = null;
+    for (const key of keys) {
+      principal = authenticate(key, deps.keys(), { admit: CLIENT_SCOPES });
+      if (principal) break;
+    }
+    if (!principal || !mayCall(principal, "brain_info")) return shown();
+    if (trace) trace.agent = principal.name;
+    // A HEAD has no body to carry the record: liveness, and no read for nothing.
+    if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
+    // The read and the registry's word start together, under one deadline, as
+    // index.ts's /health starts them: a registry that has not answered by then
+    // could still say revoked, so the key is shown nothing.
+    const info = deps.core.brainInfo("health");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const identity = await Promise.race([
+      deps.resolve(principal).catch(() => null),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (!identity || identity.status !== "ok") return shown(identity?.status === "revoked" ? "REVOKED" : identity?.status === "busy" ? "BUSY" : undefined);
+    return c.json(await info);
+  });
   // The document names where its paths are, as the caller reached it: `/api`
   // through the proxy's opt-in route, the root on the mesh — so a client
   // generated from it calls this server, not the origin's root, which is the
@@ -326,6 +375,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     if (carrier) {
+      // After the caller's, not beside it: a lookup started for the carrier
+      // while the registry is locked holds one more connection waiting on the
+      // lock, and the forwarder's answer is the agent cache's for its TTL in
+      // any case (SMD-2287 PR 3a review pass 2, not taken).
       const carried = await deps.resolve(carrier);
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
       if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
@@ -430,7 +483,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     for (const f of Object.keys(path)) {
       if (f in rest) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: f, message: `${f} comes from the path` }] });
     }
-    const parsed = z.object(shape).strict().safeParse({ ...rest, ...path });
+    // Awaited, so a plugin's async refinement runs as the MCP SDK's validation runs it (SMD-2287 PR 4a review pass 3).
+    const parsed = await z.object(shape).strict().safeParseAsync({ ...rest, ...path });
     if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
     return { input: parsed.data };
   }
@@ -481,11 +535,13 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // operation's group, by the rule mayCall applies — tools.ts's unlocks), the
   // input held to its schema, and its answer — a value its output schema
   // holds, a refusal at its status, a fault as FAILED.
-  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/*", async (c) => {
+  // Matched by a parameter that takes a line break too: Hono's `*` does not, so a path field holding one fell to the
+  // 405 that names the very method it was sent with (SMD-2287 PR 4a review pass 2).
+  app.on(["GET", "POST", "PATCH", "DELETE"], "/v1/plugins/:rest{[\\s\\S]+}", async (c) => {
     const method = (c.req.method === "HEAD" ? "GET" : c.req.method) as Method;
     const found = pluginRoutes().find((r) => r.method === method && r.pattern.test(c.req.path));
     if (!found) {
-      // No operation's route: the request line says so as any unrouted one does, not the wildcard's template.
+      // No operation's route: the request line says so as any unrouted one does, not the catch-all route's template.
       c.set("template", "-");
       return c.notFound();
     }
@@ -520,8 +576,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       return answerError(c, failure(err), 500);
     }
     if (outcome.ok) return c.json(outcome.value, 200);
+    // Forwarded, the refusal whole beside its facts, its status in it, as a core refusal's (SMD-2287): the carrier
+    // words it as server-portable does (render.ts renderPlugin), and tells it from a refusal of the key mid-call.
     const { status, ...facts } = outcome.refusal;
-    return answerError(c, facts, status);
+    return answerError(c, { ...facts, ...wholeFor(p, outcome.refusal) }, status);
   });
 
   // The enabled plugins' webhooks (SMD-2310): a POST to /hooks/<plugin>/<name>
@@ -587,6 +645,11 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       return answerError(c, { code: "FAILED", retryable: false }, 500);
     }
     const { status, text } = answer;
+    // A delivery the plugin accepted is its verified sender's, not held to the anonymous budget (telemetry.ts, review pass 3).
+    if (status < 400) {
+      const accepted = traceOf(c.req.raw);
+      if (accepted) accepted.hookAccepted = true;
+    }
     if (status === 204 || text === null) return c.body(null, 204);
     // A handler's own refusal: its code for the line, from the JSON text runHook checked.
     if (status >= 400) {
@@ -634,7 +697,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
  * kind, or its name, not said in full). A caller with no carrier gets the
  * facts alone.
  */
-const wholeFor = (p: Principal, r: Refusal): { refusal?: Refusal } => (p.act ? { refusal: r } : {});
+const wholeFor = <R = Refusal>(p: Principal, r: R): { refusal?: R } => (p.act ? { refusal: r } : {});
 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool
@@ -671,8 +734,12 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // A refused call writes none: a new row has no vector, and a re-capture's
     // row keeps the one it had (073's upsert) — so false says what this
     // capture did, not what the row holds, which a key that cannot read may
-    // not learn (whether the text was already a thought).
-    return c.json({ ...capturedFor(p, v), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
+    // not learn (whether the text was already a thought). Carried by a
+    // forwarder, the value is whole whatever the key's scope, as a refusal is
+    // (wholeFor): the MCP server words it with render.ts, which picks from it
+    // what a key that cannot read is told — the trimmed value had no tags, so
+    // a capture key's capture threw there (SMD-2287 PR 3a review pass 1).
+    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };

@@ -693,7 +693,7 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   assert(quiet.length === 3 && quiet.filter((r) => r.agent === null && "metadata" in r.diff).length === 1 && quiet.filter((r) => r.agent === hookId).length === 1,
     `setup: a vector row and an unattributed metadata row with no agent, its own metadata row (${JSON.stringify(quiet.map((r) => [r.agent === null ? "none" : r.agent === hookId ? "hook" : "writer", Object.keys(r.diff)]))})`);
   assert((await taken(own.id)) === false, "…a vector, its own metadata move and an unattributed metadata move with no `issue` (an operator's backfill) do not take it");
-  // 091 (SMD-2708): a pointer another key sets on the hook's thought, naming
+  // 092 (SMD-2708): a pointer another key sets on the hook's thought, naming
   // a thought the hook did not capture, is that key's standing on it, and
   // takes it; one naming another of the hook's own takes nothing.
   const pointed = await capture("[8c] the hook's thought the writer points at a thought of the writer's own", hook);
@@ -701,7 +701,7 @@ console.log("\n[8c] takenFromCapturer, the re-capture note and the lapse: migrat
   const within = await capture("[8c] the hook's thought the writer points at the hook's older one", hook);
   assert((await store.updateThought({ id: pointed.id, provenance: { supersedes: outside.id }, actor: writer })).ok === true && (await taken(pointed.id)) === true
       && (await store.updateThought({ id: within.id, provenance: { supersedes: older.id }, actor: writer })).ok === true && (await taken(within.id)) === false,
-    "…while a pointer the writer sets on the hook's thought, naming its own, takes it, and one naming the hook's other thought does not (091)");
+    "…while a pointer the writer sets on the hook's thought, naming its own, takes it, and one naming the hook's other thought does not (092)");
   const kept = await capture("[8c] the hook's thought another capture key re-sends", hook);
   await capture("[8c] the hook's thought another capture key re-sends", { ...hook, name: "other-hook", agentId: otherId }, { recapture: "keep" });
   assert((await rows(kept.id)).length === 0 && (await taken(kept.id)) === false, "a capture-only key's re-capture ('keep') records nothing and does not take it");
@@ -1047,7 +1047,7 @@ console.log("\n[8e] The operator's reset of a capture-only key's settled or move
   await sql.close();
 }
 
-console.log("\n[8f] Migration 091's chain locks, on two connections: a capture naming a row waits behind an accept re-pointing a row below it and is refused after it, and one waiting behind a taker's row lock does not deadlock with the taker's lapse (SMD-2708)");
+console.log("\n[8f] Migration 092's chain locks, on two connections: a capture naming a row waits behind an accept re-pointing a row below it and is refused after it, and one waiting behind a taker's row lock does not deadlock with the taker's lapse (SMD-2708)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const a = new SQL({ url: URL_, max: 1 });

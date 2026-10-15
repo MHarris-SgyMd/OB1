@@ -1134,7 +1134,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
     renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)),
     renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 1, comments: 1, withdrawn: 1 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
-    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000))]
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000)),
+    // A brain behind this server: the read names 091's column (SMD-2913, review pass 1).
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.pass_settled_at does not exist" } } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.reviewed_at does not exist" } } }), 1000))]
     .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
   assert(toldRows.join("\n") === [
     "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — acceptance 50% (2 of 4: accepted over accepted, rejected and unanswered), median 2 d to an answer; 1 found on the board from another poster",
@@ -1146,7 +1149,9 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "(no row)",
     "Findings:        ? (thought_facets not read in time)",
     "Findings:        ? (not read in time)",
-  ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, and no row without the stats (${toldRows.join(" / ")})`);
+    "Findings:        ? (migration 091 is not applied)",
+    "Findings:        ? (not read)",
+  ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, no row without the stats, and 091 named when its column is absent (${toldRows.join(" / ")})`);
   // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
   const qShapes = [
     { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },
@@ -4525,18 +4530,47 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
 
   // Each setup its own instance: two processes under one service name are two series (review passes 3–4).
   {
-    const idOf = async () => {
+    const resourceOf = async () => {
       const exporter = new InMemorySpanExporter();
       const set = setUpTelemetry("open-brain-test", { exporter });
       try {
         await withSpan("probe", {}, async () => {});
-        return String(exporter.getFinishedSpans()[0]?.resource.attributes["service.instance.id"]);
+        return exporter.getFinishedSpans()[0]?.resource.attributes ?? {};
       } finally {
         await set.shutdown();
       }
     };
+    const idOf = async () => String((await resourceOf())["service.instance.id"]);
     const ids = [await idOf(), await idOf()];
     assert(ids.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) && ids[0] !== ids[1], `each setup a fresh service.instance.id (${ids.join(", ")})`);
+    // A pipeline tier's brain names its tier on the resource; a plain brain, or a word that is no tier, names none (SMD-1849 PR 3a).
+    const savedTier = process.env.OB1_TIER;
+    const savedAttributes = process.env.OTEL_RESOURCE_ATTRIBUTES;
+    const tiers: unknown[] = [];
+    const over: unknown[] = [];
+    try {
+      delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      for (const tier of ["stable", "canary", "working", " canary ", undefined, "prod"]) {
+        if (tier === undefined) delete process.env.OB1_TIER;
+        else process.env.OB1_TIER = tier;
+        tiers.push((await resourceOf())["deployment.environment.name"]);
+      }
+      // A canary whose env file carries stable's OTEL_RESOURCE_ATTRIBUTES still says canary; a plain brain keeps the operator's own (review pass 2).
+      process.env.OTEL_RESOURCE_ATTRIBUTES = "deployment.environment.name=stable";
+      process.env.OB1_TIER = "canary";
+      over.push((await resourceOf())["deployment.environment.name"]);
+      delete process.env.OB1_TIER;
+      over.push((await resourceOf())["deployment.environment.name"]);
+    } finally {
+      if (savedTier === undefined) delete process.env.OB1_TIER;
+      else process.env.OB1_TIER = savedTier;
+      if (savedAttributes === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      else process.env.OTEL_RESOURCE_ATTRIBUTES = savedAttributes;
+    }
+    assert(JSON.stringify(tiers) === JSON.stringify(["stable", "canary", "working", "canary", null, null]) && tiers[4] === undefined && tiers[5] === undefined,
+      `each pipeline tier is deployment.environment.name on the resource, read trimmed as root.ts reads it; unset or not a tier, none (${JSON.stringify(tiers)})`);
+    assert(JSON.stringify(over) === JSON.stringify(["canary", "stable"]),
+      `a tier's name wins over OTEL_RESOURCE_ATTRIBUTES's, which a plain brain keeps (${JSON.stringify(over)})`);
   }
   // An SDK that throws as a span starts, is told, or ends is never the work's undoing: a write that landed is
   // reported as it landed, a throw as the work's own (review pass 1).
@@ -4699,6 +4733,135 @@ console.log("\n[29] capture_thought's reply says what a re-capture did to a capt
   const note = planted.split("\n\n")[1] ?? "";
   assert(!note.includes("\n") && !/[\u0000-\u001f\u007f]/.test(note) && /kind not classified, trust none\), and the label was kept: the trust your key was weighed at \(none\)/.test(note),
     `a planted name, kind, trust or weighed word is cleaned to one line and the lists (${note.slice(0, 160)})`);
+}
+
+console.log("\n[30] A request the server did not accept sends its span and log record within a budget a minute; its point and line always; a key or a delivery it accepted never held to it (SMD-1849 PR 3a review passes 2–8)");
+{
+  const { ANONYMOUS_PER_MINUTE, beginRequest, flushTelemetry, requestLine, startTelemetry, stopTelemetry, useBudgetClock } = await import("./telemetry.ts");
+  const { setUpTelemetry } = await import("./otel-setup.ts");
+  const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+  const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const { InMemoryLogRecordExporter } = await import("@opentelemetry/sdk-logs");
+  const spans = new InMemorySpanExporter();
+  const measured = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const logged = new InMemoryLogRecordExporter();
+  const said: string[] = [];
+  const lines: string[] = [];
+  const write = (r: Parameters<typeof requestLine>[0]) => lines.push(requestLine(r));
+  const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // A minute's start, so the minute's timer (about 60 s off) never fires while the section runs.
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 60_000 * 1_000;
+  const realClock = useBudgetClock(() => now);
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+  try {
+    const started = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
+    const ask = (agent?: string, refusedAtKey = false) => {
+      const r = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+      Object.assign(r, { rpc: "tools/call", agent, refusedAtKey });
+      r.end({ status: 200, outcome: agent === undefined || refusedAtKey ? "refused" : "ok", code: agent === undefined ? "UNAUTHORIZED" : refusedAtKey ? "REVOKED" : undefined });
+    };
+    const deliver = (accepted: boolean) => {
+      const r = beginRequest("api", new Request("http://api/hooks/example/capture", { method: "POST" }), write);
+      Object.assign(r, { route: "/hooks/example/capture", hookAccepted: accepted });
+      r.end(accepted ? { status: 202, outcome: "ok" } : { status: 401, outcome: "refused", code: "UNAUTHORIZED" });
+    };
+    const counted = () => said.filter((l) => l.includes("the server did not accept"));
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE + 5; i++) ask();
+    ask("MCP_ACCESS_KEY");
+    ask("revoked-key", true);
+    deliver(true);
+    deliver(false);
+    const unsaidBeforeFlush = counted().length;
+    await flushTelemetry();
+    const pointsCount = () => durationPoints(measured).reduce((n, p) => n + p.value.count, 0);
+    const doors = (agentless: boolean) => spans.getFinishedSpans().filter((s) => (s.attributes["ob1.agent"] === undefined) === agentless).length;
+    const hookSpans = () => spans.getFinishedSpans().filter((s) => s.attributes["http.route"] === "/hooks/example/capture").map((s) => s.attributes["ob1.outcome"]);
+    assert(started && ANONYMOUS_PER_MINUTE === 60 && doors(true) === 61 && doors(false) === 1 && JSON.stringify(hookSpans()) === '["ok"]' && logged.getFinishedLogRecords().length === 62 && pointsCount() === 69 && lines.length === 69,
+      `past ${ANONYMOUS_PER_MINUTE} in a minute, a request the server did not accept — no key, a revoked one, a delivery its plugin refused — sends no span and no record; its point and line still count it; a key accepted, or a delivery its plugin accepted, is never held (${JSON.stringify([doors(true), doors(false), hookSpans(), logged.getFinishedLogRecords().length, pointsCount(), lines.length])})`);
+    assert(unsaidBeforeFlush === 0 && counted().length === 1 && counted()[0] === "telemetry: 7 requests the server did not accept past 60 in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)",
+      `the flush a server's stop runs says the count, once (${JSON.stringify([unsaidBeforeFlush, counted()])})`);
+    // The next minute: a fresh budget, and nothing more said.
+    now += 60_000;
+    ask();
+    await flushTelemetry();
+    assert(doors(true) === 62 && counted().length === 1, `the next minute's first is sent, and nothing said twice (${JSON.stringify([doors(true), counted().length])})`);
+    // A count left at the stop is said by the stop; a new start's budget is fresh.
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE; i++) ask();
+    await stopTelemetry();
+    const atStop = counted();
+    assert(atStop.length === 2 && atStop[1].startsWith("telemetry: 1 request the server did not accept past 60"), `the stop says what is left, in the singular (${JSON.stringify(atStop)})`);
+    // Requests begun before the SDK loaded record nothing, and spend none of a new start's budget.
+    const early = Array.from({ length: ANONYMOUS_PER_MINUTE + 1 }, () => beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write));
+    // A fresh exporter: the stop shut the first one down.
+    const after = new InMemorySpanExporter();
+    const afterLogs = new InMemoryLogRecordExporter();
+    const restarted = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: after, logs: afterLogs }) }));
+    for (const r of early) r.end({ status: 200, outcome: "refused", code: "UNAUTHORIZED" });
+    ask();
+    await flushTelemetry();
+    assert(restarted && after.getFinishedSpans().length === 1 && afterLogs.getFinishedLogRecords().length === 1 && counted().length === 2,
+      `a new start's budget is fresh, within the same minute; a request begun before it spends none and sends no record (${JSON.stringify([after.getFinishedSpans().length, afterLogs.getFinishedLogRecords().length, counted().length])})`);
+    // A minute ending with no request after it: its timer says the count, once — the next minute's first says nothing more.
+    const before = counted().length;
+    now = Math.floor(now / 60_000) * 60_000 + 120_000 - 30;
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE + 2; i++) ask();
+    await Bun.sleep(150);
+    const byTimer = counted().slice(before);
+    now += 60_000;
+    ask();
+    const afterRoll = counted().slice(before);
+    assert(byTimer.length === 1 && byTimer[0].startsWith("telemetry: 2 requests the server did not accept past 60") && afterRoll.length === 1,
+      `the minute's end says its count by itself, once (${JSON.stringify([byTimer, afterRoll.length])})`);
+    // A request ended while a stop shuts the SDK down, past the budget: its count is said by the next start, not lost
+    // (review passes 6–8). The shutdown is held on a gate, so the request ends after the stop has said its own count and
+    // before the SDK is gone, whatever the SDK's timing; the clock at a minute's start, so no minute's timer says it.
+    await stopTelemetry();
+    now = (Math.floor(now / 60_000) + 1) * 60_000;
+    const leftLog: string[] = [];
+    let shuttingDown = false;
+    let release = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    await startTelemetry("probe", (l) => leftLog.push(l), async () => ({ setUpTelemetry: () => {
+      const held = setUpTelemetry("open-brain-test", { exporter: new InMemorySpanExporter() });
+      return { ...held, serviceName: held.serviceName, flush: () => held.flush(), emit: (r) => held.emit(r), shutdown: async () => { shuttingDown = true; await gate; await held.shutdown(); } };
+    } }));
+    for (let i = 0; i < ANONYMOUS_PER_MINUTE; i++) ask();
+    const late = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
+    const saidBefore = said.length;
+    const stopping = stopTelemetry();
+    while (!shuttingDown) await Promise.resolve();
+    late.end({ status: 200, outcome: "refused", code: "UNAUTHORIZED" });
+    release();
+    await stopping;
+    const saidByStop = leftLog.filter((l) => l.includes("did not accept")).length;
+    await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: new InMemorySpanExporter() }) }));
+    const leftLines = leftLog.filter((l) => l.includes("did not accept"));
+    const newLines = said.slice(saidBefore).filter((l) => l.includes("did not accept"));
+    assert(saidByStop === 0 && leftLines.length === 1 && leftLines[0].startsWith("telemetry: 1 request the server did not accept past 60") && newLines.length === 0,
+      `a request ended while a stop shuts the SDK down, past the budget, is said once, to that SDK's log, by the next start — not by the stop (${JSON.stringify([saidByStop, leftLines.map((l) => l.slice(0, 40)), newLines.length])})`);
+    // Spans sampled out (OTEL_TRACES_SAMPLER=always_off): no span records, and the log records are held all the same (review pass 4).
+    await stopTelemetry();
+    const savedSampler = process.env.OTEL_TRACES_SAMPLER;
+    process.env.OTEL_TRACES_SAMPLER = "always_off";
+    const quiet = new InMemorySpanExporter();
+    const quietLogs = new InMemoryLogRecordExporter();
+    try {
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: quiet, logs: quietLogs }) }));
+      now += 60_000;
+      for (let i = 0; i < ANONYMOUS_PER_MINUTE + 5; i++) ask();
+      await flushTelemetry();
+    } finally {
+      if (savedSampler === undefined) delete process.env.OTEL_TRACES_SAMPLER;
+      else process.env.OTEL_TRACES_SAMPLER = savedSampler;
+    }
+    assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
+      `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
+  } finally {
+    await stopTelemetry();
+    useBudgetClock(realClock);
+    if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
+  }
 }
 
 report();

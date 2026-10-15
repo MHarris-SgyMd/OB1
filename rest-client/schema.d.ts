@@ -441,8 +441,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Liveness
-         * @description Internal only: the process is serving. No key, nothing about the brain.
+         * Liveness, and the brain's record for a key that may read it
+         * @description Internal only: the process is serving, `{ status: "ok" }`. With a key that may read brain_info, which the agent registry clears within the deadline, the brain's record on the health surface instead — what the MCP server's public /health shows (SMD-2287). Any other key is answered liveness, as no key is: this route refuses no one.
          */
         get: operations["health"];
         put?: never;
@@ -460,7 +460,7 @@ export interface components {
         Refusal: {
             code: string;
             retryable?: boolean;
-            /** @description Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's), so the MCP server says it as it always has (SMD-2287). */
+            /** @description Only on a forwarded request (a forward-scope key in x-brain-forwarder): the refusal whole, the words its facts leave out included (the caller's input, the store's) — a plugin's with its status in it — so the MCP server says it as it always has (SMD-2287). */
             refusal?: Record<string, unknown>;
         } & {
             [key: string]: unknown;
@@ -1341,7 +1341,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 090); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`, and carried by a forwarder its `refusal` too, the words the MCP server says it in. */
+            /** @description The thought, with `embeddingAttached` — whether this capture wrote its vector with the row (false when the egress gate refused the embedding call); on a re-capture, false says this capture wrote none, not that the row has none; on a re-capture over a capture-only key's label, `label` says what it did — `outcome` moved, kept, settled or unweighed, `stamp` the label after (`actorKind`, `actorName`, `trust`), and `before`, `weighed` and `own`, `by` and `mine`, or `decliner` and `declinerWeighed` by outcome (migration 090); a key that cannot read is told its id, `embeddingCall`, `chunks`, `contextFailures` and `embeddingAttached` alone — carried by a forwarder, the whole value, which the MCP server words for that key. A save whose vector did not attach (the PostgREST two-step) is `{ id, embeddingAttached: false }`, and carried by a forwarder its `refusal` too, the words the MCP server says it in. */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -3057,12 +3057,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Serving. */
+            /** @description Serving: `{ status: "ok" }`, or the brain's record. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
             };
             /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
             405: {

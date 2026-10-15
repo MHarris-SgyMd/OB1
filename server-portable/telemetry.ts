@@ -197,6 +197,59 @@ let starting: Promise<boolean> | undefined;
 let generation = 0;
 let stopping: Promise<void> | undefined;
 
+/**
+ * A request the server did not accept — no key, one it refused (revoked, busy,
+ * outside the door's scopes), a webhook delivery its plugin refused — sends its
+ * span and log record within this many a minute per server, each start of the
+ * SDK a fresh count; past it, its point on the request-duration histogram and
+ * its line still count it (the line naming a trace that was not sent), and one
+ * line says how many sent neither, at the minute's end, the next minute's first
+ * or the stop's flush (SMD-1849 PR 3a review passes 2–3: a keyless flood put
+ * about 1 KB a request on a collector's disk, measured, and Loki and Tempo
+ * expire by age alone). Only the request's own span is held: work it ran under
+ * it — a refused key's registry lookup, a delivery its plugin refused after a
+ * capture — still sends its spans, without their parent. A key accepted, or a
+ * delivery its plugin accepted, is never held to it.
+ */
+export const ANONYMOUS_PER_MINUTE = 60;
+let anonymous = { minute: -1, sent: 0, unsent: 0 };
+let clock = (): number => Date.now();
+let telemetryLog: (line: string) => void = (line) => console.warn(line);
+
+/** The clock the anonymous budget reads its minutes from, for a suite; returns the one it replaced. */
+export function useBudgetClock(next: () => number): () => number {
+  const previous = clock;
+  clock = next;
+  return previous;
+}
+
+/** Whether a request the server did not accept sends its span and record: within the minute's budget. */
+function anonymousSent(): boolean {
+  const now = clock();
+  const minute = Math.floor(now / 60_000);
+  if (minute !== anonymous.minute) {
+    sayUnsent();
+    anonymous = { minute, sent: 0, unsent: 0 };
+  }
+  if (anonymous.sent < ANONYMOUS_PER_MINUTE) {
+    anonymous.sent += 1;
+    return true;
+  }
+  // The minute's first past the budget: its count is said when the minute ends, or by the next minute's first, or at the stop's flush.
+  if (anonymous.unsent++ === 0) setTimeout(sayUnsent, Math.max(0, (minute + 1) * 60_000 - now)).unref?.();
+  return false;
+}
+
+/** Says how many requests the server did not accept sent no span or record since it last said, once. */
+function sayUnsent(): void {
+  const n = anonymous.unsent;
+  if (n === 0) return;
+  anonymous.unsent = 0;
+  try {
+    telemetryLog(`telemetry: ${n} ${n === 1 ? "request" : "requests"} the server did not accept past ${ANONYMOUS_PER_MINUTE} in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)`);
+  } catch {}
+}
+
 /** What a request's record is told on its way: every RequestRecord field but the door, the method, the time and the trace id, which the record keeps itself. */
 export type RequestFields = Partial<Omit<RequestRecord, "door" | "method" | "ms" | "trace">>;
 
@@ -341,6 +394,14 @@ export class RequestTrace {
   deferred = false;
   /** Set where the request was refused at its key, before any tool could run (the MCP route's refusal, a keyed mirror's, the REST core's). */
   refusedAtKey = false;
+  /** Set where a plugin accepted a webhook delivery (an answer under 400): its sender verified, it is not held to the anonymous budget (review pass 3). */
+  hookAccepted = false;
+  /**
+   * Whether the SDK was running when the request began: one begun before it loaded, and not accepted, spends none of
+   * the anonymous budget and sends no record (review passes 3, 5). Not whether its span records — an unsampled span, or spans turned off, records nothing
+   * while the request's log record still goes, and the budget holds that record too (review pass 4).
+   */
+  private readonly loaded = sdk !== undefined;
   private done = false;
   /** The request's server span, and the context its handlers run in (run). */
   private readonly span: otel.Span;
@@ -425,16 +486,20 @@ export class RequestTrace {
       // The span, the histogram's point and the log record whatever the line's sink does.
       const fields = checked(record);
       const span = spanOf(fields, this.refusedAtKey);
+      // A request the server did not accept: its span unended (never exported) and no record past the minute's budget; its point always.
+      const accepted = (record.agent !== undefined && !this.refusedAtKey) || this.hookAccepted;
+      // One begun before the SDK loaded has no span to send and spends none of the budget; its record goes nowhere either (review pass 5).
+      const sent = accepted || sdk === undefined || (this.loaded && anonymousSent());
       // Never the request's undoing: an SDK that throws here loses its span (review pass 2), its point and its record (PR 2c), not the request.
       try {
         this.span.updateName(span.name);
         this.span.setAttributes(span.attributes);
         if (span.error) this.span.setStatus({ code: otel.SpanStatusCode.ERROR });
-        this.span.end(at);
+        if (sent) this.span.end(at);
       } catch {}
       try {
         histogram("http.server.request.duration", REQUEST_DURATION).record(Math.max(0, at - this.started) / 1000, labelsOf(span.attributes, fields, this.refusedAtKey));
-        if (sdk) {
+        if (sdk && sent) {
           const body: Record<string, string | number> = {};
           for (const [key, value] of Object.entries(fields)) if (value !== undefined) body[key] = value;
           sdk.emit({ body, severity: span.error ? "ERROR" : fields.outcome === undefined || fields.outcome === "ok" ? "INFO" : "WARN", context: this.context, at });
@@ -599,6 +664,10 @@ export function startTelemetry(
       return undefined;
     }
     sdk = set;
+    // A count left by a stop (requests ended while it shut down) is said before the reset (review pass 6).
+    sayUnsent();
+    anonymous = { minute: -1, sent: 0, unsent: 0 };
+    telemetryLog = log;
     return set;
   }).catch((err: unknown) => {
     // The import's failure or the setup's, a server that serves either way (review pass 4: a throw in the setup killed it).
@@ -659,6 +728,7 @@ export async function stopTelemetry(): Promise<void> {
   starting = undefined;
   const stop = (async () => {
     await loading;
+    sayUnsent();
     await sdk?.shutdown();
     sdk = undefined;
   })();
@@ -674,9 +744,12 @@ export async function stopTelemetry(): Promise<void> {
  * Sends what each signal still holds — the spans and log records batched, the
  * metrics' last reading — and waits for what is on its way: how that ended,
  * or undefined with no collector set. A server's stop runs it beside closing
- * its pool, under the pool's bound, and says which (shutdown.ts).
+ * its pool, under the pool's bound, and says which (shutdown.ts); first it says
+ * what the anonymous budget held back, since a server's stop never shuts the
+ * SDK down (review pass 3).
  */
 export async function flushTelemetry(): Promise<FlushResult | undefined> {
+  sayUnsent();
   return sdk?.flush();
 }
 

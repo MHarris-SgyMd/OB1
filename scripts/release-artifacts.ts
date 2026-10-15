@@ -52,7 +52,7 @@ export type ImageKind = (typeof IMAGES)[number];
 /** Where each image builds from — the Dockerfile the job passes to buildx, context the repo root. */
 export const DOCKERFILES: Record<ImageKind, string> = { server: "server-portable/Dockerfile", migrate: "db/Dockerfile" };
 /** The release's file assets, published name → path in the tree (the overlay is written there by the job); the notes' download lines and the job's copy loop read this one list. */
-export const ASSETS: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
+export const ASSETS: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml", "compose.grafana-port.yaml": "deploy/compose.grafana-port.yaml", "compose.grafana-public.yaml": "deploy/compose.grafana-public.yaml" };
 /** The yield table's asset name; the job writes mechanism-yield.ts's output there. */
 export const YIELD_ASSET = "mechanism-yield.txt";
 /** The base compose file, whose Ollama pin the job resolves; every other deploy/compose*.yaml that names Ollama carries the same anchor. */
@@ -252,9 +252,12 @@ export function renderComposeOverlay(o: OverlayInput): string {
     "#   docker compose -f compose.yaml -f compose.release.yaml pull",
     "#   docker compose -f compose.yaml -f compose.release.yaml up -d --wait",
     "#",
-    "# Add `--profile local-models` to both for the stack's own Ollama, and",
+    "# Add `--profile local-models` to both for the stack's own Ollama (a --profile there silences COMPOSE_PROFILES:",
+    "# name the observability profile with it then), and",
     "# `-f compose.api-public.yaml` (a release file too) for the REST core at /api,",
-    "# `-f compose.hooks-public.yaml` for the plugins' webhooks at /hooks (SMD-2310).",
+    "# `-f compose.hooks-public.yaml` for the plugins' webhooks at /hooks (SMD-2310),",
+    "# `-f compose.grafana-port.yaml` for the observability profile's Grafana on 127.0.0.1:3000, or",
+    "# `-f compose.grafana-public.yaml` for it at /grafana on the stack's origin (SMD-1849).",
     "# Secrets and knobs come from deploy/.env as ever (copy .env.example). deploy/README.md,",
     '# "Pinning a release", has the rest.',
     "",
@@ -325,7 +328,7 @@ export function renderNotes(n: NotesInput): string {
   lines.push("```bash");
   if (rehearsal) lines.push("# (a rehearsal publishes no assets — from a checkout at this commit, in deploy/)");
   else {
-    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : `curl -fsSLO ${download(name)}`);
+    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : name === "compose.grafana-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in (deploy/README.md says what that shares), another -f on every command` : name === "compose.grafana-port.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES), another -f on every command` : `curl -fsSLO ${download(name)}`);
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
@@ -437,7 +440,7 @@ function selfCheck(): number {
   ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
   const past = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, migrationNumbers: Array.from({ length: 50 }, (_, i) => i + 1) });
   ok(past.problems.length === 0 && new RegExp(past.facts.preflight_row).test("  !  schema version            the brain reports 1.0.0+upstream.9543c29 but its ledger reaches migration 050, past that release's range (…048) — migrations applied beyond the version it names"), "a rehearsal on a tree two migrations past the last release expects preflight's WARN row, not the OK row (caught: cold read)");
-  ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example deploy/compose.api-public.yaml=compose.api-public.yaml deploy/compose.hooks-public.yaml=compose.hooks-public.yaml" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");
+  ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example deploy/compose.api-public.yaml=compose.api-public.yaml deploy/compose.hooks-public.yaml=compose.hooks-public.yaml deploy/compose.grafana-port.yaml=compose.grafana-port.yaml deploy/compose.grafana-public.yaml=compose.grafana-public.yaml" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");
 
   const overlay = renderComposeOverlay({ version: release.version, tag: "v1.0.0", rendered: "2026-09-30", images: { server: { ref: "ghcr.io/x/ob1-server:1.0.0", digest: "sha256:aa" }, migrate: { ref: "ghcr.io/x/ob1-migrate:1.0.0", digest: "sha256:bb" } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: "sha256:cc" });
   const parsed = Bun.YAML.parse(overlay) as { services: Record<string, { image: string; pull_policy?: string }> };
@@ -461,6 +464,7 @@ function selfCheck(): number {
 
   const notes = renderNotes({ facts: good.facts, changelogSection: "### Added\n- a thing (SMD-1)", digests: { server: "sha256:aa", migrate: "sha256:bb", ollama: "sha256:cc" }, yieldText: "== table ==\n", yieldWindow: "over the whole log" });
   ok(notes.includes("# Open Brain 1.0.0+upstream.9543c29\n") && notes.includes("- a thing (SMD-1)") && notes.includes("releases/download/v1.0.0/compose.release.yaml") && notes.includes("`ghcr.io/mharris-sgymd/ob1-server:1.0.0` | `sha256:aa`") && notes.includes("`ollama/ollama:0.34.3` | `sha256:cc`") && notes.includes("/blob/v1.0.0/changes/") && notes.includes("104-x.md") && notes.includes("== table ==") && notes.includes("highest migration 048"), "the notes carry the changelog, the download lines, the digests, the change files, the yield and the preflight row");
+  ok(["compose.api-public.yaml    # optional: the REST core", "compose.hooks-public.yaml    # optional: the plugins' webhooks", "compose.grafana-public.yaml    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in", "compose.grafana-port.yaml    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES)"].every((line) => notes.includes(line)), "each optional overlay's download line says it is optional, Grafana's two what they need");
   const rn = renderNotes({ facts: rehearsal.facts, changelogSection: null, digests: {}, yieldText: "t", yieldWindow: "" });
   ok(rn.includes("— rehearsal") && rn.includes("_built, not published_") && !rn.includes("releases/download"), "rehearsal notes say what they are and offer no downloads");
 

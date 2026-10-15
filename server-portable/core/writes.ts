@@ -228,7 +228,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // adopts it in place, so capturing a text first does not keep it this
       // key's; nor does one a reviewer's accept or another key's pointer put
       // over a thought this key did not capture, through any number of
-      // links (091, SMD-2708). takenFromCapturer reads 082's log and 091's
+      // links (092, SMD-2708). takenFromCapturer reads 082's log and 092's
       // chain, and the lapse clears a pointer this key wrote before the
       // taking.
       const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;

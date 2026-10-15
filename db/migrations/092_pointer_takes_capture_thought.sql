@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 091: a capture-only key's thought is taken while its supersedes
+-- Migration 092: a capture-only key's thought is taken while its supersedes
 --                chain reaches a thought the key did not capture — a
 --                reviewer's accept or another key's pointer that makes the
 --                key's text current over another's — so the key cannot pass
@@ -125,7 +125,7 @@ BEGIN
      OR to_regprocedure('ob1_check_capture_pointer()') IS NULL
      OR to_regprocedure('ob1_note_recapture(uuid, jsonb)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 091 needs 082 (ob1_takes_thought, ob1_capturer_of, ob1_lapse_capture_pointers, ob1_check_capture_pointer, ob1_note_recapture); this schema lacks it',
+      MESSAGE = 'migration 092 needs 082 (ob1_takes_thought, ob1_capturer_of, ob1_lapse_capture_pointers, ob1_check_capture_pointer, ob1_note_recapture); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -149,7 +149,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_capture_taken_by_log(uuid) IS
-  'Whether any update event on the thought takes it from the agent that captured it by 082''s rule (ob1_takes_thought: a re-capture by a key that can read, a text move, board-sync''s `issue`) — 082''s ob1_thought_taken, by name, which ob1_thought_taken and ob1_chain_reaches_outside read. Migration 091 / SMD-2708, on 082 / SMD-2638.';
+  'Whether any update event on the thought takes it from the agent that captured it by 082''s rule (ob1_takes_thought: a re-capture by a key that can read, a text move, board-sync''s `issue`) — 082''s ob1_thought_taken, by name, which ob1_thought_taken and ob1_chain_reaches_outside read. Migration 092 / SMD-2708, on 082 / SMD-2638.';
 
 CREATE OR REPLACE FUNCTION ob1_chain_reaches_outside(p_id uuid, p_capturer uuid, p_at uuid DEFAULT NULL, p_to uuid DEFAULT NULL)
 RETURNS boolean
@@ -186,7 +186,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_chain_reaches_outside(uuid, uuid, uuid, uuid) IS
-  'Whether the thought''s current supersedes chain, walked down, reaches a thought p_capturer did not capture (ob1_capturer_of, none included) or one 082''s log took (ob1_capture_taken_by_log) — the capturer''s text then current over another''s. p_at''s pointer reads as p_to (an event not yet projected). Cycle-safe; past 1,000 steps it answers NULL, which ob1_thought_taken reads as taken and the lapse as not. Migration 091 / SMD-2708.';
+  'Whether the thought''s current supersedes chain, walked down, reaches a thought p_capturer did not capture (ob1_capturer_of, none included) or one 082''s log took (ob1_capture_taken_by_log) — the capturer''s text then current over another''s. p_at''s pointer reads as p_to (an event not yet projected). Cycle-safe; past 1,000 steps it answers NULL, which ob1_thought_taken reads as taken and the lapse as not. Migration 092 / SMD-2708.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Taken: 082's log, or the chain.
@@ -196,7 +196,7 @@ RETURNS boolean
 LANGUAGE sql
 STABLE
 AS $$
-  -- 091: the chain too (SMD-2708). NULL — past the walk's bound — is taken:
+  -- 092: the chain too (SMD-2708). NULL — past the walk's bound — is taken:
   -- a refused pointer is the safe side.
   WITH c AS (SELECT ob1_capturer_of(p_id) AS agent)
   SELECT c.agent IS NOT NULL
@@ -205,7 +205,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_thought_taken(uuid) IS
-  'Whether the thought is no longer its capturer''s alone: an update event took it by 082''s rule (ob1_capture_taken_by_log), or — since 091 — its current supersedes chain reaches a thought the capturer did not capture or one 082 took (ob1_chain_reaches_outside; past the walk''s bound, taken): a reviewer''s accept or another key''s pointer that puts the capturer''s text over another''s. False for a thought nobody attributable captured. The server reads it for every target of a capture-only key''s `supersedes`, and the write-time check reads it again under a lock: a taken thought is not the key''s, and the pointer is dropped. Read from the current pointers: a reject clearing an accept''s pointer gives the thought back. Migration 082 / SMD-2638; the chain 091 / SMD-2708.';
+  'Whether the thought is no longer its capturer''s alone: an update event took it by 082''s rule (ob1_capture_taken_by_log), or — since 092 — its current supersedes chain reaches a thought the capturer did not capture or one 082 took (ob1_chain_reaches_outside; past the walk''s bound, taken): a reviewer''s accept or another key''s pointer that puts the capturer''s text over another''s. False for a thought nobody attributable captured. The server reads it for every target of a capture-only key''s `supersedes`, and the write-time check reads it again under a lock: a taken thought is not the key''s, and the pointer is dropped. Read from the current pointers: a reject clearing an accept''s pointer gives the thought back. Migration 082 / SMD-2638; the chain 092 / SMD-2708.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The lapse, up the chain.
@@ -228,7 +228,7 @@ BEGIN
   -- ob1:capture-pointer-lapses — a CONTRACT SENTINEL, not prose (the 014
   -- convention). An update event that takes thought T from its capturer
   -- clears every capture-scoped pointer the capturer wrote onto T and no
-  -- update has re-pointed since. 091 (SMD-2708): taken by 082's rule or by
+  -- update has re-pointed since. 092 (SMD-2708): taken by 082's rule or by
   -- T's chain reaching outside — weighed once, for T — and then T and every
   -- row above it through the pointers that stay, each taken through T, have
   -- their capturers' capture-scoped pointers cleared.
@@ -304,7 +304,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_capture_pointers() IS
-  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, when that row is taken now (ob1_capture_taken_by_log, or ob1_chain_reaches_outside read with the event''s new pointer; past the bound, not taken), it and every row above it through the pointers that stay — each taken through it — has every thought that names it as `supersedes`, was captured by its capturer with that pointer under a capture-only key and has not been re-pointed by any update since, cleared — an update event of its own under the current actor, appended and projected. A pointer a write key set is never lapsed. Migration 082 / SMD-2638; up the chain 091 / SMD-2708.';
+  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, when that row is taken now (ob1_capture_taken_by_log, or ob1_chain_reaches_outside read with the event''s new pointer; past the bound, not taken), it and every row above it through the pointers that stay — each taken through it — has every thought that names it as `supersedes`, was captured by its capturer with that pointer under a capture-only key and has not been re-pointed by any update since, cleared — an update event of its own under the current actor, appended and projected. A pointer a write key set is never lapsed. Migration 082 / SMD-2638; up the chain 092 / SMD-2708.';
 
 -- ---------------------------------------------------------------------------
 -- 4. The check at the write, the chain locked.
@@ -332,7 +332,7 @@ BEGIN
   -- captures sent at once all passed the one-superseder rule below (review
   -- pass 3). Held to the commit, so the second reads the first's row.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:capture-pointer:' || v_target::text, 0));
-  -- 091 (SMD-2708): the chain below the target is what can take it now, so
+  -- 092 (SMD-2708): the chain below the target is what can take it now, so
   -- it is locked with the target — read, locked FOR SHARE from its deepest
   -- row up to the target, and read again. A taker re-pointing a row of the
   -- chain holds that row FOR NO KEY UPDATE and then locks the rows its
@@ -384,7 +384,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_check_capture_pointer() IS
-  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): takes an advisory lock on the target (two such captures naming one target are serialised), locks it and — since 091 — every row of its supersedes chain FOR SHARE, from the deepest up, then reads the chain again and refuses (OB004) one that moved onto a row it did not lock, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the capture names no agent or the target is not that agent''s alone — captured by another, taken (ob1_thought_taken: 082''s log or, since 091, its chain reaching another''s thought), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 082 / SMD-2638; the chain 091 / SMD-2708.';
+  'The check at the write (AFTER INSERT on thought_audit, capture events carrying `supersedes` and "scope": "capture"): takes an advisory lock on the target (two such captures naming one target are serialised), locks it and — since 092 — every row of its supersedes chain FOR SHARE, from the deepest up, then reads the chain again and refuses (OB004) one that moved onto a row it did not lock, which waits for any taker, and refuses the capture (SQLSTATE OB004) when the capture names no agent or the target is not that agent''s alone — captured by another, taken (ob1_thought_taken: 082''s log or, since 092, its chain reaching another''s thought), or already superseded by any thought. The server drops the pointer and writes again. One superseder per target bounds the lapse to one event. Migration 082 / SMD-2638; the chain 092 / SMD-2708.';
 
 -- ---------------------------------------------------------------------------
 -- 5. A re-capture by a key that can read, recorded — taken by the log alone.
@@ -419,7 +419,7 @@ BEGIN
   -- Only a capture-only key's row (its capture row's mark), once: a row
   -- already taken BY THE LOG, the capturer's own re-capture, or any other row
   -- records nothing — 060's rule, a re-capture that changes nothing moves
-  -- nothing. 091 (SMD-2708): the log, not ob1_thought_taken — a thought taken
+  -- nothing. 092 (SMD-2708): the log, not ob1_thought_taken — a thought taken
   -- only through its chain is given back when the chain is cleared, and a
   -- write key holding its text must stay on record (review pass 3).
   IF v_capturer IS NULL
@@ -442,7 +442,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_note_recapture(uuid, jsonb) IS
-  'Records that a key that can read captured text a capture-only key''s thought holds: called by the stores after a capture without p_payload.recapture = ''keep'' lands on an existing row. Sets ob1.actor from p_actor (008''s envelope), locks the row, and — when its capture row carries "scope": "capture", 082''s log has not yet taken it (ob1_capture_taken_by_log; since 091 not the chain, which a reject or an unlink clears) and the caller is another agent — appends one update event with diff {"recaptured": true} and projects it (updated_at moves, nothing else). Returns whether it recorded one. The event takes the thought from its capturer (ob1_takes_thought), and its append fires the lapse. Migration 082 / SMD-2638; the log guard 091 / SMD-2708.';
+  'Records that a key that can read captured text a capture-only key''s thought holds: called by the stores after a capture without p_payload.recapture = ''keep'' lands on an existing row. Sets ob1.actor from p_actor (008''s envelope), locks the row, and — when its capture row carries "scope": "capture", 082''s log has not yet taken it (ob1_capture_taken_by_log; since 092 not the chain, which a reject or an unlink clears) and the caller is another agent — appends one update event with diff {"recaptured": true} and projects it (updated_at moves, nothing else). Returns whether it recorded one. The event takes the thought from its capturer (ob1_takes_thought), and its append fires the lapse. Migration 082 / SMD-2638; the log guard 092 / SMD-2708.';
 
 -- ---------------------------------------------------------------------------
 -- 6. The lapse fires on a pointer's event too.

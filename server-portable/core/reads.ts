@@ -10,6 +10,7 @@ import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type Super
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
+import { BRAIN_INFO_TOOL_DEADLINE_MS, HEALTH_DEADLINE_MS } from "../deadlines.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
@@ -393,14 +394,9 @@ export async function workerStatus(ctx: Ctx, _principal: Principal, _input: Inpu
 
 // ── brain_info ───────────────────────────────────────────────────────────────
 
-// Bounded (review pass 1: a keyed probe at an unreachable database waited out
-// the driver's 30-second connect and got no reply). The health body answers
-// within a probe's usual timeout — its statements capped to fit, so a few
-// locked tables cost their lock waits and not the whole record (review pass
-// 2); the tool, kept alive by its stream (SMD-1864), waits longer for a large
-// brain's counts, at brain-info.ts's default ceilings.
-export const HEALTH_DEADLINE_MS = 2_500;
-export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
+// The two surfaces' deadlines are deadlines.ts's, which imports nothing, so a
+// server that only asks holds its keyed checks to them (SMD-2287).
+export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS };
 export type BrainInfoSurface = "health" | "tool";
 const SURFACES: Record<BrainInfoSurface, { deadlineMs: number; opts: ReadOptions }> = {
   health: { deadlineMs: HEALTH_DEADLINE_MS, opts: { statementTimeoutMs: 800, lockTimeoutMs: 300 } },

@@ -43,6 +43,16 @@ export interface CallInit {
  */
 export type Answer = { status: number; ok: boolean; headers: Headers; body: unknown; sent: boolean };
 
+/** The methods an operation answers on, the core's and a plugin's alike. */
+export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+
+/**
+ * A plugin operation's route, as its manifest gives it (core/plugins.ts's
+ * OPERATION_PATH under `/v1/plugins/<name>`, the name as PLUGIN_NAME_RE
+ * holds it): lower-case words and hyphens, and `{field}` segments.
+ */
+const PLUGIN_PATH = /^\/v1\/plugins\/[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\/(?:[a-z0-9]+(?:-[a-z0-9]+)*|\{[a-z_]+\}))+$/;
+
 /** The operations `call` takes: every one but the job's event stream, which answers a stream, not a body (`stream`). */
 export type CallableOperation = Exclude<OperationId, "job_stream">;
 
@@ -241,6 +251,14 @@ export type RestClient = {
    */
   call<K extends CallableOperation>(name: K, input: InputOf<K>, init?: CallInit): Promise<Answer>;
   /**
+   * An enabled plugin's operation (SMD-2310), which no committed document
+   * names — which plugins run is the operator's choice — by its method and its
+   * manifest's route, `/v1/plugins/<name>/…` with `{field}` segments: its
+   * input sent and its answer read as `call` sends and reads them. A route
+   * that is no plugin operation's shape rejects, as a caller's mistake.
+   */
+  callPath(method: Method, path: string, input: Record<string, unknown>, init?: CallInit): Promise<Answer>;
+  /**
    * A job's event stream, by its id: the response itself, unread — its body
    * the stream, or a refusal's JSON — for the caller to pass on or read. A
    * job id a URL path cannot carry is answered as `call` answers one.
@@ -253,7 +271,8 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   // with a query or a fragment puts every path after it, and a forwarder key
   // no header carries as written would throw on every call (review pass 2).
   const why = unfitBase(opts.baseUrl);
-  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(String(opts.baseUrl))} ${why}`);
+  // Quoted with any credentials in it blanked, so the refusal does not print a password (review pass 4 of SMD-2287 PR 3a).
+  if (why) throw new TypeError(`baseUrl must be an http or https origin, or an origin and a path: ${JSON.stringify(String(opts.baseUrl).replace(/\/\/[^/@]*@/, "//…@"))} ${why}`);
   // The timeout a whole number of milliseconds a timer can hold: setTimeout fires at once past 2^31 - 1, and AbortSignal.timeout throws on Infinity (review pass 5).
   if (opts.timeoutMs != null && !(Number.isInteger(opts.timeoutMs) && opts.timeoutMs > 0 && opts.timeoutMs <= MAX_TIMER_MS)) throw new TypeError(`timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}, or none: ${String(opts.timeoutMs)}`);
   if (opts.forwarderKey != null && (typeof opts.forwarderKey !== "string" || !headerSafe(opts.forwarderKey))) throw new TypeError("forwarderKey is no value a header carries as written (tab, printable ASCII and U+0080–U+00FF alone, no space or tab at either end)");
@@ -277,39 +296,50 @@ export function createRestClient(opts: RestClientOptions): RestClient {
   });
   const keyed = (init: CallInit): Record<string, string> => (init.key == null ? {} : { "x-brain-key": init.key });
 
+  /** One operation by its method and route: the path's fields fill the path, the rest rides the query string or the body. */
+  const invoke = async (method: Method, path: string, input: Record<string, unknown>, init: CallInit): Promise<Answer> => {
+    if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return unauthorizedHere();
+    const rest: Record<string, unknown> = { ...input };
+    const pathParams: Record<string, string> = {};
+    for (const field of fieldsOf(path)) {
+      const unfit = unfitForPath(rest[field]);
+      if (unfit) return refusedHere(field, unfit);
+      pathParams[field] = rest[field] as string;
+      delete rest[field];
+    }
+    const readsQuery = method === "GET" || method === "DELETE";
+    if (readsQuery) {
+      for (const [field, value] of Object.entries(rest)) {
+        // A name rides the URL as it is: a `#` in one made the rest a fragment, a `&` or `=` split it (review pass 5).
+        if (!/^[A-Za-z0-9_.-]+$/.test(field)) return refusedHere(field, "is no name a query string carries");
+        const unfit = unfitForQuery(value);
+        if (unfit) return refusedHere(field, unfit);
+      }
+    }
+    // Untyped here: the method and path are the operation's own, read from the document by its name, which the generic types cannot follow.
+    const request = raw.request as unknown as (method: string, path: string, init: Record<string, unknown>) => Promise<{ data?: unknown; error?: unknown; response: Response }>;
+    const { data, error, response } = await request(method.toLowerCase(), path, {
+      params: { path: pathParams, ...(readsQuery ? { query: rest } : {}) },
+      ...(readsQuery ? {} : { body: rest }),
+      headers: keyed(init),
+      signal: signalFor(init, opts.timeoutMs),
+      parseAs: "text",
+    });
+    // openapi-fetch parses an error's JSON itself, and hands back "" for an empty body, which is none (review pass 2); a success's text is parsed here.
+    return { status: response.status, ok: response.ok, sent: true, headers: response.headers, body: response.ok ? parsed(data as string | undefined) : error === "" ? null : error ?? null };
+  };
+
   return {
     raw,
+    // Async, so a caller's mistake is a rejection as an answer's failure is (review pass 1: callPath's threw at once).
     async call(name, input, init = {}) {
-      if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return unauthorizedHere();
       const { method, path } = OPERATIONS[name];
-      const rest: Record<string, unknown> = { ...(input as Record<string, unknown>) };
-      const pathParams: Record<string, string> = {};
-      for (const field of fieldsOf(path)) {
-        const unfit = unfitForPath(rest[field]);
-        if (unfit) return refusedHere(field, unfit);
-        pathParams[field] = rest[field] as string;
-        delete rest[field];
-      }
-      const readsQuery = method === "GET" || method === "DELETE";
-      if (readsQuery) {
-        for (const [field, value] of Object.entries(rest)) {
-          // A name rides the URL as it is: a `#` in one made the rest a fragment, a `&` or `=` split it (review pass 5).
-          if (!/^[A-Za-z0-9_.-]+$/.test(field)) return refusedHere(field, "is no name a query string carries");
-          const unfit = unfitForQuery(value);
-          if (unfit) return refusedHere(field, unfit);
-        }
-      }
-      // Untyped here: the method and path are the operation's own, read from the document by its name, which the generic types cannot follow.
-      const request = raw.request as unknown as (method: string, path: string, init: Record<string, unknown>) => Promise<{ data?: unknown; error?: unknown; response: Response }>;
-      const { data, error, response } = await request(method.toLowerCase(), path, {
-        params: { path: pathParams, ...(readsQuery ? { query: rest } : {}) },
-        ...(readsQuery ? {} : { body: rest }),
-        headers: keyed(init),
-        signal: signalFor(init, opts.timeoutMs),
-        parseAs: "text",
-      });
-      // openapi-fetch parses an error's JSON itself, and hands back "" for an empty body, which is none (review pass 2); a success's text is parsed here.
-      return { status: response.status, ok: response.ok, sent: true, headers: response.headers, body: response.ok ? parsed(data as string | undefined) : error === "" ? null : error ?? null };
+      return invoke(method as Method, path, input as Record<string, unknown>, init);
+    },
+    async callPath(method, path, input, init = {}) {
+      if (!["GET", "POST", "PATCH", "DELETE"].includes(method)) throw new TypeError(`callPath's method must be GET, POST, PATCH or DELETE: ${JSON.stringify(method)}`);
+      if (typeof path !== "string" || !PLUGIN_PATH.test(path)) throw new TypeError(`callPath's route must be a plugin operation's, /v1/plugins/<name>/… with {field} segments: ${JSON.stringify(path)}`);
+      return invoke(method, path, input ?? {}, init);
     },
     async stream(jobId, init = {}) {
       if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return asResponse(unauthorizedHere());

@@ -65,11 +65,18 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the proxy, and n8n under its opt-in profile
+ *      compose.yaml publishes the forwarder (SMD-2583), and n8n under its opt-in profile
  *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
- *      publish through compose.host-ports.yaml, a second -f; and
+ *      publish through compose.host-ports.yaml, a second -f, and the
+ *      observability profile's Grafana through compose.grafana-port.yaml
+ *      (SMD-1849); and
  *      deploy/.env.example's live lines are exactly the keys an operator fills
- *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685).
+ *      in, empty (ENV_EXAMPLE_LIVE), and no tracked file is a .env (SMD-2685)
+ *      or any env file (a name that starts `.env`, ends `.env` or holds
+ *      `.env.`) but an .example, .sample or .template; and deploy/canary.sh and deploy/tier.sh
+ *      read the stack's project through a stub carrying compose.yaml's own
+ *      `name:` on one code line that reads an env file, and name it nowhere
+ *      else in code but a short list (SMD-2873).
  *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
@@ -301,15 +308,18 @@
  *      one of its probes
  *  28. the proxy's other route tables are held byte for byte, and only its
  *      backends answer it (SMD-2658, SMD-2685): compose.yaml's,
- *      compose.api-public.yaml's and compose.hooks-public.yaml's (SMD-2310)
- *      tables, as mounted config and as proxy label,
+ *      compose.api-public.yaml's, compose.hooks-public.yaml's (SMD-2310) and
+ *      compose.grafana-public.yaml's (SMD-1849) tables, as mounted config and
+ *      as proxy label,
  *      each equal to the table built here, with no comment in it (Traefik
  *      renders a route file as a Go template); in every compose file directly
  *      in deploy/ (any case, and any name outside printable ASCII) but
  *      compose.tiers.yaml (check 27's), no control, format or separator
  *      character but space and line feed, no `!!`, named-handle, verbatim or
  *      percent-escaped YAML tag, no !reset or !override and no directive;
- *      compose.yaml's proxy as held, and its forwarder (SMD-2583), with the
+ *      compose.yaml's proxy as held, its observability collector whole
+ *      (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
+ *      environment, SMD-1849), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
  *      deploy/forwarder.ts; an overlay's only its own table's mount,
  *      no config but the file's own table's (compose.yaml's forwarder's too), no name compose takes with no -f
@@ -2289,6 +2299,7 @@ const PUBLISHES: Record<string, string[]> = {
   // the provisioning step and an AI client on this host.
   "compose.yaml": ["forwarder", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
+  "compose.grafana-port.yaml": ["lgtm"],
   // The three-brain pipeline (SMD-1806): its forwarder, in front of its proxy,
   // where each tier is a path (SMD-2294, SMD-2583); the tiers' servers, REST
   // cores and Postgres services and the shared Ollama publish nothing.
@@ -2435,7 +2446,31 @@ function checkPublishedPorts() {
   let tracked: string[] | null = null;
   try { tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0"); } catch (e) { console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 13 cannot tell a committed .env from an operator's own, and skips that rule)`); }
   for (const f of tracked ?? []) if (/^\.env$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env — compose reads it with no --env-file, so what it sets (a COMPOSE_FILE naming a file no check reads, a port) reaches every stack run from here unrendered, and `git pull` writes it over an operator's own; untrack it (`git rm --cached`) and keep settings in .env.example (SMD-2685)");
-    else if (/^\.env\.canary([.-].*)?$/i.test(f.split("/").at(-1) ?? "")) fail(f, "is a tracked .env.canary.local (or the temporary file deploy/canary.sh makes it in) — the canary runs on it, its database password and stable's keys included, and `git pull` writes it over the canary's own; untrack it (`git rm --cached`) (SMD-2583)");
+    else if (/^\.env.|\.env$|\.env\./i.test(f.split("/").at(-1) ?? "") && !/\.(example|sample|template)$/i.test(f)) fail(f, "is a tracked env file — one env file is one brain (SMD-2873): a brain's own (.env.<name>.local), a canary's (.env.canary.local, .env.<stable>-canary.local), the temporary file deploy/canary.sh makes one in, and any other env file hold a database password or keys, and `git pull` writes it over the operator's own; untrack it (`git rm --cached`) and name a brain's .env.<name>.local, which the root .gitignore ignores, or an example .example, .sample or .template (SMD-2583, SMD-2873)");
+  // One env file is one brain (SMD-2873): canary.sh and tier.sh read the project from it, through a stub
+  // carrying compose.yaml's own `name:`, on one code line that reads an env file; no other code line names
+  // open-brain but the few each script is allowed (a fixed default, in any of bash's forms, is one).
+  {
+    let name: string | undefined;
+    try { name = (Bun.YAML.parse(readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8")) as { name?: unknown }).name as string | undefined; } catch { name = undefined; }
+    if (typeof name !== "string" || !name) fail("deploy/compose.yaml", "has no top-level `name:` Bun.YAML reads, which deploy/canary.sh and deploy/tier.sh fall back to (SMD-2873)");
+    else {
+      const allowed: Record<string, RegExp[]> = {
+        "canary.sh": [/\[ "\$CANARY" = open-brain-canary \]/g, /compose\.yaml's default \(open-brain\)/g, /compose\.yaml's open-brain"/g],
+        "tier.sh": [/\bopen-brain-tier(-env)?\b/g, /compose\.yaml's open-brain"/g],
+      };
+      const composeName: string = name;
+      for (const [script, ok] of Object.entries(allowed)) {
+        // The code part of each line: a trailing ` # …` comment is no code, and must not carry an allowed word past the check.
+        const lines = readFileSync(join(ROOT, "deploy", script), "utf8").split("\n").map((l, i) => [i + 1, l.replace(/\s#.*$/, "")] as const).filter(([, l]) => !/^\s*(#|$)/.test(l));
+        const stub: string = `printf 'name: ${composeName}\\nservices: {}\\n'`;
+        const stubs = lines.filter(([, l]) => l.includes(stub));
+        if (stubs.length !== 1 || !/--env-file/.test(stubs[0][1])) fail(`deploy/${script}`, `reads the stack's project through compose with a stub carrying compose.yaml's \`name: ${name}\` (${stub}) on exactly one code line, which reads an env file (--env-file), so its fallback is the project compose.yaml names (found on ${stubs.length}) (SMD-2873)`);
+        // Each allowed text, and the stub, is taken out of the code; the name must then be gone.
+        for (const [n, l] of lines) if (ok.reduce((s, r) => s.replace(r, ""), l.split(stub).join("")).includes(name)) fail(`deploy/${script}:${n}`, `names ${name} outside the project read (${JSON.stringify(l.trim().slice(0, 80))}): the project follows the env file, and compose.yaml's name is the read's fallback alone (SMD-2873)`);
+      }
+    }
+  }
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
@@ -4016,7 +4051,7 @@ await checkVersionModule();
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts", "jev", "deploy/auth", "rest-client", "mcp-server"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
@@ -5352,6 +5387,9 @@ const EDGE_ROLE: TransportRole = {
     ["./oauth-edge.ts", new Set(["challengeHeader", "UNREACHABLE_RETRY_AFTER_SECONDS"])],
     ["./telemetry.ts", new Set(["traceOf", "RequestOutcome", "RequestTrace"])],
     ["./tools.ts", new Set(["ToolName"])],
+    // The worker mirrors' inputs and the codes their words cover (SMD-2287): types alone.
+    ["./core/schemas.ts", new Set(["Input"])],
+    ["./core/workers.ts", new Set(["ReleaseLeasesCode", "RetryFailedCode", "RunWorkerCode"])],
   ]),
   wiring: false,
   mustImport: "./telemetry.ts",
@@ -5852,8 +5890,9 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
-/** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server or plugin (SMD-2310), and no auth or orchestration profile. */
-const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS"];
+/** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier, authorization server, plugin (SMD-2310) or collector (SMD-1849's observability profile), and no auth or orchestration profile. */
+const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS",
+  "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -6140,6 +6179,7 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
+  + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
   + ROUTE_TIER_PATHS + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
@@ -6158,11 +6198,17 @@ const HOOKS_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-public", "PathPrefix(`/hooks/`)", 36, "hooks-no-forwarder", "hooks")
   + "  middlewares:\n    hooks-no-forwarder:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n"
   + "  services:\n" + routeService("hooks", `http://${tierMeshName("api", "stable")}.:8000`);
+/** compose.grafana-public.yaml's route table (SMD-1849 PR 3a), byte for byte, as Bun.YAML reads the block: /grafana to the observability profile's Grafana, path kept; its 502 — the profile off, the container stopped or starting — a bare 404. */
+const GRAFANA_ROUTE_TABLE = "http:\n  routers:\n"
+  + routeRouter("grafana-public", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 36, "grafana-absent", "grafana")
+  + "  middlewares:\n" + routeErrors("grafana-absent", "502")
+  + "  services:\n" + routeService("grafana", "http://lgtm.ob1.internal.:3000");
 /** [the file under deploy/, the config compose mounts, where the proxy mounts it, the proxy label that copies it, the table's name here, the table]. */
 const ROUTE_FILES = [
   ["compose.yaml", "proxy-routes", "/etc/traefik/dynamic/routes.yaml", "ob1.proxy-routes", "PROXY_ROUTE_TABLE", PROXY_ROUTE_TABLE],
   ["compose.api-public.yaml", "proxy-api-route", "/etc/traefik/dynamic/api.yaml", "ob1.proxy-api-route", "API_ROUTE_TABLE", API_ROUTE_TABLE],
   ["compose.hooks-public.yaml", "proxy-hooks-route", "/etc/traefik/dynamic/hooks.yaml", "ob1.proxy-hooks-route", "HOOKS_ROUTE_TABLE", HOOKS_ROUTE_TABLE],
+  ["compose.grafana-public.yaml", "proxy-grafana-route", "/etc/traefik/dynamic/grafana.yaml", "ob1.proxy-grafana-route", "GRAFANA_ROUTE_TABLE", GRAFANA_ROUTE_TABLE],
 ] as const;
 /** compose.yaml's proxy as Bun.YAML reads it, its label (the table rule's) and its `logging` (check 29's, x-logging for every service) aside. */
 const PROXY_SERVICE = {
@@ -6210,13 +6256,76 @@ const FORWARDER_SERVICE = {
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
+/**
+ * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) aside: the image by its digest,
+ * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
+ * container's loopback, every call out off, Loki's retention, the mesh alone. Its environment holds telemetry's sign-in and
+ * exposure; a change to it is made here too, on purpose (review pass 1).
+ */
+const LGTM_SERVICE = {
+  image: "docker.io/grafana/otel-lgtm:0.36.0@sha256:57c04cbd8e7022f32bb84c4ac005d79baf8b08e2c5be44facf11f5f1f9944ba2",
+  profiles: ["observability"],
+  init: true,
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  command: ["bash", "-c", [
+    "LC_ALL=C.UTF-8\n",
+    "pw=$$(printf '%s' \"$$GF_SECURITY_ADMIN_PASSWORD\" | tr -d '[:space:]')\n",
+    "if [ \"$$(printf '%s' \"$$pw\" | tr '[:upper:]' '[:lower:]')\" = admin ] || [ \"$${#pw}\" -lt 12 ]; then\n",
+    "  echo \"lgtm: set GRAFANA_ADMIN_PASSWORD in deploy/.env, 12 characters or more and not admin: Grafana signs its operator in with it\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "origin=$${LGTM_ORIGIN%/}\n",
+    "export GF_SERVER_ROOT_URL=\"$$origin/grafana/\"\n",
+    "case \"$$(printf '%s' \"$$origin\" | tr '[:upper:]' '[:lower:]')\" in https://*) export GF_SECURITY_COOKIE_SECURE=true ;; esac\n",
+    "sed 's/^server:$$/server:\\n  http_listen_address: 127.0.0.1\\n  grpc_listen_address: 127.0.0.1/' /otel-lgtm/tempo-config.yaml > /tmp/tempo-config.yaml\n",
+    "if [ \"$$(grep -c 'listen_address:' /tmp/tempo-config.yaml)\" != 2 ] || ! grep -qx '  grpc_listen_address: 127.0.0.1' /tmp/tempo-config.yaml; then\n",
+    "  echo \"lgtm: the image's tempo-config.yaml is not the one this was written for (a server: block setting no address): Tempo would not be on loopback alone\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "exec /otel-lgtm/run-all.sh\n",
+  ].join("")],
+  environment: {
+    GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}",
+    GF_AUTH_ANONYMOUS_ENABLED: "false",
+    LGTM_ORIGIN: "${OB1_PUBLIC_ORIGIN:-http://127.0.0.1:${SERVER_PORT:-8000}}",
+    GF_SERVER_SERVE_FROM_SUB_PATH: "true",
+    GF_SECURITY_CONTENT_SECURITY_POLICY: "true",
+    GF_SECURITY_DATA_SOURCE_PROXY_WHITELIST: "127.0.0.1:9090 127.0.0.1:3100 127.0.0.1:3200 127.0.0.1:4040",
+    GF_SECURITY_DISABLE_GRAVATAR: "true",
+    GF_SNAPSHOTS_ENABLED: "false",
+    GF_SNAPSHOTS_EXTERNAL_ENABLED: "false",
+    GF_PUBLIC_DASHBOARDS_ENABLED: "false",
+    GF_METRICS_ENABLED: "false",
+    GF_NEWS_NEWS_FEED_ENABLED: "false",
+    GF_PLUGINS_PREINSTALL_DISABLED: "true",
+    GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true",
+    GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false",
+    GF_ANALYTICS_REPORTING_ENABLED: "false",
+    GF_ANALYTICS_CHECK_FOR_UPDATES: "false",
+    GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false",
+    GF_CLOUD_MIGRATION_ENABLED: "false",
+    PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090",
+    LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h",
+    TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
+    PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
+  },
+  volumes: ["lgtm-data:/data"],
+  networks: { mesh: { aliases: ["lgtm.ob1.internal"] } },
+  healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
+  restart: "unless-stopped",
+};
+/** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
+const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
-  // Postgres's port, and the outward network it is published on (SMD-2583).
+  // No wait: the proxy starts with the profile off, and its 502 is a 404 (SMD-1849 PR 3a).
+  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"] }, top: ["configs"] },
+  // Postgres's port, and the outward network it is published on (SMD-2583); Grafana's, the same way (SMD-1849 PR 3a).
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
+  // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
+  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
   "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
@@ -6227,10 +6336,11 @@ const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "e
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
 /** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. */
-const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null };
+const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null, "lgtm-data": null };
 const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
@@ -6240,6 +6350,7 @@ const SERVICE_MOUNTS: Record<string, unknown[]> = {
   n8n: ["n8n-data:/home/node/.n8n"],
   "orchestration-runner": [{ type: "bind", source: "${IMPORTS_DIR:-./imports}", target: "/imports", read_only: true, bind: { selinux: "z" } }, "./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z"],
   auth: ["auth-data:/data"],
+  lgtm: ["lgtm-data:/data"],
 };
 const SERVICE_BUILDS: Record<string, unknown> = {
   migrate: { context: "..", dockerfile: "db/Dockerfile" },
@@ -6252,6 +6363,7 @@ const SERVICE_BUILDS: Record<string, unknown> = {
 const FILE_NETWORKS: Record<string, Mapping> = {
   "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true } },
   "compose.host-ports.yaml": { "postgres-port": {} },
+  "compose.grafana-port.yaml": { "grafana-port": {} },
   "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
 };
 /** The networks each file's services join, and the names each answers to there, exactly; a service not named here sets no `networks` (compose.yaml's proxy aside, PROXY_SERVICE's). */
@@ -6273,8 +6385,11 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     "orchestration-runner-role": ["data"],
     "orchestration-runner": ["data", "egress"],
     auth: { mesh: { aliases: ["auth.ob1.internal"] }, "auth-egress": {} },
+    // The observability profile's collector and Grafana (SMD-1849 PR 3a): the servers send to it and the proxy shows it, on `mesh` alone.
+    lgtm: { mesh: { aliases: ["lgtm.ob1.internal"] } },
   },
   "compose.host-ports.yaml": { postgres: ["postgres-port"] },
+  "compose.grafana-port.yaml": { lgtm: ["grafana-port"] },
   "compose.canary.yaml": {
     server: { "stable-mesh": { aliases: [tierMeshName("mcp", "canary")] } },
     api: { "stable-mesh": { aliases: [tierMeshName("api", "canary")] } },
@@ -6323,6 +6438,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const fdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(forwarder, ["labels", "logging"]))), FORWARDER_SERVICE, "services.forwarder", fdiffs);
     if (fdiffs.length) flag("proxy", `${fdiffs.slice(0, 6).join("; ")}${fdiffs.length > 6 ? `; and ${fdiffs.length - 6} more` : ""} — compose.yaml's forwarder is check 28's FORWARDER_SERVICE, its label aside: it holds the stack's published port and every client's bytes, so a change to it is made there too, on purpose (SMD-2583)`);
+    // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
+    const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
+    const ldiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(lgtm, ["logging"]))), LGTM_SERVICE, "services.lgtm", ldiffs);
+    if (ldiffs.length) flag("proxy", `${ldiffs.slice(0, 6).join("; ")}${ldiffs.length > 6 ? `; and ${ldiffs.length - 6} more` : ""} — compose.yaml's lgtm is check 28's LGTM_SERVICE: Grafana's anonymous access, its admin password's refusal, the backends' loopback and every call out are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3a)`);
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
     pathDiffs(fconfig?.content, FORWARDER_SCRIPT, "configs.forwarder.content", sdiffs);
@@ -6358,6 +6478,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const may = overlay?.services[name] ?? [];
       const extra = Object.keys(svc).filter((k) => !may.includes(k));
       if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
+      if (file === "compose.grafana-port.yaml" && name === "lgtm" && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_PORT_LGTM_ENV)) flag("keys", `sets services.lgtm.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_PORT_LGTM_ENV holds ${JSON.stringify(GRAFANA_PORT_LGTM_ENV)} — the loopback port names Grafana's origin and nothing else: any other key there is Grafana's configuration, its anonymous access included`);
       continue;
     }
     if (name === "proxy" || name === "forwarder") continue;
@@ -6398,6 +6519,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
   ["a comment line in compose.yaml's table", "compose.yaml", "    middlewares:\n      legacy-window:\n", "    middlewares:\n      # a note\n      legacy-window:\n"],
   ["the legacy router over /mcp", "compose.yaml", "        priority: 1\n", "        priority: 50\n"],
+  ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],
   ["compose.yaml's anchor redefined behind U+2028 on a comment, which compose reads and Bun.YAML does not (measured)", "compose.yaml", "\nservices:\n", "\n# a note\u2028x-shadow: &proxy-routes \"http: {}\"\n\nservices:\n"],
@@ -6409,6 +6531,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.api-public.yaml's label its own table", "compose.api-public.yaml", "      ob1.proxy-api-route: *api-route\n", "      ob1.proxy-api-route: \"http: {}\"\n"],
   // What a file may do to the proxy (pass 2, each run against compose's render).
   ["a setting on compose.yaml's proxy by a variable CI renders as its default", "compose.yaml", "      TRAEFIK_PING: \"true\"\n", "      TRAEFIK_PING: \"true\"\n      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ${OB1_PROXY_ADDRESS:-:8000}\n"],
+  ["compose.grafana-port.yaml turning Grafana's anonymous access on beside its origin (review passes 3, 6)", "compose.grafana-port.yaml", "      LGTM_ORIGIN: \"${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}\"\n", "      LGTM_ORIGIN: \"${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}\"\n      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["compose.host-ports.yaml mounting a second route file on the proxy", "compose.host-ports.yaml", "\nservices:\n", "\nservices:\n  proxy:\n    configs: [{source: proxy-routes, target: /etc/traefik/dynamic/zz.yaml}]\n"],
   ["compose.api-public.yaml giving the proxy a root hook that writes a route file (measured, pass 2)", "compose.api-public.yaml", "    depends_on:\n      api:\n", "    post_start: [{command: [sh, -c, \"echo > /etc/traefik/dynamic/x.yaml\"], user: root}]\n    depends_on:\n      api:\n"],
   ["compose.api-public.yaml mounting its table over compose.yaml's", "compose.api-public.yaml", "        target: /etc/traefik/dynamic/api.yaml\n", "        target: /etc/traefik/dynamic/routes.yaml\n"],
@@ -6502,8 +6625,8 @@ function checkRouteTables() {
     if (rules.size === 1) soleCatch.add([...rules][0]);
   }
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
-  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml" };
-  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml and compose.hooks-public.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
+  const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml", "compose.grafana-port.yaml": "deploy/compose.grafana-port.yaml", "compose.grafana-public.yaml": "deploy/compose.grafana-public.yaml" };
+  if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
   // …and the commands its notes tell an operator to run: the downloads of those files and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
     const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
@@ -6946,6 +7069,7 @@ const RESTART_POLICIES: Record<string, string> = {
   "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
+  lgtm: "unless-stopped",
 };
 /** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
 function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {

@@ -21,7 +21,7 @@ import { acceptance, FINDING_OUTCOMES_SQL, findingOutcome, findingsValue, type F
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { egressRefusal } from "./worker-bootstrap.ts";
 import {
-  commentBody, DEFAULT_CAP, findingGate, findingLine, FINDING_UNITS, findingSubject, groupFindings, groupWords,
+  commentBody, DEFAULT_CAP, findingGate, findingLine, findingLines, FINDING_UNITS, findingSubject, groupFindings, groupWords,
   boardOf, emptyReport, findingsWanted, reportLine, withoutFindingTerms, markerLine, markerWords, onlyWords, outcomes, passCode, readCap, summaryLine, type Finding, type FindingsReport,
 } from "./board-findings.ts";
 
@@ -33,7 +33,7 @@ function ok(cond: boolean, msg: string): void {
 
 const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Finding => {
   const [a, b] = o.older < o.newer ? [o.older, o.newer] : [o.newer, o.older];
-  return { kind: "relation", word: "related", verdict: null, confidence: null, reason: null, at: "2026-10-01T00:00:00.000Z", a, b, ...o };
+  return { kind: "relation", word: "related", verdict: null, confidence: null, reason: null, at: "2026-10-01T00:00:00.000Z", a, b, olderClosed: false, newerClosed: false, ...o };
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,12 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(g[0].on === "SMD-1" && g[0].findings.map((x) => x.id).join(",") === "r1,p1", `the comment goes on the newer side of the pair's best finding (${g[0].on})`);
   ok(groupWords(g[0]).join(",") === "related,outdates", "the words in rank order");
   ok(onlyWords(g[0], new Set(["outdates"]))?.findings.map((x) => x.id).join(",") === "p1" && onlyWords(g[0], new Set(["duplicate"])) === null, "onlyWords keeps a word's findings, and nothing when none is left");
+  // SMD-2932: a closed newer ticket with an open older one: the comment goes on the open one; otherwise the newer.
+  const on = (o: Partial<Finding>) => groupFindings([f({ id: "c", older: "SMD-1", newer: "SMD-2", ...o })])[0].on;
+  ok(on({}) === "SMD-2" && on({ newerClosed: true }) === "SMD-1" && on({ olderClosed: true }) === "SMD-2" && on({ newerClosed: true, olderClosed: true }) === "SMD-2",
+    "the comment goes on the newer ticket, but on the older when only the newer is closed");
+  const mixed = groupFindings([f({ id: "m1", older: "SMD-1", newer: "SMD-2", confidence: 0.9, newerClosed: true }), f({ id: "m2", older: "SMD-2", newer: "SMD-1", confidence: 0.5, olderClosed: true })])[0];
+  ok(mixed.on === "SMD-1", `…read on the pair's best finding (${mixed.on})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +88,32 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(lines[0] === "**Open Brain found something about SMD-2 and SMD-1**, two tickets this board does not link.", `the comment opens by naming the ticket it is on and the other (${lines[0]})`);
   ok(/changed nothing on this board/.test(body) && lines[lines.length - 1] === "ob1-finding SMD-1 SMD-2 outdates related", "it says it changed nothing, and its marker is the last line");
   ok(lines.filter((l) => l.startsWith("- ")).length === 2 && lines.filter((l) => /^ob1-finding /.test(l)).length === 1, "one bullet per finding, and one marker line");
+
+  // SMD-2930: the judge relates rows, and a ticket's sections are rows of their own — one relation, one bullet.
+  const rows = groupFindings([
+    f({ id: "r1", older: "SMD-1", newer: "SMD-2", confidence: 0.84 }), f({ id: "r2", older: "SMD-1", newer: "SMD-2", confidence: 0.99 }),
+    f({ id: "r3", older: "SMD-2", newer: "SMD-1", confidence: 0.93 }), f({ id: "r4", older: "SMD-1", newer: "SMD-2", confidence: 0.97 }),
+    f({ id: "e1", word: "evolves", older: "SMD-1", newer: "SMD-2", confidence: 0.7 }), f({ id: "e2", word: "evolves", older: "SMD-2", newer: "SMD-1", confidence: 0.6 }),
+    f({ id: "e3", word: "evolves", older: "SMD-1", newer: "SMD-2", confidence: 0.5 }),
+    p, { ...p, id: "p2", confidence: 0.6 },
+  ])[0];
+  const bullets = findingLines(rows);
+  const heads = bullets.map((b) => /^- \*\*([^*]+)\*\*( \([^)]*\))?/.exec(b)?.slice(1).join("") ?? b);
+  ok(JSON.stringify(heads) === JSON.stringify([
+      "SMD-2 is related to SMD-1 (confidence 0.99, best of 4 row pairs)",
+      "SMD-2 outdates SMD-1 (confidence 0.83)",
+      "SMD-2 evolves from SMD-1 (confidence 0.70, best of 3 row pairs, 1 the other way)",
+      "SMD-2 outdates SMD-1 (confidence 0.60)",
+    ]),
+    `each relation word is one bullet, in its best finding's direction, at its rank: related either way round, evolves noting the row pair read the other way; each proposal its own, in rank order (${heads.join(" / ")})`);
+  const rowsBody = commentBody(rows);
+  const dup = findingLines({ findings: groupFindings([
+    f({ id: "d1", word: "duplicate", older: "SMD-1", newer: "SMD-2", confidence: 0.9 }), f({ id: "d2", word: "duplicate", older: "SMD-2", newer: "SMD-1", confidence: 0.5 }),
+  ])[0].findings });
+  ok(rowsBody.split("\n").filter((l) => l.startsWith("- ")).length === 4 && rowsBody.endsWith("ob1-finding SMD-1 SMD-2 related outdates evolves")
+      && rows.findings.length === 9 && JSON.stringify(findingLines({ findings: [f({ id: "x", older: "SMD-1", newer: "SMD-2", confidence: null }), f({ id: "y", older: "SMD-1", newer: "SMD-2", confidence: null })] })) === JSON.stringify(["- **SMD-2 is related to SMD-1** (2 row pairs). If so, link them as related here; board-sync brings the link back on its next pass and the brain stops pairing them."])
+      && dup.length === 1 && /^- \*\*SMD-2 duplicates SMD-1\*\* \(confidence 0\.90, best of 2 row pairs, 1 the other way\)\./.test(dup[0]),
+    "the comment carries the collapsed bullets and the same marker; the group still names every finding, which the record keeps; with no confidence, just the count; a duplicate read both ways is one bullet saying so");
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +197,7 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
 // ---------------------------------------------------------------------------
 {
   const D = 86_400;
-  const prop = (o: Partial<NonNullable<FindingRow["proposals"]>> = {}) => ({ accepted: 0, rejected: 0, settled: 0, stale: 0, pending: 0, acceptedS: null, rejectedS: null, settledS: null, ...o });
+  const prop = (o: Partial<NonNullable<FindingRow["proposals"]>> = {}) => ({ accepted: 0, rejected: 0, settled: 0, reopened: 0, stale: 0, pending: 0, acceptedS: null, rejectedS: null, ...o });
   const row = (o: Partial<FindingRow>): FindingRow => ({ a: "SMD-1", b: "SMD-2", word: "related", postedOn: "SMD-2", origin: "posted", postedAt: "2026-10-01T00:00:00.000Z", ageS: 5 * D, linkedS: null, proposals: null, stands: true, withdrawnS: null, ...o });
   const out = (o: Partial<FindingRow>, days?: number) => { const v = findingOutcome(row(o), days); return `${v.outcome}/${v.how}/${v.answeredS}`; };
   const outd = (p: Partial<NonNullable<FindingRow["proposals"]>>, o: Partial<FindingRow> = {}) => out({ word: "outdates", stands: null, proposals: prop(p), ...o });
@@ -178,10 +210,18 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
   ok(outd({ rejected: 1, pending: 1 }) === "open/null/null" && outd({ rejected: 1, pending: 1 }, { linkedS: D }) === `accepted/linked/${D}`,
     "a rejection beside a pending proposal is not yet an answer; the board linking the pair then is");
   ok(outd({ pending: 2 }, { linkedS: 0 }) === "accepted/linked/0" && outd({ stale: 1 }, { linkedS: D }) === `accepted/linked/${D}`, "a pending or stale proposal on a pair the board links is accepted by the link");
-  ok(outd({ settled: 1, settledS: 3 * D }) === "withdrawn/null/null" && outd({ settled: 1, settledS: 31 * D }, { ageS: 40 * D }) === "unanswered/null/null"
-      && outd({ settled: 1, settledS: 3 * D }, { linkedS: 2 * D }) === `accepted/linked/${2 * D}` && outd({ settled: 1, rejected: 1, rejectedS: D, settledS: 3 * D }) === `rejected/proposal/${D}`
-      && outd({ settled: 1, stale: 1 }) === "open/null/null" && outd({ settled: 1, settledS: 3 * D }, { ageS: 40 * D }) === "withdrawn/null/null",
-    "the pass's settle is no reviewer's no: withdrawn within the window, unanswered after it, a link and a person's rejection before it, a stale one still open (review pass 2)");
+  ok(outd({}, { withdrawnS: 3 * D }) === "withdrawn/null/null" && outd({}, { withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
+      && outd({}, { withdrawnS: 3 * D, linkedS: 2 * D }) === `accepted/linked/${2 * D}` && outd({ rejected: 1, rejectedS: D }, { withdrawnS: 3 * D }) === `rejected/proposal/${D}`
+      && outd({ stale: 1 }) === "open/null/null" && outd({}, { withdrawnS: 3 * D, ageS: 40 * D }) === "withdrawn/null/null",
+    "the pass's settle is no reviewer's no: withdrawn within the window, unanswered after it, a link and a person's rejection before it, a stale one never settled since the post still open (review pass 2)");
+  ok(outd({ reopened: 1 }, { withdrawnS: 5 * D, ageS: 40 * D }) === "withdrawn/null/null" && outd({ reopened: 1 }, { withdrawnS: 31 * D, ageS: 40 * D }) === "unanswered/null/null"
+      && outd({ reopened: 1 }, { withdrawnS: 5 * D, linkedS: 6 * D }) === `accepted/linked/${6 * D}` && outd({ accepted: 1, acceptedS: 9 * D }, { withdrawnS: 5 * D }) === `accepted/proposal/${9 * D}`
+      && outd({ reopened: 1 }, { withdrawnS: -60 }) === "withdrawn/null/null",
+    "a settle a text move reopened since stays a take-back, withdrawn within the window and unanswered past it; an acceptance or a link still answers; one settled before its comment was posted is withdrawn (SMD-2913)");
+  ok(outd({ rejected: 1, rejectedS: 3 * D, reopened: 1 }) === `rejected/proposal/${3 * D}` && outd({ rejected: 1, reopened: 1, stale: 1 }) === "open/null/null",
+    "a proposal the pass took back and a text move reopened does not hold off a person's rejection beside it; one waiting on its re-judge does (review pass 2)");
+  ok(out({ stands: true, ageS: 40 * D }) === "unanswered/null/null" && out({ stands: true, ageS: 10 * D }) === "open/null/null",
+    "a relation the judge says again is its verdict once more: open, then unanswered — not a take-back (review pass 1)");
   ok(outd({}, { ageS: 31 * D }) === "unanswered/null/null" && out({ stands: false, ageS: 31 * D }) === "unanswered/null/null",
     "gone with its thought, no time left: the comment's age decides, past the window unanswered (review pass 2)");
   ok(outd({ stale: 2 }) === "open/null/null" && outd({ stale: 2 }, { ageS: 31 * D }) === "unanswered/null/null" && outd({}) === "withdrawn/null/null",
@@ -221,7 +261,10 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ accepted: 1, acceptedS: 2 * D }) })),
     reportLine(row({ word: "outdates", stands: null, proposals: prop({ rejected: 1, rejectedS: null }) })),
     reportLine(row({ word: "outdates", stands: null, proposals: prop({}) })),
-    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1, settledS: 4 * D }) })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({}), withdrawnS: 4 * D })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ reopened: 1 }), withdrawnS: 4 * D })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1 }) })),
+    reportLine(row({ word: "outdates", stands: null, proposals: prop({ settled: 1 }), withdrawnS: -600 })),
     reportLine(row({ word: "evolves", stands: false })),
     reportLine(row({ origin: "found" })),
     reportLine(row({ word: "evolves", stands: false, withdrawnS: 2 * D })),
@@ -235,6 +278,9 @@ const f = (o: Partial<Finding> & Pick<Finding, "id" | "older" | "newer">): Findi
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — rejected: its proposal was rejected",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: its proposal is gone",
     "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 4 d after (reopened since)",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal",
+    "    SMD-1 ~ SMD-2          outdates  posted 5 d ago on SMD-2 — withdrawn: the pass settled its proposal 0 s after",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: its relation is gone with a thought",
     "    SMD-1 ~ SMD-2          related   posted 5 d ago on SMD-2 — open",
     "    SMD-1 ~ SMD-2          evolves   posted 5 d ago on SMD-2 — withdrawn: the judge stopped saying evolves 2 d after",

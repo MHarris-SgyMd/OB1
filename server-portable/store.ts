@@ -1543,7 +1543,7 @@ export interface ThoughtStore {
    * Whether another key or board-sync has taken the thought from the agent
    * that captured it: migration 082's ob1_thought_taken, the one rule — a
    * re-capture by a key that can read, a text edit, board-sync (no agent id)
-   * giving the metadata a ticket's `issue`, or (091, SMD-2708) its
+   * giving the metadata a ticket's `issue`, or (092, SMD-2708) its
    * supersedes chain reaching a thought its capturer did not capture — a
    * reviewer's accept or another key's pointer, through any number of links;
    * a key's metadata edit never. Read beside

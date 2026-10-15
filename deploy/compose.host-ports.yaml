@@ -32,6 +32,9 @@
 # too, as it reaches every port this file publishes (measured on podman 6:
 # `postgres` by name and its addresses time out from `egress`, the host
 # alias's port answers; SMD-2583). Ollama and Jev are on `egress` already.
+#
+# The observability profile's Grafana has a file of its own,
+# compose.grafana-port.yaml (SMD-1849 PR 3a).
 
 services:
   postgres:

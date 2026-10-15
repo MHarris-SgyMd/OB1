@@ -218,6 +218,11 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   calls.length = 0;
   r = await json(await fwd("/v1/thoughts", "cap-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
   assert(r.status === 201 && calls[0]?.principal.scope === "capture" && calls[0]?.principal.act?.name === "f", `a capture key forwarded captures, act set (${r.status})`);
+  // Forwarded, the value is whole, as a refusal is: the MCP server renders what a capture key is told from it (SMD-2287 PR 3a review pass 1).
+  assert((r.body as { tags?: unknown }).tags !== undefined && (r.body as { embeddings?: unknown }).embeddings !== undefined && r.body.embeddingAttached === true,
+    `…and is answered the whole capture value for the MCP server to word (${Object.keys(r.body).sort().join(",")})`);
+  const direct = await json(await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(direct.status === 201 && !("tags" in direct.body) && !("embeddings" in direct.body), `…while not forwarded, a capture key is told the trimmed value alone (${Object.keys(direct.body).sort().join(",")})`);
   answer = async () => ok({});
   r = await json(await fwd("/v1/stats", "cap-raw", "fwd-raw"));
   assert(r.status === 403 && r.body.needs === "read", `…and still cannot read (${r.status})`);
@@ -282,6 +287,59 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   const statsSecurity = ((doc.body.paths as Record<string, Record<string, { security?: Record<string, unknown>[] }>>)["/v1/stats"].get.security ?? []).map((x) => Object.keys(x).sort().join("+"));
   assert(schemes.forwarder?.in === "header" && schemes.forwarder?.name === "x-brain-forwarder" && statsSecurity.includes("brainKey+forwarder") && statsSecurity.includes("brainKey") && !statsSecurity.includes("forwarder"),
     `the document names the forwarder slot, beside a caller's key and never alone (${statsSecurity.join(", ")})`);
+}
+
+console.log("\n[5c] A keyed /health answers the brain's record on the health surface to a key that may read it, cleared in time; liveness to any other (SMD-2287)");
+{
+  const record = { version: "1.0.0", database: { reachable: true }, counts: { thoughts: 3 } };
+  answer = async () => record;
+  identity = { status: "ok", agentId: "agent-1" };
+  const health = async (key?: string, method = "GET", extra: Record<string, string> = {}) => {
+    const r = await app.fetch(new Request("http://api/health", { method, headers: { ...(key ? { "x-brain-key": key } : {}), ...extra } }));
+    const text = await r.text();
+    return { status: r.status, body: text ? JSON.parse(text) as Record<string, unknown> : null };
+  };
+  const live = { status: "ok" };
+  calls.length = 0;
+  let r = await health();
+  assert(r.status === 200 && same(r.body, live) && calls.length === 0, `no key: liveness, nothing read (${JSON.stringify(r.body)})`);
+  for (const key of ["read-raw", "write-raw"]) {
+    calls.length = 0;
+    r = await health(key);
+    assert(r.status === 200 && same(r.body, record) && calls[0]?.name === "brainInfo" && calls[0]?.principal === ("health" as never), `${key}: the brain's record, read on the health surface (${JSON.stringify(r.body)} via ${calls[0]?.name}(${String(calls[0]?.principal)}))`);
+  }
+  for (const [label, key] of [["a capture key", "cap-raw"], ["a wrong key", "nope"], ["a forwarder key alone", "fwd-raw"]] as const) {
+    r = await health(key);
+    assert(r.status === 200 && same(r.body, live), `${label}: liveness, never a refusal (${JSON.stringify(r.body)})`);
+  }
+  // Present but the slot ignored: the record is the caller's key's to see, whoever carried it.
+  r = await health("read-raw", "GET", { "x-brain-forwarder": "nope" });
+  assert(r.status === 200 && same(r.body, record), `a read key with a junk forwarder slot: still the record (${JSON.stringify(r.body)})`);
+  r = await health("read-raw", "HEAD");
+  assert(r.status === 200 && r.body === null, "a keyed HEAD: 200 with no body, nothing read for it");
+  for (const [label, word] of [["revoked", { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null }], ["busy", { status: "busy" }]] as const) {
+    identity = word as AgentOutcome;
+    lines.length = 0;
+    r = await health("read-raw");
+    const line = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert(r.status === 200 && same(r.body, live) && line.outcome === "refused" && line.code === (label === "revoked" ? "REVOKED" : "BUSY"),
+      `a ${label} key: liveness, its line refused with ${line.code} (${JSON.stringify(r.body)})`);
+  }
+  identity = { status: "ok", agentId: "agent-1" };
+  resolveThrows = true;
+  r = await health("read-raw");
+  resolveThrows = false;
+  assert(r.status === 200 && same(r.body, live), "a registry that throws: liveness, not a 500");
+  // A registry that does not answer within the deadline could still say revoked: liveness, at the deadline.
+  let release: () => void = () => {};
+  resolveGate = new Promise<void>((done) => { release = done; });
+  const t0 = performance.now();
+  r = await health("read-raw");
+  const took = performance.now() - t0;
+  release();
+  resolveGate = null;
+  assert(r.status === 200 && same(r.body, live) && took >= 2_400 && took < 4_000, `a registry silent past the deadline: liveness, at it (${Math.round(took)} ms)`);
+  answer = async () => ok({});
 }
 
 console.log("\n[6] Inputs are the tool's schema; a refused one names the field, never its value");
@@ -605,12 +663,18 @@ console.log("\n[8] One JSON line per request (telemetry.ts, SMD-1849): method, r
   const unmatchedLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
   assert(unmatched.status === 404 && lines.length === 1 && unmatchedLine.status === 404 && unmatchedLine.outcome === "refused" && unmatchedLine.code === "NO_ROUTE",
     `a path with an encoded line break: one 404 NO_ROUTE line (${lines.join(" / ")})`);
-  // The liveness probe has no record at all, keyed or not.
+  // The liveness probe — no key — has no record at all; a keyed /health is a
+  // request like any other, its line naming the route and the tool (SMD-2287).
   lines.length = 0;
   const probesBefore = openRequestCount();
-  await app.fetch(new Request("http://api/health", { headers: { "x-brain-key": "read-raw" } }));
+  await app.fetch(new Request("http://api/health"));
   await app.fetch(new Request("http://api/health", { method: "HEAD" }));
-  assert(lines.length === 0 && openRequestCount() === probesBefore, `GET and HEAD /health: no line, no record (${lines.length} lines)`);
+  assert(lines.length === 0 && openRequestCount() === probesBefore, `keyless GET and HEAD /health: no line, no record (${lines.length} lines)`);
+  await app.fetch(new Request("http://api/health", { headers: { "x-brain-key": "cap-raw" } }));
+  const keyedHealth = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+  assert(lines.length === 1 && keyedHealth.route === "/health" && keyedHealth.tool === "brain_info" && keyedHealth.outcome === "refused",
+    `a keyed /health its key may not read: one line, refused (${lines.join(" / ")})`);
+  lines.length = 0;
   // Any other method there is no probe: its 405 is logged (review pass 4).
   await app.fetch(new Request("http://api/health", { method: "POST" }));
   const postHealth = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -991,6 +1055,21 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   }
   const lateStop = lateOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
   assert(late.up && late.sdk && /; telemetry not all sent within \d+ ms; exit 0$/.test(lateStop), `an export on its way at the stop is waited for, not read as sent (${lateStop})`);
+}
+
+console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default cuts a GET whose handler has not answered (SMD-2287 PR 3a review pass 3)");
+{
+  const api = await import("./api.ts");
+  assert(api.IDLE_TIMEOUT_S === 255 && (api.default as { idleTimeout?: number }).idleTimeout === 255, `bun api.ts serves with idleTimeout 255 (${(api.default as { idleTimeout?: number }).idleTimeout})`);
+  // What the setting is for, measured on this runtime: a GET whose handler answers after 14 s (Bun cuts at its 10 s default plus its sweep, about 12 s).
+  const probe = (idleTimeout?: number) => {
+    const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
+    return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 40)}`).finally(() => server.stop(true));
+  };
+  const [held, cut] = await Promise.all([probe(255), probe()]);
+  assert(held === "200 done", `at 255, a 14-second GET is answered (${held})`);
+  // A tripwire: when a Bun bump stops cutting, this fails — revisit IDLE_TIMEOUT_S here and in mcp-server/index.ts, and sse.ts's comment (SMD-2931).
+  assert(/^cut: .*ECONNRESET|^cut: .*closed/i.test(cut), `…where Bun's default cuts it, the connection reset — the setting's reason, still true on this runtime; if this fails after a Bun bump, revisit IDLE_TIMEOUT_S (api.ts, mcp-server/index.ts) and sse.ts's comment (${cut})`);
 }
 
 report();
