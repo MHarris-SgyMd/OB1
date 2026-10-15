@@ -155,6 +155,7 @@ main() {
   nodb .                 recipes/session-capture-hook/test-session-capture.mjs
   nodb .                 dashboards/open-brain-dashboard/test-parsers.ts
   nodb .                 deploy/forwarder.ts --self-check
+  nodb .                 deploy/instance.ts --self-check
   nodb server-portable    test-server.ts
   nodb server-portable    test-auth.ts
   nodb server-portable    test-rest.ts
@@ -174,6 +175,7 @@ main() {
   nodb evals              eval-projection-replay.ts --self-check
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
+  nodb evals              eval-stated-status.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check

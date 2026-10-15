@@ -3167,8 +3167,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const EXTRACT = "extract:stub@p1";
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
-    `supersession_proposals has the seventeen columns, in order (${cols.join(",")})`);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written,pass_settled_at",
+    `supersession_proposals has the eighteen columns, in order — 091's pass_settled_at last (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -12383,6 +12383,8 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
     ["a diff that is not an object, naming `content`", ["content"], Y, X, false],
     ["a metadata move keeping an `issue` it had, no agent id", meta({ issue: "TKT-1" }, { issue: "TKT-1", status: "Done" }), null, X, false],
     ["a vector arriving with no agent id", { embedding_present: true }, null, X, false],
+    // The pointer event itself takes nothing; since 092 (SMD-2708) the chain
+    // it builds can (ob1_thought_taken, [81]).
     ["a pointer set by another agent", { supersedes: { before: null, after: Y } }, Y, X, false],
     ["its capturer's own metadata move", meta({}, { project: "p" }), X, X, false],
     ["its capturer's own text edit", { content: { before: "a", after: "b" } }, X, X, false],
@@ -12460,11 +12462,15 @@ console.log("\n[72] Migration 082: one rule for when a capture-only key's though
   } catch (e) { unscopedError = (e as Error).message; }
   assert(unscopedPointer === fresh.t, `the check is a capture-only key's: a write key's capture naming the same target is written (${unscopedError.slice(0, 80) || unscopedPointer})`);
   const taken = async (id: string) => (await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [id])).t;
-  assert((await taken(merged.t)) === true && (await taken(noop.t)) === true && (await taken(merged.s)) === false && (await taken(writers.id)) === false,
-    "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own, and a write key's re-captured note not taken");
+  assert((await taken(merged.t)) === true && (await taken(noop.t)) === true && (await taken(noop.s)) === false && (await taken(merged.s)) === true && (await taken(writers.id)) === false,
+    "ob1_thought_taken reads the two targets taken, the hook's thought whose pointer lapsed still its own — the one a write key then pointed at a thought another key took, taken through its chain (092) — and a write key's re-captured note not taken");
 
   // A re-apply moves nothing.
   await reapply("082");
+  // 082 re-applied puts its own taken read, lapse, check and WHEN back; 092
+  // is their last definer since SMD-2708, and the sections after run on the
+  // shipped state.
+  await restoreShipped("ob1_thought_taken");
   const [{ trg }] = await q<{ trg: number }>(`SELECT count(*)::int AS trg FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`);
   assert(trg === 1 && (await pointerOf(unmarked.s)) === unmarked.t, "082 re-applied: one trigger, and the standing pointer still stands");
   await db.exec(`DELETE FROM thoughts`);
@@ -13912,6 +13918,293 @@ console.log("\n[80] Migration 090: a re-capture over a capture-only key's label 
     "090 re-applied: one of each function, and no row moved");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
+}
+
+console.log("\n[81] Migration 091: every time the consolidation pass settled a proposal since the judge last asserted it is kept on its row — appended as the row becomes settled, kept over 067's reopen and a person's review, emptied by 063's replace in place, never a caller's value; a row inserted settled starts with its time (SMD-2913)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const ACTOR = { name: "op-81", via: "test-door" };
+  const PASS_ACTOR = { name: "consolidator", via: "consolidate", session: "consolidate:stub@p81" };
+  const JUDGE = "consolidate:stub@p81";
+  const cap = async (content: string, at: number) =>
+    (await one<{ r: { id: string; fingerprint: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(at)])).r;
+  const move = async (id: string, content: string) => {
+    await db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [id, content]);
+    return fpOf(content);
+  };
+  const rebuild = async (id: string) =>
+    (await one<{ r: { ok: boolean; stale_proposals: number } }>(`SELECT rebuild_derived($1::uuid, 'edit', false, NULL::text[], false, false) AS r`, [id])).r;
+  const settle = async (id: string, ofp: string, nfp: string) =>
+    (await one<{ r: { ok: boolean; error?: string } }>(`SELECT settle_supersession_proposal($1::uuid, $2::text, $3::jsonb, $4::text, $5::text, $6::text, '{"deterministic": false, "model": "stub-judge", "settled": "unrelated"}'::jsonb, NULL::uuid) AS r`,
+      [id, `${PASS_SETTLED_PREFIX} judged again after a text moved — unrelated at ${JUDGE}`, JSON.stringify(PASS_ACTOR), JUDGE, ofp, nfp])).r;
+  const propose = (older: string, newer: string) =>
+    one<{ id: string | null }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', 0.8, $3::text, NULL, NULL, NULL, '{"deterministic": false, "model": "stub-judge"}'::jsonb) AS id`, [older, newer, JUDGE]);
+  type Row = { status: string; reviewed: string | null; settles: string[] };
+  const row = (id: string) => one<Row>(`SELECT status, reviewed_at::text AS reviewed, pass_settled_at::text[] AS settles FROM supersession_proposals WHERE id = $1::uuid`, [id]);
+  await restoreShipped("rebuild_derived", "settle_supersession_proposal", "ob1_keep_proposal_settles");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+
+  // The shape.
+  const trig = await q<{ t: string; when: string }>(`SELECT tgname AS t, pg_get_triggerdef(oid) AS when FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND NOT tgisinternal AND tgname = 'supersession_proposals_keep_settles'`);
+  const col = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["supersession_proposals", "pass_settled_at"])).c ?? "";
+  const fc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_keep_proposal_settles()"])).c ?? "";
+  assert(trig.length === 1 && /BEFORE INSERT OR UPDATE ON public\.supersession_proposals FOR EACH ROW/.test(trig[0].when) && lastDefinerOf("ob1_keep_proposal_settles").startsWith("091")
+      && /091 \/ SMD-2913/.test(col) && /091 \/ SMD-2913/.test(fc) && (await functionsNamed("ob1_keep_proposal_settles")) === 1,
+    `one BEFORE INSERT OR UPDATE trigger, 091 its function's last definer, the column's and the function's comments naming 091 and the ticket (${trig.map((t) => t.when).join()})`);
+
+  // The fixture: B older, A newer; a pending proposal on the pair.
+  const B = await cap("091: the older note about Bea", 1);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [B.id]);
+  const A = await cap("091: the newer note about Bea", 2);
+  const pid = (await propose(B.id, A.id)).id!;
+  assert(JSON.stringify((await row(pid)).settles) === "[]", "a proposal recorded pending starts with no settle");
+
+  // Settled, reopened by a text move, settled again; then judged in conflict again (063's replace in place), stale, settled.
+  const aFp2 = await move(A.id, "091: the newer note about Bea, rewritten once");
+  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp2)).ok === true, "the fixture: stale by a text move, then settled by the pass");
+  const s1 = await row(pid);
+  assert(s1.status === "rejected" && s1.settles.length === 1 && s1.reviewed !== null && Date.parse(s1.settles[0]) === Date.parse(s1.reviewed),
+    `a settle appends its reviewed_at (${JSON.stringify(s1)})`);
+  const aFp3 = await move(A.id, "091: the newer note about Bea, rewritten twice");
+  const reopened = await rebuild(A.id);
+  const s2 = await row(pid);
+  assert(reopened.stale_proposals === 1 && s2.status === "stale" && s2.reviewed === null && JSON.stringify(s2.settles) === JSON.stringify(s1.settles),
+    `067's reopen clears reviewed_at; the settle it reopened is kept (${JSON.stringify(s2)})`);
+  assert((await settle(pid, B.fingerprint, aFp3)).ok === true, "the fixture: settled again after the reopen");
+  const s3 = await row(pid);
+  assert(s3.settles.length === 2 && s3.settles[0] === s1.settles[0] && Date.parse(s3.settles[1]) === Date.parse(s3.reviewed!) && Date.parse(s3.settles[1]) >= Date.parse(s3.settles[0]),
+    `a second settle appends, oldest first (${JSON.stringify(s3)})`);
+  await move(A.id, "091: the newer note about Bea, rewritten three times");
+  assert((await rebuild(A.id)).stale_proposals === 1, "the fixture: a third text move reopens it");
+  await propose(B.id, A.id);
+  const s4 = await row(pid);
+  assert(s4.status === "pending" && JSON.stringify(s4.settles) === "[]",
+    `063's replace in place — the judge finding the conflict again, judged_at moved — empties it: the settles were of the earlier verdict (review pass 2) (${JSON.stringify(s4)})`);
+  const aFp5 = await move(A.id, "091: the newer note about Bea, rewritten four times");
+  assert((await rebuild(A.id)).stale_proposals === 1 && (await settle(pid, B.fingerprint, aFp5)).ok === true, "the fixture: stale and settled after the re-assertion");
+  const s5 = await row(pid);
+  assert(s5.settles.length === 1 && Date.parse(s5.settles[0]) === Date.parse(s5.reviewed!), `…and a settle after it starts the record again (${JSON.stringify(s5)})`);
+  // In one transaction judged_at cannot move (now() is the transaction's): a stale row turning pending empties it too (review pass 3).
+  const C6 = await cap("091: a fourth note about Bea, judged in one transaction", 4);
+  const pid6 = (await propose(B.id, C6.id)).id!;
+  await db.exec(`BEGIN;
+    UPDATE supersession_proposals SET judged_at = now() WHERE id = '${pid6}';
+    UPDATE supersession_proposals SET status = 'rejected', reviewed_at = now(), review_note = '${PASS_SETTLED_PREFIX} in one transaction' WHERE id = '${pid6}';
+    UPDATE supersession_proposals SET status = 'stale', reviewed_at = NULL, review_note = NULL WHERE id = '${pid6}';
+    UPDATE supersession_proposals SET status = 'pending', judged_at = now() WHERE id = '${pid6}';
+    COMMIT;`);
+  const s6 = await row(pid6);
+  assert(s6.status === "pending" && JSON.stringify(s6.settles) === "[]", `a re-assertion in the transaction that last wrote judged_at empties it all the same (${JSON.stringify(s6)})`);
+
+  // A write on a settled row that does not settle it, and a caller's own value: carried over unchanged.
+  await db.query(`UPDATE supersession_proposals SET confidence = 0.5, reviewed_at = now() - interval '9 days', pass_settled_at = ARRAY[now() - interval '40 days'] WHERE id = $1::uuid`, [pid]);
+  const s7 = await row(pid);
+  assert(JSON.stringify(s7.settles) === JSON.stringify(s5.settles), `a write that does not settle the row, and a caller's own pass_settled_at, change nothing (${JSON.stringify(s7)})`);
+
+  // A person's rejection is no settle; a row inserted settled starts with its time.
+  const C = await cap("091: a third note about Bea", 3);
+  const pid2 = (await propose(B.id, C.id)).id!;
+  await db.query(`SELECT review_supersession_proposal($1::uuid, 'reject', 'not the same claim')`, [pid2]);
+  const inserted = await one<{ settles: string[]; reviewed: string }>(
+    `INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, judge_key, status, reviewed_at, review_note, pass_settled_at)
+     VALUES ($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', $3::text, 'rejected', now() - interval '2 days', $4::text, '{}')
+     RETURNING pass_settled_at::text[] AS settles, reviewed_at::text AS reviewed`, [C.id, A.id, JUDGE, `${PASS_SETTLED_PREFIX} inserted settled`]);
+  const pending = await one<{ settles: string[] }>(
+    `INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, judge_key, pass_settled_at)
+     VALUES ($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'because', $3::text, ARRAY[now()]) RETURNING pass_settled_at::text[] AS settles`, [A.id, C.id, JUDGE]);
+  assert(JSON.stringify((await row(pid2)).settles) === "[]" && inserted.settles.length === 1 && Date.parse(inserted.settles[0]) === Date.parse(inserted.reviewed) && JSON.stringify(pending.settles) === "[]",
+    `a person's rejection appends nothing; a row inserted settled starts with its reviewed_at, one inserted pending with none, whatever the caller gave (${JSON.stringify([inserted, pending])})`);
+
+  // A re-apply moves nothing: the backfill touches only settled rows still empty.
+  const before = JSON.stringify(await q(`SELECT id, status, pass_settled_at::text FROM supersession_proposals ORDER BY id`));
+  await reapply("091");
+  assert(JSON.stringify(await q(`SELECT id, status, pass_settled_at::text FROM supersession_proposals ORDER BY id`)) === before && (await functionsNamed("ob1_keep_proposal_settles")) === 1
+      && (await q(`SELECT 1 FROM pg_trigger WHERE tgname = 'supersession_proposals_keep_settles'`)).length === 1,
+    "091 re-applied: one function, one trigger, no row moved");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations`);
+}
+
+console.log("\n[82] Migration 092: a capture-only key's thought is taken while its supersedes chain reaches a thought the key did not capture — a reviewer's accept, another key's pointer, through any number of links — the lapse runs up the chain, the check locks it; a pointer between the key's own thoughts takes nothing; a re-apply a no-op (SMD-2708)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  await restoreShipped("ob1_thought_taken");
+  await db.exec(`DELETE FROM thoughts`);
+
+  // The shape.
+  const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const [trg] = await q<{ d: string | null }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers' AND tgrelid = 'thought_audit'::regclass`);
+  assert(/092 \/ SMD-2708/.test(await comment("ob1_thought_taken(uuid)")) && /082 \/ SMD-2638/.test(await comment("ob1_thought_taken(uuid)"))
+      && /092 \/ SMD-2708/.test(await comment("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)")) && /092 \/ SMD-2708/.test(await comment("ob1_capture_taken_by_log(uuid)"))
+      && /ob1:capture-chain-reaches-outside/.test(await src("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)"))
+      && /ob1:capture-pointer-lapses/.test(await src("ob1_lapse_capture_pointers()")) && /ob1:capture-pointer-checked-at-write/.test(await src("ob1_check_capture_pointer()"))
+      && ["ob1_thought_taken", "ob1_lapse_capture_pointers", "ob1_check_capture_pointer", "ob1_note_recapture", "ob1_chain_reaches_outside", "ob1_capture_taken_by_log"].every((f) => lastDefinerOf(f).startsWith("092"))
+      && lastDefinerOf("ob1_takes_thought").startsWith("082") && /'supersedes'/.test(trg?.d ?? ""),
+    `092's chain, its log read, the taken read, the lapse and the check, each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
+
+  const HOOK = { name: "hook-82", agent_id: await agent("7", "hook-82", "capture"), via: "test-door", scope: "capture" };
+  const NO_AGENT = { name: "hook-82", via: "test-door", scope: "capture" };
+  const WRITER = { name: "writer-82", agent_id: await agent("6", "writer-82", "write"), via: "test-door" };
+  const REVIEWER = { name: "consolidate-82", via: "consolidate", session: "job-82" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(82)])).r.id;
+  const pointerOf = async (id: string) => (await one<{ s: string | null }>(`SELECT supersedes::text AS s FROM thoughts WHERE id = $1::uuid`, [id])).s;
+  const taken = async (id: string) => (await one<{ t: boolean }>(`SELECT ob1_thought_taken($1::uuid) AS t`, [id])).t;
+  const propose = async (older: string, newer: string) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, '[82]', 0.9, 'consolidate:stub@p82') AS id`, [older, newer])).id;
+  const review = async (pid: string, decision: "accept" | "reject") =>
+    (await one<{ r: { ok: boolean; error?: string; written?: boolean } }>(`SELECT review_supersession_proposal($1::uuid, $2, NULL, NULL, $3::jsonb, false) AS r`, [pid, decision, JSON.stringify(REVIEWER)])).r;
+  const link = async (id: string, to: string) =>
+    one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [id, JSON.stringify(WRITER), JSON.stringify({ supersedes: to })]);
+  const refused = async (content: string, target: string) => {
+    try { await cap(content, HOOK, target); return false; } catch (e) { return /ob1_check_capture_pointer/.test((e as Error).message); }
+  };
+
+  // SMD-1873's chain: the hook's newer note accepted over the writer's; its
+  // earlier pointer onto that note lapses under the reviewer, and the hook
+  // can no longer point new text at it.
+  const W = await cap("[82] the writer's rota: weekly", WRITER);
+  const C = await cap("[82] the hook's rota: daily, replacing the weekly one", HOOK);
+  const N = await cap("[82] the hook's next word on the rota", HOOK, C);
+  assert((await pointerOf(N)) === C && (await taken(C)) === false, "setup: the hook's own thought, its own pointer onto it, nothing taken");
+  const accepted = await review(await propose(W, C), "accept");
+  const [lapse] = await q<{ actor_name: string | null; diff: Record<string, { before?: string; after?: string | null }> }>(
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' ORDER BY seq DESC LIMIT 1`, [N]);
+  assert(accepted.ok === true && accepted.written === true && (await pointerOf(C)) === W && (await taken(C)) === true,
+    `a reviewer's accept putting the hook's thought over the writer's takes it (${JSON.stringify(accepted)})`);
+  assert((await pointerOf(N)) === null && lapse?.actor_name === "consolidate-82" && lapse?.diff?.supersedes?.before === C,
+    `…and the hook's earlier pointer onto it lapses, an event under the reviewer (${JSON.stringify(lapse)})`);
+  assert(await refused("[82] the hook's unreviewed word on the rota", C), "…and a capture naming it as supersedes is refused at the write");
+
+  // A write key's edit ranking the hook's row over another's takes it.
+  const C2 = await cap("[82] the hook's note a writer files as the current one", HOOK);
+  const X2 = await cap("[82] the writer's older note", WRITER);
+  await link(C2, X2);
+  assert((await taken(C2)) === true, "a write key ranking the hook's row over the writer's takes it");
+
+  // Between the hook's own thoughts nothing is taken: the recipe's repair
+  // keeps the hook's chain, and an accept between two of its thoughts takes
+  // neither.
+  const Sa = await cap("[82] the hook's summary a", HOOK);
+  const Sb = await cap("[82] the hook's summary b, which lost its pointer", HOOK);
+  const Sc = await cap("[82] the hook's summary c", HOOK, Sb);
+  await link(Sb, Sa);
+  const Sd = await cap("[82] the hook's summary d", HOOK, Sc);
+  assert((await pointerOf(Sb)) === Sa && (await pointerOf(Sc)) === Sb && (await pointerOf(Sd)) === Sc && !(await taken(Sb)) && !(await taken(Sc)),
+    "the recipe's repair: a write key linking two of the hook's summaries takes neither, and the hook's next summary still lands with its pointer");
+  const H1 = await cap("[82] the hook's older note", HOOK);
+  const H2 = await cap("[82] the hook's newer note", HOOK);
+  assert((await review(await propose(H1, H2), "accept")).ok === true && (await pointerOf(H2)) === H1 && !(await taken(H2)),
+    "an accept between two of the hook's own thoughts, nothing below them another's, takes nothing");
+
+  // Re-pointing: onto another's thought takes, onto the hook's own does not.
+  const P1 = await cap("[82] the hook's earlier note it points at", HOOK);
+  const R1 = await cap("[82] the hook's note a writer re-points outside", HOOK, P1);
+  const P3 = await cap("[82] the hook's other earlier note", HOOK);
+  const R2 = await cap("[82] the hook's note a writer re-points within", HOOK, P3);
+  const OUT = await cap("[82] the writer's note it is re-pointed at", WRITER);
+  const P2 = await cap("[82] the hook's third earlier note", HOOK);
+  await link(R1, OUT);
+  await link(R2, P2);
+  assert((await taken(R1)) === true && (await taken(R2)) === false, "a write key re-pointing the hook's row onto another's thought takes it; onto another of the hook's own, it does not");
+
+  // Through more links (review pass 2): a second accept between two of the
+  // hook's thoughts over one already put over another's; a write key's link
+  // onto such a thought; an accept arriving after the hook's pointer above a
+  // link.
+  const W5 = await cap("[82] the writer's plan", WRITER);
+  const C51 = await cap("[82] the hook's plan, a copy", HOOK);
+  await review(await propose(W5, C51), "accept");
+  const C52 = await cap("[82] the hook's plan, a later copy", HOOK);
+  assert((await review(await propose(C51, C52), "accept")).ok === true && (await pointerOf(C52)) === C51 && (await taken(C52)) === true
+      && await refused("[82] the hook's unreviewed plan", C52),
+    "two accepts: the hook's later copy accepted over its earlier, itself accepted over the writer's, is taken, and the hook cannot point past it");
+  const W6 = await cap("[82] the writer's budget", WRITER);
+  const D1 = await cap("[82] the hook's budget, a copy", HOOK);
+  await review(await propose(W6, D1), "accept");
+  const D2 = await cap("[82] the hook's budget, a later copy", HOOK);
+  await link(D2, D1);
+  assert((await taken(D2)) === true && await refused("[82] the hook's unreviewed budget", D2),
+    "a write key's link onto an accepted copy: the newer is taken too, and the hook cannot point past it");
+  const W7 = await cap("[82] the writer's roster", WRITER);
+  const T7 = await cap("[82] the hook's roster, a copy", HOOK);
+  const R7 = await cap("[82] the hook's roster, linked above it", HOOK);
+  await link(R7, T7);
+  const N7 = await cap("[82] the hook's roster, its next word", HOOK, R7);
+  assert((await pointerOf(N7)) === R7 && !(await taken(R7)), "setup: the hook's pointer above a write key's link between its own thoughts lands");
+  await review(await propose(W7, T7), "accept");
+  assert((await taken(T7)) === true && (await taken(R7)) === true && (await pointerOf(N7)) === null && (await pointerOf(R7)) === T7,
+    "an accept arriving after: the row below the link taken, the linked row above it too, and the hook's pointer above the link lapses — the write key's link stands");
+
+  // A reject takes nothing; an accept then a reject gives the thought back,
+  // the pointer the accept lapsed not restored (SMD-2933).
+  const W3 = await cap("[82] the writer's note a reviewer keeps", WRITER);
+  const C3 = await cap("[82] the hook's note a reviewer turns down", HOOK);
+  const rejected = await review(await propose(W3, C3), "reject");
+  assert(rejected.ok === true && (await taken(C3)) === false && (await pointerOf(C3)) === null, "a rejected proposal takes nothing");
+  const W4 = await cap("[82] the writer's note a reviewer keeps after all", WRITER);
+  const C4 = await cap("[82] the hook's note accepted, then turned down", HOOK);
+  const N4 = await cap("[82] the hook's next word after it", HOOK, C4);
+  const p4 = await propose(W4, C4);
+  await review(p4, "accept");
+  const undone = await review(p4, "reject");
+  assert(undone.ok === true && (await pointerOf(C4)) === null && (await taken(C4)) === false && (await pointerOf(N4)) === null,
+    "an accept then a reject: the pointer cleared and the thought the hook's again — the pointer the accept lapsed stays cleared");
+
+  // A write key re-capturing a thought taken only through its chain is
+  // recorded, so it stays taken when the chain is cleared (review pass 3:
+  // the note read the chain, and a reject gave back a thought a write key
+  // held).
+  const W8 = await cap("[82] the writer's standup notes", WRITER);
+  const H8 = await cap("[82] the hook's standup notes, a copy", HOOK);
+  const p8 = await propose(W8, H8);
+  await review(p8, "accept");
+  await one(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["[82] the hook's standup notes, a copy", JSON.stringify({ metadata: { source: "mcp" }, actor: WRITER }), unit(82)]);
+  const noted8 = (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [H8, JSON.stringify(WRITER)])).r;
+  await review(p8, "reject");
+  assert(noted8 === true && (await pointerOf(H8)) === null && (await taken(H8)) === true && await refused("[82] the hook's unreviewed standup notes", H8),
+    "a write key's re-capture of a thought taken through its chain is noted, so a reject clearing the chain leaves it taken — the write key holds its text");
+
+  // A thought the hook wrote while the registry could not attribute it
+  // counts as another's (082 refuses ownership by name): a link onto it takes.
+  const Z = await cap("[82] the hook's summary from an outage", NO_AGENT);
+  const Y = await cap("[82] the hook's summary after it", HOOK);
+  await link(Y, Z);
+  assert((await taken(Y)) === true, "a write key linking the hook's summary to one written with no agent id takes it — the documented limit");
+
+  // A cycle a raw write closed through the hook's own capture pointer: the
+  // lapse walking up from a write key's taking never clears the event's own
+  // row, so the write lands (review pass 4: it refused it, OB002).
+  const V9 = await cap("[82] the hook's note a raw write loops", HOOK);
+  const X9 = await cap("[82] the hook's next note in the loop", HOOK, V9);
+  await db.query(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [X9, V9]);
+  let loopNote = "noted", loopEdit = "edited";
+  try {
+    await one(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["[82] the hook's next note in the loop", JSON.stringify({ metadata: { source: "mcp" }, actor: WRITER }), unit(82)]);
+    await one(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [X9, JSON.stringify(WRITER)]);
+  } catch (e) { loopNote = (e as Error).message; }
+  try { await one(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [V9, "[82] the hook's note a raw write loops, edited", JSON.stringify(WRITER)]); } catch (e) { loopEdit = (e as Error).message; }
+  assert(loopNote === "noted" && loopEdit === "edited", `a write key's re-capture and edit inside a raw write's loop land (${loopNote.slice(0, 80)}; ${loopEdit.slice(0, 80)})`);
+
+  // The walk is cycle-safe and bounded.
+  const cyc = await one<{ r: boolean | null }>(`SELECT ob1_chain_reaches_outside($1::uuid, $2::uuid, $1::uuid, $1::uuid) AS r`, [Sa, HOOK.agent_id]);
+  assert(cyc.r === false, `a pointer read as onto itself is a cycle, and the walk stops (${cyc.r})`);
+
+  // A re-apply moves nothing.
+  const rows = JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`));
+  const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
+  await reapply("092");
+  assert(JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
+      && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`)).n === 1,
+    "092 re-applied: one trigger, no row and no event moved");
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
