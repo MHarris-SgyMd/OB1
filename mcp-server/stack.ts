@@ -9,6 +9,7 @@
 import { randomBytes } from "node:crypto";
 import { hashKey, routable } from "../server-portable/auth.ts";
 import { createRestClient } from "../rest-client/index.ts";
+import { outgoingTraceparent } from "../server-portable/telemetry.ts";
 import { SUITE_CARRIER } from "../server-portable/test-support.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS } from "../server-portable/sse.ts";
@@ -26,6 +27,8 @@ const rest = createRestClient({
   fetch: (req) => Promise.resolve(restCore.fetch(routable(req))),
   forwarderKey,
   timeoutMs: REST_TIMEOUT_MS,
+  // The calling span's traceparent, as the entry sends it (PR 4c): the REST core continues it for its forwarder.
+  headers: outgoingTraceparent,
 });
 // The plugins the REST core in process runs (root.ts's, read once), so this server's tools are its operations'.
 // Its tool calls counted, as the entry counts them for its stop, and read by a suite as index.ts's are (toolCallsRunning).
