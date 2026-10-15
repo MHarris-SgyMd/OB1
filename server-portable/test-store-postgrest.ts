@@ -1201,7 +1201,7 @@ console.log("\n[17] ticketStatusInputs: migration 094's one call — the hits wi
     `a later function answering one object over PostgREST is read as no rows, not a throw (${single === "threw" ? "threw" : JSON.stringify(single && { heads: single.heads.size })})`);
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 094: null — the label is left off, the search goes on");
-  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.startsWith("094") });
+  await applyMigrations(URL_, { dim: DIM, model: "stub", only: (f) => f.endsWith("_ticket_status_inputs.sql") });
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "094 re-applied: answers again");
   await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
   await raw.close();

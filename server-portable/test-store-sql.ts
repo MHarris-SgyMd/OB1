@@ -1551,7 +1551,7 @@ console.log("\n[17] ticketStatusInputs: migration 094's one call — the hits wi
     "a later function's kind is skipped through the store: the head it also returns is read, nothing throws, and it is not read as a brain without 094");
   await raw.unsafe(`DROP FUNCTION ticket_status_inputs(uuid[], text[])`);
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"])) === null, "a brain without 094: null — the label is left off, the search goes on");
-  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094") });
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_ticket_status_inputs.sql") });
   assert((await store.ticketStatusInputs([ticket.id], ["SMD-17001"]))?.heads.get("SMD-17001")?.type === "completed", "094 re-applied: answers again");
   await raw`DELETE FROM thoughts WHERE id = ${ticket.id}::uuid OR id = ${note.id}::uuid`;
   await raw.close();
