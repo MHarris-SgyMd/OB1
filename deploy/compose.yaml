@@ -649,7 +649,7 @@ services:
     # backed only as used; raise it with maintenance_work_mem, or build with
     # max_parallel_maintenance_workers = 0, which uses ordinary backend memory.
     shm_size: ${POSTGRES_SHM_SIZE:-1g}
-    # pg_stat_statements' library at the server's start, which migration 094's
+    # pg_stat_statements' library at the server's start, which migration 096's
     # extension needs, with utility statements untracked: an ALTER ROLE …
     # PASSWORD (login-role.ts's verifier) is never kept with its text. Each
     # SQL statement's calls and times — its blocks' read and write times too,

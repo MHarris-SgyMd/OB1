@@ -2769,7 +2769,7 @@ jobs:
 
       # SMD-1849 PR 3b: the stack's Postgres loads pg_stat_statements at its
       # start, with utility statements untracked and I/O timed (compose.yaml's
-      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 094 created
+      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 096 created
       # the extension out of PUBLIC's reach, so the view answers and counts the
       # brain's own statements by now — the server's calls of thought_stats'
       # and keyword search's functions above, in the brain's database (the
@@ -2784,8 +2784,8 @@ jobs:
           [ "$(q "SHOW shared_preload_libraries")" = pg_stat_statements ] || { echo "Postgres did not start with pg_stat_statements preloaded" >&2; exit 1; }
           [ "$(q "SHOW pg_stat_statements.track_utility")" = off ] || { echo "Postgres tracks utility statements, whose text a role's password would be in" >&2; exit 1; }
           [ "$(q "SHOW track_io_timing")" = on ] || { echo "Postgres does not time I/O: pg_stat_statements' block times read 0" >&2; exit 1; }
-          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "094 did not create pg_stat_statements" >&2; exit 1; }
-          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 094's revoke did not hold" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "096 did not create pg_stat_statements" >&2; exit 1; }
+          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 096's revoke did not hold" >&2; exit 1; }
           n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
           [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
           [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }

@@ -1426,7 +1426,7 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   (`POSTGRES_PRELOAD_LIBRARIES=pg_stat_statements,auto_explain`). The image
   ships Postgres's contrib modules (`auto_explain` among them) and pgvector,
   not `pg_cron` or another extension: a library it does not have stops
-  Postgres at its start, on every tier that copies the setting. Migration 094
+  Postgres at its start, on every tier that copies the setting. Migration 096
   creates the extension only as a superuser may: a migrator that is not one
   leaves it out and says so. Its views are `pg_monitor`'s alone, and each
   plain migrate run takes back a grant to `PUBLIC` that a restore without

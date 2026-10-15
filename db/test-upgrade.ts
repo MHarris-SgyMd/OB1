@@ -533,9 +533,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 1.8.0 cut's schema_version, SMD-1804), 090 (a re-capture says what it
   // did to a capture-only key's label, SMD-2898), 091 (each settle by the
   // pass kept on its proposal, SMD-2913), 092 (another key's pointer
-  // takes a capture-only key's thought, SMD-2708), 093 (a long
-  // thought's extraction windows kept, SMD-2694) and 094 (pg_stat_statements
-  // where the server offers it, SMD-1849)
+  // takes a capture-only key's thought, SMD-2708), 093 (a long thought's
+  // extraction windows kept, SMD-2694), 094 (a proposal's listing names
+  // who wrote each side, SMD-2707), 095 (what the stated-status label
+  // reads, SMD-2540) and 096 (pg_stat_statements where the server offers
+  // it, SMD-1849)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -654,14 +656,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // its trigger to 029's table, refusing by name without 067 ([20al]); 092
   // redefines 082's taken read, lapse and check and adds the chain, refusing
   // by name without 082 ([20am]); 093 adds a table and two functions over
-  // 015's claims ([20an]); 094 creates pg_stat_statements where the server
-  // offers it, needing nothing — all
+  // 015's claims ([20an]); 094 adds the writers' read beside 070's listing,
+  // refusing by name without 016, 025, 029, 082 or 092 ([20ao]); 095 adds one
+  // read function and redefines 060's order over its own signature, refusing
+  // by name without 068 or 060 ([20ap]); 096 creates pg_stat_statements
+  // where the server offers it, needing nothing — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 65, `030 is among the last sixty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 67, `030 is among the last sixty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4117,6 +4122,89 @@ console.log("\n[20an] Migration 093: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
   const [n] = await sql`SELECT count(*)::int AS n FROM extraction_progress`;
   assert(n.n === 1 && (await state()) === before, "a re-apply of 093 is a no-op: the kept window stands, no thought or claim moved");
+}
+
+console.log("\n[20ao] Migration 094: refused by name without 092; onto a populated brain at the file before it — proposals recorded before it read their writers after it, 070's listing untouched, no row and no audit row moved; a re-apply a no-op (SMD-2707)");
+{
+  const the094 = MIGRATIONS.find((f) => f.endsWith("_listing_names_the_writers.sql"))!;  // by name: renumbered when main takes its number
+  const before094 = (f: string) => f < the094;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "092" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 094 needs 092 (ob1_capture_taken_by_log); this schema lacks it",
+    `094 on a schema stopped before 092 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: before094 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-key", agent_id: await agentOf("5", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const WRITER = { name: "writer-key", agent_id: await agentOf("4", "writer-key", "write"), via: "open-brain" };
+  await sql`SELECT set_agent_kind('hook-key', 'agent'), set_agent_kind('writer-key', 'operator')`;
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string }).id;
+  const W = await cap("upgrade 094: the writer's rota, weekly", WRITER);
+  const C = await cap("upgrade 094: the hook's rota, daily", HOOK);
+  const N = await cap("upgrade 094: the hook's next word on the rota", HOOK, C);
+  const pid = ((await sql`SELECT record_supersession_proposal(${W}::uuid, ${C}::uuid, 'newer_supersedes_older', 0.9, '[20ao]', 0.9, 'consolidate:stub@p93') AS id`)[0] as { id: string }).id;
+  // As Postgres spells it: the driver decodes the real similarity as 0.9 on one read and 0.8999999761581421 on the next.
+  const listing = async () => String((await sql`SELECT jsonb_agg(l ORDER BY l.id)::text AS j FROM list_supersession_proposals(NULL::text, 200, NULL::boolean) l`)[0].j);
+  const listingSrc = async () => String((await sql`SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)[0].prosrc);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits(), listedBefore = await listing(), srcBefore = await listingSrc();
+  assert((await sql`SELECT to_regprocedure('list_proposal_writers(uuid[])') AS f`)[0].f === null, "[20ao] setup: before 094 there is no writers' read");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  const listedAfter = await listing();
+  const at = [...listedAfter].findIndex((ch, i) => ch !== listedBefore[i]);
+  assert((await rows()) === before && (await audits()) === auditBefore && listedAfter === listedBefore && (await listingSrc()) === srcBefore,
+    `094 applied: no row or audit row moved, and 070's listing reads and is defined as before (${at < 0 ? "same" : `${listedBefore.slice(at - 80, at + 80)} → ${listedAfter.slice(at - 80, at + 80)}`})`);
+  const [w] = (await sql`SELECT * FROM list_proposal_writers(ARRAY[${pid}::uuid])`) as Record<string, unknown>[];
+  const json = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
+  assert(w?.older_actor_name === "writer-key" && w?.older_trust === "operator" && w?.older_capture_only === false
+      && w?.newer_actor_name === "hook-key" && w?.newer_trust === "agent" && w?.newer_capture_only === true
+      && w?.newer_superseded_by === N && JSON.stringify(json(w?.newer_lapses)) === JSON.stringify([{ id: N, onto: C }]) && JSON.stringify(json(w?.older_lapses)) === "[]" && w?.same_capturer === false,
+    `after it, the proposal recorded before reads its writers: the writer's side an operator's, the hook's a capture-only key's text the hook has since superseded, the pointer an accept making it stand would lapse (${JSON.stringify(w)})`);
+  // A re-apply moves nothing.
+  const read = async () => JSON.stringify(await sql`SELECT * FROM list_proposal_writers(ARRAY[${pid}::uuid])`);
+  const readBefore = await read(), rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  assert((await read()) === readBefore && (await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 094 is a no-op: the same writers, no row or audit row moved");
+  // 070 re-applied over it — the re-apply order passes through 070 first — stands, and the writers still read.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("070_") });
+  assert((await read()) === readBefore && (await listing()) === listedBefore, "070 re-applied after it: its listing and 094's read both stand");
+  await sql.close();
+}
+
+console.log("\n[20ap] Migration 095: refused by name without 068; onto a populated brain at the file before it — the label's inputs read the tickets board-sync moved before it, in the log's order, and no row moved; a re-apply a no-op (SMD-2540)");
+{
+  const the094 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "068" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 095 needs 068 (ob1_ticket_head, node_state); this schema lacks it",
+    `095 on a schema stopped before 068 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the094 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const [{ r }] = await sql`SELECT upsert_thought('ticket SMD-1'::text, ${{ metadata: { source: "linear", issue: "SMD-1", status: "Backlog", status_type: "backlog" } }}::jsonb, ${vec}::vector) AS r`;
+  const id = (r as { id: string }).id;
+  for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await sql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${id}::uuid`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata FROM thoughts ORDER BY id`);
+  const before = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  const read = async () => (await sql`SELECT kind, issue, status, history FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`) as { kind: string; issue: string; status: string; history: { status: string }[] | null }[];
+  const got = await read();
+  const events = (got.find((x) => x.kind === "history")?.history ?? []).map((x) => x.status);
+  assert((await rows()) === before && JSON.stringify(events) === JSON.stringify(["Backlog", "In Progress", "Done"])
+      && got.some((x) => x.kind === "head" && x.status === "Done") && got.some((x) => x.kind === "lifecycle"),
+    `onto a brain at 094: the moves made before 095 are read back in order, the head is Done, the ticket row is its own lifecycle, and no row moved (${JSON.stringify(got.map((x) => [x.kind, x.status]))})`);
+  const beforeReapply = JSON.stringify(await read());
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  assert(JSON.stringify(await read()) === beforeReapply && (await rows()) === before, "a re-apply of 095 is a no-op");
   await sql.close();
 }
 
@@ -4479,12 +4567,12 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
       await admin.unsafe("GRANT USAGE ON SCHEMA public TO PUBLIC; DROP OWNED BY tu_nousage; DROP ROLE IF EXISTS tu_nousage; DROP OWNED BY tu_granted; DROP ROLE IF EXISTS tu_granted");
     }
     assert(noUsage.code === 2 && /Refused: role tu_nousage has no USAGE on schema public/.test(noUsage.out) && /Run the migrator as the database's owner, postgres, or a role that is a member of it\./.test(noUsage.out)
-             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && /001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has;\n {2}094's pg_stat_statements needs a superuser too, and is left out without one\./.test(noUsage.out)
+             && /GRANT USAGE, CREATE ON SCHEMA public TO tu_nousage;/.test(noUsage.out) && /001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has;\n {2}096's pg_stat_statements needs a superuser too, and is left out without one\./.test(noUsage.out)
              && noUsageLedger === "",
            `a role without USAGE on public: refused, naming the database's owner, the GRANT and what each extension needs, and no ledger created anywhere (exit ${noUsage.code})`);
     assert(!!noUsageGrant && noUsageGrant.code === 2 && /Run --grant as the objects' owner — the role that ran the migrations — or a superuser\./.test(noUsageGrant.out) && !/GRANT USAGE, CREATE/.test(noUsageGrant.out),
            `…and --grant as that role is refused in its own words: run it as the objects' owner (exit ${noUsageGrant?.code})`);
-    // Exit 0 and no FAILED line: 094 met pg_stat_statements an earlier superuser run left confined here, and failed this run (SMD-1849 PR 3b review pass 2), which a check of 001 alone passed.
+    // Exit 0 and no FAILED line: 096 met pg_stat_statements an earlier superuser run left confined here, and failed this run (SMD-1849 PR 3b review pass 2), which a check of 001 alone passed.
     assert(!!granted2 && granted2.code === 0 && !/Refused|FAILED/.test(granted2.out) && /001_\S+\s+applied/.test(granted2.out) && grantedLedger === "public",
            `…and the GRANT, run as printed, puts public back on the role's path, and it builds there (${granted2 ? granted2.out.split("\n").find((l) => /FAILED|Refused/.test(l))?.trim() ?? "no failure line" : "no GRANT printed"})`);
   } finally {

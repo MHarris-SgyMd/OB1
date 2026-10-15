@@ -6929,6 +6929,106 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(stmt !== undefined && repooled.length === 0 && others > 0, `…and that statement clears exactly those claims (${others} other succeeded claim(s) kept)`);
   }
 
+  // SMD-2707 (migration 094): --list names who wrote each side. A capture-only
+  // key's text proposed to stand over an operator's is flagged WRITER and its
+  // accept refused without --force, naming both writers; the reverse is not.
+  // A side the hook has since superseded names the pointer an accept clears,
+  // and the accept says it cleared it.
+  {
+    const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+    const HOOK = { name: "hook-16", agent_id: await agentOf("a", "hook-16", "capture"), via: "test-door", scope: "capture" };
+    const OPER = { name: "oper-16", agent_id: await agentOf("b", "oper-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('hook-16', 'agent'), set_agent_kind('oper-16', 'operator')`;
+    const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+      ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(40)}::vector) AS r`)[0].r as { id: string }).id;
+    const propose = async (older: string, newer: string) =>
+      String((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.95::numeric, 'the rota changed', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const W = await cap("[16w] the rota is weekly, the operator's word", OPER);
+    const C = await cap("[16w] the rota is now daily, replacing the weekly one", HOOK);
+    const N = await cap("[16w] the hook's next word on the rota", HOOK, C);
+    const pw = await propose(W, C);
+    const C2 = await cap("[16w] the hook's older note on the on-call", HOOK);
+    const W2 = await cap("[16w] the operator's newer word on the on-call", OPER);
+    const pr = await propose(C2, W2);
+    const listW = await consolidate("--list");
+    const blk = (out: string, pid: string) => out.split("\n\n").find((b) => b.includes(`proposal ${pid}`)) ?? "";
+    const bw = blk(listW.out, pw), br = blk(listW.out, pr);
+    assert(bw.includes(`ID: ${C}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        superseded by ${N}\n        an accept that makes this side stand clears a capture-only pointer, ${N} onto this side: it then no longer supersedes what it pointed at`)
+        && bw.includes(`ID: ${W}\n        By: oper-16 (operator) · trust operator`),
+      `--list names each side's writer under its id, and the hook's own later pointer onto its side (${bw.replace(/\n/g, " ⏎ ").slice(0, 700)})`);
+    assert(/the NEWER thought supersedes the older {2}WRITER\n/.test(bw)
+        && bw.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side) — read both writers before accepting; the accept takes --force")
+        && bw.includes(`--accept ${pw} --force`),
+      "…flags the capture-only key's text proposed to stand, says why, and puts --force on its accept");
+    assert(br !== "" && !/WRITER|writer:/.test(br) && br.includes(`--accept ${pr}    --reject ${pr}`),
+      `…and the operator's text standing over the hook's is not flagged, its accept without --force (${br.replace(/\n/g, " ⏎ ").slice(0, 300)})`);
+    assert(same(await consolidateInProcess({ list: "pending" }), listW), "…and run() in-process lists it byte for byte");
+    const refusedW = await consolidate("--accept", pw);
+    const [{ status: stillPending }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${pw}::uuid`;
+    assert(refusedW.code === 1 && refusedW.out.includes(`accept refused: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side). newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: oper-16 (operator) · trust operator. Read both with --list pending and pass --force if that side should stand, or --reject ${pw}`)
+        && stillPending === "pending" && (await supersedesOf(C)) === null && (await supersedesOf(N)) === C,
+      `accepting it without --force is refused, naming both writers, and nothing is written (${refusedW.out.trim().slice(0, 300)})`);
+    const forcedW = await consolidate("--accept", pw, "--force");
+    assert(forcedW.code === 0 && forcedW.out.includes(`accepted ${pw}: ${C} now supersedes ${W}`)
+        && forcedW.out.includes(`lapsed: ${N} no longer supersedes ${C} — its capturer's capture-only pointer, cleared by this accept`)
+        && (await supersedesOf(C)) === W && (await supersedesOf(N)) === null,
+      `with --force it is accepted, and the reply names the hook's pointer the accept cleared (${forcedW.out.trim().replace(/\n/g, " ⏎ ").slice(0, 400)})`);
+    // SMD-1873's case as it is met, at equal trust (review pass 4): a write
+    // key of agent kind — flagged for the capture scope alone, and refused.
+    const PEER = { name: "peer-16", agent_id: await agentOf("c", "peer-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('peer-16', 'agent')`;
+    const W7 = await cap("[16w] an agent's note on the standup time", PEER);
+    const C7 = await cap("[16w] the hook's copy of the note on the standup time", HOOK);
+    const pe = await propose(W7, C7);
+    const be = blk((await consolidate("--list")).out, pe);
+    const refusedE = await consolidate("--accept", pe);
+    assert(be.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's — read both writers before accepting; the accept takes --force")
+        && refusedE.code === 1 && refusedE.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's. newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: peer-16 (agent) · trust agent.")
+        && (await supersedesOf(C7)) === null,
+      `at equal trust the hook's copy proposed to stand is flagged for its capture scope alone, and refused without --force (${refusedE.out.trim().slice(0, 200)})`);
+    // Review pass 1: a rejected flagged row is guarded too — 029 accepts a
+    // rejected row, and the guard read pending and stale alone.
+    const C5 = await cap("[16w] the hook's note on the standup", HOOK);
+    const W5 = await cap("[16w] the operator's note on the standup", OPER);
+    const pj = await propose(W5, C5);
+    const rejected = await consolidate("--reject", pj);
+    const reaccept = await consolidate("--accept", pj);
+    assert(rejected.code === 0 && reaccept.code === 1 && reaccept.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's") && reaccept.out.includes("Read both with --list rejected and pass --force if that side should stand; left as it is, it stays rejected") && (await supersedesOf(C5)) === null,
+      `a rejected flagged proposal accepted again without --force is refused as a pending one is (${reaccept.out.trim().slice(0, 160)})`);
+    // A lineage pair also flagged WRITER: its refusal names the flag its
+    // --force would also waive (review pass 2).
+    const C9 = await cap("[16w] the hook's page drawn from the operator's note", HOOK);
+    const W9 = await cap("[16w] the operator's note the page is drawn from", OPER);
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${W9}::text) WHERE id = ${C9}::uuid`;
+    const pl = await propose(W9, C9);
+    const lin = await consolidate("--accept", pl);
+    assert(lin.code === 1 && lin.out.includes("one side's derived_from names the other") && lin.out.includes("— it also accepts over its WRITER flag: an accept would make the NEWER side stand: its text is a capture-only key's"),
+      `a lineage pair also flagged WRITER is refused as a lineage pair, naming the flag its --force would also waive (${lin.out.trim().slice(0, 200)})`);
+    // An undirected one: no --direction asks for one first; the flagged
+    // direction is refused, the other accepted plainly.
+    const C6 = await cap("[16w] the hook's note on the release", HOOK);
+    const W6 = await cap("[16w] the operator's note on the release", OPER);
+    const pu = String((await sql`SELECT record_supersession_proposal(${W6}::uuid, ${C6}::uuid, 'conflict_undirected', 0.95::numeric, 'which stands', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const listU = blk((await consolidate("--list")).out, pu);
+    const noDir = await consolidate("--accept", pu);
+    const newerDir = await consolidate("--accept", pu, "--direction", "newer");
+    const olderDir = await consolidate("--accept", pu, "--direction", "older");
+    assert(listU.includes(`--accept ${pu} --direction newer --force    --accept ${pu} --direction older    --reject ${pu}`)
+        && noDir.code === 1 && /pass --direction newer or --direction older/.test(noDir.out) && !/WRITER|would stand/.test(noDir.out)
+        && newerDir.code === 1 && newerDir.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's")
+        && olderDir.code === 0 && olderDir.out.includes(`accepted ${pu}: ${W6} now supersedes ${C6}`),
+      `an undirected flagged row lists an accept per direction, --force on the flagged one; no --direction asks for one, the flagged one is refused, the other accepted (${[noDir.out, newerDir.out, olderDir.out].map((o) => o.trim().slice(0, 80)).join(" | ")})`);
+    // A brain short of 094: the accept says the writer check did not run and
+    // the rest answers as before.
+    await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
+    const plainR = await consolidate("--accept", pr);
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") });
+    assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
+      `…and on a brain short of 094 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);
+    await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid)`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
+  }
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
@@ -12980,30 +13080,88 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
   }
 }
 
-console.log("\n[43] Migration 094 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
+console.log("\n[43] Migration 095: the stated-status label's inputs read the hits, not the log, under either plan — 060's order an index probe for a list (its every-row arm never runs), and the tickets matched by = ANY, with no join filter that pairs each event with each key (SMD-2540)");
+{
+  const tsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    // Sixty ticket rows, each moved through three statuses in place, as board-sync moves them.
+    const KEYS = Array.from({ length: 60 }, (_, i) => `ZS-${1000 + i}`);
+    const ids: string[] = [];
+    for (const key of KEYS) {
+      const [{ id }] = await tsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${`${key} — a ticket (label-inputs fixture)`}, ${{ source: "linear", issue: key, status: "Backlog", status_type: "backlog" }}::jsonb, content_fingerprint_of(${`${key} — a ticket (label-inputs fixture)`})) RETURNING id::text AS id`;
+      for (const [status, status_type] of [["In Progress", "started"], ["Done", "completed"]]) await tsql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type }}::jsonb WHERE id = ${id}::uuid`;
+      ids.push(id);
+    }
+    const plan = async (body: string, types: string, args: string, mode: "force_custom_plan" | "force_generic_plan") =>
+      tsql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
+        await tx.unsafe(`SET LOCAL max_parallel_workers_per_gather = 0`); // ticket_status_inputs' own setting
+        // A small table is scanned whole whatever the body; with that discouraged, only an index-able
+        // filter reaches thought_audit_thought_id_idx — 060's `$1 IS NULL OR …` under a generic plan cannot.
+        await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+        await tx.unsafe(`PREPARE label_inputs_plan(${types}) AS ${body}`);
+        // A generic plan is chosen after the custom ones the planner tries first; five warm calls get there.
+        for (let i = 0; i < 6; i++) await tx.unsafe(`EXECUTE label_inputs_plan(${args})`);
+        const rows = await tx.unsafe(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) EXECUTE label_inputs_plan(${args})`);
+        await tx.unsafe(`DEALLOCATE label_inputs_plan`);
+        return (rows as Record<string, string>[]).map((r) => r["QUERY PLAN"]).join("\n");
+      });
+    const src = async (sig: string) => String((await tsql`SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure(${sig})`)[0].prosrc);
+
+    // 060's order, as 095 redefines it: a list is read by the thought-id index, and the every-row arm never runs.
+    const order = (await src("ob1_thought_events_in_order(uuid[])")).replace(/\bp_thoughts\b/g, "$1");
+    const list = `'{${ids.slice(0, 10).join(",")}}'::uuid[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(order, "uuid[]", list, mode);
+      const seqLines = p.split("\n").filter((l) => /Seq Scan on thought_audit/.test(l));
+      assert(/(Index Scan|Index Only Scan|Bitmap Index Scan) (using|on) thought_audit_thought_id_idx/.test(p) && seqLines.every((l) => /never executed/.test(l)),
+        `${mode.replace("force_", "").replace("_plan", "")} plan, ten ids: ob1_thought_events_in_order reads them by thought_audit_thought_id_idx, and any scan of the whole log is never executed (${seqLines.map((l) => l.trim()).join(" | ") || "no seq scan"})`);
+    }
+
+    // 095's tickets matched by = ANY on each event's fields read once: no join filter pairs every event with every key.
+    const inputs = (await src("ticket_status_inputs(uuid[],text[])")).replace(/\bp_ids\b/g, "$1").replace(/\bp_issues\b/g, "$2");
+    const keys = `ARRAY[${KEYS.map((k) => `'${k}'`).join(",")}]::text[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(inputs, "uuid[], text[]", `'{${ids.slice(0, 10).join(",")}}'::uuid[], ${keys}`, mode);
+      const removed = [...p.matchAll(/Rows Removed by Join Filter: (\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+      // The first cut paired every event with every key: 180 events × 60 keys, 5,790 removed on a fresh
+      // database under the generic plan. What the shipped body removes is the brain's other ticket heads,
+      // a count of this database's tickets, not of the keys asked.
+      assert(removed < (KEYS.length * KEYS.length) / 2,
+        `${mode.replace("force_", "").replace("_plan", "")} plan, sixty tickets: ticket_status_inputs removes ${removed} rows by a join filter — not one per event per key, the generic-plan join the first cut made (1,032 keys: 5.3 s)`);
+    }
+  } catch (err) {
+    assert(false, `[43] stopped: ${(err as Error).stack}`);
+  } finally {
+    await tsql`DELETE FROM thoughts WHERE metadata->>'issue' LIKE 'ZS-%' AND content LIKE '% — a ticket (label-inputs fixture)'`;
+    await tsql.close();
+  }
+}
+
+console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
 {
   const xsql = new SQL({ url: URL_!, max: 1 });
   try {
     const [{ offered, installed }] = (await xsql`SELECT (SELECT count(*)::int FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered, (SELECT count(*)::int FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed`) as { offered: number; installed: number }[];
-    assert(offered === installed, `094 created pg_stat_statements exactly where the server offers it (offered ${offered}, installed ${installed})`);
+    assert(offered === installed, `096 created pg_stat_statements exactly where the server offers it (offered ${offered}, installed ${installed})`);
     if (installed === 1) {
       // Readable by pg_monitor alone: PUBLIC's default grant revoked, so the plugins' login role and the servers' reach neither view.
       const [g] = (await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') AS public_view, has_table_privilege('public', 'pg_stat_statements_info', 'SELECT') AS public_info,
                                      has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS public_fn,
                                      has_table_privilege('pg_monitor', 'pg_stat_statements', 'SELECT') AS monitor_view, has_function_privilege('pg_monitor', 'pg_stat_statements(boolean)', 'EXECUTE') AS monitor_fn`) as Record<string, boolean>[];
-      assert(!g.public_view && !g.public_info && !g.public_fn && g.monitor_view && g.monitor_fn, `094 revokes the views and their function from PUBLIC and grants them to pg_monitor (${JSON.stringify(g)})`);
+      assert(!g.public_view && !g.public_info && !g.public_fn && g.monitor_view && g.monitor_fn, `096 revokes the views and their function from PUBLIC and grants them to pg_monitor (${JSON.stringify(g)})`);
     }
     const [{ superuser }] = (await xsql`SELECT rolsuper AS superuser FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean }[];
     if (installed !== 1 || !superuser) {
-      skip("094 as a migrator that is no superuser, the grants a restore gives back, and login-role.ts --member-of", installed !== 1 ? "the server does not offer pg_stat_statements" : "the connection's role is not a superuser");
+      skip("096 as a migrator that is no superuser, the grants a restore gives back, and login-role.ts --member-of", installed !== 1 ? "the server does not offer pg_stat_statements" : "the connection's role is not a superuser");
     } else {
       const publicReads = async () => ((await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS p`) as { p: boolean }[])[0].p;
-      // 094 as a role that is no superuser and owns nothing of the extension's: where it is confined already, PUBLIC holding nothing, its GRANT is an error, not a warning (review pass 2: the run stopped there); where it is not there, an untrusted extension may not be created (review pass 1: the run stopped there too). Both are warnings.
+      // 096 as a role that is no superuser and owns nothing of the extension's: where it is confined already, PUBLIC holding nothing, its GRANT is an error, not a warning (review pass 2: the run stopped there); where it is not there, an untrusted extension may not be created (review pass 1: the run stopped there too). Both are warnings.
       await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_nosuper; CREATE ROLE ob1_live_nosuper NOLOGIN`);
-      const file094 = readFileSync(join(HERE, "migrations", "094_pg_stat_statements.sql"), "utf8");
+      const file096 = readFileSync(join(HERE, "migrations", "096_pg_stat_statements.sql"), "utf8");
       const asNosuper = async (): Promise<string | null> => {
         try {
-          await xsql.begin(async (tx) => { await tx.unsafe("SET LOCAL ROLE ob1_live_nosuper"); await tx.unsafe(file094); });
+          await xsql.begin(async (tx) => { await tx.unsafe("SET LOCAL ROLE ob1_live_nosuper"); await tx.unsafe(file096); });
           return null;
         } catch (e) {
           return (e as Error).message;
@@ -13019,9 +13177,9 @@ console.log("\n[43] Migration 094 on a real Postgres: pg_stat_statements created
         await xsql.unsafe("DROP ROLE ob1_live_nosuper");
       }
       const [{ left }] = (await xsql`SELECT count(*)::int AS left FROM pg_extension WHERE extname = 'pg_stat_statements'`) as { left: number }[];
-      assert(confinedRun === null && stillConfined, `094 run by a role that neither owns the confined views nor holds a grant on them warns and leaves the grants as they were, not a failure (${confinedRun ?? "applied"}; still confined ${stillConfined})`);
-      assert(leftOutRun === null && left === 0, `094 run by a role that is no superuser leaves pg_stat_statements out with a warning, not a failure (${leftOutRun ?? "applied"}; installed ${left})`);
-      // The run that applies 094 as a role that may not create the extension says it left it out, and what applies it (review pass 2: no suite ran that line).
+      assert(confinedRun === null && stillConfined, `096 run by a role that neither owns the confined views nor holds a grant on them warns and leaves the grants as they were, not a failure (${confinedRun ?? "applied"}; still confined ${stillConfined})`);
+      assert(leftOutRun === null && left === 0, `096 run by a role that is no superuser leaves pg_stat_statements out with a warning, not a failure (${leftOutRun ?? "applied"}; installed ${left})`);
+      // The run that applies 096 as a role that may not create the extension says it left it out, and what applies it (review pass 2: no suite ran that line).
       const MIG_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mig:ob1-live-mig-password-0123@");
       if (MIG_URL === URL_) {
         skip("a plain run as a role that is no superuser says it left pg_stat_statements out", "DATABASE_URL carries no credentials to swap for the role's");
@@ -13029,22 +13187,22 @@ console.log("\n[43] Migration 094 on a real Postgres: pg_stat_statements created
         let leftOutNote: { code: number; stdout: string; stderr: string } | null = null;
         try {
           await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig`);
-          await xsql`DELETE FROM schema_migrations WHERE name = '094_pg_stat_statements.sql'`;
+          await xsql`DELETE FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`;
           leftOutNote = await runMigrator(MIG_URL, undefined);
         } finally {
           await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
         }
-        const [{ recorded }] = (await xsql`SELECT count(*)::int AS recorded FROM schema_migrations WHERE name = '094_pg_stat_statements.sql'`) as { recorded: number }[];
-        assert(leftOutNote.code === 0 && /094_pg_stat_statements\.sql {2}left pg_stat_statements out: the server offers it, and this role could not create it/.test(leftOutNote.stdout) && /psql -d '[^']+' -v ON_ERROR_STOP=1 -f db\/migrations\/094_pg_stat_statements\.sql/.test(leftOutNote.stdout) && recorded === 1,
-          `a plain run as a role that is no superuser applies 094, says it left pg_stat_statements out and the file to apply as a superuser, exit 0 (exit ${leftOutNote.code}; ${(leftOutNote.stdout.split("\n").find((l) => /left pg_stat_statements out/.test(l)) ?? leftOutNote.stderr.trim().split("\n")[0] ?? "").trim().slice(0, 140)}; recorded ${recorded})`);
+        const [{ recorded }] = (await xsql`SELECT count(*)::int AS recorded FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`) as { recorded: number }[];
+        assert(leftOutNote.code === 0 && /096_pg_stat_statements\.sql {2}left pg_stat_statements out: the server offers it, and this role could not create it/.test(leftOutNote.stdout) && /psql -d '[^']+' -v ON_ERROR_STOP=1 -f db\/migrations\/096_pg_stat_statements\.sql/.test(leftOutNote.stdout) && recorded === 1,
+          `a plain run as a role that is no superuser applies 096, says it left pg_stat_statements out and the file to apply as a superuser, exit 0 (exit ${leftOutNote.code}; ${(leftOutNote.stdout.split("\n").find((l) => /left pg_stat_statements out/.test(l)) ?? leftOutNote.stderr.trim().split("\n")[0] ?? "").trim().slice(0, 140)}; recorded ${recorded})`);
       }
-      // A tier refresh's pg_restore -x creates the extension again with its own grants, PUBLIC's among them, under a ledger that records 094: the next plain run takes them back, and the one after has nothing to do.
+      // A tier refresh's pg_restore -x creates the extension again with its own grants, PUBLIC's among them, under a ledger that records 096: the next plain run takes them back, and the one after has nothing to do.
       await xsql.unsafe("CREATE EXTENSION pg_stat_statements");
       const restored = await publicReads();
       const healed = await migrate();
       const after = await publicReads();
       const quiet = await migrate();
-      assert(restored && healed.code === 0 && /↻ {2}094_pg_stat_statements\.sql {2}ran again: PUBLIC could read pg_stat_statements/.test(healed.stdout) && !after && quiet.code === 0 && !/094_pg_stat_statements\.sql {2}ran again/.test(quiet.stdout),
+      assert(restored && healed.code === 0 && /↻ {2}096_pg_stat_statements\.sql {2}ran again: PUBLIC could read pg_stat_statements/.test(healed.stdout) && !after && quiet.code === 0 && !/096_pg_stat_statements\.sql {2}ran again/.test(quiet.stdout),
         `a plain run takes back the grants a restore gave PUBLIC on pg_stat_statements, says so, and the next run is quiet (restored ${restored}, exit ${healed.code}, after ${after}, quiet exit ${quiet.code}: ${healed.stdout.split("\n").find((l) => /ran again/.test(l)) ?? "no ran-again line"})`);
       // The function alone given back: the view reads through it, so the run reads the functions' grants too (review pass 2: that half of the read went untested).
       await xsql.unsafe("GRANT EXECUTE ON FUNCTION pg_stat_statements(boolean) TO PUBLIC");
@@ -13064,7 +13222,7 @@ console.log("\n[43] Migration 094 on a real Postgres: pg_stat_statements created
         const stillPublic = await publicReads();
         const ownerRun = await migrate();
         const ownerAfter = await publicReads();
-        assert(warned.code === 0 && /⚠ {2}094_pg_stat_statements\.sql {2}ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can/.test(warned.stderr) && /-f db\/migrations\/094_pg_stat_statements\.sql/.test(warned.stderr) && stillPublic && ownerRun.code === 0 && !ownerAfter,
+        assert(warned.code === 0 && /⚠ {2}096_pg_stat_statements\.sql {2}ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can/.test(warned.stderr) && /-f db\/migrations\/096_pg_stat_statements\.sql/.test(warned.stderr) && stillPublic && ownerRun.code === 0 && !ownerAfter,
           `a run as a role that does not own the views warns, names the file, exits 0 and leaves PUBLIC's grant; the owner's next run takes it (exit ${warned.code}: ${warned.stderr.trim().split("\n")[0]?.slice(0, 120)}; public ${stillPublic} → ${ownerAfter})`);
       }
 
