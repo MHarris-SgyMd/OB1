@@ -7658,7 +7658,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && restored[7].startsWith("093") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("088") && restored[6].startsWith("090") && restored[7].startsWith("094") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -9135,7 +9135,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert((await snapshots()) === snapN + 1 && (await snapshotOf(fpA2))?.vec === unit(8), "…and a second re-apply is a no-op: the live rows keep the trigger's vectors");
   // 060 re-applied by hand recreates its 10-argument update_thought beside
   // 061's eleven; the shipped file restored drops it again (SMD-1731). It
-  // also put back 060's ob1_thought_events_in_order, which 093 redefines:
+  // also put back 060's ob1_thought_events_in_order, which 094 redefines:
   // restored too, so every later section reads the shipped order (SMD-2540).
   await restoreShipped("update_thought", "ob1_thought_events_in_order");
   assert((await functionsNamed("update_thought")) === 1, "…and 061 restored after it leaves one update_thought again");
@@ -14209,7 +14209,93 @@ console.log("\n[82] Migration 092: a capture-only key's thought is taken while i
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[83] Migration 093: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and one row per ticket with every status its rows held in the log's order (060's, not seq's, planted where they disagree); an unknown status type or a head with no status left out; a NULL list is none, never every thought; 060's order redefined to the same rows; a re-apply a no-op (SMD-2540)");
+console.log("\n[83] Migration 093: extraction_progress — a long thought's windows kept for the claim's holder only, replaced under another text or windowing, the stops counted and a stop that gained nothing stalled; the row goes with its claim (SMD-2694)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
+    .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone",
+    `the table's columns, only windows nullable (${cols})`);
+  const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
+  assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
+  const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
+  const sc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["save_extraction_window(uuid, text, text, text, text, int, int, jsonb)"])).c ?? "";
+  const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text, boolean)"])).c ?? "";
+  assert([tc, sc, nc].every((c) => /Migration 093 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 093, the ticket and the holder rule");
+  const lockCfg = (await q<{ n: string; c: string[] | null }>(`SELECT proname AS n, proconfig AS c FROM pg_proc WHERE proname IN ('save_extraction_window', 'note_extraction_stop') ORDER BY proname`)).map((r) => `${r.n}:${(r.c ?? []).join(",")}`).join(" ");
+  assert(lockCfg === "note_extraction_stop:lock_timeout=1s save_extraction_window:lock_timeout=1s", `both functions give up a lock wait after a second, so the stop's release is not queued behind them (review pass 3) (${lockCfg})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "extract:stub-80@p2";
+  const thought = async (text: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [text])).id;
+  const id = await thought("[83] a long document");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
+  const [claimed] = await q<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'w-80', 1, 900)`, [JOB]);
+  assert(claimed?.thought_id === id, "the thought claimed by w-80");
+  const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
+  const save = (worker: string, fp: string, win: string, i: number, tid = id, windows = 4) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, $3, $4, $5, $8, $6, $7::jsonb) AS ok`, [tid, JOB, worker, fp, win, i, part(i), windows]).then((r) => r.ok);
+  const note = (worker: string, fp: string, win: string, tid = id, long = true) =>
+    one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, $3, $4, $5, $6) AS ok`, [tid, JOB, worker, fp, win, long]).then((r) => r.ok);
+  const row = async (tid = id) => await one<{ keys: string; windows: number | null; stops: number; stalled: number; gained: number; fingerprint: string }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, fingerprint FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [tid, JOB]);
+
+  assert((await save("w-80", "fpA", "winA", 0)) && (await save("w-80", "fpA", "winA", 1)), "the holder keeps two windows");
+  assert((await row())?.keys === "0,1" && (await row())?.windows === 4, "…keyed by index, with the thought's window count");
+  assert((await save("w-other", "fpA", "winA", 2)) === false && (await row())?.keys === "0,1", "a worker that does not hold the claim keeps nothing");
+  assert((await save("w-80", "fpA", "winA", 1)) && (await row())?.keys === "0,1" && (await row())?.gained === 3, "a window saved again under its index replaces the one kept, no duplicate — every save counted as gained");
+  let r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 1 && r.stalled === 0 && r.gained === 0, `a stop after windows were saved: one stop, not stalled, gained back to 0 (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 2 && r.stalled === 1 && r.gained === 0, `a stop with no window saved since the last: stalled one (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 3 && r.stalled === 2, `…and another: stalled two (${JSON.stringify(r)})`);
+  // A window saved over an index already kept — one whose request changed
+  // under it, a chunker's — is a window gained, though the row holds no more
+  // keys (review pass 1: counting keys read it stalled).
+  r = (await save("w-80", "fpA", "winA", 1)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 4 && r.stalled === 0 && r.keys === "0,1", `a stop after a window was saved, over a kept index, resets stalled (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && await row();
+  assert(r && r.gained === 1 && r.stalled === 0, `a save between stops counts in gained, which a reader takes for gaining now (${JSON.stringify(r)})`);
+  // Another window count under the same text and settings (a chunker
+  // changed): the old indexes are of other windows, so the row's windows go;
+  // its stops were this text's and stay.
+  r = (await save("w-80", "fpA", "winA", 0, id, 5)) && await row();
+  assert(r && r.keys === "0" && r.windows === 5 && r.stops === 4, `a window saved under another window count replaces the windows kept, and keeps the stops (${JSON.stringify(r)})`);
+  r = (await save("w-80", "fpA", "winA", 2)) && (await note("w-80", "fpA", "winA")) && await row();
+  assert(r && r.stops === 5 && r.stalled === 0 && r.gained === 0, `…and the stop after it, windows saved, is not stalled (${JSON.stringify(r)})`);
+  assert((await note("w-other", "fpA", "winA")) === false && (await row())?.stops === 5, "a stop counted by a worker that does not hold the claim counts nothing");
+  r = (await save("w-80", "fpB", "winA", 3)) && await row();
+  assert(r && r.keys === "3" && r.stops === 0 && r.stalled === 0 && r.fingerprint === "fpB", `a window of other text replaces the row: its windows and its stops were the old text's (${JSON.stringify(r)})`);
+  r = (await note("w-80", "fpB", "winB")) && await row();
+  assert(r && r.keys === null && r.windows === null && r.stops === 1 && r.stalled === 1, `a stop under another windowing replaces the row too, this stop its first (${JSON.stringify(r)})`);
+  assert(/an index of at least 0/.test(await save("w-80", "fpB", "winB", -1).then(() => "", (e: Error) => e.message)), "a window with a negative index is refused");
+
+  await q(`SELECT release_claims_for_worker($1, 'w-80')`, [JOB]);
+  assert((await save("w-80", "fpB", "winB", 0)) === false && (await note("w-80", "fpB", "winB")) === false && (await row())?.stops === 1,
+    "once the lease is returned the old holder's save and stop write nothing — the row stands as it was");
+
+  // A single-window thought keeps no window: its first stop makes the row.
+  const lone = await thought("[83] one window");
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, lone]);
+  await q(`SELECT claim_thoughts($1, 'w-80b', 2, 900)`, [JOB]);
+  r = (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 1 && r.stalled === 0 && r.keys === null, `a short stop with no window kept makes the row, one stop and no stall: a short sleep is no slow window (review pass 2) (${JSON.stringify(r)})`);
+  r = (await note("w-80b", "fpL", "winA", lone)) && (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
+  assert(r && r.stops === 3 && r.stalled === 1, `a long stop stalls it, and a short one after leaves the stall as it was (${JSON.stringify(r)})`);
+
+  const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
+  await reapply("093");
+  assert(JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "093 re-applied: the rows stand");
+  await db.exec(`DELETE FROM thought_work_claims WHERE work_type = '${JOB}' AND thought_id = '${lone}'`);
+  assert((await row(lone)) === undefined && (await row()) !== undefined, "a claim row deleted by hand takes its kept windows with it, and only its own");
+  await db.exec(`DELETE FROM thoughts WHERE id = '${id}'`);
+  assert((await row()) === undefined, "…and a thought deleted takes them through its claim");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[84] Migration 094: what the stated-status label reads, in one call — the hits with a lifecycle of their own, each named ticket's status now, and one row per ticket with every status its rows held in the log's order (060's, not seq's, planted where they disagree); an unknown status type or a head with no status left out; a NULL list is none, never every thought; 060's order redefined to the same rows; a re-apply a no-op (SMD-2540)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   await db.exec(`DELETE FROM thoughts`);
@@ -14220,12 +14306,12 @@ console.log("\n[83] Migration 093: what the stated-status label reads, in one ca
     `SELECT pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proacl::text AS acl, p.proconfig AS cfg
        FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname = 'ticket_status_inputs'`);
   assert(fn && fn.args === "p_ids uuid[], p_issues text[]" && fn.result === "TABLE(kind text, thought_id uuid, issue text, status text, status_type text, history jsonb)"
-      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("093") && (await functionsNamed("ticket_status_inputs")) === 1,
-    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 093 defines it (${JSON.stringify(fn)})`);
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("094") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 094 defines it (${JSON.stringify(fn)})`);
   const [order] = await q<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure('ob1_thought_events_in_order(uuid[])')`);
-  assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("093") && (await functionsNamed("ob1_thought_events_in_order")) === 1
+  assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("094") && (await functionsNamed("ob1_thought_events_in_order")) === 1
       && /UNION ALL/.test(order.src) && /p_thoughts IS NOT NULL AND thought_id = ANY\(p_thoughts\)/.test(order.src) && /WHERE p_thoughts IS NULL\)/.test(order.src),
-    "093 redefines 060's ob1_thought_events_in_order over its one signature, and the body live here is 093's two arms — not 060's, which an earlier re-apply puts back");
+    "094 redefines 060's ob1_thought_events_in_order over its one signature, and the body live here is 094's two arms — not 060's, which an earlier re-apply puts back");
 
   // Ticket rows moved as board-sync moves them: in place, each status an audit event.
   const put = async (content: string, metadata: Record<string, unknown>) =>
@@ -14280,7 +14366,7 @@ console.log("\n[83] Migration 093: what the stated-status label reads, in one ca
       WHERE $1::uuid[] IS NULL OR a.thought_id = ANY($1::uuid[]) ORDER BY (a.created_at >= k.b), CASE WHEN a.created_at >= k.b THEN NULL ELSE a.created_at END, a.seq`, [ids])).map((r) => r.id).join();
   const now060 = async (ids: string[] | null) => (await q<{ id: string }>(`SELECT id FROM ob1_thought_events_in_order($1::uuid[])`, [ids])).map((r) => r.id).join();
   assert((await now060([t1, t3])) === (await ref([t1, t3])) && (await now060(null)) === (await ref(null)) && (await now060([])) === "",
-    "ob1_thought_events_in_order as 093 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
+    "ob1_thought_events_in_order as 094 redefines it: the same rows in the same order as 060's filter, for a list and for every row; an empty list none");
 
   // Nothing asked, nothing read: a NULL or empty list is none — node_state(NULL) would read every thought.
   const none = [...(await inputs(null, null)), ...(await inputs([], [])), ...(await inputs(null, ["SMD-404"]))];
@@ -14291,8 +14377,8 @@ console.log("\n[83] Migration 093: what the stated-status label reads, in one ca
 
   // A re-apply moves nothing.
   const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));
-  await reapply("093");
-  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "093 re-applied: one function, the same rows");
+  await reapply("094");
+  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "094 re-applied: one function, the same rows");
   await db.exec(`DELETE FROM thoughts`);
 }
 

@@ -63,9 +63,11 @@
  * extract's since this ticket's first cut, consolidate's since SMD-2304 — and
  * the claims they held moved to the back of the queue, since a release keeps
  * a claim's place: a thought longer than the sleeps would otherwise be every
- * sleep's first, and the pool behind it would never move. That thought itself
- * is still never finished while every sleep is shorter, and consolidation
- * does not join while it is pending (SMD-2694). Waking costs up to
+ * sleep's first, and the pool behind it would never move. That thought's
+ * windows answered so far are kept (extract-entities.ts over migration 093,
+ * SMD-2694), so it advances by the windows each sleep finishes and is done
+ * once its last is; until then consolidation does not join, and one whose
+ * single window outlasts every sleep still holds it back. Waking costs up to
  * --poll seconds of a pass beside the live call, and the calls in flight
  * thrown away. The first live call is not spared: it is recorded after the
  * model work it does, so on a one-slot model it can queue behind the call in

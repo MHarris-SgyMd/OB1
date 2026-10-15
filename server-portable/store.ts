@@ -758,7 +758,7 @@ export type ChangeFilters = {
 };
 
 /**
- * What migration 093's ticket_status_inputs gives the stated-status label
+ * What migration 094's ticket_status_inputs gives the stated-status label
  * (SMD-2540): the hits with a lifecycle of their own (never labelled), and per
  * ticket its status now and every status its rows held, in the log's order.
  */
@@ -1094,6 +1094,15 @@ export type Actor = {
    * another key or board-sync takes that thought. Absent for any other key.
    */
   scope?: "capture";
+  /**
+   * Why a capture whose embedding call the gate allowed landed without its
+   * vector (SMD-2888): the provider did not answer — providerDown's word,
+   * `provider_unreachable`, `provider_timeout` or `provider_<status>`. Lands
+   * in thought_audit.actor_context as `vector_failed`, beside `egress`, so
+   * the audit row says which of the two left the row vectorless. Absent
+   * when the vector landed or the call was not made.
+   */
+  vectorFailed?: string;
 };
 
 /**
@@ -1116,6 +1125,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     // agent_id, not agentId — the trigger's spelling, as for the actor itself.
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
     ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
+    ...(actor.vectorFailed !== undefined ? { vector_failed: actor.vectorFailed } : {}),
   };
 }
 
@@ -1640,12 +1650,12 @@ export interface ThoughtStore {
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   /**
-   * What the stated-status label reads (migration 093, SMD-2540): which of
+   * What the stated-status label reads (migration 094, SMD-2540): which of
    * these hits carry a lifecycle of their own, and each named ticket's status
    * now and history in the log's order. One query, none when no ticket is
    * named (nothing to label). Best-effort, as supersededAmong: a database
-   * before 093, or a role without the order's ob1_config grant, returns null —
-   * the hits go unlabelled and the search goes on. Never throws: a row 093
+   * before 094, or a role without the order's ob1_config grant, returns null —
+   * the hits go unlabelled and the search goes on. Never throws: a row 094
    * does not return is skipped (normaliseTicketStatusInputs), so a server
    * older than its brain's function loses labels, not searches.
    */

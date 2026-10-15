@@ -533,8 +533,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 1.8.0 cut's schema_version, SMD-1804), 090 (a re-capture says what it
   // did to a capture-only key's label, SMD-2898), 091 (each settle by the
   // pass kept on its proposal, SMD-2913), 092 (another key's pointer
-  // takes a capture-only key's thought, SMD-2708) and 093 (what the
-  // stated-status label reads, SMD-2540)
+  // takes a capture-only key's thought, SMD-2708), 093 (a long thought's
+  // extraction windows kept, SMD-2694) and 094 (what the stated-status label
+  // reads, SMD-2540)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -652,15 +653,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // refusing by name without 085 or 086 ([20ak]); 091 adds a column and
   // its trigger to 029's table, refusing by name without 067 ([20al]); 092
   // redefines 082's taken read, lapse and check and adds the chain, refusing
-  // by name without 082 ([20am]); 093 adds one read function and redefines
-  // 060's order over its own signature, refusing by name without 068 or 060
-  // ([20an]) — all
+  // by name without 082 ([20am]); 093 adds a table and two functions over
+  // 015's claims ([20an]); 094 adds one read function and redefines 060's
+  // order over its own signature, refusing by name without 068 or 060
+  // ([20ao]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 64, `030 is among the last sixty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 65, `030 is among the last sixty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4089,17 +4091,47 @@ console.log("\n[20am] Migration 092: refused by name without 082; onto a populat
   await sql.close();
 }
 
-console.log("\n[20an] Migration 093: refused by name without 068; onto a populated brain at the file before it — the label's inputs read the tickets board-sync moved before it, in the log's order, and no row moved; a re-apply a no-op (SMD-2540)");
+console.log("\n[20an] Migration 093: onto a populated brain at the file before it, a claim in flight — the table and its two functions, no thought or claim moved; the claim's holder keeps a window after it; a re-apply a no-op that keeps it (SMD-2694)");
 {
-  const the093 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "068" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the093 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;  // by name: renumbered when main takes its number
+  // Refused by name on a schema before 015, as 031 is (review pass 4).
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
   const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 093 needs 068 (ob1_ticket_head, node_state); this schema lacks it",
-    `093 on a schema stopped before 068 is refused up front, naming what it needs (${refused})`);
-
+  assert(/^migration 0\d\d needs 015 \(thought_work_claims\); this schema lacks it$/.test(refused), `093 on a schema before 015 is refused up front, naming what it needs (${refused})`);
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the093 });
+  const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 093: a long document') RETURNING id`;
+  await sql`SELECT enqueue_thoughts('extract:stub@p2', ARRAY[${id}::uuid])`;
+  await sql`SELECT * FROM claim_thoughts('extract:stub@p2', 'w-upgrade', 1, 900)`;
+  const state = async () => JSON.stringify(await sql`SELECT t.id, t.content, t.updated_at, c.status, c.worker_id, c.enqueued_at, c.attempt_count FROM thoughts t JOIN thought_work_claims c ON c.thought_id = t.id ORDER BY t.id`);
+  const before = await state();
+  assert((await sql`SELECT to_regclass('extraction_progress') IS NULL AS absent`)[0].absent === true, "before 093 there is no table of kept windows");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
+  const [shape] = await sql`SELECT to_regclass('extraction_progress') IS NOT NULL AS t,
+    to_regprocedure('save_extraction_window(uuid, text, text, text, text, int, int, jsonb)') IS NOT NULL AS s,
+    to_regprocedure('note_extraction_stop(uuid, text, text, text, text, boolean)') IS NOT NULL AS n`;
+  assert(shape.t && shape.s && shape.n && (await state()) === before, "093 onto the populated brain: the table and both functions, and no thought or claim moved");
+  const [{ ok }] = await sql`SELECT save_extraction_window(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', 3, 0, ${{ index: 0, h: "h0" }}::jsonb) AS ok`;
+  assert(ok === true, "the claim in flight across the upgrade: its holder keeps a window after it");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
+  const [n] = await sql`SELECT count(*)::int AS n FROM extraction_progress`;
+  assert(n.n === 1 && (await state()) === before, "a re-apply of 093 is a no-op: the kept window stands, no thought or claim moved");
+  await sql.close();
+}
+
+console.log("\n[20ao] Migration 094: refused by name without 068; onto a populated brain at the file before it — the label's inputs read the tickets board-sync moved before it, in the log's order, and no row moved; a re-apply a no-op (SMD-2540)");
+{
+  const the094 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "068" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 094 needs 068 (ob1_ticket_head, node_state); this schema lacks it",
+    `094 on a schema stopped before 068 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the094 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
   const [{ r }] = await sql`SELECT upsert_thought('ticket SMD-1'::text, ${{ metadata: { source: "linear", issue: "SMD-1", status: "Backlog", status_type: "backlog" } }}::jsonb, ${vec}::vector) AS r`;
@@ -4107,16 +4139,16 @@ console.log("\n[20an] Migration 093: refused by name without 068; onto a populat
   for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await sql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${id}::uuid`;
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata FROM thoughts ORDER BY id`);
   const before = await rows();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
   const read = async () => (await sql`SELECT kind, issue, status, history FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`) as { kind: string; issue: string; status: string; history: { status: string }[] | null }[];
   const got = await read();
   const events = (got.find((x) => x.kind === "history")?.history ?? []).map((x) => x.status);
   assert((await rows()) === before && JSON.stringify(events) === JSON.stringify(["Backlog", "In Progress", "Done"])
       && got.some((x) => x.kind === "head" && x.status === "Done") && got.some((x) => x.kind === "lifecycle"),
-    `onto a brain at 092: the moves made before 093 are read back in order, the head is Done, the ticket row is its own lifecycle, and no row moved (${JSON.stringify(got.map((x) => [x.kind, x.status]))})`);
+    `onto a brain at 093: the moves made before 094 are read back in order, the head is Done, the ticket row is its own lifecycle, and no row moved (${JSON.stringify(got.map((x) => [x.kind, x.status]))})`);
   const beforeReapply = JSON.stringify(await read());
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the093 });
-  assert(JSON.stringify(await read()) === beforeReapply && (await rows()) === before, "a re-apply of 093 is a no-op");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the094 });
+  assert(JSON.stringify(await read()) === beforeReapply && (await rows()) === before, "a re-apply of 094 is a no-op");
   await sql.close();
 }
 

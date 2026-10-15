@@ -111,7 +111,38 @@ export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "reje
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
   ms: number;
+  /** Set on a window answered under an earlier claim and kept (ExtractProgress, SMD-2694): no call was made for it in this one. */
+  resumed?: true;
 };
+
+/**
+ * Where a long thought's answered windows are kept across a claim that does
+ * not finish (db/extract-entities.ts over migration 093, SMD-2694). `sent` is
+ * the window's request as it would be sent — its messages — so a window is
+ * reused only for exactly the text it answered: a change of the thought, the
+ * chunker, the header rule or the prompt is a window asked again.
+ */
+export interface ExtractProgress {
+  /** A parsed window kept from an earlier claim for this request, or undefined. */
+  kept(index: number, sent: string): ExtractionWindow | undefined;
+  /** A window just answered and parsed, of `windows` the thought is sent in; the caller's errors are its own. */
+  save(part: ExtractionWindow, sent: string, windows: number): Promise<void>;
+  /**
+   * A first stop (SMD-2694, review pass 5): aborted, the next window not kept
+   * is not sent, and the extraction rejects with StoppedBetweenWindows — the
+   * windows answered so far are kept, so a stop need not wait out a whole
+   * document, as a deploy's SIGTERM did, killed past its grace.
+   */
+  between?: AbortSignal;
+}
+
+/** A windowed extraction a first stop ended before its next window (ExtractProgress.between): its windows answered so far are kept. */
+export class StoppedBetweenWindows extends Error {
+  constructor() {
+    super("stopped between windows: the windows answered so far are kept");
+    this.name = "StoppedBetweenWindows";
+  }
+}
 export type Extraction = {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
@@ -787,9 +818,11 @@ function foldAliases(aliases: string[], name: string): string[] {
   return [...seen.values()];
 }
 
-/** Every model call an answer cost: one per window, one more per window that was retried. The worker's summary and the eval's column read this one. */
+/** Every model call an answer cost: one per window, one more per window that was retried — a window kept from an earlier claim cost none here (SMD-2694). The worker's summary and the eval's column read this one. */
 export function callsOf(ex: Extraction): number {
-  return ex.windows + (ex.parts ? ex.parts.filter((p) => p.retried).length : ex.retried ? 1 : 0);
+  if (!ex.parts) return ex.windows + (ex.retried ? 1 : 0);
+  const sent = ex.parts.filter((p) => !p.resumed);
+  return sent.length + sent.filter((p) => p.retried).length;
 }
 
 /** …and for a relation: the verb and both endpoints, case-folded. */
@@ -1291,8 +1324,12 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
  * configuration's unless a harness measures another (evals/eval-extract-windows.ts).
  * `stop`, the claim worker's hard stop, aborts the call in hand and sends no
  * further window or retry: the extraction rejects with the stop's reason.
+ * `progress`, the worker's, keeps each window of a windowed thought once it
+ * has parsed and hands back those an earlier claim kept, which are not sent
+ * again (SMD-2694): the windows are walked in order either way, so the merge
+ * — whose ties keep the first reading — is an unbroken run's.
  */
-export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg), stop?: AbortSignal): Promise<Extraction> {
+export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg), stop?: AbortSignal, progress?: ExtractProgress): Promise<Extraction> {
   const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
   if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
   // A call always has a deadline: with Bun's idle cut disabled, an undefined
@@ -1329,11 +1366,28 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
     // escalated names the same model.
     let escalatedModel: string | undefined;
     for (const w of windows) {
+      const part = { index: w.index, of, header };
+      // The request as it would go out: a kept window answered exactly this.
+      const sent = progress ? JSON.stringify(buildMessages(w.content, part)) : "";
+      const kept = progress?.kept(w.index, sent);
+      if (kept && !kept.malformed) {
+        retriedAny ||= !!kept.retried;
+        if (kept.escalated) escalatedModel = kept.escalated;
+        parts.push({ ...kept, index: w.index, resumed: true });
+        continue;
+      }
+      // A first stop ends it here, between windows, those answered kept.
+      if (progress?.between?.aborted) throw new StoppedBetweenWindows();
       const t0 = Date.now();
-      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of, header }, windowing, onCall, stop);
+      const ex = await extractCall(w.content, cfg, deadline, part, windowing, onCall, stop);
       retriedAny ||= ex.retried;
       if (ex.escalated) escalatedModel = ex.escalated;
-      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs, ...(ex.abortedBy ? { abortedBy: ex.abortedBy } : {}) } : {}), ms: Date.now() - t0 });
+      const answered: ExtractionWindow = { index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.escalated ? { escalated: ex.escalated } : {}), ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs, ...(ex.abortedBy ? { abortedBy: ex.abortedBy } : {}) } : {}), ms: Date.now() - t0 };
+      parts.push(answered);
+      // A malformed answer is not kept: the next claim asks that window again.
+      // Nor is a lone window — a prefix cut to one (review pass 1): with
+      // nothing after it there is nothing to resume.
+      if (progress && !answered.malformed && windows.length > 1) await progress.save(answered, sent, windows.length);
     }
     const merged = mergeExtractions(parts);
     // The windows that parsed are the answer and the rest are named on it, as

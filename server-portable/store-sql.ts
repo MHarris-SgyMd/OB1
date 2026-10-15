@@ -874,9 +874,9 @@ export class SqlStore implements ThoughtStore {
   async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
     const valid = idList(ids), keys = ticketList(tickets);
     if (keys.length === 0) return normaliseTicketStatusInputs([]);
-    // Best-effort, as supersededAmong: before 093, or without the order's
+    // Best-effort, as supersededAmong: before 094, or without the order's
     // ob1_config grant, the label is left off and the search goes on. A row
-    // 093 does not return is skipped by the normaliser, which never throws.
+    // 094 does not return is skipped by the normaliser, which never throws.
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
