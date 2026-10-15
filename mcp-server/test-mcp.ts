@@ -20,7 +20,7 @@
  *   bun test-mcp.ts
  */
 
-import { createAssert } from "../db/test-support.ts";
+import { createAssert, watchStream } from "../db/test-support.ts";
 import { hashKey, type Principal } from "../server-portable/auth.ts";
 import type { Core } from "../server-portable/core/index.ts";
 import { ok, refuse, type Refusal } from "../server-portable/core/refusal.ts";
@@ -798,6 +798,89 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
   const cut = lines.filter((l) => l.door === "mcp" && l.tool === "thought_stats");
   assert(up && cut.length === 1 && cut[0].outcome === "cut" && /SIGTERM: no longer accepting; .*1 tool call running/.test(out) && /cut off by the server's stop/.test(err),
     `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
+}
+
+console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a collector as open-brain-mcp, sent at its stop; the REST core's span the child of its tool call's, across two processes; a plugin tool named on its line");
+{
+  const { setUpTelemetry } = await import("../server-portable/otel-setup.ts");
+  // The environment's own OTEL_* set aside for the section — a service name, a sampler, an exporter turned off — in this
+  // process and the entry's, so each sends under its own name (review pass 2: OTEL_SERVICE_NAME failed it).
+  const otelSaved = Object.entries(process.env).filter(([k]) => k.startsWith("OTEL_"));
+  for (const [k] of otelSaved) delete process.env[k];
+  // The entry in a process of its own and the REST core in this one, each sending its spans to one collector here.
+  const received: Record<string, string[]> = {};
+  const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
+  const tracing = setUpTelemetry("open-brain-api-test", { report: { warn: () => {} }, urls: { traces: `http://127.0.0.1:${collector.port}/v1/traces` } });
+  const tracedRest = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    resolve: async (p) => ({ status: "ok", agentId: p.scope === "forward" ? "agent-f" : "agent-1" }),
+    track: (run) => run(),
+    log: () => {},
+    plugins: () => loadPlugins("example"),
+  });
+  const restServer = Bun.serve({ port: 0, fetch: (req) => tracedRest.fetch(req) });
+  const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const port = holder.port;
+  holder.stop(true);
+  const entry = Bun.spawn(["bun", "index.ts"], {
+    cwd: import.meta.dir,
+    env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let up = false;
+  for (let i = 0; i < 100 && !up; i++) {
+    up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
+    if (!up) await Bun.sleep(50);
+  }
+  const call = (id: number, name: string) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", signal: AbortSignal.timeout(10_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } }) }).then((r) => r.text());
+  // The SDK loads after the server answers: its start line, before the calls whose spans are read.
+  const said = watchStream(entry.stderr);
+  const sdk = await said.until(/ go to \S+ over OTLP\/HTTP/, 10_000);
+  let out = "";
+  try {
+    await call(1, "thought_stats");
+    await call(2, "example_recent");
+    entry.kill("SIGTERM");
+    const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);
+    await entry.exited;
+    clearTimeout(hung);
+    out = await new Response(entry.stdout).text();
+    await tracing.flush();
+  } finally {
+    entry.kill();
+    restServer.stop(true);
+    await tracing.shutdown().catch(() => {});
+    collector.stop(true);
+    for (const [k, v] of otelSaved) process.env[k] = v;
+  }
+  // OTLP/JSON: each export's spans under their resource; a SERVER span is kind 2, and an attribute a key and a typed value.
+  type OtlpAttributes = { key: string; value: { stringValue?: string } }[];
+  type OtlpSpan = { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: number; attributes?: OtlpAttributes };
+  type OtlpResource = { resource: { attributes: OtlpAttributes }; scopeSpans: { spans: OtlpSpan[] }[] };
+  const sent = (received["/v1/traces"] ?? []).flatMap((t) => (JSON.parse(t) as { resourceSpans: OtlpResource[] }).resourceSpans);
+  const valueOf = (attributes: OtlpAttributes | undefined, key: string) => attributes?.find((a) => a.key === key)?.value.stringValue;
+  const spansOf = (rs: OtlpResource[]) => rs.flatMap((r) => r.scopeSpans).flatMap((sc) => sc.spans);
+  // The entry's spans and the REST core's, told apart by their service — not by a door, which an export holding only a
+  // call's tool span would lack (review pass 1: the batch's timer firing between a call's two spans).
+  const serviceOf = (r: OtlpResource) => valueOf(r.resource.attributes, "service.name");
+  const entrySent = sent.filter((r) => serviceOf(r) !== tracing.serviceName);
+  const service = entrySent[0] && serviceOf(entrySent[0]);
+  const mcpSpans = spansOf(entrySent);
+  const statsCall = mcpSpans.find((sp) => sp.name === "execute_tool thought_stats");
+  const statsRequest = mcpSpans.find((sp) => sp.name === "tools/call thought_stats" && sp.kind === 2);
+  const restStats = spansOf(sent.filter((r) => serviceOf(r) === tracing.serviceName)).find((sp) => sp.kind === 2 && valueOf(sp.attributes, "ob1.tool") === "thought_stats");
+  assert(up && sdk && service === "open-brain-mcp" && statsRequest !== undefined && statsCall?.parentSpanId === statsRequest.spanId && statsCall.traceId === statsRequest.traceId,
+    `the entry sends its spans at its stop as open-brain-mcp: a tool call's span under its request's (${service}; ${mcpSpans.map((sp) => sp.name).join(", ")})`);
+  assert(statsCall !== undefined && restStats?.traceId === statsCall.traceId && restStats.parentSpanId === statsCall.spanId,
+    `the REST core's request continues the tool call's traceparent: one trace across two processes (${restStats?.traceId} ${restStats?.parentSpanId} under ${statsCall?.traceId} ${statsCall?.spanId})`);
+  // The plugin call's line: the second tools/call, the calls made one after the other.
+  const pluginLine = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.door === "mcp" && l.rpc === "tools/call")[1];
+  assert(pluginLine?.tool === "example_recent" && mcpSpans.some((sp) => sp.name === "execute_tool example_recent"),
+    `a plugin tool is named on the entry's line and its span, the REST core in another process (${JSON.stringify(pluginLine)})`);
 }
 
 console.log("\n[9] The method guard, the preflight and discovery, as index.ts answers them");

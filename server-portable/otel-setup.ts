@@ -26,7 +26,8 @@
 // through its awaits by AsyncLocalStorage, so a tool's span is its request's
 // child and a request's log record names its trace; the W3C propagator reads
 // an incoming `traceparent`, which telemetry.ts links to the request's span, or
-// continues where the operator trusts it (OB1_OTEL_TRUST_TRACEPARENT=1).
+// continues where the operator trusts it (OB1_OTEL_TRUST_TRACEPARENT=1) or the
+// REST core's forwarder carried it (SMD-2287).
 //
 // Workers never loads this: wrangler.toml aliases it to
 // shims/otel-unavailable.ts, so the Worker's bundle holds the API alone.
