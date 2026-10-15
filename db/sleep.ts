@@ -78,8 +78,8 @@
  * let out for the newer work meanwhile, at most once a minute, then set aside
  * again once it reaches the stalled thought(s), which wait for consolidation
  * (SMD-3008): the judge model failing while the extraction model serves, as
- * both are on the one chat endpoint. A judge answering 5xx is waited for only
- * past those pauses, a minute and more. The thought is tried in every
+ * both are on the one chat endpoint. Mid-pass, a judge answering 5xx is
+ * waited for only past those pauses, a minute and more. The thought is tried in every
  * sleep once consolidation's pool drains, and finished by the first sleep
  * long enough for both. A brain before 093, or a role that cannot read it,
  * joins once extraction is drained alone, and the start says so; granted
@@ -256,6 +256,8 @@ export interface SleepOptions {
   minStampEveryS?: number;
   /** Extraction's stall floor (extract-entities.ts STALL_FLOOR_MS) unless a test drives it faster. */
   stallFloorMs?: number;
+  /** The least time between two restarts or let-outs of extraction (RESTART_EVERY_MS) unless a test drives it faster. */
+  restartEveryMs?: number;
 }
 
 /**
@@ -264,9 +266,12 @@ export interface SleepOptions {
  * SLEEP_STALLED_JOIN or more long hard stops in a row have taken with no
  * window saved between, and none since (migration 093, SMD-2694), 0 where the
  * scheduler cannot read them — and `stalledPending`, those of them pending
- * (SMD-3008).
+ * (SMD-3008); `stalledRead`, whether that read ran. `mine` counts the rows in
+ * flight under this process's extraction worker ids (MINE), and `stalledMine`
+ * those of them stalled: another's claim, a lapsed lease of a scheduler gone,
+ * is no thought this one holds.
  */
-type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number };
+type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
 const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 /**
@@ -283,6 +288,8 @@ const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claime
  * the brain for it (SMD-3008). The pool is not all stalled, so consolidation
  * would not join past it either, and both waited out the window in hand.
  */
+/** Extraction's worker ids in this process (extract-entities.ts's `workerId`, heldHere's prefix). */
+const MINE = `extract-${hostname()}-${process.pid}-`;
 const queuesBehind = (p: Pool): boolean => p.claimed > 0 && p.stalled - p.stalledPending === p.claimed && p.pending - p.stalledPending + p.unpooled > 0;
 
 /**
@@ -313,26 +320,30 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
     : sql`SELECT count(*)::int FROM consolidation_pool(${job})`;
   const [by] = (await sql`
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
-           count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n
-      FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number }[];
+           count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n,
+           count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}))::int AS mine
+      FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number; mine: number }[];
   // Read only where the start found 093's table readable (stalledUnder, the
   // windowing). One gone or refused since reads none stalled, said by the
   // caller, so the scheduler joins once extraction drains rather than ends
   // (review pass 2: the read ran inside reading(), which rethrows it).
-  let s = 0, sp = 0;
+  let s = 0, sp = 0, sm = 0, read = false;
   if (pass === "extract" && stalledUnder !== undefined) {
     try {
-      [{ s, sp }] = (await sql`
-        SELECT count(*)::int AS s, count(*) FILTER (WHERE c.status = 'pending')::int AS sp FROM thought_work_claims c
+      [{ s, sp, sm }] = (await sql`
+        SELECT count(*)::int AS s, count(*) FILTER (WHERE c.status = 'pending')::int AS sp,
+               count(*) FILTER (WHERE c.status = 'claimed' AND starts_with(c.worker_id, ${MINE}))::int AS sm
+          FROM thought_work_claims c
           JOIN extraction_progress e USING (thought_id, work_type) JOIN thoughts t ON t.id = c.thought_id
-         WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stalled >= ${SLEEP_STALLED_JOIN} AND e.gained = 0 AND ${currentProgress(sql, stalledUnder)}`) as { s: number; sp: number }[];
+         WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stalled >= ${SLEEP_STALLED_JOIN} AND e.gained = 0 AND ${currentProgress(sql, stalledUnder)}`) as { s: number; sp: number; sm: number }[];
+      read = true;
     } catch (e) {
       const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
       if (code !== "42P01" && code !== "42501") throw e;
       unread?.(e as Error);
     }
   }
-  return { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n), stalled: Number(s), stalledPending: Number(sp) };
+  return { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n), stalled: Number(s), stalledPending: Number(sp), stalledRead: read, mine: Number(by.mine), stalledMine: Number(sm) };
 }
 
 /**
@@ -815,7 +826,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
 
   /** Aborted when a pass of the current sleep settles, so its poll wakes to read why. */
   let passEnded = new AbortController();
-  const start = (name: PassName): Running => {
+  const start = (name: PassName, workers = WORKERS): Running => {
     const abort = new AbortController();
     const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort, hushed: false, start: null };
     // Its banner and its summary's queries are left out: the check said the
@@ -823,7 +834,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // would wait for at a wake (SMD-2752). Its start is reported, so a
     // refusal is told apart.
     const common = {
-      url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
+      url, env, workers, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
       banner: false, summary: false,
       onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
@@ -1009,6 +1020,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
      */
     let behindPolls = 0;
     let restartedAt = 0;
+    const restartEvery = opts.restartEveryMs ?? RESTART_EVERY_MS;
     /**
      * Extraction let out of the set-aside while consolidation waits for its
      * provider — at its start, or mid-pass after its workers' pauses — for the
@@ -1117,14 +1129,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           out("  consolidation drained — extracting beside it, the stalled thought(s) last");
           start("extract");
           parked = false;
-        } else if (judgeWaits() && Date.now() - restartedAt >= RESTART_EVERY_MS) {
+        } else if (judgeWaits() && reorders && Date.now() - restartedAt >= restartEvery) {
           const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true));
           if (ex === null) return stopped();
-          if (ex.pending > ex.stalledPending) {
-            await stoppedLast();
+          // Only where the stalled thoughts can be told and moved behind the
+          // newer work: otherwise one is claimed first, set aside at the next
+          // poll, and let out again a minute on (review pass 1).
+          if (ex.stalledRead && ex.pending > ex.stalledPending && (reorders = await stoppedLast())) {
             if (stopping) return stopped();
             out(`  consolidation waits for its provider — extracting the ${ex.pending - ex.stalledPending} newer thought(s) meanwhile; the stalled thought(s) wait for consolidation`);
-            start("extract");
+            // One worker, so the stalled thought is not claimed beside the
+            // newer work, whose call it would hold on a one-slot model (review pass 1).
+            start("extract", 1);
             parked = false;
             aside = true;
             restartedAt = Date.now();
@@ -1137,8 +1153,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // out, as after any drain.
         const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true));
         if (ex === null) return stopped();
-        const stalledInHand = ex.claimed > 0 && ex.stalled - ex.stalledPending === ex.claimed;
-        if (stalledInHand || (ex.claimed === 0 && ex.pending === ex.stalledPending)) {
+        // Any stalled thought this process holds, or one it can no longer tell
+        // (093 gone or refused since): a lease another left is not its own,
+        // and would re-park it every minute (review pass 1).
+        const stalledInHand = !ex.stalledRead || ex.stalledMine > 0;
+        if (stalledInHand || (ex.mine === 0 && ex.pending === ex.stalledPending)) {
           out(`  extraction ${stalledInHand ? "has reached the stalled thought(s)" : "has done the newer work"} — set aside again until consolidation drains`);
           if (await setAside()) return stopped();
           aside = false;
@@ -1171,7 +1190,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           start("consolidate");
           consolidating = true;
           parked = true;
-        } else if (behindPolls >= 2 && reorders && Date.now() - restartedAt >= RESTART_EVERY_MS && !running.some((r) => r.name === "extract" && r.settled)) {
+        } else if (behindPolls >= 2 && reorders && Date.now() - restartedAt >= restartEvery && !running.some((r) => r.name === "extract" && r.settled)) {
           // Work landed behind the stalled thought(s) in hand — a capture made
           // during the sleep, dated after the move at its start — and neither
           // it nor consolidation, which joins past only an all-stalled pool,

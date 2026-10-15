@@ -12168,7 +12168,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       onJudge = mid ? () => { judgeMissing = true; judgeProbeDown = true; onJudge = null; } : null;
       const jl: { l: string; at: number }[] = [];
       let stopJ: PassStop | null = null;
-      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      // Mid-pass, let-outs two seconds apart, so a wait still read once the judge answers would let the second note out (review pass 1).
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
       const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
       // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
@@ -12176,23 +12177,38 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       if (!mid) await Bun.sleep(1500);
       const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
       const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // A second note: at its start, while the judge is still down — let out
+      // at most once a minute, it waits for consolidation; mid-pass, once the
+      // judge answers — the wait over, it is not let out (review pass 1).
+      let noteB = "";
+      if (!mid) {
+        noteB = await syncNote("The judgenote, again, while the judge is still down.", 20);
+        await Bun.sleep(2500);
+      }
       const flipAt = Date.now();
       judgeProbeDown = false;
       judgeMissing = false;
+      if (mid && (await pollUntil(async () => seen(/\[consolidate\].*the provider answers again/) < Infinity, 30_000))) {
+        noteB = await syncNote("The judgenote, again, once the judge answers.", 20);
+      }
       const resumed = await pollUntil(async () => judged.length > 0 && seen(/consolidation drained — extracting beside it/) < Infinity, 60_000);
       (stopJ as PassStop | null)?.();
       await (stopJ as PassStop | null)?.();
-      await Promise.race([runJ, Bun.sleep(15_000)]);
+      await Promise.race([runJ, Bun.sleep(30_000)]);
       onJudge = null;
       const joinJ = seen(/consolidating first/), unparkJ = seen(/consolidation waits for its provider — extracting the 1 newer thought\(s\) meanwhile/);
       const reparkJ = seen(/set aside again until consolidation drains/), resumeJ = seen(/consolidation drained — extracting beside it/);
       const noteCall = extracts.find((e) => e.marker === "judgenote")?.at ?? Infinity;
+      const noteBCall = extracts.filter((e) => e.marker === "judgenote")[1]?.at ?? Infinity;
+      const letOuts = jl.filter((x) => /consolidation waits for its provider — extracting/.test(x.l)).length;
       const rel = (t: number) => (t === Infinity ? "never" : `+${t - joinJ} ms`);
       // Claimed after the note, by its place, the stalled thought is set aside
       // at the next poll: its call cut within a poll, and none begun after.
-      const stuckAside = stuckCalls.filter(([a, b]) => a > unparkJ && a < resumeJ && (b - a > 1500 || a > reparkJ)).length;
+      const stuckAside = stuckCalls.filter(([a, b]) => a > unparkJ && a < resumeJ && (b - a > 2500 || a > reparkJ)).length;
       assert(noteDone && unparkJ > joinJ && noteCall > unparkJ && noteCall < flipAt && reparkJ > noteCall && reparkJ < flipAt,
         `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
+      assert(noteB !== "" && letOuts === 1 && noteBCall > resumeJ,
+        `…a second note ${mid ? "written once the judge answers" : "written while the judge is still down"} is not let out — ${mid ? "the wait is over" : "at most once a minute"} — and is extracted once consolidation drains (${letOuts} let-out(s); the note ${rel(noteBCall)}, resumed ${rel(resumeJ)})`);
       assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
         `…the stalled thought waits for consolidation: claimed after the note, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
     };
