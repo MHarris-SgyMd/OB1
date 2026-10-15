@@ -239,9 +239,9 @@ take the brain the same way:
   project is `ob1b-canary`, its connector `ob1b-canary`, and its env file
   `.env.ob1b-canary.local`. `--stable-project` overrides the project the env
   file names.
-- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data` and
-  `ob1b_egress`. `--project` overrides the project, and `--network` names the
-  networks outright.
+- `deploy/tier.sh --env-file deploy/.env.ob1b.local` joins `ob1b_data`.
+  `--project` overrides the project, and `--network` names the network
+  outright.
 
 **Local models.** An instance on `--profile local-models` runs its own Ollama
 and `ollama` volume, so both models are pulled, and held in memory, once per
@@ -1886,8 +1886,9 @@ progress lines (`pool:`, `before:`) still come with each sleep's work.
 carries both. `tier.sh` is the runnable form. It builds `db/tier.Dockerfile`
 (`oven/bun:1.4.3-alpine` plus `postgresql16-client`, the major of the postgres
 service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
-in it, mounted read-only, on the stack's networks — `data`, where Postgres
-is, and `egress`, where a replay's embedding model is:
+in it, mounted read-only, on the stack's `data` network, where Postgres is.
+`--replay` and `--diff` need no container: they reach each brain over HTTP
+(SMD-2875).
 
 ```bash
 # stable (this stack's postgres) into a working copy, a scratch database on the
@@ -1895,16 +1896,15 @@ is, and `egress`, where a replay's embedding model is:
 # env file (deploy/.env is gitignored)
 docker compose --env-file ~/OB1/deploy/.env -f deploy/compose.yaml exec postgres createdb -U postgres openbrain_working
 deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postgres/openbrain_working --tier working
-# replay stable's logged searches on the canary deploy/canary.sh stood up — on
-# both projects' database networks, so by container name (each has a
-# `postgres`), and stable's egress for the model the replay embeds with. The
-# canary's database takes its own password (SMD-2583): --env-file is the
-# canary's file, which builds --to's URL and hands on the replay's settings,
-# and --from-env-file is stable's, for --from's password alone
-OB1_EVAL_EMBED=qwen3-embedding:4b@1024 deploy/tier.sh --env-file ~/OB1/deploy/.env.canary.local \
-  --from-env-file ~/OB1/deploy/.env \
-  --network open-brain_data,open-brain-canary_data,open-brain_egress \
-  --diff --since 2026-01-01 --from open-brain-postgres-1 --to open-brain-canary-postgres-1
+# replay stable's logged searches on stable and on the canary deploy/canary.sh
+# stood up, each over HTTP with a read key, and diff the ids. Each brain is a
+# connector name (its key is the connector's x-brain-key; canary.sh up --connect
+# registers the canary's) or an http(s):// URL; a URL's key is --from-key /
+# --to-key, else its ?key=, else OB1_COMPARE_KEY, which then goes to both
+# brains. The variable or the connector keeps a key off the command line.
+bun --no-env-file db/tier.ts --diff --from open-brain --to open-brain-canary --since 2026-01-01
+OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff \
+  --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8000/canary/mcp
 # the three-tier stack's own database network and services
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_data
 ```
@@ -1914,23 +1914,32 @@ migration, reset at will. It shares stable's memory and WAL as a canary must
 not, since the canary is the tier that takes the risky rebuilds ("A canary
 beside the stack", below).
 
-A `--diff` or `--replay` replays what stable logged, so:
+A `--diff` or `--replay` replays what stable logged on both brains, so:
 - stable must run with `OB1_QUERY_LOG=on`, which is off by default;
-- the window starts at the canary's last refresh unless `--since` says
-  otherwise, and a refresh is what `canary.sh up` just did;
-- hybrid-arm rows (`search_thoughts`) are replayed only with `OB1_EVAL_EMBED`
-  set to the brain's model, as in the example, and otherwise skipped.
+- the window is the most recent searches stable logged after `--since` (or at
+  all), at most a page of them (`list_logged_searches`, 200);
+- each brain embeds its own query, so every arm replays with no model here.
+  A search both brains refuse is skipped; one that only one brain fails, the
+  other answering, fails the run (exit 1 on both verbs), naming that brain;
+- the canary is diffed against stable as it answers now, so a thought stable
+  gained since the refresh can read as a move (the report's id-set line counts
+  them). Until SMD-2875 the diff read both databases from one container on
+  both brains' networks, against the ids stable had logged;
+- the replays are real searches, which a brain running with
+  `OB1_QUERY_LOG=on` logs.
 
 Both print the window and how many searches were replayed and skipped. A
 `--diff` that replayed none says `nothing to compare` and exits 3, where a
-pass is 0, a moved ranking or a failed step 1, and a usage error or refusal
-2 (SMD-2182).
+pass is 0, a moved ranking or a failed step 1 (a refusal such as a missing
+key included), and a malformed command line 2, a `postgres://` side included
+(SMD-2182).
 
 ### Compare two live brains
 
-`--diff`/`--replay` is the merge-time replay over Postgres. To ask instead "are
-these two running brains telling me the same thing, and if not why?" in one step,
-point them at each other over HTTP (SMD-2109):
+`--diff`/`--replay` is the merge-time gate over the searches stable logged, and
+prints this report above its verdict. To ask instead "are these two running
+brains telling me the same thing, and if not why?" in one step, point them at
+each other with `--compare` (SMD-2109):
 
 ```bash
 # each brain is a connector name (claude mcp get resolves the URL + key) or an
@@ -1955,7 +1964,8 @@ brain holds and the other does not, via `list_thought_ids`, SMD-2244); and, with
 The vector arm needs no local model — each brain embeds its own query. It never
 prints a key and prints a one-line verdict ("current with each other" / "canary
 is 1 migration behind; 407 vs 597 thoughts"), and exits non-zero when anything
-differs. The default compare writes nothing; `--replay` issues real searches,
+differs, a search one brain fails and the other answers included (an id-set
+read that failed is not counted). The default compare writes nothing; `--replay` issues real searches,
 which a brain running `OB1_QUERY_LOG=on` records in `query_log` (telemetry,
 migration 034, never the thoughts corpus), as any client search does. Until
 SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW settings, so a
@@ -1983,9 +1993,9 @@ alive.
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
 the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
-as given. `--network` defaults to the stack's `<project>_data,<project>_egress`
-(`open-brain_data,open-brain_egress` for the default project; a stack from
-before SMD-2583 has one, `<project>_default`). The project is the one
+as given. `--network` defaults to the stack's `<project>_data`
+(`open-brain_data` for the default project; a stack from before SMD-2583 has
+one network, `<project>_default`). The project is the one
 `--env-file` names, `COMPOSE_PROJECT_NAME` as compose reads it, else
 `open-brain`, or `--project NAME` (SMD-2873; not with `--network`). `--runtime` is
 `docker` or `podman` (docker when it is on the PATH). `--from-env-file PATH`
@@ -1999,13 +2009,13 @@ through `compose config --environment`. So a quoted value, an inline comment,
 an `export` line, CRLF line endings or a byte-order mark read here as they do
 for the stack. A variable set in the shell wins over the file, as it does
 there. Only what `tier.ts` and `migrate.ts` read is handed to the container:
-- the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` on a refresh);
-- `POSTGRES_PASSWORD`;
-- the key the replay's embed falls back to when `OB1_LLM_API_KEY` is unset
-  (`OPENROUTER_API_KEY`).
+- the `OB1_*` knobs (`migrate.ts` reads `OB1_EMBEDDING_*` and `OB1_PLUGINS`
+  on a refresh);
+- `POSTGRES_PASSWORD`.
 
-Access keys, `LINEAR_API_KEY`, `OLLAMA_BASE` and the authorization server's
-`OB1_AUTH_*` settings stay behind. The values travel in a temporary
+Access keys, `OPENROUTER_API_KEY` (a replay's embed fell back to it until the
+replay moved onto HTTP, SMD-2875), `LINEAR_API_KEY`, `OLLAMA_BASE` and the
+authorization server's `OB1_AUTH_*` settings stay behind. The values travel in a temporary
 env file (mode 600, removed on exit), so they are not on the wrapper's command
 line or the runtime's. They are in the container's environment, which
 `inspect` shows while it runs, and the URLs are on the argument lists of bun,
@@ -2066,10 +2076,11 @@ server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
 every PR, the deploy-stack CI job seeds one thought and one logged search, then
-runs through this script: a refresh, a `--replay`, a `--diff`, a `--diff` over
-the empty window after the refresh (exit 3), a retry over a copy left
-stamped `stable` (as a refresh that died after its restore leaves it), and
-both refusals. On a host with SELinux enforcing (Fedora and RHEL,
+runs through this script: a refresh, its refusal of a `--diff`, a retry over a
+copy left stamped `stable` (as a refresh that died after its restore leaves
+it), and both refusals. The canary step then diffs the canary against stable
+over HTTP (`tier.ts --diff`, exit 0), and over a window after every search
+(exit 3). On a host with SELinux enforcing (Fedora and RHEL,
 where podman labels by default), the container can read the mounted checkout
 only once it is relabelled: `chcon -Rt container_file_t <checkout>`. The
 script does not relabel it for you.
@@ -2280,8 +2291,7 @@ stable is redeployed:
    `git describe`, unless the shell sets it.
 4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
-   `smoke.sh` leaves out and a `--diff` replays only with a provider
-   configured. A candidate thought is searched for by its own text, with
+   `smoke.sh` leaves out. A candidate thought is searched for by its own text, with
    every literal that search matches exactly taken out: SMD keys, dates,
    paths and identifiers, as `extract_search_needles` finds them. It must
    come back as Result 1, at 50% or more. Up to five candidates are tried,
