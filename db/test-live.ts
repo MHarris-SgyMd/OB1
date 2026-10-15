@@ -4207,7 +4207,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          `…and aborts the model call in hand: run() returns at once, not after the 5 s answer, and sends nothing more (${hardMs} ms, ${calls - callsAtHard} call(s) after the stop)`);
   assert(!hard.stderr.includes("no longer this worker's") && /\n  0 extracted, 0 failed/.test(hard.stdout) && (await noteClaims()).succeeded === 1 && hardStop?.() === null,
          `…the thought in hand abandoned — nothing written or released for it, nothing counted — and the stop inert once run() has returned (${hard.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 80)})`);
-  // …but its stop is counted on it before the lease went back (092,
+  // …but its stop is counted on it before the lease went back (093,
   // SMD-2694): a one-window note keeps no window, so the stop is stalled.
   const stopsCounted = (await sql`SELECT stops, stalled, parts FROM extraction_progress WHERE work_type = ${KEY} AND thought_id = ANY(${sql.array(notes, "TEXT")}::uuid[])`) as { stops: number; stalled: number; parts: Record<string, unknown> }[];
   assert(stopsCounted.length === 1 && stopsCounted[0].stops === 1 && stopsCounted[0].stalled === 1 && Object.keys(stopsCounted[0].parts).length === 0,
@@ -4877,7 +4877,7 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 092, SMD-2694)");
+console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 093, SMD-2694)");
 {
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -12208,13 +12208,13 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       `the stalled read failing mid-run is said once, and the scheduler goes on to a clean stop (exit ${goneCode})`);
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
 
-    // A brain without 092's table (a role without its grant reads the same):
+    // A brain without 093's table (a role without its grant reads the same):
     // the start says so, and the dry run reads the pools as before.
     await sql`ALTER TABLE extraction_progress RENAME TO extraction_progress_away`;
     lines.length = 0;
     const dry = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
-    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 092 not applied\) — consolidation joins only once extraction is drained/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
+    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once extraction is drained/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
       `without the table the start says consolidation joins only once extraction drains, and the dry run reads the pools (exit ${dry})`);
     // With it, the dry run beside the scheduler named the held thought and the pool it joins past.
     assert(dryHeld === 0 && dryLines.some((l) => new RegExp(`held back across wakes \\(1 of 1\\): ${stuck}, no window kept over \\d+ stop\\(s\\), the last \\d+ with none gained`).test(l)) && dryLines.some((l) => /only 1 stalled thought\(s\), which consolidation would join past/.test(l)),
