@@ -32,6 +32,11 @@
 # podman), and a request sent by those names could reach stable's brain with
 # stable's keys. Today only the server's OAuth probe dials one
 # (auth.ob1.internal), and only under a profile, which the canary runs without.
+# One more, on purpose: with OTEL_EXPORTER_OTLP_ENDPOINT in its env file, the
+# canary's servers send their telemetry to lgtm.ob1.internal, stable's
+# observability collector (SMD-1849 PR 3a), which no canary container holds:
+# telemetry carries no key and no text, and names the canary by its tier
+# (deployment.environment.name).
 
 services:
   server:
