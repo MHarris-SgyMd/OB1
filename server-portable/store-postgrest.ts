@@ -643,9 +643,9 @@ export class PostgrestStore implements ThoughtStore {
     const valid = idList(ids), keys = ticketList(tickets);
     if (keys.length === 0) return normaliseTicketStatusInputs([]);
     // Best-effort, as supersededAmong: before 093 the RPC is unknown, and the
-    // label is left off rather than failing the search. The rows are read
-    // outside the catch, so a changed function is not mistaken for a brain
-    // without it. One row per ticket (093), so db-max-rows cuts no history.
+    // label is left off rather than failing the search; a row 093 does not
+    // return is skipped by the normaliser, which never throws. One row per
+    // ticket (093), so db-max-rows cuts no history.
     let rows: Record<string, unknown>[];
     try {
       const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });

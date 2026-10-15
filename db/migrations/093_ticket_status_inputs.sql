@@ -58,16 +58,24 @@
 --     search reply, SMD-2540 PR 2b). No search function changes, so no rank
 --     moves and no column is reshaped.
 --   * Grants: none. EXECUTE is PUBLIC; the server's role reads thoughts,
---     thought_audit and ob1_ticket_head already (db/config.mjs's capture
---     group). node_state reads thought_sources and the log's order reads
---     ob1_config, both soft grants (the server group): a role without either
---     fails this call, and the server shows no label rather than failing the
---     search (the store's best-effort read, as supersededAmong's).
+--     thought_audit, ob1_ticket_head and ob1_superseded_by already
+--     (db/config.mjs's capture group). The log's order reads ob1_config, a
+--     soft grant (the server group): a role without it fails this call, and
+--     the server shows no label rather than failing the search (the store's
+--     best-effort read, as supersededAmong's). node_state's thought_sources is
+--     not read: reading only `open` removes its dependency join (068's
+--     observed behaviour; the third review pass found the call working without
+--     it on PG16 and PG18).
 --   * A ticket row deleted, or one whose `issue` facet was taken off, leaves
---     its events out: the rows read are those carrying the key now (068's
---     thoughts_issue_key_idx), not every audit row that ever carried it —
---     board-sync deletes no ticket row. The eval read every event carrying
---     the key; on a brain where the two differ, the label reads the narrower.
+--     its events out: the rows read are those carrying one of the named keys
+--     now (068's thoughts_issue_key_idx), and each of their events counts
+--     toward the ticket the event itself names — not every audit row that ever
+--     carried a key. Board-sync deletes and re-keys no ticket row. The eval
+--     read every event carrying the key; on stable the two give the same
+--     history for every ticket (0 of 1,032 differ, the first review pass).
+--   * A history element with no status (JSON null or empty) is left out, as a
+--     head with none is. The eval kept such an element; stable holds none
+--     (all 5,172 statuses are text), so no measured label moves.
 --
 -- SAFETY
 --   Additive: one function, LANGUAGE sql with a string body (no recorded
@@ -179,4 +187,4 @@ AS $f$
 $f$;
 
 COMMENT ON FUNCTION ticket_status_inputs(uuid[], text[]) IS
-  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type and a status, its status now; kind history — one row per such ticket with every status its rows held, one element per capture or update event carrying it (at in ms since the epoch, status, status_type), in the log''s order (060''s ob1_thought_events_in_order, never thought_audit''s seq alone). A NULL or empty list of tickets reads no ticket, of ids no hit. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; node_state reads thought_sources and the order reads ob1_config, so a role without either soft grant fails the call and the server shows no label. Migration 093 / SMD-2540.';
+  'What the stated-status label reads (SMD-2540), one tagged row set: kind lifecycle — a hit of p_ids with a lifecycle of its own (node_state open IS NOT NULL), never labelled; kind head — each ticket of p_issues ob1_ticket_head holds with a known lifecycle type and a status, its status now; kind history — one row per such ticket with every status its rows held, one element per capture or update event carrying it (at in ms since the epoch, status, status_type), in the log''s order (060''s ob1_thought_events_in_order, never thought_audit''s seq alone). A NULL or empty list of tickets reads no ticket, of ids no hit. The reading (moved-session-settled, measured by evals/eval-stated-status.ts) runs in the server. STABLE, SECURITY INVOKER; the order reads ob1_config, so a role without that soft grant fails the call and the server shows no label (node_state''s thought_sources is not read when only open is). Migration 093 / SMD-2540.';

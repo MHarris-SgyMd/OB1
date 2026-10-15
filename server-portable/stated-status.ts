@@ -19,8 +19,10 @@
  * Known hazards, inside the measured precision (29 of 30 held out): a list
  * step takes a count with the key's digit count as a ticket (`SMD-2306, 1006
  * summaries` reads SMD-1006 — labelled only if that ticket exists and moved),
- * and a ticket's history is every row's carrying its key while its status now
- * is the head's.
+ * and a ticket's history is the events of the rows now carrying a named key
+ * while its status now is the head's. The measured population is thoughts
+ * with no lifecycle of their own that nothing supersedes (the eval sampled
+ * no superseded thought, so a label on one is unmeasured).
  */
 
 /** A ticket key, whole word: 077's lookarounds. */

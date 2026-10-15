@@ -1482,10 +1482,11 @@ by `thought_audit_thought_id_idx` whatever the plan: the old `p_thoughts IS
 NULL OR …` filter read the whole log when the body was not inlined. The label is read in
 the server (`server-portable/stated-status.ts`, the reading
 `evals/eval-stated-status.ts` measured and chose, held to it by the eval's
-self-check), so no search function changes and no rank moves. No grant; the
-server's role reads the three tables already, and a role without
-`node_state`'s `thought_sources` or the order's `ob1_config` gets no label
-rather than a failed search. It
+self-check), so no search function changes and no rank moves. No grant: the
+server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
+`ob1_superseded_by` already, and a role without the order's `ob1_config` gets
+no label rather than a failed search (`node_state`'s `thought_sources` is not
+read when only `open` is). It
 refuses to apply without 068 or 060. test-schema [83], test-upgrade [20an],
 server-portable/test-store-sql and test-store-postgrest.
 

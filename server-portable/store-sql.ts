@@ -874,10 +874,9 @@ export class SqlStore implements ThoughtStore {
   async ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null> {
     const valid = idList(ids), keys = ticketList(tickets);
     if (keys.length === 0) return normaliseTicketStatusInputs([]);
-    // Best-effort, as supersededAmong: before 093, or without node_state's
-    // thought_sources or the order's ob1_config grant, the label is left off
-    // and the search goes on. The rows are read outside the catch, so a
-    // changed function is not mistaken for a brain without it.
+    // Best-effort, as supersededAmong: before 093, or without the order's
+    // ob1_config grant, the label is left off and the search goes on. A row
+    // 093 does not return is skipped by the normaliser, which never throws.
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
