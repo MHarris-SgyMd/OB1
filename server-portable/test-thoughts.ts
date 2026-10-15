@@ -890,11 +890,11 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     busy.stop(true);
     bad.stop(true);
   }
-  const closed = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const closedPort = closed.port;
-  closed.stop(true);
+  // A port nothing listens on, taken just before it is dialled: one taken
+  // earlier may be another process's by then (review pass 3: a 404 answered).
+  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
   let thrown: unknown;
-  try { await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${closedPort}/v1`, OB1_LLM_LOCAL: "1" })); } catch (e) { thrown = e; }
+  try { await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" })); } catch (e) { thrown = e; }
   assert((thrown as { code?: string } | undefined)?.code === "ECONNREFUSED", `a closed port: extractMetadata throws the runtime's error, as before (${String(thrown)})`);
 
   // A provider that crashes after its 200 headers resets the socket mid-body:
@@ -990,9 +990,6 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   // down: the row is written with no vector and the marker alone, the actor
   // carries vector_failed, and the reply names the EMBEDDINGS endpoint, not
   // the chat one (review pass 1: every other test used one base for both).
-  // Fresh closed ports, taken here: one taken earlier in the section may be
-  // another process's by now (review pass 3: a 404 answered one under load).
-  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
   const embedPort = closedNow();
   const chatPort = closedNow();
   const written: Record<string, any>[] = [];
