@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -833,7 +833,20 @@ export class SqlStore implements ThoughtStore {
     // and fails; three resolve (preflight's lineage check names the leftover).
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
-    return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
+    // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
+    // 094 has no such function: the page goes out without writers, and the
+    // reply says so.
+    let writers: Record<string, unknown>[] = [];
+    let read = false;
+    if (rows.length) {
+      try {
+        writers = await this.sql`SELECT * FROM list_proposal_writers(${this.sql.array(rows.map((r: Record<string, unknown>) => String(r.id)), "UUID")}::uuid[])`;
+        read = true;
+      } catch (e) {
+        if (!WRITERS_MISSING.test((e as Error).message)) throw e;
+      }
+    }
+    return withWriters(rows, writers, read).map(normaliseProposal);
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {

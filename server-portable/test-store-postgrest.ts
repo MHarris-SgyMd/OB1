@@ -942,6 +942,9 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   assert(pending.length === 1 && pending[0].id === pid && pending[0].verdict === "conflict_undirected" && pending[0].confidence === 0.6,
          `the rpc returns the pending proposal, mapped (${pending.length}: ${pending[0]?.verdict})`);
   assert(pending[0].older.id === older && pending[0].newer.id === newer && /monthly/.test(pending[0].older.content), "…with both thoughts inline");
+  // 094 (SMD-2707): each side's writer over a second rpc, by the page's ids.
+  assert(pending[0].older.writer !== null && pending[0].newer.writer !== null && pending[0].newer.writer.captureOnly === false && pending[0].newer.supersededBy === null && pending[0].sameCapturer === false,
+    `…and each side's writer read over rpc (094) (${JSON.stringify({ older: pending[0].older.writer, newer: pending[0].newer.writer })})`);
   assert((await store.listSupersessionProposals({ status: null, limit: 5 })).length === 1, "p_status NULL and an explicit limit bind");
   assert((await store.listSupersessionProposals({ status: "rejected" })).length === 0, "…and a status with no rows is an empty list, not an error");
   // 070 (SMD-2313): p_lineage named on the rpc — the flag false here, true
