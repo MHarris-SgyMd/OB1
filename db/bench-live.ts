@@ -32,7 +32,8 @@
  *   bun db/bench-live.ts --label baseline --out /private/tmp/live.jsonl --ids /private/tmp/probe-ids.txt
  *   --mcp URL (http://127.0.0.1:8010/canary/mcp)   --key-from NAME (open-brain: ~/.claude.json's mcpServers entry)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
- *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule, the schedule, the flags — no brain, no provider
+ *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule, the schedule — no brain, no provider
+ *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
  *
  * The provider and models come from the variables the server reads
  * (OB1_LLM_BASE_URL, OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_METADATA_MODEL,
@@ -49,6 +50,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { commandLine } from "./cli.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractMetadata } from "../server-portable/metadata.ts";
 import type { EgressSubject } from "../server-portable/egress.ts";
@@ -136,22 +138,6 @@ export function outcomeOf(status: number, msg: Record<string, any> | null, tool:
   return { ok: true, status, id };
 }
 
-/** One flag's value in `argv`: refused when given twice, given without a value, or given a value that is another flag. */
-export function flagIn(argv: string[], name: string, fallback?: string): string | undefined {
-  const at = argv.flatMap((a, i) => (a === `--${name}` ? [i] : []));
-  if (at.length > 1) throw new Error(`--${name} given twice`);
-  if (at.length === 0) return fallback;
-  const value = argv[at[0] + 1];
-  if (value === undefined || value.startsWith("--")) throw new Error(`--${name} needs a value`);
-  return value;
-}
-/** A count flag: digits only, so `1e1`, `0x10`, `-3` and a blank are refused rather than read as a number. */
-export function countIn(argv: string[], name: string, fallback: number): number {
-  const raw = flagIn(argv, name, String(fallback))!;
-  if (!/^\d+$/.test(raw)) throw new Error(`--${name} takes a whole number`);
-  return Number(raw);
-}
-
 /**
  * The order of a run's calls: each step takes the next of every kind still
  * owed, a kind due once the step has reached its share, so each kind is spread
@@ -178,15 +164,36 @@ function keyFrom(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv;
-  const label = flagIn(argv, "label");
-  const out = flagIn(argv, "out");
-  const ids = flagIn(argv, "ids");
-  if (!label || !out || !ids) throw new Error("--label, --out and --ids are required");
-  const mcp = flagIn(argv, "mcp", "http://127.0.0.1:8010/canary/mcp")!;
-  const key = keyFrom(flagIn(argv, "key-from", "open-brain")!);
-  const keep = argv.includes("--keep-probes");
-  const want = { search: countIn(argv, "searches", 60), capture: countIn(argv, "captures", 30), embed: countIn(argv, "embeds", 40), metadata: countIn(argv, "metadata", 20) };
+  // Every argument through the one scanner (cli.ts) before anything runs: a flag the harness
+  // does not have, one given twice, a missing or blank value, a count that is not digits — exit 2.
+  const cli = commandLine("bench-live.ts", {
+    label: "one", out: "one", ids: "one", mcp: "one", "key-from": "one",
+    searches: "one", captures: "one", embeds: "one", metadata: "one",
+    "keep-probes": "none", "self-check": "none",
+  }, {
+    hints: {
+      label: "<state name>", out: "<samples.jsonl>", ids: "<probe-ids.txt>", mcp: "<MCP URL>", "key-from": "<~/.claude.json mcpServers name>",
+      searches: "<n>", captures: "<n>", embeds: "<n>", metadata: "<n>",
+    },
+    note: "a run needs --label, --out and --ids; --self-check needs none",
+  });
+  if (cli.has("self-check")) process.exit(selfCheck());
+  const label = cli.value("label");
+  const out = cli.value("out");
+  const ids = cli.value("ids");
+  if (!label || !out || !ids) {
+    console.error("bench-live.ts: a run needs --label, --out and --ids (--help lists every flag).");
+    process.exit(2);
+  }
+  const mcp = cli.value("mcp") ?? "http://127.0.0.1:8010/canary/mcp";
+  const key = keyFrom(cli.value("key-from") ?? "open-brain");
+  const keep = cli.has("keep-probes");
+  const want = {
+    search: cli.int("searches", { absent: 60, min: 0 }),
+    capture: cli.int("captures", { absent: 30, min: 0 }),
+    embed: cli.int("embeds", { absent: 40, min: 0 }),
+    metadata: cli.int("metadata", { absent: 20, min: 0 }),
+  };
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
   appendFileSync(ids, "");
@@ -331,17 +338,7 @@ export function selfCheck(): number {
   const full = schedule({ search: 60, capture: 30, embed: 40, metadata: 20 });
   ok(full.map((o) => o.kind).lastIndexOf("capture") > full.length * 0.8, "captures reach the end of the run, not bunched at its start");
 
-  // The flags.
-  const refused = (f: () => unknown, rule: RegExp) => { try { f(); return false; } catch (e) { return rule.test((e as Error).message); } };
-  ok(refused(() => flagIn(["--label", "--out", "x"], "label"), /needs a value/), "a flag followed by another flag needs a value");
-  ok(refused(() => flagIn(["--label"], "label"), /needs a value/), "a flag last on the line needs a value");
-  ok(refused(() => flagIn(["--label", "a", "--label", "b"], "label"), /given twice/), "a flag given twice is refused");
-  ok(refused(() => countIn(["--captures", "1e1"], "captures", 30), /whole number/), "a count in exponent form is refused");
-  ok(refused(() => countIn(["--captures", ""], "captures", 30), /whole number/), "a blank count is refused");
-  ok(countIn([], "captures", 30) === 30 && countIn(["--captures", "0"], "captures", 30) === 0, "a count falls back, and 0 is a count");
-  ok(flagIn(["--mcp", "http://x/mcp"], "mcp", "d") === "http://x/mcp" && flagIn([], "mcp", "d") === "d", "a flag's value, or its fallback");
-
-  // The probes and the queries.
+  // The probes and the queries. (The flags are cli.ts's, held by test-cli.ts.)
   ok(probeText("x", 1).startsWith(PROBE_PREFIX), "every probe starts with the prefix delete-by-content matches");
   ok(QUERIES.length > 0 && EMBED_QUERIES.length > 0 && !QUERIES.some((q) => EMBED_QUERIES.includes(q)), "the direct embeds' queries are none of the searches'");
 
@@ -349,7 +346,4 @@ export function selfCheck(): number {
   return bad === 0 ? 0 : 1;
 }
 
-if (import.meta.main) {
-  if (process.argv.includes("--self-check")) process.exit(selfCheck());
-  await main();
-}
+if (import.meta.main) await main();

@@ -3098,7 +3098,7 @@ timed call loads a model.
 OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
 OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
   bun bench-live.ts --label baseline --out /private/tmp/live.jsonl --ids /private/tmp/probe-ids.txt
-bun bench-live.ts --self-check   # the answer reader, the ok rule, the schedule, the flags; what CI runs
+bun bench-live.ts --self-check   # the answer reader, the ok rule, the schedule; what CI runs
 ```
 
 Captures are real writes, so run it against the canary or a scratch brain, never

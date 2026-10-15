@@ -602,8 +602,9 @@ jobs:
       # The latency harness's pure parts (SMD-3024): the answer reader and the
       # ok rule against the failing inputs its first run's review found (a
       # reply that never parses, an answer to another request, a capture saved
-      # without a vector or with its tagging failed), the call schedule and the
-      # flags. No network, no database, no provider.
+      # without a vector or with its tagging failed) and the call schedule. Its
+      # flags are cli.ts's, held by the flag scanner's suite. No network, no
+      # database, no provider.
       - name: Latency harness rules
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
