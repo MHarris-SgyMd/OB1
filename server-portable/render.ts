@@ -892,7 +892,8 @@ function explainRecaptureLabel(v: Captured): string {
  * the text. A capture-only key's does not (080, SMD-2539) and is not told
  * whether the text was new, so its note says what each case got and names the
  * re-embed pass alone (review pass 2: "stored" claimed a write a 'keep'
- * re-capture never made).
+ * re-capture never made). It is also whether the provider's words are said:
+ * they name its endpoint, which a key that cannot read is not told (SMD-2888).
  */
 function explainHeadWindow(e: HeadWindow | null, recaptures = true): string {
   if (!e?.fellBack || e.refused) return "";

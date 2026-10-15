@@ -833,10 +833,11 @@ stripped (`X-Forwarded-Prefix`).
   the registry reads a known name with a new digest as that agent's rotation.
 - **Answers.** A success is the operation's value, for a key that can read (a capture
   is a 201 with its `Location` and `embeddingAttached` — whether this capture wrote its
-  vector with the row, false when the egress gate refused the embedding call (on a
-  re-capture the row then keeps the vector it had); a scan a 202 whose handle points at
+  vector with the row, false when the egress gate refused the embedding call or the
+  provider did not answer it, `vectorFailed` saying why (on a re-capture the row then
+  keeps any vector it had); a scan a 202 whose handle points at
   `/v1/jobs`). A capture-only key is told what the MCP tool tells it — the id,
-  `embeddingCall`, `chunks`, `contextFailures` — and not the provider's address, the
+  `embeddingCall`, `chunks`, `contextFailures`, `vectorFailed`'s word — and not the provider's address, the
   egress gate's reasons or the extractor's tags — unless a forwarder carried the
   request, which is answered the whole value for the MCP server to word for that key,
   as a refusal is (SMD-2287). A refusal is its code, `retryable` and the facts its code declares

@@ -13,8 +13,10 @@
  *
  * What it returns is what upsert_thought merges into `metadata`: people,
  * action_items, dates_mentioned, topics, type (coerced to THOUGHT_TYPES —
- * thoughts.ts — with the model's raw answer kept in type_raw), or the failure
- * fallback with `metadata_extraction_failed` naming why.
+ * thoughts.ts — with the model's raw answer kept in type_raw), or
+ * `metadata_extraction_failed` naming why none were made: alone for an outage
+ * or a refusal (metadataUnavailable, metadataRefused), beside placeholder tags
+ * for any other failure (SMD-2888).
  */
 
 import { providerCall, providerDown, ProviderError, type EmbedConfig } from "./embed.ts";

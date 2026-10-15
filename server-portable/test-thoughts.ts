@@ -16,7 +16,7 @@
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture } from "./core/writes.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
@@ -931,6 +931,47 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   } finally {
     stalled.stop(true);
   }
+  // A LONG text whose whole-content call resets after its 200 while every
+  // window answers: the head window stands in, as for a 5xx — the reset is an
+  // outage of one call, not of the capture (review pass 3: since pass 1 a
+  // reset is the runtime's error, and nothing held the whole-content catch
+  // taking it).
+  {
+    const longCfgEnv = { OB1_LLM_LOCAL: "1", OB1_CHUNK_TOKENS: "100" };
+    const dim = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://x/v1", ...longCfgEnv }).embeddingDim;
+    const LONG_TEXT = Array.from({ length: 60 }, (_, i) => `Sentence ${i} of a long note about the provider resetting mid-answer.`).join(" ");
+    const pending = new Map<unknown, string>(); // each socket's request so far
+    const wholeOnly = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+      data(sock, chunk) {
+        const buf = (pending.get(sock) ?? "") + chunk.toString();
+        pending.set(sock, buf);
+        const split = buf.indexOf("\r\n\r\n");
+        const len = Number(/content-length: *(\d+)/i.exec(buf)?.[1] ?? NaN);
+        if (split < 0 || !(buf.length - split - 4 >= len)) return; // the whole request first
+        const body = JSON.parse(buf.slice(split + 4, split + 4 + len)) as { input: string };
+        if (body.input.length >= LONG_TEXT.length) { // the whole content: headers, then a reset
+          sock.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{"data":[`); sock.flush();
+          setTimeout(() => sock.terminate(), 20);
+          return;
+        }
+        const v = new Array(dim).fill(0); v[body.input.length % dim] = 1;
+        const json = JSON.stringify({ data: [{ embedding: v }] });
+        sock.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(json)}\r\nConnection: close\r\n\r\n${json}`); sock.flush();
+        sock.end();
+      },
+    } });
+    try {
+      const longCfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${wholeOnly.port}/v1`, ...longCfgEnv });
+      const said: string[] = [];
+      const got = await createEmbedder(() => longCfg, { log: (l) => said.push(l) }).embedCapture(LONG_TEXT, { kind: "capture" })
+        .catch((e: unknown) => ({ chunks: [], embedding: [], wholeContentFellBack: false, wholeContentRefused: false, wholeContentError: `threw: ${String(e)}` }));
+      assert(got.chunks.length > 1 && got.wholeContentFellBack === true && got.wholeContentRefused === false && /ECONNRESET|closed unexpectedly/.test(got.wholeContentError ?? "")
+          && JSON.stringify(got.embedding) === JSON.stringify(got.chunks[0].embedding),
+        `a long text's whole-content call reset after its 200 falls back to the head window, every window embedded (${got.chunks.length} windows, ${got.wholeContentError?.slice(0, 60)})`);
+    } finally {
+      wholeOnly.stop(true);
+    }
+  }
   // A body fault that is no outage — a gzip body that does not inflate (Bun:
   // ZlibError) — is still the body that was not JSON, as before: rethrown
   // raw it failed the capture's tagging call (review pass 2).
@@ -949,10 +990,11 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   // down: the row is written with no vector and the marker alone, the actor
   // carries vector_failed, and the reply names the EMBEDDINGS endpoint, not
   // the chat one (review pass 1: every other test used one base for both).
-  const embedPort = closedPort;
-  const chatGone = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const chatPort = chatGone.port;
-  chatGone.stop(true);
+  // Fresh closed ports, taken here: one taken earlier in the section may be
+  // another process's by now (review pass 3: a 404 answered one under load).
+  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  const embedPort = closedNow();
+  const chatPort = closedNow();
   const written: Record<string, any>[] = [];
   const store = { captureThought: async (args: Record<string, unknown>) => { written.push(args); return { id: "00000000-0000-4000-8000-0000000000b1", existed: false }; } };
   const ctx = createContext({
@@ -980,7 +1022,9 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     });
     let eTls: unknown;
     try { await capture(ctx2, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought whose chat endpoint is misconfigured" } as never); } catch (e) { eTls = e; }
-    assert(eTls !== undefined && providerDown(eTls) === null && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${String(eTls)} ${(eTls as { code?: string })?.code})`);
+    // The handshake's own error, whatever the platform calls it (EPROTO on macOS), not some other throw in capture.
+    const tlsSaid = `${String(eTls)} ${(eTls as { code?: unknown })?.code ?? ""}`;
+    assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
   } finally {
     plain.stop(true);
   }

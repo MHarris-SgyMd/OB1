@@ -494,7 +494,7 @@ The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The
 
 `OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, run Step 4's command again (with `-d`; a `restart` keeps the old values), and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
 
-If the note says **the embedding provider was unavailable**, the model endpoint didn't answer — Ollama isn't running or was stopped, or a hosted provider is down. The thought is saved and keyword search finds it; start the provider (`ollama serve`, or `ollama ps` to check) and capture the same text again to give it its vector.
+If the note says the embedding provider at some address **was unavailable**, the model endpoint didn't answer — the stack's `ollama` container is stopped, an Ollama on the host isn't running, or a hosted provider is down. The thought is saved and keyword search finds it. Bring the provider back — run Step 4's command again (with `-d`) for the stack's own `ollama`, or `ollama serve` for one on the host — and capture the same text again to give it its vector.
 
 **❌ Search returns no results**
 
