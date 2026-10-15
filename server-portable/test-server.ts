@@ -4889,6 +4889,27 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     }
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
+    // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
+    // index.ts names the key, accepted; the MCP server, which asks the REST core nothing for a HEAD, sends no span or
+    // record for one — its line and its point kept — as the keyless probe has none.
+    await stopTelemetry();
+    const probed = new InMemorySpanExporter();
+    const { useRequestLog } = await import("./telemetry.ts");
+    const probeLines: string[] = [];
+    const beforeLog = useRequestLog((l) => probeLines.push(l));
+    try {
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: probed }) }));
+      now += 60_000;
+      for (let i = 0; i < ANONYMOUS_PER_MINUTE + 10; i++) await (await worker.fetch(new Request("http://mcp/mcp/health", { method: "HEAD", headers: { "x-brain-key": KEY } }))).text();
+      await (await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }))).text();
+      await flushTelemetry();
+    } finally {
+      useRequestLog(beforeLog);
+    }
+    const probeRecords = probeLines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused");
+    assert(probeRecords.filter((r) => r.method === "HEAD" && r.outcome === "ok").length === ANONYMOUS_PER_MINUTE + 10 && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
+      `${ANONYMOUS_PER_MINUTE + 10} keyed HEADs, each its line: none of the budget spent, so the keyless refusal after them sends its span (${JSON.stringify([probeRecords.length, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
   } finally {
     await stopTelemetry();
     useBudgetClock(realClock);

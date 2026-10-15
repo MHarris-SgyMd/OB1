@@ -182,7 +182,7 @@ const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[]
 };
 
 /** `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter. */
-type RestEnv = { Variables: { template?: string } };
+type RestEnv = { Variables: { template?: string; carrier?: Principal | null } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const app = new Hono<RestEnv>();
@@ -232,7 +232,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // Hono passes up rather than to onError, ends it as one. A request whose
     // forwarder slot holds a forward-scope key continues its traceparent: the
     // MCP server's tool call, of which this is the operation (SMD-2287 PR 4c).
-    const trace = beginRequest("api", c.req.raw, write, { trustParent: forwardedByKey(c.req.raw) });
+    const carrier = carrierOf(c.req.raw);
+    if (carrier !== undefined) c.set("carrier", carrier);
+    const trace = beginRequest("api", c.req.raw, write, { trustParent: carrier != null });
     try {
       deps.init();
       // Under the request's span, so the operation's span is its child (PR 2b).
@@ -344,20 +346,22 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
   /**
-   * Whether the forwarder slot holds a forward-scope key: the digest check
-   * `caller` makes, read before the request's span starts, so the span
-   * continues the forwarder's trace (SMD-2287 PR 4c). Only a key's holder can
-   * pass it — any other caller's traceparent is linked, not continued; the
-   * registry's word on the key is not asked here (its request is refused
-   * below all the same), and keys that cannot be read trust no one.
+   * The forward-scope key the forwarder slot holds — null for none, or a slot
+   * that holds no such key — checked by its digest once, before the request's
+   * span starts, so the span continues the forwarder's trace (SMD-2287 PR 4c),
+   * and `caller` reads it from there. Only a key's holder passes: any other
+   * caller's traceparent is linked, not continued. The registry's word on the
+   * key is not asked here (a revoked forwarder is refused below all the same).
+   * Undefined where the keys cannot be read: no trust, and `caller` reads them
+   * itself, its throw onError's.
    */
-  function forwardedByKey(req: Request): boolean {
+  function carrierOf(req: Request): Principal | null | undefined {
     const forwarded = req.headers.get(FORWARDER_HEADER);
-    if (!forwarded) return false;
+    if (forwarded === null) return null;
     try {
-      return authenticate(forwarded, deps.keys(), { admit: ["forward"] }) !== null;
+      return authenticate(forwarded, deps.keys(), { admit: ["forward"] });
     } catch {
-      return false;
+      return undefined;
     }
   }
 
@@ -387,7 +391,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // registers no one; one refused as a revoked or busy forwarder has resolved
     // the caller first (a valid key; it is granted nothing).
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
-    const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
+    const checked = c.get("carrier");
+    const carrier = forwarded === null ? null : checked !== undefined ? checked : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
     // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,

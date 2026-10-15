@@ -397,6 +397,12 @@ export class RequestTrace {
   /** Set where a plugin accepted a webhook delivery (an answer under 400): its sender verified, it is not held to the anonymous budget (review pass 3). */
   hookAccepted = false;
   /**
+   * Set where a request was liveness alone — the MCP server's keyed HEAD, which asks the REST core nothing, so knows
+   * no key: its line and its point, but no span or record, and none of the anonymous budget, as the keyless probe has
+   * no record at all (SMD-2287 PR 4c review pass 1: a monitor's keyed HEADs spent the budget, and a refusal after went unsent).
+   */
+  liveness = false;
+  /**
    * Whether the SDK was running when the request began: one begun before it loaded, and not accepted, spends none of
    * the anonymous budget and sends no record (review passes 3, 5). Not whether its span records — an unsampled span, or spans turned off, records nothing
    * while the request's log record still goes, and the budget holds that record too (review pass 4).
@@ -491,7 +497,7 @@ export class RequestTrace {
       // A request the server did not accept: its span unended (never exported) and no record past the minute's budget; its point always.
       const accepted = (record.agent !== undefined && !this.refusedAtKey) || this.hookAccepted;
       // One begun before the SDK loaded has no span to send and spends none of the budget; its record goes nowhere either (review pass 5).
-      const sent = accepted || sdk === undefined || (this.loaded && anonymousSent());
+      const sent = !this.liveness && (accepted || sdk === undefined || (this.loaded && anonymousSent()));
       // Never the request's undoing: an SDK that throws here loses its span (review pass 2), its point and its record (PR 2c), not the request.
       try {
         this.span.updateName(span.name);

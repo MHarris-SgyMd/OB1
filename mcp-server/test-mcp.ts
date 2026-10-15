@@ -820,7 +820,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
     if (!up) await Bun.sleep(50);
   }
-  const call = (id: number, name: string) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } }) }).then((r) => r.text());
+  const call = (id: number, name: string) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", signal: AbortSignal.timeout(10_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } }) }).then((r) => r.text());
   // The SDK loads after the server answers: its start line, before the calls whose spans are read.
   const said = watchStream(entry.stderr);
   const sdk = await said.until(/ go to \S+ over OTLP\/HTTP/, 10_000);
@@ -846,14 +846,15 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   const sent = (received["/v1/traces"] ?? []).flatMap((t) => (JSON.parse(t) as { resourceSpans: OtlpResource[] }).resourceSpans);
   const attr = (sp: OtlpSpan | undefined, key: string) => sp?.attributes?.find((a) => a.key === key)?.value.stringValue;
   const spansOf = (rs: OtlpResource[]) => rs.flatMap((r) => r.scopeSpans).flatMap((sc) => sc.spans);
-  // The entry's spans and the REST core's, told apart by each request's door.
-  const doorOf = (r: OtlpResource) => spansOf([r]).some((sp) => attr(sp, "ob1.door") === "mcp") ? "mcp" : "api";
-  const entrySent = sent.filter((r) => doorOf(r) === "mcp");
-  const service = entrySent[0]?.resource.attributes.find((a) => a.key === "service.name")?.value.stringValue;
+  // The entry's spans and the REST core's, told apart by their service — not by a door, which an export holding only a
+  // call's tool span would lack (review pass 1: the batch's timer firing between a call's two spans).
+  const serviceOf = (r: OtlpResource) => r.resource.attributes.find((a) => a.key === "service.name")?.value.stringValue;
+  const entrySent = sent.filter((r) => serviceOf(r) !== "open-brain-api-test");
+  const service = entrySent[0] && serviceOf(entrySent[0]);
   const mcpSpans = spansOf(entrySent);
   const statsCall = mcpSpans.find((sp) => sp.name === "execute_tool thought_stats");
   const statsRequest = mcpSpans.find((sp) => sp.name === "tools/call thought_stats" && sp.kind === 2);
-  const restStats = spansOf(sent.filter((r) => doorOf(r) === "api")).find((sp) => sp.kind === 2 && attr(sp, "ob1.tool") === "thought_stats");
+  const restStats = spansOf(sent.filter((r) => serviceOf(r) === "open-brain-api-test")).find((sp) => sp.kind === 2 && attr(sp, "ob1.tool") === "thought_stats");
   assert(up && sdk && service === "open-brain-mcp" && statsRequest !== undefined && statsCall?.parentSpanId === statsRequest.spanId && statsCall.traceId === statsRequest.traceId,
     `the entry sends its spans at its stop as open-brain-mcp: a tool call's span under its request's (${service}; ${mcpSpans.map((sp) => sp.name).join(", ")})`);
   assert(statsCall !== undefined && restStats?.traceId === statsCall.traceId && restStats.parentSpanId === statsCall.spanId,

@@ -448,9 +448,12 @@ export function createMcpApp(deps: McpDeps): Hono {
   /**
    * A keyed HEAD: no body to carry an answer, so liveness at once, asking the REST core nothing, a probe never
    * waiting on the registry (review passes 1 and 2 of PR 4b: asking whoami first, a locked registry held it 1.8 s);
-   * its line `ok`, the route named and no key, where index.ts matched the key's hash.
+   * its line `ok`, the route named and no key, where index.ts matched the key's hash. Liveness alone, its span and
+   * record unsent, so a monitor's probes spend none of the budget for requests no key was accepted for (PR 4c review pass 1).
    */
   const headAtOnce = (c: Context, route: string, tool: ToolName) => {
+    const trace = traceOf(c.req.raw);
+    if (trace) trace.liveness = true;
     nameRoute(c, route, tool);
     return c.text("ok", 200, corsHeaders);
   };

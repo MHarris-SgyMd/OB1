@@ -125,9 +125,10 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 - **A throw's kind on a span.** What the REST core throws (its registry, its store) is
   on the REST core's span, under this server's; this server's own span has the kind of
   what it met, a 500, since an answer carries no exception.
-- **A keyed HEAD's telemetry** names no key, so its span and record are held to the
-  budget for requests no key was accepted for (`telemetry.ts`), where `index.ts`'s
-  matched the key.
+- **A keyed HEAD's telemetry.** Knowing no key, it sends no span or log record — its
+  line and its point on the request-duration histogram kept, as the keyless probe has
+  none — so a monitor's probes spend none of the budget for requests no key was
+  accepted for (`telemetry.ts`), where `index.ts` names the key and sends both.
 
 **Every request's line** is this server's own, `door: "mcp"`, as `index.ts` writes it
 (SMD-1849): the route as a template, the JSON-RPC method and tool, the key's name once
@@ -141,7 +142,13 @@ says otherwise): each request a span, each tool call an `execute_tool` span bene
 Every call on the REST core carries the current span's `traceparent`, which the REST
 core continues for a request its forwarder carried — a forward-scope key in
 `x-brain-forwarder` — so a tool call and the operation it ran are one trace. Any other
-caller's `traceparent` it links, as before. The stop sends what is batched.
+caller's `traceparent` it links, as before. The REST core's sampling follows this
+server's sampled flag for such a request (`parentbased_` samplers), and a span this
+server held to its budget leaves the REST core's under it without its parent. There is
+no CLIENT span between the two, so Tempo's service graph draws no edge from this server
+to the REST core (SMD-3031). With no collector set, a trusted incoming `traceparent` names this
+server's line but is not sent on, so the REST core's line names a trace of its own. The
+stop sends what is batched.
 
 **The entry** serves with Bun's longest idle timeout, 255 s (`IDLE_TIMEOUT_S`): its job
 polls and mirrors are GETs that wait on the REST core, and Bun's 10 s default cuts such
@@ -168,7 +175,7 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 bun test-mcp.ts                                                  # 123 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
 cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 573 — the whole server over MCP on real Postgres, held to this server the same way
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1073 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry and its stop
+cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1074 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-plugins.ts   # 283 — plugins in the contract, an enabled plugin's operation as this server's tool
 cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
 ```
