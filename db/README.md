@@ -3746,7 +3746,7 @@ claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working
 A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
 same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
-key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
+key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`:
 `OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as

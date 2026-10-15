@@ -847,7 +847,7 @@ export async function promoteTarget(dir: string, stableUrl: string): Promise<{ v
 
 const COMPARE_USAGE =
   "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
-  "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
+  "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, else ?key=, else OB1_COMPARE_KEY) or a connector name (open-brain, open-brain-canary; its own key)";
 const VERB_USAGE =
   "  db/tier.ts --refresh | --promote (one verb) --from <postgres://…> --to <postgres://…> [--tier <canary|working>]\n" +
   "    or one half: --from <postgres://…> --handoff <dir>, then --handoff <dir> --to <postgres://…> (deploy/tier.sh's two containers)\n" +

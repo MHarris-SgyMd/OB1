@@ -240,6 +240,7 @@ project_of() {
     [ -z "$name" ] || break
   done
   if [ -z "$name" ]; then
+    # shellcheck disable=SC2016 # the backticks quote a command for the reader
     printf 'could not read the stack'"'"'s project from %s through compose; name it with %s, or run `%s compose --env-file %q -f %q config --quiet` to see compose'"'"'s reason.\n' "$1" "$2" "$RUNTIME" "$1" "$REPO/deploy/compose.yaml" >&2
     exit 2
   fi
@@ -350,9 +351,10 @@ trap 'exit 129' HUP
 trap 'exit 143' TERM
 
 # The environment as compose builds it for the stack: an empty project, the
-# file, the shell. stderr apart, since a delegating `podman compose` prints a
-# banner there even when it succeeds. The runtime's compose first, then the
-# other's; the first failure is the one reported.
+# file, the shell. stderr is dropped: a delegating `podman compose` prints a
+# banner there even when it succeeds, and compose's words can quote a value.
+# The runtime's compose first, then the other's; the first that fails names
+# the command in the message.
 # Called as an assignment, so its exit 2 ends the script under set -e.
 resolve_env() {
   local c out err=""
@@ -363,6 +365,7 @@ resolve_env() {
     if out="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$1" -f - config --environment 2>/dev/null)" && [ -n "$out" ]; then printf '%s\n' "$out"; return; fi
     [ -n "$err" ] || err="$c"
   done
+  # shellcheck disable=SC2016 # the backticks quote a command for the reader
   printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment". `%s compose --env-file %q -f %q config --quiet` shows compose'"'"'s reason.\n' "$1" "${err:-$RUNTIME}" "$1" "$REPO/deploy/compose.yaml" >&2
   exit 2
 }

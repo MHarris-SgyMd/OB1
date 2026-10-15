@@ -13,7 +13,7 @@
  *   bun deploy/test-tier-sh.ts
  */
 
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,7 +143,7 @@ const CANARY = ["--env-file", envB, "--from-env-file", envA, "--project", "pb", 
     `the source half runs, its hand-off passes, its container goes, then the target starts (${order.join(" ; ")})`);
   ok(!/pa0a|pb0b/.test(r.out + r.err), "no password on tier.sh's output");
   ok(!r.log.includes("ENVLEFT"), "each half's env file is gone from the host before that half starts");
-  ok(!existsSync(join(root, `run${runN}`, "ob1-tier-env")) && Bun.spawnSync(["sh", "-c", `ls ${join(root, `run${runN}`)} | grep -c ob1-tier`]).stdout.toString().trim() === "0", "no temporary env file is left");
+  ok(!readdirSync(join(root, `run${runN}`)).some((f) => f.startsWith("ob1-tier")), "no temporary env file is left");
 }
 
 // The copy rule on a checkout of its own (review passes 5–6): every tracked
