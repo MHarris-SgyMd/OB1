@@ -409,16 +409,18 @@ export class RequestTrace {
   /** The trace id an incoming `traceparent` names, for the line when the span has none of its own. */
   private readonly incoming?: string;
 
-  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal: AbortSignal, headers: Headers) {
+  constructor(readonly door: Door, readonly method: string, private readonly write: (r: RequestRecord) => void, private readonly signal: AbortSignal, headers: Headers, trustParent = false) {
     OPEN.add(this);
     // A caller's traceparent is its own choice: continued, it would pick this
     // request's trace — joining any trace it knows, colliding with another
     // request's line, deciding the ratio sampler — so by default the request
     // starts its own trace and links the caller's, as OpenTelemetry advises
     // for a public endpoint; an operator whose proxy sets the header trusts it
-    // (OB1_OTEL_TRUST_TRACEPARENT=1) and it is continued (review pass 6).
+    // (OB1_OTEL_TRUST_TRACEPARENT=1) and it is continued (review pass 6), as is
+    // one a server's caller holds a key for (`trustParent`: the REST core's
+    // forwarder, SMD-2287 PR 4c).
     const remote = otel.propagation.extract(otel.ROOT_CONTEXT, headers, HEADERS);
-    const trusted = trustsTraceparent();
+    const trusted = trustParent || trustsTraceparent();
     const parent = trusted ? remote : otel.ROOT_CONTEXT;
     const caller = trusted ? undefined : otel.trace.getSpanContext(remote);
     this.incoming = trusted ? incomingTrace(headers.get("traceparent")) : undefined;
@@ -753,11 +755,32 @@ export async function flushTelemetry(): Promise<FlushResult | undefined> {
   return sdk?.flush();
 }
 
-/** A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest unless a suite says). */
-export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest): RequestTrace {
-  const trace = new RequestTrace(door, req.method, write, req.signal, req.headers);
+/**
+ * A request's record, made as a server's first middleware receives it; `write` is where its line goes (logRequest
+ * unless a suite says). `trustParent`: its `traceparent` is continued, whatever OB1_OTEL_TRUST_TRACEPARENT says — the
+ * REST core's word for a request its forwarder carried (SMD-2287 PR 4c).
+ */
+export function beginRequest(door: Door, req: Request, write: (r: RequestRecord) => void = logRequest, { trustParent = false } = {}): RequestTrace {
+  const trace = new RequestTrace(door, req.method, write, req.signal, req.headers, trustParent);
   RECORDS.set(req, trace);
   return trace;
+}
+
+/** Writes the `traceparent` key alone: a span this server started carries no caller's `tracestate` (HEADERS), and nothing else goes. */
+const TRACEPARENT_ONLY: otel.TextMapSetter<Record<string, string>> = { set: (carrier, key, value) => { if (key === "traceparent") carrier[key] = value; } };
+
+/**
+ * The current span's `traceparent`, for a call this server makes on another
+ * (the MCP server's on the REST core, SMD-2287 PR 4c): the REST core continues
+ * it for its forwarder, so a tool call and the operation it ran are one trace.
+ * None with no SDK, or no span current.
+ */
+export function outgoingTraceparent(): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  try {
+    otel.propagation.inject(otel.context.active(), carrier, TRACEPARENT_ONLY);
+  } catch {}
+  return carrier;
 }
 
 /**

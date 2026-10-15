@@ -917,6 +917,21 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
       `the request's span: its route's template, its operation, the key's name, its 200; its own trace, on the line, the caller's linked (${listed?.name} ${JSON.stringify(attrs(listed))} ${listedLine.trace})`);
     assert(listedOp?.parentSpanContext?.spanId === listed?.spanContext().spanId && attrs(listedOp)["ob1.outcome"] === "ok" && listedOp?.status.code === SpanStatusCode.UNSET,
       `the operation's span is its child, \`ok\` (${listedOp?.name} ${JSON.stringify(attrs(listedOp))})`);
+    // A request its forwarder carried continues the forwarder's traceparent: the MCP server's tool call, of which it is
+    // the operation, one trace (SMD-2287 PR 4c). Only a forward-scope key in the slot does: another key there, a key
+    // that is none, or keys that cannot be read, and the caller's trace is linked as any caller's is.
+    const parentage = async (forwarder: string | null, on = app) => {
+      exporter.reset();
+      const headers: Record<string, string> = { "x-brain-key": "read-raw", traceparent: `00-${TID}-${PARENT}-01`, ...(forwarder === null ? {} : { "x-brain-forwarder": forwarder }) };
+      await Promise.resolve(on.fetch(new Request("http://api/v1/whoami", { headers }))).then((r) => r.text());
+      const sp = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+      return sp?.spanContext().traceId === TID && sp.parentSpanContext?.spanId === PARENT && sp.links.length === 0 ? "continued"
+        : sp?.spanContext().traceId !== TID && sp?.parentSpanContext === undefined && sp?.links[0]?.context.traceId === TID ? "linked" : `neither (${sp?.name})`;
+    };
+    const keysUnread = createRestApp({ core, init: () => {}, keys: () => { throw new TypeError("the keys are unreadable"); }, resolve: async () => identity, track: (run) => run(), log: () => {} });
+    const trusts = [await parentage("fwd-raw"), await parentage("write-raw"), await parentage("not-a-key"), await parentage(""), await parentage(null), await parentage("fwd-raw", keysUnread)];
+    assert(JSON.stringify(trusts) === JSON.stringify(["continued", "linked", "linked", "linked", "linked", "linked"]),
+      `a forward-scope key in the forwarder slot continues the caller's traceparent; another key, none, an empty slot, no slot or unread keys link it (${JSON.stringify(trusts)})`);
 
     exporter.reset();
     answer = async () => { throw new Error(`the store fell over near ${PLANTED}`); };

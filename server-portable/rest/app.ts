@@ -229,8 +229,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     // The record first, so an environment that will not seed (init throws,
     // onError's 500) is still a line; a throw that is not an Error, which
-    // Hono passes up rather than to onError, ends it as one.
-    const trace = beginRequest("api", c.req.raw, write);
+    // Hono passes up rather than to onError, ends it as one. A request whose
+    // forwarder slot holds a forward-scope key continues its traceparent: the
+    // MCP server's tool call, of which this is the operation (SMD-2287 PR 4c).
+    const trace = beginRequest("api", c.req.raw, write, { trustParent: forwardedByKey(c.req.raw) });
     try {
       deps.init();
       // Under the request's span, so the operation's span is its child (PR 2b).
@@ -340,6 +342,24 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
    * would refuse (REFUSED_SINCE, REFUSED_CURSOR). Bun adds `content-length: 0`.
    */
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
+
+  /**
+   * Whether the forwarder slot holds a forward-scope key: the digest check
+   * `caller` makes, read before the request's span starts, so the span
+   * continues the forwarder's trace (SMD-2287 PR 4c). Only a key's holder can
+   * pass it — any other caller's traceparent is linked, not continued; the
+   * registry's word on the key is not asked here (its request is refused
+   * below all the same), and keys that cannot be read trust no one.
+   */
+  function forwardedByKey(req: Request): boolean {
+    const forwarded = req.headers.get(FORWARDER_HEADER);
+    if (!forwarded) return false;
+    try {
+      return authenticate(forwarded, deps.keys(), { admit: ["forward"] }) !== null;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * The caller, or the answer that refuses it: a key that authenticates (a
