@@ -858,14 +858,20 @@ export function renderComparison(c: Comparison): string {
     lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);
   } else {
     const moved = c.retrieval.rows.filter((r) => r.changed);
-    const skipped = c.retrieval.rows.filter((r) => r.skipped);
+    // A row one brain failed and the other answered is a difference, shown
+    // apart from the rows both failed (review pass 2).
+    const oneSided = c.retrieval.rows.filter((r) => r.failedOn !== undefined);
+    const skipped = c.retrieval.rows.filter((r) => r.skipped && r.failedOn === undefined);
     const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
     const hybridNote = c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : "";
     // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
     lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${hybridNote}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
-    if (moved.length === 0) {
+    for (const r of oneSided) lines.push(`  ✗ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: ${r.failedOn === "a" ? "a failed, b answered" : "b failed, a answered"} — ${r.skipped}`);
+    if (oneSided.length > 0 && moved.length === 0) {
+      lines.push(`  ${oneSided.length} replay${oneSided.length === 1 ? "" : "s"} failed on one brain and answered on the other — a delta.`);
+    } else if (moved.length === 0) {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
@@ -978,7 +984,7 @@ export interface TierReplayArgs {
   toKey?: string;
   /** The window for stable's logged searches (ISO-8601). */
   since?: string;
-  /** --diff: exit 1 when a ranking moved and 3 when nothing was compared; --replay reports and exits 0. */
+  /** --diff: exit 1 when a ranking moved and 3 when nothing was compared; --replay reports, and both exit 1 on a log not read or a search one brain failed. */
   gate: boolean;
   json: boolean;
 }
@@ -1052,7 +1058,8 @@ export async function runTierReplay(args: TierReplayArgs): Promise<number> {
   try {
     const page = await fetchLoggedSearches(stable, args.since ?? null);
     opts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${stable.label}`, truncated: page.truncated };
-    noArm = page.searches.filter((s) => (s.arm !== "keyword" && s.arm !== "hybrid" && s.arm !== "current") || typeof s.query !== "string" || s.query.length === 0).length;
+    // Distinct, as the plan's own count is: one query logged a hundred times with no arm is one.
+    noArm = new Set(page.searches.filter((s) => s.arm === null && typeof s.query === "string" && s.query.length > 0).map((s) => s.query)).size;
   } catch (e) {
     opts = { fromLog: [], source: `the log of ${stable.label}`, sourceError: (e as Error).message };
   }

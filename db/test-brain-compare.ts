@@ -923,15 +923,17 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   const canaryFails = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
   ok(canaryFails.code === 1 && /failed: localhost:\d+ failed 1 that localhost:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
     `--diff fails when the canary fails a search stable answered, the rest unmoved (${canaryFails.code}: ${canaryFails.out.split("\n").slice(-1)})`);
+  ok(canaryFails.out.includes("✗ [hybrid] \"q\": b failed, a answered") && canaryFails.out.includes("1 replay failed on one brain and answered on the other — a delta.") && !canaryFails.out.includes("no delta"),
+    `the report shows the one-sided failure apart and does not call it no delta (${canaryFails.out.split("\n").filter((l) => l.includes("✗") || l.includes("delta")).join(" | ")})`);
   const canaryFailsReplay = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] }, refuse: ["q"] }, { gate: false });
   ok(canaryFailsReplay.code === 1, `--replay exits 1 on it too: a failed step, not a report (${canaryFailsReplay.code})`);
   const stableFails = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] } });
   const stableLine = stableFails.out.split("\n").find((l) => l.startsWith("failed:")) ?? "";
-  ok(stableFails.code === 1 && /^failed: localhost:(\d+) failed 1 that localhost:\d+ answered/.test(stableLine) && stableFails.out.includes("skipped — localhost:"),
+  ok(stableFails.code === 1 && /^failed: localhost:(\d+) failed 1 that localhost:\d+ answered/.test(stableLine) && stableFails.out.includes("a failed, b answered — localhost:"),
     `--diff fails, naming stable, when stable fails a search it logged (${stableFails.code}: ${stableLine})`);
 
   // Searches logged with no arm (before migration 045) are counted, not lost.
-  const noArmOnly = await gate({ log: logged(["q", null], ["r", null]) }, {});
+  const noArmOnly = await gate({ log: logged(["q", null], ["r", null], ["r", null]) }, {});
   ok(noArmOnly.code === 3 && noArmOnly.out.includes("(0 skipped; 2 more logged with no arm, before migration 045, not replayed)") && noArmOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on."),
     `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
   const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });

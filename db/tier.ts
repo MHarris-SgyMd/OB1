@@ -63,8 +63,10 @@
  * on both brains, and the ids the two return now are diffed
  * (db/brain-compare.ts runTierReplay). So a thought stable gained since the
  * refresh can read as a move, and each brain embeds its own query: no model
- * or egress gate is this tool's. A row logged before migration 045 has no arm
- * and is skipped. The replays are real searches, which a brain running with
+ * or egress gate is this tool's. A search both brains refuse is skipped; one
+ * only one brain fails, the other answering, fails the run (exit 1). Rows
+ * logged before migration 045 have no arm and are counted apart, not
+ * replayed. The replays are real searches, which a brain running with
  * OB1_QUERY_LOG=on logs. Both verbs print --compare's report, then the window
  * and how many searches were replayed and skipped. A window that replayed none
  * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182).

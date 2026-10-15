@@ -3701,12 +3701,14 @@ Stable's logged searches (`list_logged_searches`: the window `--since` names, el
 the most recent page) run on both brains, each on the arm that ran it and each
 query and arm once, and the ids the two return are diffed: the measured per-PR
 **"what moved"**, in place of the hand-written control run. Each brain embeds its
-own query, so the hybrid and current arms need no model here. A row logged before
-migration 045 has no arm and is skipped. Both verbs print `--compare`'s report,
-then the window and how many searches were replayed and skipped. A window that
+own query, so the hybrid and current arms need no model here. A search both
+brains refuse is skipped; one only one brain fails, the other answering, fails
+the run (exit 1 on both verbs). Rows logged before migration 045 have no arm,
+and are counted apart, not replayed. Both verbs print `--compare`'s report, then
+the window and how many searches were replayed and skipped. A window that
 replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
-ranking that moved or a step that failed (stable's log unread included), 2 a
-usage error or a refusal (SMD-2182).
+ranking that moved or a step that failed (stable's log unread, or a search one
+brain failed), 2 a usage error or a refusal (SMD-2182).
 
 Until SMD-2875 they read both databases, from one container on both brains'
 networks holding both superuser passwords, and diffed the canary against the ids

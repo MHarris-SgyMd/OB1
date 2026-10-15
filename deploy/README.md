@@ -1857,8 +1857,9 @@ A `--diff` or `--replay` replays what stable logged on both brains, so:
 - stable must run with `OB1_QUERY_LOG=on`, which is off by default;
 - the window is what `--since` names, else the most recent page of stable's
   log (`list_logged_searches`);
-- each brain embeds its own query, so every arm replays with no model here,
-  and a search one brain refuses is skipped;
+- each brain embeds its own query, so every arm replays with no model here.
+  A search both brains refuse is skipped; one that only one brain fails, the
+  other answering, fails the run (exit 1 on both verbs), naming that brain;
 - the canary is diffed against stable as it answers now, so a thought stable
   gained since the refresh can read as a move (the report's id-set line counts
   them). Until SMD-2875 the diff read both databases from one container on
@@ -1901,7 +1902,8 @@ brain holds and the other does not, via `list_thought_ids`, SMD-2244); and, with
 The vector arm needs no local model — each brain embeds its own query. It never
 prints a key and prints a one-line verdict ("current with each other" / "canary
 is 1 migration behind; 407 vs 597 thoughts"), and exits non-zero when anything
-differs. The default compare writes nothing; `--replay` issues real searches,
+differs, a search one brain fails and the other answers included (an id-set
+read that failed is not counted). The default compare writes nothing; `--replay` issues real searches,
 which a brain running `OB1_QUERY_LOG=on` records in `query_log` (telemetry,
 migration 034, never the thoughts corpus), as any client search does. Until
 SMD-2037 lands, a refreshed brain runs at pgvector's default HNSW settings, so a
