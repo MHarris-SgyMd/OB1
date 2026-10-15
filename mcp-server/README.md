@@ -74,9 +74,9 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   that is no plugin stops the entry, exit 2 in words, as it stops the REST core.
 - **`/health`** is plain `ok` without a key. With a key, the first key the REST core
   knows decides, as `index.ts` authenticates the first, and the route shows the REST
-  core's keyed `/health`: the brain's record on the health surface, for a key that may read it and
-  that the registry clears within the deadline, with this server's view of the public
-  origin beside it as `oauth`. Any other key gets `ok`.
+  core's keyed `/health`: the brain's record on the health surface, for a key that may
+  read it and that the registry clears within the deadline, with this server's view of
+  the public origin beside it as `oauth`. Any other key gets `ok`.
 - **The keyed mirrors.** `/worker-status`, `/worker-retry-failed`,
   `/worker-release-leases`, `/worker-run`, `/jobs/<id>` and `/jobs/<id>/stream` are the
   REST core's operations, with the same gates, inputs and words as server-portable's

@@ -439,6 +439,15 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
     return shownNothing(c, trace);
   };
+  /**
+   * A keyed HEAD: no body to carry an answer, so liveness at once, asking the REST core nothing, a probe never
+   * waiting on the registry (review passes 1 and 2 of PR 4b: asking whoami first, a locked registry held it 1.8 s);
+   * its line `ok`, the route named and no key, where index.ts matched the key's hash.
+   */
+  const headAtOnce = (c: Context, route: string, tool: ToolName) => {
+    nameRoute(c, route, tool);
+    return c.text("ok", 200, corsHeaders);
+  };
   /** A route that faulted: its line `error` FAILED, its kind on the span; a mirror's 200 {error} answer as index.ts's, or (`shownOk`) liveness. */
   const faultedAt = (c: Context, err: unknown, shownOk = false) => {
     if (err instanceof ForwarderRefused) sayOnce(err);
@@ -454,13 +463,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.get("*", async (c, next) => {
     if (!HEALTH_PATH.test(c.req.path)) return next();
     if (presentedKeys(c.req.raw).length === 0) return c.text("ok", 200, corsHeaders);
-    // A keyed HEAD has no body to carry the record: liveness at once, no call to the REST core, so a probe never
-    // waits on the registry (review pass 1 of PR 4b: asking whoami first, a locked registry held it 1.8 s). Its line
-    // is `ok`, the route named and no key, where index.ts matched the key's hash.
-    if (c.req.method === "HEAD") {
-      nameRoute(c, "/health", "brain_info");
-      return c.text("ok", 200, corsHeaders);
-    }
+    if (c.req.method === "HEAD") return headAtOnce(c, "/health", "brain_info");
     // The first key the REST core knows decides, as index.ts authenticates the
     // first that matches: a capture or revoked key before a read key is `ok`,
     // not the record (review pass 1).
@@ -498,22 +501,18 @@ export function createMcpApp(deps: McpDeps): Hono {
     // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
     // or an answer that is no record and no liveness, is this server's fault: liveness all the same, its line `error`
     // FAILED (review pass 2 of PR 4b: the REST core gone between the two calls read as the key refused).
-    if (budget.aborted) return notCleared(c, traceOf(c.req.raw), null);
-    if (fault !== null || !a?.ok) {
-      const err = fault ?? new Error(`the REST core answered /health ${a?.status}`);
-      // The caller was found; its record was not (review pass 3: the default lead sent the operator after the key).
+    // The caller was found; its record was not (review pass 3: the default lead sent the operator after the key).
+    const recordFault = (err: unknown) => {
       sayOnce(err, "/health's record could not be read");
       return faultedAt(c, err, true);
-    }
+    };
+    if (budget.aborted) return notCleared(c, traceOf(c.req.raw), null);
+    if (fault !== null || !a?.ok) return recordFault(fault ?? new Error(`the REST core answered /health ${a?.status}`));
     const body = a.body as Record<string, unknown> | null;
     // Liveness where the record was asked: the registry did not clear the key in time (index.ts's notCleared).
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
-    if (typeof body !== "object" || Array.isArray(body)) {
-      const err = new Error("the REST core answered /health with no record");
-      sayOnce(err, "/health's record could not be read");
-      return faultedAt(c, err, true);
-    }
+    if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
     noteLegacyRoute(c.req.raw, caller.name);
     return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
@@ -522,11 +521,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
   app.get("*", async (c, next) => {
     if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
-    // A keyed HEAD: liveness at once, asking the REST core nothing, as at /health (review pass 2 of PR 4b).
-    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) {
-      nameRoute(c, "/worker-status", "worker_status");
-      return c.text("ok", 200, corsHeaders);
-    }
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, "/worker-status", "worker_status");
     const caller = await keyedCaller(c, "/worker-status", "worker_status");
     if (caller instanceof Response) return caller;
     noteLegacyRoute(c.req.raw, caller.name);
@@ -584,11 +579,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!streamMatch && !pollMatch) return next();
     const id = (streamMatch ?? pollMatch)![2];
     const route = streamMatch ? "/jobs/:id/stream" : "/jobs/:id";
-    // A keyed HEAD: liveness at once, asking the REST core nothing, as at /health (review pass 2 of PR 4b).
-    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) {
-      nameRoute(c, route, "job_status");
-      return c.text("ok", 200, corsHeaders);
-    }
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, route, "job_status");
     const caller = await keyedCaller(c, route, "job_status");
     if (caller instanceof Response) return caller;
     noteLegacyRoute(c.req.raw, caller.name);
