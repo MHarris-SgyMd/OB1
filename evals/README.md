@@ -2995,11 +2995,12 @@ mostly hides; the sample is drawn from the rest, so 328 is the estimate over
 the sample's own population. A labelled thought names up to 12 moved tickets
 (3 at p90), so the label needs a cap. Its wrong labels are a ticket that moved
 minutes after the note to a status that is not its current one (`3a37f18b`,
-`1886b600`). Without the lifecycle guard, 408 thoughts with a lifecycle of
-their own (ticket rows, notes filed under one) would carry a label.
-1,006 of the 1,117 lifecycle-less thoughts are session summaries, so the
-session line does most of the work; a note whose ticket has no history at its
-written time (691 pairs, mostly before board-sync began on 09-22) gets none.
+`1886b600`). At the record (2026-10-14): without the lifecycle guard, 408
+thoughts with a lifecycle of their own (ticket rows, notes filed under one)
+would carry a label; 1,006 of the 1,117 lifecycle-less thoughts are session
+summaries, so the session line does most of the work; and a note whose ticket
+has no history at its written time (691 pairs, mostly before board-sync began
+on 09-22) gets none. A live run prints today's census; these are not recorded.
 Caveats: graders are models, not the maintainer; one brain; three registrations
 on the same corpus — the held-out sample is the guard, and it is 30 labels.
 Known hazards for PR 2, inside the measured precision: a list step takes a count
@@ -3007,14 +3008,17 @@ with the key's digit count as a ticket (`SMD-2306, 1006 summaries` reads
 SMD-1006), and a ticket's history is every row's that carries its key while its
 status now is the head's.
 
-The verdict is the gold's record, not a re-draw: each graded item carries the
-samples that drew it and the label sets that held it, and the gold the counts
-each candidate had. A re-run decides nothing; it compares its own snapshot with
-the recorded one, whole, and prints how far the brain has moved (a ticket that
-moves changes an item's identity, a new thought can hash into a sample: one did
-within hours of the record, entering three first-registration samples).
-`--record` writes the gold with a run recorded; `--self-check` holds the
-recorded numbers, the record's invariants and the round trip with no database.
+The verdict is the gold's record, frozen: each graded item carries the samples
+that drew it and the label sets that held it, and the gold the counts each
+candidate had, as of round 3. The three registrations are closed, so nothing
+rewrites the record; a new registration brings its own candidates, rounds and
+record. A re-run decides nothing: it compares its own snapshot with the
+recorded one, whole, and says whether what moved is evidence the verdict read
+(samples, graded pools, the measured case) or counts only (labels, fresh) — a
+ticket that moves changes an item's identity, and a new thought can hash into
+a sample: one did within hours of the record, entering three first-registration
+samples. `--self-check` holds the recorded numbers (each registration's at the
+round it was decided) and the record's invariants with no database.
 
 ## LongMemEval: the fork on a public benchmark, and the floor it exposed
 
