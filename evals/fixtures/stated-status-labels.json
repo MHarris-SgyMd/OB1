@@ -1,0 +1,2967 @@
+{
+ "version": 1,
+ "generated": "2026-10-14",
+ "origin": "SMD-2540 on the dogfood stable brain (evals/eval-stated-status.ts). Round 1: per first-registration candidate its first 30 labels on unsuperseded thoughts by a fixed hash, the union graded once. Round 2: what the history-order fix (by time, not audit seq) changed in those samples. Round 3: the third registration's held-out sample (salt held-out-3:, none of it graded in rounds 1-2). Two blind Claude graders per round, given the rubric, an excerpt of each thought around its labelled tickets, its dates and the tickets' status histories only; disagreements went to a third blind grader choosing between the two grades.",
+ "note": "Fields are ids and numbers only (check 9, SMD-1295). issue is the SMD ticket's number. kind indexes [moved, stated]; claim and now index [triage, backlog, unstarted, started, completed, canceled, duplicate]; a, b and grade index [wrong, noise, useful]: wrong = the claim is false (the ticket was not in that status when the content was written, or the text does not state it in its own voice); noise = true, but the thought says nothing of the ticket's state a reader could take as current; useful = true, and it does. grade is a's and b's where they agree, else grader c's pick between them.",
+ "items": [
+  {
+   "id": "008b4199-c07c-43f6-92de-17e85b2cfae0",
+   "issue": 1850,
+   "kind": 1,
+   "claim": 4,
+   "now": 3,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "0290ab5a-8e2e-48aa-b2da-00d19e30dd0d",
+   "issue": 2661,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "03ef3d56-eab3-4e76-9a18-518b850cbeee",
+   "issue": 1997,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "04163d26-ffc6-4279-9bf7-37da9d925cfe",
+   "issue": 2238,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "045fdc5f-3bb9-4378-97e0-a25062529695",
+   "issue": 1998,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "05640ec1-5d16-48e8-842f-4bd2236fb87d",
+   "issue": 1810,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "05640ec1-5d16-48e8-842f-4bd2236fb87d",
+   "issue": 1810,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "05640ec1-5d16-48e8-842f-4bd2236fb87d",
+   "issue": 1847,
+   "kind": 0,
+   "claim": 1,
+   "now": 5,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "05640ec1-5d16-48e8-842f-4bd2236fb87d",
+   "issue": 1847,
+   "kind": 1,
+   "claim": 1,
+   "now": 5,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "05e8b384-60a5-420c-9edb-2e0508c98aa9",
+   "issue": 2227,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "0777351f-5a8d-469f-81d3-1cb07ef218e2",
+   "issue": 2017,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "0777351f-5a8d-469f-81d3-1cb07ef218e2",
+   "issue": 2052,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    0,
+    1
+   ],
+   "pooled": [
+    0,
+    1,
+    6
+   ]
+  },
+  {
+   "id": "080818a6-f868-49a6-9dd2-6cfb570e3c97",
+   "issue": 1937,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "080818a6-f868-49a6-9dd2-6cfb570e3c97",
+   "issue": 2052,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "080818a6-f868-49a6-9dd2-6cfb570e3c97",
+   "issue": 2082,
+   "kind": 1,
+   "claim": 4,
+   "now": 1,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "0a9a6c6c-b6cf-4fbc-b2c6-79d357706bc4",
+   "issue": 2139,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "0e15cd40-20c6-4f5c-a2f3-c9bd5195870f",
+   "issue": 2101,
+   "kind": 1,
+   "claim": 4,
+   "now": 1,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "0f35c7ae-a021-4051-a44c-39affabcc38f",
+   "issue": 2261,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    2,
+    3
+   ]
+  },
+  {
+   "id": "10c2e1dd-7f6b-4b2e-abfe-5699fe29a793",
+   "issue": 2768,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    2
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "12bea1e5-01f8-41ba-8f42-81633769256b",
+   "issue": 2669,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "130475dd-fa6e-4770-b007-775232a9873b",
+   "issue": 2134,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "16fb6f0a-4d37-4753-ae00-9e5fd97fb1ec",
+   "issue": 2038,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "17baf7fb-0fd9-46e9-9075-9d62cf397edf",
+   "issue": 1863,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "17baf7fb-0fd9-46e9-9075-9d62cf397edf",
+   "issue": 1863,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "1886b600-8440-4a06-98f4-0418bf9444f7",
+   "issue": 2256,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 1,
+   "grade": 0,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "issue": 1471,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "issue": 1490,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "issue": 1492,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "issue": 1843,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
+   "issue": 1917,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "1cac27fc-62a9-4d7f-8cbc-471eb72e5aba",
+   "issue": 2000,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "1e11a251-63b5-488f-aa6b-ffe254098b38",
+   "issue": 1938,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    2,
+    3
+   ]
+  },
+  {
+   "id": "1f3cea4f-4353-4750-839e-e16cae786fcd",
+   "issue": 2294,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 1,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "1f3cea4f-4353-4750-839e-e16cae786fcd",
+   "issue": 2294,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "1f6578b3-7332-47cd-b275-23b6c5e18211",
+   "issue": 1997,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "1f6578b3-7332-47cd-b275-23b6c5e18211",
+   "issue": 1998,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "1f88795d-eb5d-4b56-b232-94b7f9f36cbb",
+   "issue": 1492,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 2,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "2111a585-9900-4e34-9b83-c0dbc96935f7",
+   "issue": 2131,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "23815315-b8d6-4e0c-992e-5c5c7569b2a4",
+   "issue": 2103,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "2c9d1f2b-64e9-49a9-afd1-917a7dd55c38",
+   "issue": 2284,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "2c9f7ab9-e69b-4e9a-90e4-bc2517c23243",
+   "issue": 2894,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2,
+    3
+   ],
+   "pooled": [
+    1,
+    2,
+    3,
+    7
+   ]
+  },
+  {
+   "id": "2c9f7ab9-e69b-4e9a-90e4-bc2517c23243",
+   "issue": 2894,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "2cb3b8f6-bcca-407e-8fc8-66d47dd99dcf",
+   "issue": 2074,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "2e4fb72b-ce09-4129-979b-7c3b81f2f601",
+   "issue": 2137,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "305c22e2-417d-4269-80d5-98abe86e3040",
+   "issue": 2116,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "31169d8c-4b55-4861-bb20-48ab1438a520",
+   "issue": 1804,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "31169d8c-4b55-4861-bb20-48ab1438a520",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    7
+   ]
+  },
+  {
+   "id": "3178862d-67b0-4129-a678-1a8992d68de0",
+   "issue": 2685,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    1,
+    2,
+    3,
+    7
+   ]
+  },
+  {
+   "id": "3178862d-67b0-4129-a678-1a8992d68de0",
+   "issue": 2685,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "368605c4-d313-4040-b076-2338c59b0afc",
+   "issue": 1805,
+   "kind": 1,
+   "claim": 4,
+   "now": 3,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "37b35009-ca4e-41ac-8d9f-b1c064d53dc2",
+   "issue": 2000,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "3a37f18b-316d-4831-b2d5-45df4670d82e",
+   "issue": 1804,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 2,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "3a37f18b-316d-4831-b2d5-45df4670d82e",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    7
+   ]
+  },
+  {
+   "id": "3a37f18b-316d-4831-b2d5-45df4670d82e",
+   "issue": 1860,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "3b1006b1-1c16-4bf8-b798-601290c2163c",
+   "issue": 2245,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "44ced74e-a63a-4a1a-ab47-e81817c14d78",
+   "issue": 2306,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    2
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "45144934-60ed-4daf-955e-6a649b393607",
+   "issue": 2294,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    6
+   ]
+  },
+  {
+   "id": "457167b6-23e0-4798-80b3-d69ea0236def",
+   "issue": 1806,
+   "kind": 1,
+   "claim": 4,
+   "now": 3,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "4a8601fb-46e1-4de3-b214-fe934330f1f6",
+   "issue": 2212,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "52a2567c-ecd4-4101-a036-45d55f9f0e2d",
+   "issue": 1804,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "52a2567c-ecd4-4101-a036-45d55f9f0e2d",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "569a0c7b-705f-4a5a-a683-e1fdad2c039c",
+   "issue": 2261,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "56c49d44-cea3-4129-91c8-25b727dcd331",
+   "issue": 2074,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    2
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "56c49d44-cea3-4129-91c8-25b727dcd331",
+   "issue": 2240,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "5818ef32-f022-4896-8397-3cbdd7f8cd4c",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "58933716-620a-4d45-a38f-5e60631429a9",
+   "issue": 1978,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "6063a205-0b37-4117-b277-c8e151cbda11",
+   "issue": 2615,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "61683743-5d99-47c4-a1ed-9c715574bfdd",
+   "issue": 1731,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "61683743-5d99-47c4-a1ed-9c715574bfdd",
+   "issue": 1732,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "617f726e-2abe-49b0-b3c6-66ea12aabf80",
+   "issue": 1525,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "62dbe907-387b-4283-bbea-58a0e2b98266",
+   "issue": 2074,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "685ed914-a2f4-4aaf-9bca-6bb3670c0f58",
+   "issue": 2038,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "68cceeb3-b78e-4547-9d15-c53091b05fd1",
+   "issue": 1865,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "6d4c2919-0302-4abf-8af6-3427bd152d30",
+   "issue": 2471,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    2,
+    3
+   ]
+  },
+  {
+   "id": "708fb7b0-9499-4141-8a20-a26030fc7969",
+   "issue": 2321,
+   "kind": 1,
+   "claim": 3,
+   "now": 1,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "735fd35b-a212-45f0-9020-d344577a849c",
+   "issue": 2139,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "735fd35b-a212-45f0-9020-d344577a849c",
+   "issue": 2262,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "7492e930-92a4-4379-bf25-86aacd44b66b",
+   "issue": 1804,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "7492e930-92a4-4379-bf25-86aacd44b66b",
+   "issue": 1859,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "7492e930-92a4-4379-bf25-86aacd44b66b",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "75c4a404-8a4d-4ce8-b665-73632310146e",
+   "issue": 1729,
+   "kind": 1,
+   "claim": 1,
+   "now": 3,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "7a3271f1-94a1-4fdd-aaf3-c7389177c33a",
+   "issue": 2536,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "825ea9d3-2c9c-4519-9d3a-187cab88082c",
+   "issue": 2287,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2
+   ]
+  },
+  {
+   "id": "85d1cc14-9ddf-4a22-9163-e54274079fd4",
+   "issue": 2000,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "879ea459-626a-4fd5-b95d-310a257d7a50",
+   "issue": 2752,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    6
+   ]
+  },
+  {
+   "id": "89fc8a61-d582-4750-b51a-ae8d562009f1",
+   "issue": 2681,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "pooled": [
+    1,
+    2
+   ]
+  },
+  {
+   "id": "91707529-062f-4ab1-8a7c-ed7441b0651c",
+   "issue": 1800,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    7
+   ]
+  },
+  {
+   "id": "93da5c0e-334e-486e-8f4c-bb2959bd3f66",
+   "issue": 1794,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "93da5c0e-334e-486e-8f4c-bb2959bd3f66",
+   "issue": 1794,
+   "kind": 1,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "95fea8e7-6751-46f4-beaf-b35efbc2b82d",
+   "issue": 2115,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
+   "issue": 1879,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 2,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "999c462b-de4c-4064-a786-556258585b0f",
+   "issue": 2017,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "99cb20e7-4dd2-4032-b362-2961ac218871",
+   "issue": 1731,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "99cb20e7-4dd2-4032-b362-2961ac218871",
+   "issue": 1731,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "99cb20e7-4dd2-4032-b362-2961ac218871",
+   "issue": 1793,
+   "kind": 0,
+   "claim": 1,
+   "now": 5,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "99cb20e7-4dd2-4032-b362-2961ac218871",
+   "issue": 1793,
+   "kind": 1,
+   "claim": 1,
+   "now": 5,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "9d13ae79-b6d2-463f-8f1d-f06570d4ab04",
+   "issue": 2755,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "9d19b7fc-9253-4ca6-ada2-0a66f44a1259",
+   "issue": 1937,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "9d19b7fc-9253-4ca6-ada2-0a66f44a1259",
+   "issue": 2017,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "9e7d5f78-f245-4e85-bf81-30c8c66c9271",
+   "issue": 2116,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "9e7d5f78-f245-4e85-bf81-30c8c66c9271",
+   "issue": 2255,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "9f49eb4c-03d5-419d-96f8-fdcef67cede7",
+   "issue": 1731,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "a2143f79-d6b2-478e-8eb7-fb5a07dd3053",
+   "issue": 1812,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "a4ad472c-1e27-496d-a9bb-460c5a984c27",
+   "issue": 2743,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "a68cc967-1f77-455b-8ad1-c2ecf6553703",
+   "issue": 2102,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "a6cabdb3-9e85-495f-8ff1-0ce1166daa2f",
+   "issue": 2133,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "a9cf5e53-0ab8-4659-84f9-3bbd7b333099",
+   "issue": 1846,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "a9cf5e53-0ab8-4659-84f9-3bbd7b333099",
+   "issue": 1986,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    2
+   ],
+   "pooled": [
+    2,
+    7
+   ]
+  },
+  {
+   "id": "aa8a88e3-b578-4cc3-97fd-02d94ac8193a",
+   "issue": 1259,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1
+   ],
+   "pooled": [
+    0,
+    1
+   ]
+  },
+  {
+   "id": "aaf0fcf9-ca7f-4e24-8b4b-026a02488e8f",
+   "issue": 1935,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1
+   ],
+   "pooled": [
+    0,
+    1
+   ]
+  },
+  {
+   "id": "b3eff12e-e797-4733-bc97-99e41a802166",
+   "issue": 1860,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "b3f50096-c37b-43ea-b1a7-5a25301502c7",
+   "issue": 2212,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "b6ef2a98-b4eb-4aa6-a7b2-e67a5c47c459",
+   "issue": 2692,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "b9ccc543-66eb-4b83-93cb-5dcc7fa90cc6",
+   "issue": 1298,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "b9ccc543-66eb-4b83-93cb-5dcc7fa90cc6",
+   "issue": 1857,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "b9de34f4-c79e-467c-979b-eaf82cab9a2c",
+   "issue": 2218,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "bd7c2432-f696-46a7-98ee-de919523f868",
+   "issue": 2310,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "be3aa0ae-8f11-4ad7-a3be-0daead37635f",
+   "issue": 1712,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "bf51c668-55e6-4456-8509-0e77298f66e5",
+   "issue": 2310,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "pooled": [
+    0,
+    6
+   ]
+  },
+  {
+   "id": "c4b3cac2-6399-49c7-8972-6ff1f4ce46d9",
+   "issue": 1978,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "c6a328b7-9e47-422f-a74d-65ad356013af",
+   "issue": 1455,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 1931,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2284,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2306,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2424,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2448,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2473,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2,
+    3
+   ],
+   "pooled": [
+    1,
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "c702157d-8e4a-4f1a-83ed-3c0b73ccfac9",
+   "issue": 2473,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "d088c98b-953c-459a-93b2-059ddfb97147",
+   "issue": 1299,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1
+   ],
+   "pooled": [
+    0,
+    1
+   ]
+  },
+  {
+   "id": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "issue": 1856,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 2,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "id": "dbc9d27c-1463-4b3f-bae5-8cb2992eb8d0",
+   "issue": 1724,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "dd70dccc-0556-4a44-a8f7-68a3e2264802",
+   "issue": 2306,
+   "kind": 1,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    5
+   ],
+   "pooled": [
+    5
+   ]
+  },
+  {
+   "id": "dd70dccc-0556-4a44-a8f7-68a3e2264802",
+   "issue": 2382,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "df6a44d9-faf1-4bb3-84ca-c92c6bb81e2f",
+   "issue": 2177,
+   "kind": 1,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    4,
+    5
+   ],
+   "pooled": [
+    4,
+    5
+   ]
+  },
+  {
+   "id": "e0f94860-df5e-449f-8df5-7b478c7bf71d",
+   "issue": 1726,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1
+  },
+  {
+   "id": "e114f7fc-5284-4b42-86c6-14088cfe0e99",
+   "issue": 2283,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "e37c4beb-5617-4a47-8618-ace9741dc56c",
+   "issue": 1794,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 1,
+   "sampled": [
+    1
+   ],
+   "pooled": [
+    1
+   ]
+  },
+  {
+   "id": "e80bb6ec-04a1-4844-92ba-97d4c76bbc31",
+   "issue": 2177,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    2
+   ],
+   "pooled": [
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "e81b8424-bf32-4d0d-b2b6-bb77159469a8",
+   "issue": 2682,
+   "kind": 0,
+   "claim": 1,
+   "now": 3,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    1,
+    2
+   ],
+   "pooled": [
+    1,
+    2
+   ]
+  },
+  {
+   "id": "ed442b49-625d-490f-b595-eb9ae50bf8e8",
+   "issue": 2664,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    1,
+    2,
+    7
+   ]
+  },
+  {
+   "id": "ed7819e6-0554-4fc0-9d8b-2afa397b0fee",
+   "issue": 1809,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "f0bf9069-fb77-439d-b316-4904e1893049",
+   "issue": 2251,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "f302667d-0660-4af5-aa9d-c3093ecadc65",
+   "issue": 1953,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 1,
+   "b": 1,
+   "grade": 1,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "f4b7e4ba-d8fc-4fff-a1d5-0aabff78e517",
+   "issue": 2132,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "f68a2ee6-d30f-4bfd-9839-930adb4bcb86",
+   "issue": 2242,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "f68a2ee6-d30f-4bfd-9839-930adb4bcb86",
+   "issue": 2260,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 3,
+   "sampled": [
+    7
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "fab47c58-4a13-472d-9865-8e561116eb0b",
+   "issue": 1938,
+   "kind": 0,
+   "claim": 1,
+   "now": 4,
+   "a": 0,
+   "b": 0,
+   "grade": 0,
+   "round": 2,
+   "sampled": [
+    3
+   ],
+   "pooled": [
+    0,
+    2,
+    3
+   ]
+  },
+  {
+   "id": "fcc64741-38d6-4812-ab46-c01d6b7f86a6",
+   "issue": 2139,
+   "kind": 0,
+   "claim": 3,
+   "now": 4,
+   "a": 2,
+   "b": 2,
+   "grade": 2,
+   "round": 1,
+   "sampled": [
+    0,
+    1,
+    2
+   ],
+   "pooled": [
+    0,
+    1,
+    2,
+    6,
+    7
+   ]
+  }
+ ],
+ "rounds": [
+  {
+   "generated": "2026-10-14",
+   "agreement": {
+    "raw": 0.9814814814814815,
+    "kappa": 0.9687951459115863,
+    "adjudicated": 2
+   }
+  },
+  {
+   "generated": "2026-10-14",
+   "agreement": {
+    "raw": 1,
+    "kappa": 1,
+    "adjudicated": 0
+   }
+  },
+  {
+   "generated": "2026-10-14",
+   "agreement": {
+    "raw": 0.8666666666666667,
+    "kappa": 0.7142857142857144,
+    "adjudicated": 4
+   }
+  }
+ ],
+ "recorded": {
+  "generated": "2026-10-14",
+  "order": 2543244411,
+  "labels": [
+   601,
+   711,
+   819,
+   99,
+   60,
+   72,
+   761,
+   742
+  ],
+  "fresh": [
+   330,
+   429,
+   520,
+   62,
+   40,
+   49,
+   481,
+   468
+  ],
+  "measured": [
+   0,
+   1,
+   1,
+   1,
+   0,
+   1,
+   1,
+   1
+  ]
+ }
+}

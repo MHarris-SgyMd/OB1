@@ -5,8 +5,8 @@
 // MCP registration renders it in the words it always has (render.ts), and the
 // REST core (SMD-2284) answers it as JSON.
 
-import type { EmbedConfig, EmbeddedCapture } from "../embed.ts";
-import { extractMetadata, metadataRefused, TAG_KEYS } from "../metadata.ts";
+import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
+import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
@@ -117,6 +117,12 @@ export type Captured = {
   recapture: { derivedNamed: boolean; given?: string; current: string | null } | null;
   /** What the re-capture did to a capture-only key's label (090, SMD-2898). Reader only, on a re-capture; absent before 090. */
   label?: RecaptureLabel;
+  /**
+   * The embedding call was made and the provider did not answer (SMD-2888):
+   * providerDown's word and words, and the endpoint dialled. The thought
+   * landed without its vector, as a refused call's does. Absent otherwise.
+   */
+  vectorFailed?: { reason: string; detail: string; base: string };
 };
 
 /**
@@ -226,8 +232,11 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // Nor is one another key or board-sync has since taken (SMD-2638): a
       // write key's capture of the same text lands on the row, and board-sync
       // adopts it in place, so capturing a text first does not keep it this
-      // key's. Migration 082's one rule says what takes it (takenFromCapturer),
-      // and its lapse clears a pointer this key wrote before the taking.
+      // key's; nor does one a reviewer's accept or another key's pointer put
+      // over a thought this key did not capture, through any number of
+      // links (092, SMD-2708). takenFromCapturer reads 082's log and 092's
+      // chain, and the lapse clears a pointer this key wrote before the
+      // taking.
       const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;
       if (!own) pointer = undefined;
     }
@@ -249,9 +258,34 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // so it need not wait for extractMetadata (SMD-2323). Its own egress is
     // the tier's, so it runs regardless of the capture's chat gate; a tier
     // outage falls back to `other` inside the classifier, never here.
+    // A provider that did not answer the embedding call (refused, timed out,
+    // 5xx) lands the thought without its vector, as a refused call does,
+    // rather than losing it: the capture is the one write whose text may
+    // exist nowhere else (SMD-2888). Any other failure — a 4xx, a width
+    // mismatch — still fails the capture, so a misconfigured brain says so.
+    let vectorFailed: { reason: string; detail: string } | undefined;
     const [embedded, metadata, genre] = await Promise.all([
-      gate.embeddings.allowed ? ctx.embedder.embedCapture(content, subject) : Promise.resolve(undefined),
-      gate.chat.allowed ? extractMetadata(content, subject, cfg) : Promise.resolve(metadataRefused()),
+      gate.embeddings.allowed
+        ? ctx.embedder.embedCapture(content, subject).catch((e: unknown) => {
+            const down = providerDown(e);
+            if (!down) throw e;
+            console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
+            vectorFailed = down;
+            return undefined;
+          })
+        : Promise.resolve(undefined),
+      // A chat provider that did not answer at the socket (extractMetadata
+      // throws the runtime's error, so board-sync retries the item) is the
+      // marker alone here: with one provider down, this call fails beside the
+      // embedding's, and the capture lands all the same (SMD-2888).
+      gate.chat.allowed
+        ? extractMetadata(content, subject, cfg).catch((e: unknown) => {
+            const down = providerDown(e);
+            if (!down) throw e;
+            console.error(`capture: the chat provider at ${cfg.chat.base} was unavailable: ${down.detail}`);
+            return metadataUnavailable(down.reason);
+          })
+        : Promise.resolve(metadataRefused()),
       // The genre classifier (SMD-2323): a deterministic pre-signal over the
       // metadata first, then the typed-decision tier when OB1_JEV_BASE_URL names
       // one — opt-in and null-by-default, so a capture pays nothing for it unless
@@ -303,13 +337,17 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // The gate's decisions for this write, on the audit row (SMD-1903);
         // absent when both endpoints are declared local and nothing was judged.
         ...(gate.record ? { egress: gate.record } : {}),
+        // Why an allowed embedding call left no vector (SMD-2888): beside
+        // the gate's record, so the audit row says which of the two it was.
+        ...(vectorFailed ? { vectorFailed: vectorFailed.reason } : {}),
         // A key that cannot read, said on its capture row: 082's lapse clears
         // a pointer such a key wrote once another key takes the thought it
         // points at; a write key's pointer it leaves (SMD-2638).
         ...(reader ? {} : { scope: "capture" as const }),
       },
-      // NULL when the gate refused the embedding call: the row lands with
-      // its text and fingerprint and no vector, as the reply says.
+      // NULL when the gate refused the embedding call, or the provider did
+      // not answer it: the row lands with its text and fingerprint and no
+      // vector, as the reply says.
       embedding: embedded?.embedding ?? null,
       // The model this vector came from, recorded on the row (021) — the
       // one the embedder used, not the one ob1_config records: they differ
@@ -405,6 +443,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // the stores weigh only a reader's re-capture, and `existed` above is
       // a reader's alone.
       ...(existed === true && captured.label ? { label: captured.label } : {}),
+      ...(vectorFailed ? { vectorFailed: { ...vectorFailed, base: cfg.embeddings.base } } : {}),
     });
   } catch (err: unknown) {
     const msg = (err as Error)?.message ?? "";
