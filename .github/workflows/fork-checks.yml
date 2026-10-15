@@ -246,8 +246,8 @@ jobs:
         run: bun test-plugins.ts
 
       # The real server's suite through the MCP server as a REST client
-      # (SMD-2287 PR 4b): its request lines, its refusals, its mirrors and its
-      # stop's count of tool calls — [22]'s spans are PR 4c's, skipped till then.
+      # (SMD-2287 PR 4b and 4c): its request lines, its refusals, its mirrors,
+      # its stop's count of tool calls, and its spans, one trace per tool call.
       - name: Test against the real server, through the MCP server as a REST client
         working-directory: server-portable
         env:
