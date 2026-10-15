@@ -128,6 +128,7 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
   - `tier-off` is a bare 404 for any path starting with `/canary` or `/working`, in any case. It keeps a changed tier URL from reaching stable through the legacy route and writing with the same key. A connector left at `…/canary/mcp` must not write into stable.
   - In CI's "The tier routes reach a tier on the mesh…", the tier-off probes stay; its tier-absent and tier stand-up probes go.
 - **The canary's keys are its own.** The dogfood connector `open-brain-canary` gets the new port and a new key.
+- **As built (SMD-2874 PR 1):** path mode and `compose.canary.yaml` are gone. The canary answers at `/mcp` on its own loopback port, and its env file now holds its own port, address, tier and profiles. The first `up` takes `--port`, and later runs read the port from the file. Check 28's probes of the overlay moved to `compose.grafana-port.yaml`, so each rule they caught still has a catch. The canary's own keys are PR 2, and stable's tier routes PR 3.
 
 **The tier tools (SMD-2875):** today one container joins both data networks and holds both superuser passwords. Under this decision each brain is reached through its own project:
 - **Refresh:** a dump streamed from stable's project into the canary's. Its re-migrate and refresh mark run in the canary's own project.
