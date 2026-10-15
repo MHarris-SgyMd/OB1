@@ -29,8 +29,9 @@
 # set in the shell for one of them, which wins over deploy/.env. The
 # servers, the REST cores, the three Postgres services and Ollama publish
 # nothing. Each server reaches its own database by service name on the
-# internal `data` network, and db/tier.ts reaches them the same way through
-# deploy/tier.sh --network open-brain-tiers_data (SMD-2036, SMD-2583). The
+# internal `data` network, and db/tier.ts's --refresh reaches them the same way
+# through deploy/tier.sh --network open-brain-tiers_data (SMD-2036, SMD-2583);
+# its --replay and --diff reach each tier at its path, over HTTP (SMD-2875). The
 # proxy reaches the servers
 # on the internal `mesh` network by name — mcp.ob1.internal, the stable tier's
 # as in compose.yaml, and mcp.canary.ob1.internal, mcp.working.ob1.internal —

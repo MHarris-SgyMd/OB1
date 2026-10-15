@@ -2118,19 +2118,19 @@ jobs:
       # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
       # pg_restore, which no image in the stack carries together, so the
       # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
-      # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
-      # replay engine, the guards, and a refresh whose stand-in pg_restore
-      # fails, never a real one). deploy/tier.sh builds db/tier.Dockerfile
-      # and runs this checkout's tier.ts on the stack's network. The brain is
-      # given something to carry first: smoke.sh captures nothing, so one thought
-      # with a vector goes in through upsert_thought, and one keyword search that
-      # finds it goes through the server, which logs it. Then the refresh into a
-      # second database on the server, read back one test per line (a test inside
-      # an && list does not trip set -e: a schema-only copy passed that way in
-      # review), the tier stamp, a --replay that replays that search, a --diff
-      # that finds it unmoved and one over the empty window after the refresh
-      # that exits 3, and a retry over a copy left stamped stable, as a
-      # refresh that died after its restore leaves it. Then the two guards the
+      # has a pg14 client, which refuses a pg16 server; test-live [20] drives
+      # the guards and a refresh whose stand-in pg_restore fails, never a real
+      # one). deploy/tier.sh builds db/tier.Dockerfile and runs this checkout's
+      # tier.ts on the stack's network. The brain is given something to carry
+      # first: smoke.sh captures nothing, so one thought with a vector goes in
+      # through upsert_thought, and one keyword search that finds it goes
+      # through the server, which logs it (the canary step's --diff replays
+      # it, over HTTP since SMD-2875). Then the refresh into a second database
+      # on the server, read back one test per line (a test inside an && list
+      # does not trip set -e: a schema-only copy passed that way in review),
+      # the tier stamp, tier.sh's refusal of a --diff, and a retry over a copy
+      # left stamped stable, as a refresh that died after its restore leaves
+      # it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
       # the brain under its service name and its container name is one
       # database, and a refresh the wrong way round lands on a brain with no
@@ -2161,18 +2161,10 @@ jobs:
           echo "database settings: stable $STABLE_SET, refreshed $COPY_SET"
           grep -q 'hnsw.max_scan_tuples=' <<<"$STABLE_SET" || { echo "stable has no HNSW bound to copy (014 seeds one)" >&2; exit 1; }
           [ "$STABLE_SET" = "$COPY_SET" ] || { echo "the refreshed copy's database settings differ from stable's" >&2; exit 1; }
-          ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
-          grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
-          ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
-          grep -F 'what moved: nothing' /tmp/tier-diff.out
-          # SMD-2182: with no --since the window starts at the copy's refresh,
-          # and stable has logged nothing since, so a --diff compares nothing:
-          # exit 3 through the wrapper, not the pass it used to be.
-          empty_rc=0
-          ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci > /tmp/tier-empty.out || empty_rc=$?
-          cat /tmp/tier-empty.out
-          [ "$empty_rc" = 3 ] || { echo "a --diff that compared nothing exited $empty_rc, not 3" >&2; exit 1; }
-          grep -F 'nothing to compare: stable logged no searches' /tmp/tier-empty.out
+          # SMD-2875: a replay or diff reaches the brains over HTTP and needs no
+          # container, so the wrapper refuses one, before it builds or joins anything.
+          rc=0; ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--diff runs over HTTP now' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not refuse a --diff (exit $rc)" >&2; exit 1; fi
           # A refresh that dies after its restore leaves the source's ob1_config
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the
@@ -2300,7 +2292,9 @@ jobs:
       #   alone, and no canary proxy runs. It runs over a stable carrying the
       #   protective mark `stable` (not a refresh's). It stamps stable,
       #   registers the connector at /canary/mcp, and reports tier canary with
-      #   OAuth not configured. Its vector probe must pass on the thought whose
+      #   OAuth not configured. Stable's logged searches, replayed on both over
+      #   HTTP (tier.ts --diff, SMD-2875), move nothing, and a window after
+      #   them compares nothing (exit 3). Its vector probe must pass on the thought whose
       #   text holds literals (SMD key, path), searched for without them.
       #   It runs over a canary Postgres made the old way, on stable's env
       #   file (SMD-2583): it makes .env.canary.local from .env, mode 600, with a
@@ -2430,6 +2424,16 @@ jobs:
           jq -e '.tier != "canary"' <<<"$(health /mcp)" > /dev/null || { echo "stable's /mcp answered as the canary" >&2; exit 1; }
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
+          # SMD-2875: the diff over HTTP. Stable's logged searches (the tier
+          # step's keyword search and smoke.sh's) replayed on stable at /mcp and
+          # on the canary at /canary/mcp, each with the smoke key, which the
+          # canary takes: a canary just refreshed from stable answers as stable
+          # does. A window after every search compared nothing, exit 3.
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8010/canary/mcp > /tmp/tier-diff.out 2>&1 || rc=$?
+          if [ "$rc" != 0 ] || ! grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-diff.out || ! grep -F 'what moved: nothing' /tmp/tier-diff.out; then cat /tmp/tier-diff.out >&2; echo "the --diff of a canary just refreshed from stable did not pass (exit $rc)" >&2; exit 1; fi
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8010/canary/mcp --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
+          if [ "$rc" != 3 ] || ! grep -F 'logged no searches in the window' /tmp/tier-empty.out; then cat /tmp/tier-empty.out >&2; echo "a --diff that compared nothing exited $rc, not 3" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
@@ -2539,10 +2543,11 @@ jobs:
       #   good second before the result. A buffering proxy delivers both
       #   together.
       # After the tier and canary steps: its search_thoughts is a semantic
-      # search the query log keeps, and the tier step's --replay re-embeds
-      # every logged query from tier.sh's container, which has no
+      # search the query log keeps, and until SMD-2875 the tier step's --replay
+      # re-embedded every logged query from tier.sh's container, which had no
       # host.docker.internal to reach the stub by (the first CI run, caught:
-      # getaddrinfo ENOTFOUND host.docker.internal).
+      # getaddrinfo ENOTFOUND host.docker.internal). Since then the canary
+      # step's --diff replays them over HTTP, and each brain embeds its own.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |

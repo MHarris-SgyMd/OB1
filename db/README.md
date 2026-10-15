@@ -3934,10 +3934,10 @@ verbs are the promotion pipeline:
 ```bash
 # snapshot stable into the canary (or a working copy) and migrate it forward
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
-# replay stable's logged searches against the canary and report the ranking
-bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# replay stable's logged searches on stable and the canary, over HTTP, and report the ranking
+bun tier.ts --replay  --from <stable> --to <canary> [--since <iso-ts>]
 # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
-bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
+bun tier.ts --diff    --from <stable> --to <canary> [--since <iso-ts>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
 ```
@@ -4010,19 +4010,31 @@ path; without `--tier` the ingester stamps `stable`) — a real test of the
 re-embed path, not a cost.
 
 **`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
-`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
-each search stable logged since the canary's last refresh, the query is re-run
-against the canary through the shipped retrieval and the returned ids are diffed
-against the ids stable recorded — the measured per-PR **"what moved"**, in place of
-the hand-written control run. The **keyword** arm replays with no model (the arm
-`test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
-so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
-`evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
-before migration 045 carries a NULL arm and is skipped rather than guessed. Both
-verbs print the window and how many rows it held, replayed and skipped. A window
-that replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
-ranking that moved or a step that failed, 2 a usage error or a refusal (SMD-2182).
-A side that does not answer is named with its host and port.
+`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs), and
+they reach the two brains over HTTP, never Postgres (SMD-2875). `--from` and
+`--to` are each brain's MCP URL or connector name, read with a key as
+`--compare` reads one (`--from-key`/`--to-key`, else a connector's own header or
+a URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains).
+Stable's logged searches (`list_logged_searches`: the window `--since` names, else
+the most recent page) run on both brains, each on the arm that ran it and each
+query and arm once, and the ids the two return are diffed: the measured per-PR
+**"what moved"**, in place of the hand-written control run. Each brain embeds its
+own query, so the hybrid and current arms need no model here. A search both
+brains refuse is skipped; one only one brain fails, the other answering, fails
+the run (exit 1 on both verbs). Rows logged before migration 045 have no arm,
+and are counted apart, not replayed. Both verbs print `--compare`'s report, then
+the window and how many searches were replayed and skipped. A window that
+replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
+ranking that moved or a step that failed (stable's log unread, or a search one
+brain failed, or a refusal such as a missing key), 2 a malformed command line,
+a `postgres://` side included (SMD-2182).
+
+Until SMD-2875 they read both databases, from one container on both brains'
+networks holding both superuser passwords, and diffed the canary against the ids
+stable had logged. Now the canary is diffed against stable as it answers now: a
+thought stable gained since the refresh can read as a move, and the id-set line
+of the report says how many each holds that the other does not. The replays are
+real searches, which a brain running with `OB1_QUERY_LOG=on` logs.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
 services, one shared Ollama, each tier's MCP server and REST core, and one proxy
@@ -4047,11 +4059,10 @@ Basic beside the key, on any Bun, and are in neither the label nor the
 request's URL (SMD-2894).
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
-runs the refresh/replay/diff against the **published** images through the merge
-queue; straight after a refresh the default window is empty and `--diff` exits
-3, so the job replays a `--since` read before it or waits out a soak) and
-`--promote`'s image-repoint half. The engine, the compose stack and the
-end-to-end test ([20]) do not need them and are here now.
+runs the refresh and then the replay/diff against the **published** images
+through the merge queue) and `--promote`'s image-repoint half. The engine, the
+compose stack and the end-to-end tests ([20], and `test-brain-compare.ts` for the
+replay over HTTP) do not need them and are here now.
 
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
 server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
@@ -4519,7 +4530,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2874 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1344 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1329 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -4573,9 +4584,8 @@ parts:
 `OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
 nothing else: the other refusals say which database would be dropped. The
 server's address is not compared with loopback, because through a container's
-published port it is the container's. `hnsw-graph.ts`,
-`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
-after connecting and return it from `closeThenExit`, which closes the pool and
+published port it is the container's. `hnsw-graph.ts` and
+`graph-centrality.ts` decide their exit code after connecting and return it from `closeThenExit`, which closes the pool and
 flushes their output first, as `migrate.ts`, `extract-entities.ts`,
 `consolidate.ts` and `reembed.ts` do with their `run()`'s code (SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks
