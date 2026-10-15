@@ -136,6 +136,12 @@ jobs:
       # beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
+      # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
+      # side's password per half, the target's settings by name, the source
+      # container gone before the target starts, every refusal before
+      # anything is made. The deploy-stack job runs it against a stack.
+      - name: tier.sh's two halves against a stub runtime
+        run: bun deploy/test-tier-sh.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -2345,21 +2351,23 @@ jobs:
           # a dummy (nothing here runs the profile).
           printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
           # SMD-2875: through the first up's refresh, every 0.2 s, the tier
-          # halves' containers (each exists from tier.sh's create to its exit,
-          # so the sampling sees both however short a half runs). None may be
+          # halves' containers, found by the label tier.sh gives each (both are
+          # made before either runs; the source's lasts until its hand-off has
+          # passed, the target's until tier.sh exits, so the sampling sees both
+          # however short a half runs). None may be
           # on both brains' data networks, and each half's environment is kept
           # (mode 700 directory), to be searched below for the other side's
           # password.
           mkdir -m 700 /tmp/tier-sample
           sample_nets() {
             while :; do
-              for n in $(docker ps -aq --filter ancestor=open-brain-canary-tier:latest 2>/dev/null); do
+              for n in $(docker ps -aq --filter label=ob1.tier-half 2>/dev/null); do
                 nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$n" 2>/dev/null)" || continue
                 side=""
                 case " $nets " in *" open-brain_data "*) side=stable ;; esac
                 case " $nets " in *" open-brain-canary_data "*) [ -z "$side" ] || echo "$n: $nets" >> /tmp/tier-sample/both; side=canary ;; esac
-                # Written only from an inspect that answered: tier.sh's trap may
-                # remove the container between the two (review pass 1).
+                # Written only from an inspect that answered: tier.sh may remove
+                # the container between the two (review pass 1).
                 [ -z "$side" ] || { env_now="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$n" 2>/dev/null)" && printf '%s\n' "$env_now" > "/tmp/tier-sample/$side.$n"; } || true
               done
               sleep 0.2

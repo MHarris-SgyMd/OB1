@@ -7384,8 +7384,8 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
         const carriesPassword = /\bpassword\s*=|postgres(ql)?:\/\//i.test(dumpArgs);
         assert(parseRefreshSource(facts) !== null && facts.major === major && facts.identity.database === new URL(URL_!).pathname.slice(1)
             && /--role=pg_read_all_data/.test(dumpArgs) && !carriesPassword
-            && existsSync(join(handDir, "stable.dump")) && (statSync(join(handDir, "source.json")).mode & 0o777) === 0o600,
-          `the source half writes its facts (mode 600) and its dump, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
+            && existsSync(join(handDir, "stable.dump")) && (statSync(join(handDir, "source.json")).mode & 0o777) === 0o600 && (statSync(handDir).mode & 0o777) === 0o700,
+          `the source half writes its facts (mode 600) and its dump into a directory it made mode 700, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
         assert(/--handoff: .* already exists; name a directory this run can make, mode 700/.test(await refusedBy(() => refreshSource(URL_!, handDir))),
           "the source half refuses a hand-off directory that exists (it keeps its own mode, and the dump goes in it)");
         // The identity's three parts each decide (the halves cannot ask each other's server).

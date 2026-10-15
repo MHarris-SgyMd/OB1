@@ -1988,8 +1988,8 @@ for the stack. A variable set in the shell wins over the file, as it does
 there. Only what `tier.ts` and `migrate.ts` read is handed to the target half,
 by name, and the source half gets its URL alone:
 - the knobs `migrate.ts` and `db/config.mjs` read on a refresh:
-  `OB1_EMBEDDING_*`, `OB1_TRGM_INDEX`, `OB1_BACKFILL_LIMIT`,
-  `OB1_CHUNK_CONTEXT`, `OB1_METADATA_MODEL`, `OB1_LLM_BASE_URL`, `OB1_PLUGINS`
+  `OB1_EMBEDDING_MODEL`, `OB1_EMBEDDING_DIM`, `OB1_EMBEDDING_DIMENSIONS`,
+  `OB1_TRGM_INDEX`, `OB1_BACKFILL_LIMIT`, `OB1_CHUNK_CONTEXT`, `OB1_PLUGINS`
   and the plugin role's `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
 - `POSTGRES_PASSWORD`.
 
@@ -1998,7 +1998,8 @@ Every other `OB1_*` setting stays behind: the provider and worker keys,
 reading would carry) and the authorization server's `OB1_AUTH_*` settings. So
 do access keys, `OPENROUTER_API_KEY` (a replay's embed fell back to it until
 the replay moved onto HTTP, SMD-2875), `LINEAR_API_KEY` and `OLLAMA_BASE`. The values travel in a temporary
-env file per half (mode 600, removed on exit), so they are not on the
+env file per half (mode 600, removed as soon as that half's container is
+made), so they are not on the
 wrapper's command line or the runtime's. They are in each half's container
 environment, which `inspect` shows while it runs, and its URL is on the
 argument lists of bun and `migrate.ts` inside it, which a Linux host's `ps`

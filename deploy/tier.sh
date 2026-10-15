@@ -48,9 +48,10 @@
 # Flags of this wrapper's own, all optional:
 #   --env-file PATH  the --to side's env file: its POSTGRES_PASSWORD builds a
 #                    short-form --to's URL, its project names that side's
-#                    network and the image, and its OB1_* settings reach the
-#                    target half (default deploy/.env beside this script —
-#                    which a branch worktree does not have: it is gitignored)
+#                    network and the image, and the settings migrate.ts reads
+#                    (below) reach the target half (default deploy/.env beside
+#                    this script — which a branch worktree does not have: it
+#                    is gitignored)
 #   --from-env-file PATH  the --from side's env file, when --from is another
 #                    stack's (deploy/canary.sh names stable's, SMD-2583): its
 #                    POSTGRES_PASSWORD builds a short-form --from's URL and its
@@ -77,16 +78,17 @@
 # file as the stack does (quotes, inline comments, `export`, CRLF, a BOM) under
 # the shell's own variables, which win there too. Of --env-file's, only what
 # tier.ts and migrate.ts read is handed to the target half, by name: the
-# knobs migrate.ts and db/config.mjs read (OB1_EMBEDDING_*, OB1_TRGM_INDEX,
-# OB1_BACKFILL_LIMIT, OB1_CHUNK_CONTEXT, OB1_METADATA_MODEL, OB1_LLM_BASE_URL,
-# OB1_PLUGINS and the plugin role's OB1_PLUGIN_DB_PASSWORD), OB1_TIER, and
-# POSTGRES_PASSWORD, which builds the URL. Every other OB1_* stays behind: the
+# knobs a migration reads (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM,
+# OB1_EMBEDDING_DIMENSIONS, OB1_TRGM_INDEX, OB1_BACKFILL_LIMIT,
+# OB1_CHUNK_CONTEXT, OB1_PLUGINS and the plugin role's OB1_PLUGIN_DB_PASSWORD),
+# OB1_TIER, and POSTGRES_PASSWORD, which builds the URL. Every other OB1_* stays behind: the
 # provider keys, the worker keys, OB1_COMPARE_KEY (which `tier.ts --diff`
 # reads from the shell, and compose's reading carries) and the authorization
 # server's OB1_AUTH_* settings (SMD-2285, SMD-2875); so do access keys,
 # OPENROUTER_API_KEY, LINEAR_API_KEY and the rest. The source half gets its URL
-# alone. Each half's values travel in a mode-600
-# temporary env file, so they are not on this command line or the runtime's;
+# alone. Each half's values travel in a mode-600 temporary env file, removed
+# as soon as its container is made, so they are not on this command line or
+# the runtime's;
 # they are in the half's container environment (`inspect` shows it while it
 # runs), and its URL is on the argument lists inside it (bun's, migrate.ts's),
 # which a Linux host's `ps` shows (SMD-2119). The hand-off holds the source's
@@ -165,6 +167,8 @@ while [ $# -gt 0 ]; do
         --to) TO="$2" ;;
       esac
       shift 2 ;;
+    --network=*|--project=*|--from-network=*|--from-project=*|--env-file=*|--from-env-file=*|--runtime=*|--from=*|--to=*)
+      echo "give ${1%%=*} VALUE, not ${1%%=*}=VALUE: the wrapper reads its flags apart from their values." >&2; exit 2 ;;
     -h|--help) usage ;;
     --replay|--diff)
       echo "$1 runs over HTTP now, each brain at its own URL with its own key, and needs no container (SMD-2875): bun db/tier.ts $1 --from <stable's MCP URL or connector> --to <the canary's>." >&2
@@ -315,7 +319,7 @@ while IFS= read -r line; do
     # authorization server's) reaches the container (SMD-2285, SMD-2875;
     # deploy/auth/provision.ts --self-check runs this loop, and
     # db/test-connect.ts reads the line above as names alone).
-    OB1_EMBEDDING_*|OB1_TRGM_INDEX|OB1_BACKFILL_LIMIT|OB1_CHUNK_CONTEXT|OB1_METADATA_MODEL|OB1_LLM_BASE_URL|OB1_PLUGINS|OB1_PLUGIN_DB_PASSWORD|OB1_TIER|POSTGRES_PASSWORD) ;;
+    OB1_EMBEDDING_MODEL|OB1_EMBEDDING_DIM|OB1_EMBEDDING_DIMENSIONS|OB1_TRGM_INDEX|OB1_BACKFILL_LIMIT|OB1_CHUNK_CONTEXT|OB1_PLUGINS|OB1_PLUGIN_DB_PASSWORD|OB1_TIER|POSTGRES_PASSWORD) ;;
     *) continue ;;
   esac
   printf '%s\n' "$line" >> "$TMP_ENV"
@@ -409,22 +413,28 @@ if [ "$RUNTIME" = docker ] && docker buildx version >/dev/null 2>&1; then LOAD=(
 # dies of the Ctrl-C it forwarded (measured; `run` returned 130), and a
 # refresh stopped mid-restore must not read as done to the script that called
 # this one. The EXIT trap removes both containers and the temporary files.
+# Each is labelled with its half, for a reader that looks for them.
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
 SRC_CID="$("$RUNTIME" create --init \
+  --label ob1.tier-half=source \
   --network "$FROM_NETWORK" \
   --env-file "$TMP_ENV_FROM" \
   -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
   sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --from "$TIER_FROM_URL" --handoff /tmp/handoff' tier ${PASS[@]+"${PASS[@]}"})"
+# The runtime read the env file at create: stable's URL leaves the host now.
+rm -f "$TMP_ENV_FROM"
 # shellcheck disable=SC2016 # the container's sh expands them, not this one
 DST_CID="$("$RUNTIME" create --init \
+  --label ob1.tier-half=target \
   --network "$NETWORK" \
   --env-file "$TMP_ENV" \
   -v "$REPO:/repo:ro" \
   -w /tmp \
   "$IMAGE" \
   sh -c 'exec bun --no-env-file /repo/db/tier.ts "$@" --handoff /tmp/handoff --to "$TIER_TO_URL"' tier ${PASS[@]+"${PASS[@]}"})"
+rm -f "$TMP_ENV"
 
 # Start one half attached and wait for its end; the script ends there unless
 # it ended 0. CID
