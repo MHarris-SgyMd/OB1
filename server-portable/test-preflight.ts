@@ -2615,6 +2615,8 @@ else {
   assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046, 055 then 060 re-applied put the column and the trigger back (060's body over 055's over 046's — SMD-2115, SMD-2116)");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
+  // 093's kept windows hang off the claims (SMD-2694): a brain before 015 has neither.
+  await claims.unsafe("DROP TABLE extraction_progress");
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
@@ -2623,7 +2625,7 @@ else {
          "…while the claim functions, which outlive the table, still read as 015's");
   assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "…and the consolidate pass check, which reads the same table, says so too");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") || f.endsWith("_extraction_progress.sql") });
 
   // SMD-2880's Verify: the walk index remedy followed literally. A ledger
   // the migrator wrote (--baseline over the full apply) records 039. 038
@@ -3814,6 +3816,48 @@ else {
       const retired = await run(LOG_ON);
       assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
         `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+
+      // The thoughts its wakes hold back (SMD-2694): one gaining windows across
+      // them is named and passes; one stalled — a window longer than every
+      // sleep, which consolidation joins past — warns, naming it and what
+      // finishes it; a `held` not of the shape is left off.
+      const ID1 = "11111111-1111-4111-8111-111111111111", ID2 = "22222222-2222-4222-8222-222222222222";
+      const sleeping = (held: unknown) => beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: new Date(Date.now() - 60_000).toISOString().replace(/\d{3}Z$/, "000Z"), to: null }, held }), 10);
+      await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 2, kept: 7, windows: 24 }] });
+      const gaining = await run(LOG_ON);
+      assert(/✓\s+sleep\s+running a pass .*; a search or a write wakes it; 1 thought\(s\) held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
+        `a thought held back, two stops short of the three the scheduler joins past at, is named, and the row passes (${row(gaining.out, "sleep")})`);
+      await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
+      const stalledOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
+        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough — overnight, most likely — finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*--profile sleep stop sleep.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
+      // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
+      await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });
+      assert(/→ 11111111-1111-4111-8111-111111111111: 3 or more long hard stops in a row have taken it with no window gained — its windows all kept, the stops landing past the last — in the decider's call or the write\. Consolidation joins past it once extraction holds nothing else/.test(fix((await run(LOG_ON)).out, "sleep")),
+        "a stalled thought whose windows are all kept is told apart: the stops land past its last window");
+      // Two stalled, each with its own reason (review pass 2).
+      await sleeping({ total: 2, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }, { id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] });
+      assert(/→ 2 thoughts: 3 or more long hard stops in a row have taken each with no window gained — 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the sleeps\./.test(fix((await run(LOG_ON)).out, "sleep")),
+        "two stalled thoughts are each given their own reason");
+      // More held than named: the rest counted.
+      await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
+      assert(/held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
+      // A scheduler stopped says what it held at its last word, and warns of none:
+      // a hand run may have finished it since (review pass 1).
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, reads: "yes", held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
+      const endedHeld = await run(LOG_ON);
+      assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
+        `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);
+      // A held word out of its bounds is left off: more thoughts than its total, or more windows kept than sent.
+      for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }]) {
+        await sleeping(bad);
+        assert(!/held back/.test(row((await run(LOG_ON)).out, "sleep")), `a held word out of its bounds is left off (${JSON.stringify(bad)})`);
+      }
+      await sleeping({ total: 1, thoughts: [{ id: "not-a-uuid", stops: 3, stalled: 3, kept: 0, windows: null }] });
+      const badHeld = await run(LOG_ON);
+      assert(/✓\s+sleep\s+running a pass/.test(row(badHeld.out, "sleep")) && !/held back/.test(row(badHeld.out, "sleep")), `a held word not of the shape is left off, and the row reads as it would without it (${row(badHeld.out, "sleep")})`);
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }
 

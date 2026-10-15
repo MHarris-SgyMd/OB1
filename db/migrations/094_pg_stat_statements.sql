@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 092: pg_stat_statements, where the server offers it — each SQL
+-- Migration 094: pg_stat_statements, where the server offers it — each SQL
 --                statement's calls and times, for the observability profile's
 --                exporter (SMD-1849 PR 3b)
 -- =============================================================================

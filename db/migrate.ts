@@ -217,7 +217,7 @@ async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], gr
             `  Run the migrator as the database's owner, ${pinned.owner}, or a role that is a member of it. To build as ${pinned.role} instead, as the schema's owner:\n` +
             `    GRANT USAGE, CREATE ON SCHEMA public TO ${pinned.role};\n` +
             "  Either way, 001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has;\n" +
-            "  092's pg_stat_statements needs a superuser too, and is left out without one. Nothing was changed."
+            "  094's pg_stat_statements needs a superuser too, and is left out without one. Nothing was changed."
     );
     return false;
   }
@@ -1317,14 +1317,14 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
 
   /**
    * pg_stat_statements' views and functions kept from PUBLIC on every run, not
-   * on 092's alone (SMD-1849 PR 3b, review pass 1). A restore without
+   * on 094's alone (SMD-1849 PR 3b, review pass 1). A restore without
    * privileges — a tier refresh's pg_restore -x (db/tier.ts) — creates the
    * extension again with its own grants, PUBLIC's among them, under a ledger
-   * that already records 092, so nothing else would run it again; and
+   * that already records 094, so nothing else would run it again; and
    * readable by PUBLIC they are core relations the plugins' login role holds,
    * which preflight's "plugin tables" row refuses. So read the grants, and run
-   * 092 again where PUBLIC holds one. Read after the fact, as reportSeeds
-   * reads: 092's grants left as they were where this role does not own the
+   * 094 again where PUBLIC holds one. Read after the fact, as reportSeeds
+   * reads: 094's grants left as they were where this role does not own the
    * objects, and its skip where this role may not create the extension, are
    * warnings, which this client does not surface. Said, never fatal: the
    * brain runs without the extension, and preflight refuses what needs
@@ -1334,7 +1334,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   async function confineStatStatements(): Promise<void> {
     const file = migrations!.find((m) => m.name.endsWith("_pg_stat_statements.sql"));
     if (!file) return;
-    // The objects 092 revokes, by name among the extension's members, wherever it lives.
+    // The objects 094 revokes, by name among the extension's members, wherever it lives.
     const state = async () =>
       ((await sql`
         SELECT current_database() AS db,

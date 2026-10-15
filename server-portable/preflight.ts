@@ -31,7 +31,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
-import { ago, deniedObject, heartbeatState, ledgerStatus, pad3, readDatabaseFacts } from "./brain-info.ts";
+import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, SLEEP_STALLED_JOIN } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -4688,7 +4688,16 @@ if (configFailed) {
               // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
               const refusedBy = h.ended && h.outcome === "failed" && h.refused ? h.refused : null;
               // A scheduler not running wakes for nothing: what would wake it is said as such.
-              const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}`;
+              // The thoughts its wakes hold back, by its own word (SMD-2694): one
+              // gaining windows across them is on its way; one stalled gains
+              // nothing at its stops, which consolidation joins past once
+              // extraction holds nothing else. A scheduler not running says
+              // only what it held at its last word, and warns of none: a hand
+              // run may have finished them since (review pass 1).
+              const held = h.held;
+              const stuck = down ? [] : held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
+              const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its wakes — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
+              const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${heldDetail}`;
               const fixes: string[] = [];
               // Followers running here keep a scheduler down: it refuses beside
               // them, so "start it again" alone would only refuse again (review pass 3).
@@ -4706,6 +4715,18 @@ if (configFailed) {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }
               if (wakeFix) fixes.push(wakeFix);
+              if (stuck.length) {
+                const one = stuck.length === 1;
+                // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
+                // Each its own reason: every window kept puts the stops past the last (review pass 2).
+                const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps");
+                // The remedy as an operator runs it (review pass 4): stopped
+                // asleep, the scheduler finishes the window in hand first, up
+                // to its 120 s grace, and may leave the lease; and a checkout
+                // reaches the stack's Postgres only through host-ports.
+                const it = one ? "it" : "them";
+                fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough — overnight, most likely — finishes ${it}. Sooner, finish ${it} by hand: stop the scheduler just after a live call, when its passes have returned their leases (podman compose -f deploy/compose.yaml --profile sleep stop sleep, with the -f files and -p the stack was started with — stopped asleep, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no wake stops and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
+              }
               add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
             }
           }

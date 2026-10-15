@@ -181,8 +181,11 @@ const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[]
   return [...methods].sort();
 };
 
-/** `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter. */
-type RestEnv = { Variables: { template?: string } };
+/**
+ * `template`: a plugin operation's route, for the request line — its Hono route is the one catch-all parameter.
+ * `carrier`: the forwarder slot's forward-scope key, or null for none — checked once, by the first middleware (carrierOf).
+ */
+type RestEnv = { Variables: { template?: string; carrier?: Principal | null } };
 
 export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const app = new Hono<RestEnv>();
@@ -229,8 +232,12 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     }
     // The record first, so an environment that will not seed (init throws,
     // onError's 500) is still a line; a throw that is not an Error, which
-    // Hono passes up rather than to onError, ends it as one.
-    const trace = beginRequest("api", c.req.raw, write);
+    // Hono passes up rather than to onError, ends it as one. A request whose
+    // forwarder slot holds a forward-scope key continues its traceparent: the
+    // MCP server's tool call, of which this is the operation (SMD-2287 PR 4c).
+    const carrier = carrierOf(c.req.raw);
+    if (carrier !== undefined) c.set("carrier", carrier);
+    const trace = beginRequest("api", c.req.raw, write, { trustParent: carrier != null });
     try {
       deps.init();
       // Under the request's span, so the operation's span is its child (PR 2b).
@@ -262,8 +269,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // whose scope lacks the tool, a revoked one, one the registry is busy on or
   // does not answer for in time — is answered liveness as no key is: this
   // route shows nothing, and refuses no one. The rules are server-portable
-  // index.ts's /health's. The forwarder slot is not read: the record is the
-  // caller's key's to see, whoever carried it.
+  // index.ts's /health's. The forwarder slot is not read here (the middleware
+  // reads it for the span's parent alone): the record is the caller's key's to
+  // see, whoever carried it.
   app.get("/health", async (c) => {
     const keys = headerKeys(c.req.raw);
     if (keys.length === 0) return c.json({ status: "ok" });
@@ -342,6 +350,29 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   const headOnly = (c: Context, type = "application/json") => c.req.method === "HEAD" ? c.body(null, 200, { "content-type": type }) : null;
 
   /**
+   * The forward-scope key the forwarder slot holds — null for none, or a slot
+   * that holds no such key — checked by its digest once, before the request's
+   * span starts, so the span continues the forwarder's trace (SMD-2287 PR 4c),
+   * and `caller` reads it from there. Only a key's holder passes: any other
+   * caller's traceparent is linked, not continued. The registry's word on the
+   * key is not asked here (a revoked forwarder is refused below all the same).
+   * Undefined where the keys cannot be read: no trust, and `caller` reads them
+   * itself, its throw onError's. Before the middleware's own init, so it seeds
+   * the environment itself (review pass 2: an in-process REST core's first
+   * forwarded request was linked); init's throw is the middleware's 500.
+   */
+  function carrierOf(req: Request): Principal | null | undefined {
+    const forwarded = req.headers.get(FORWARDER_HEADER);
+    if (!forwarded) return null;
+    try {
+      deps.init();
+      return authenticate(forwarded, deps.keys(), { admit: ["forward"] });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * The caller, or the answer that refuses it: a key that authenticates (a
    * caller's scope — a forwarder key alone is unknown here), then the registry's word on it — revoked is refused for good, busy
    * for now — with its stable agent id set for the audit row. A request that
@@ -367,11 +398,16 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // registers no one; one refused as a revoked or busy forwarder has resolved
     // the caller first (a valid key; it is granted nothing).
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
-    const carrier = forwarded === null ? null : authenticate(forwarded, keys, { admit: ["forward"] });
+    const checked = c.get("carrier");
+    const carrier = forwarded === null ? null : checked !== undefined ? checked : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
-    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED" }, { "WWW-Authenticate": "Bearer" });
-    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true }, RETRY_AFTER);
+    // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,
+    // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
+    // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
+    const named = carrier ? { name: principal.name } : {};
+    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named }, { "WWW-Authenticate": "Bearer" });
+    if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
     if (carrier) {
@@ -380,8 +416,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // lock, and the forwarder's answer is the agent cache's for its TTL in
       // any case (SMD-2287 PR 3a review pass 2, not taken).
       const carried = await deps.resolve(carrier);
+      // The caller, resolved, named beside the forwarder's busy registry, for the forwarder's line (SMD-2287 PR 4b review
+      // pass 5); a revoked forwarder is the server's misconfiguration, whose line names no caller.
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
-      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
+      if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder", name: principal.name }, RETRY_AFTER);
       principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
     }
     return principal;
@@ -702,13 +740,14 @@ const wholeFor = <R = Refusal>(p: Principal, r: R): { refusal?: R } => (p.act ? 
 /**
  * What a key that cannot read is told of its capture: the fields the MCP tool
  * gives it (render.ts's capture value) — the id, whether its embedding was
- * made, its chunks and context failures — and not the provider's address,
- * the egress gate's reasons or the extractor's tags (the maintainer's call,
- * SMD-2284 review pass 1). A reader is told the whole value.
+ * made, its chunks and context failures, and the word for a provider that did
+ * not answer it (SMD-2888) — and not the provider's address, the egress
+ * gate's reasons or the extractor's tags (the maintainer's call, SMD-2284
+ * review pass 1). A reader is told the whole value.
  */
 type Captured = Extract<Awaited<ReturnType<Core["capture"]>>, { ok: true }>["value"];
 const capturedFor = (p: Principal, v: Captured): object =>
-  canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures };
+  canRead(p) ? v : { id: v.id, ...(v.existed === undefined ? {} : { existed: v.existed }), embeddingCall: v.embeddings.allowed, chunks: v.chunks, contextFailures: v.contextFailures, ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}) };
 
 /**
  * Where this server's routes sit in the URL its caller used: "" on the mesh,
@@ -739,7 +778,7 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     // (wholeFor): the MCP server words it with render.ts, which picks from it
     // what a key that cannot read is told — the trimmed value had no tags, so
     // a capture key's capture threw there (SMD-2287 PR 3a review pass 1).
-    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
+    return c.json({ ...(p.act ? v : capturedFor(p, v)), embeddingAttached: v.embeddings.allowed && !v.vectorFailed }, 201, { Location: `${linkBase(c)}/v1/thoughts/${v.id}` });
   }
   if (name === "scan_thoughts") {
     const { jobId } = value as { jobId: string };

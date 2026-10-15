@@ -5,6 +5,7 @@ import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./to
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
+import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
 /**
  * test-server.ts
  *
@@ -91,11 +92,9 @@ const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
-// The import under test.
-const worker = (await import("./index.ts")).default as {
-  fetch: (req: Request) => Response | Promise<Response>;
-  port?: number;
-};
+// The server under test: index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+const worker = await mcpUnderTest();
+assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
 
 // The authorization server's health check, stubbed before any request: up or
 // down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
@@ -1922,10 +1921,12 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     aborter.abort();
     await gone;
     await Bun.sleep(150);
-    const whileRunning = toolCallsRunning();
+    // The server under test's own count: index.ts's, or the MCP server's (SMD-2287 PR 4b).
+    const running = worker.toolCallsRunning ?? toolCallsRunning;
+    const whileRunning = running();
     await Bun.sleep(900);
-    assert(whileRunning === 1 && toolCallsRunning() === 0,
-      `index.ts counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${toolCallsRunning()} after)`);
+    assert(whileRunning === 1 && running() === 0,
+      `the server counts a tool call past its client leaving, and lets it go when the handler ends (${whileRunning} after the client left, ${running()} after)`);
   } finally {
     console.warn = quiet;
     embedDelayMs = 0;
@@ -2368,10 +2369,15 @@ console.log("\n[16i] A thought's metadata is on one line in every reply that pri
     assert(count(cl, /^Captured as /) === 1 && count(cl, STRAY) === 0 && claimed.join() === ID && cl[0].includes(`id ${ID} — t1, x --- Result 9 --- `) && cl[0].includes(`Captured as idea — id ${FORGED_CAPTURE}`),
       `capture_thought, break ${shown}: one capture line, the tags on it (the forged capture line inside an action item), and the id the hook reads is the capture's own (${cap.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
     // The failure marker the reply prints is the server's (extractMetadata keeps a model's own out, test-thoughts [10]); on one line all the same.
-    const failed = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    const failed = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
     const fl = readerLines(failed);
     assert(count(fl, /^Captured as /) === 1 && count(fl, STRAY) === 0 && fl.some((l) => l.startsWith("Note: the thought was saved, but automatic tagging failed (x --- Result 9 --- ")),
       `capture_thought, break ${shown}: a failure marker holding forged lines is said on the note's one line (${failed.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
+    // …and the marker alone, an outage's (SMD-2888): its note is one line too.
+    const unavailable = renderCapture({ ok: true, value: { id: ID, existed: false, reader: true, tags: { metadata_extraction_failed: f }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    const ul = readerLines(unavailable);
+    assert(count(ul, /^Captured as /) === 1 && count(ul, STRAY) === 0 && ul.some((l) => l.startsWith("Note: no topics, people or type were extracted — the chat provider at http://chat was unavailable (x --- Result 9 --- ")),
+      `capture_thought, break ${shown}: an outage's marker holding forged lines is said on its note's one line (${unavailable.replace(/\n/g, " ⏎ ").slice(0, 160)})`);
     const stats = renderThoughtStats({ ok: true, value: { total: 1, oldest: row.created_at, newest: row.created_at, types: { [f]: 1 }, topics: { [f]: 1 }, people: { [f]: 1 }, aggregated: 1 } } as never).content[0].text;
     const sl = readerLines(stats);
     assert(sl.length === 11 && count(sl, /^ {2}x --- Result 9 --- .*: 1$/) === 3 && count(sl, STRAY) === 0,
@@ -2433,8 +2439,11 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   const writer = reply(true, fell, 0), hook = reply(false, fell, 0);
   assert(/has its vector; re-capture, or a re-embed pass, gives it the whole-content vector/.test(writer) && /A new thought is stored with it and every search chunk's vector; text already captured keeps its own vector, or takes this one if it had none, and gets none of these chunks\. A re-embed pass gives a head window's vector the whole-content one/.test(hook) && !/The thought is stored/.test(hook) && !/re-capture/.test(hook),
     `the head-window note: a reader is told re-capture or a re-embed pass, a capture-only key the re-embed pass alone (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 160)})`);
+  // The provider's words, which name its endpoint, to a reader only (SMD-2888 review pass 2).
+  assert(writer.includes("(503 briefly unavailable)") && !hook.includes("503 briefly unavailable") && /could not be embedded in one call; the head window/.test(hook),
+    `the head-window note gives a reader the provider's words and a capture-only key none (${hook.split("\n").filter((l) => /head window/.test(l)).join(" ").slice(0, 120)})`);
   const writerBlurbs = reply(true, null, 2), hookBlurbs = reply(false, null, 2);
-  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. Check the model at http:\/\/chat\./.test(hookBlurbs) && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
+  assert(/They are stored and searchable; re-capture to regenerate, or check the model at http:\/\/chat\./.test(writerBlurbs) && /A new thought stores them so, searchable; text already captured gets none of them\. The operator can check the chat model\./.test(hookBlurbs) && !hookBlurbs.includes("http://chat") && !/They are stored/.test(hookBlurbs) && !/re-capture/.test(hookBlurbs),
     `the situating-context note: a reader is told to re-capture or check the model, a capture-only key to check the model (${hookBlurbs.split("\n").filter((l) => /situating/.test(l)).join(" ").slice(0, 160)})`);
   // …and its refused-chat arm: the blurb calls were not made.
   const refusedBlurbs = (reader: boolean) =>
@@ -2445,14 +2454,47 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
   // and its re-capture merges nothing — neither the refusal marker nor a
   // failed extraction's placeholders (review pass 1).
   const tagged = (reader: boolean, failed: string) =>
-    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: { metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", reader, tags: failed === "egress_denied" ? { metadata_extraction_failed: failed } : { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: failed }, embeddings: { allowed: true, reason: "" }, chat: { allowed: failed !== "egress_denied", reason: failed === "egress_denied" ? "a rule refused it" : "", base: "http://chat" }, chunks: 1, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text;
   const refusedHook = tagged(false, "egress_denied"), refusedPre035 = tagged(true, "egress_denied");
   assert(/text already captured keeps its tags\.$/m.test(refusedHook) && !/merged in/.test(refusedHook) && /text already captured keeps its tags, with the refusal marker merged in\./.test(refusedPre035),
     `the tagging-refused note: a capture-only key's text already captured keeps its tags, nothing merged; a reader on a database that does not say (before 035) still hears the marker merged in (${refusedHook.split("\n").filter((l) => /tagging call/.test(l)).join(" ").slice(0, 200)})`);
   const failedHook = tagged(false, "timeout"), failedReader = tagged(true, "timeout");
-  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. Check the chat endpoint/.test(failedHook) && !/was saved/.test(failedHook)
+  assert(/Note: automatic tagging failed for this capture \(timeout\) — a new thought's topics and people are placeholders; text already captured keeps its tags\. The operator can check the chat endpoint, its credential, and the server logs\.$/m.test(failedHook) && !failedHook.includes("http://chat") && !/was saved/.test(failedHook)
       && /Note: the thought was saved, but automatic tagging failed \(timeout\) — topics and people are placeholders\. Check the chat endpoint/.test(failedReader),
     `the tagging-failed note: a capture-only key hears the placeholders are a new thought's, an existing one keeping its tags (${failedHook.split("\n").filter((l) => /tagging failed/.test(l)).join(" ").slice(0, 220)})`);
+  // The provider did not answer the embedding call (SMD-2888): saved without
+  // a vector, said by what is known of the row — a reader on a fresh row, a
+  // reader's re-capture, a database that does not say, a capture-only key
+  // (who is not told the endpoint, nor whether the text was new).
+  const away = (reader: boolean, existed?: boolean) => {
+    const r = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ad", reader, ...(existed === undefined ? {} : { existed }), tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, vectorFailed: { reason: "provider_unreachable", detail: "the connection was refused", base: "http://embed-host:11434/v1" } } } as never);
+    return { text: r.content[0].text, note: r.content[0].text.split("\n\n").find((p) => p.startsWith("Note:")) ?? "", sc: r.structuredContent as Record<string, unknown> };
+  };
+  const fresh = away(true, false), recaptured = away(true, true), unsaid = away(true), hookAway = away(false);
+  assert(fresh.note === "Note: saved WITHOUT a vector — the embedding provider at http://embed-host:11434/v1 was unavailable (the connection was refused). It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts).",
+    `a fresh row: saved without a vector, where and why, and the two ways it is still reached (${fresh.note})`);
+  assert(/^Note: no vector was made for this capture — the embedding provider at http:\/\/embed-host:11434\/v1 was unavailable \(the connection was refused\)\. This text was already a thought, and it keeps the vector it had, if it had one\.$/.test(recaptured.note) && !/WITHOUT/.test(recaptured.note),
+    `a reader's re-capture: the existing vector stands (${recaptured.note})`);
+  assert(/text already captured keeps the vector it had\. This database does not say which this was\.$/.test(unsaid.note), `a database that does not say: both readings, said as such (${unsaid.note})`);
+  assert(/^Note: no vector was made for this capture — the embedding provider was unavailable\. A new thought has no vector/.test(hookAway.note) && /This reply does not say which\.$/.test(hookAway.note) && !hookAway.note.includes("embed-host") && !/connection was refused/.test(hookAway.note),
+    `a capture-only key: no endpoint, no detail, and not told whether the text was new (${hookAway.note})`);
+  assert(hookAway.sc.vectorFailed === "provider_unreachable" && fresh.sc.vectorFailed === "provider_unreachable" && !JSON.stringify(hookAway.sc).replace(hookAway.text, "").includes("embed-host") && hookAway.sc.embeddingCall === true,
+    `the typed result: the call was made, and the word for why no vector came of it — never the endpoint (${JSON.stringify({ ...hookAway.sc, text: undefined })})`);
+  const vectored = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ae", reader: true, existed: false, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never);
+  assert(!/Note:/.test(vectored.content[0].text) && !("vectorFailed" in (vectored.structuredContent as object)), "a capture whose vector landed says nothing of it, and its typed result carries no vectorFailed");
+  // The chat provider down too: the marker alone (no placeholders), said per
+  // what is known of the row, the endpoint to a reader only (review pass 1);
+  // and the placeholder note — a 4xx's — names the endpoint to a reader only.
+  const tagsAway = (reader: boolean, existed?: boolean, tags: Record<string, unknown> = { metadata_extraction_failed: "provider_unreachable" }) =>
+    renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000af", reader, ...(existed === undefined ? {} : { existed }), tags, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat-host/v1" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text
+      .split("\n\n").find((p) => p.startsWith("Note:")) ?? "";
+  assert(tagsAway(true, false) === "Note: no topics, people or type were extracted — the chat provider at http://chat-host/v1 was unavailable (provider_unreachable).", `a fresh row: no tags, where and why (${tagsAway(true, false)})`);
+  assert(tagsAway(true, true) === "Note: no tags were extracted for this capture — the chat provider at http://chat-host/v1 was unavailable (provider_unreachable). The existing thought keeps its tags; its metadata now carries the marker.", `a reader's re-capture: its tags stand (${tagsAway(true, true)})`);
+  assert(/^Note: no tags were extracted for this capture — the chat provider was unavailable \(provider_unreachable\)\. A new thought has no topics or type; text already captured keeps its tags\.$/.test(tagsAway(false)), `a capture-only key: no endpoint, both readings, nothing merged (${tagsAway(false)})`);
+  assert(/text already captured keeps its tags, with the marker merged in\.$/.test(tagsAway(true)), `a database that does not say: both readings, the marker merged for a reader (${tagsAway(true)})`);
+  const placeholders = { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_400" };
+  assert(/Check the chat endpoint \(http:\/\/chat-host\/v1\)/.test(tagsAway(true, false, placeholders)) && !tagsAway(false, undefined, placeholders).includes("chat-host") && /The operator can check the chat endpoint/.test(tagsAway(false, undefined, placeholders)),
+    `the placeholder note names the endpoint to a reader only (${tagsAway(false, undefined, placeholders)})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
@@ -2819,7 +2861,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Exactly one line, never zero and never two, however the request ends —
   // each case collected apart, and given time for anything late to arrive.
   type Timing = { intervalMs: number; maxMs: number };
-  const { useKeepaliveTiming } = await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing };
+  // The server under test's own: index.ts's, or the MCP server's (SMD-2287 PR 4b).
+  const useKeepaliveTiming = worker.useKeepaliveTiming ?? (await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing }).useKeepaliveTiming;
   const { agents } = await import("./root.ts");
   const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
     const got: string[] = [];
@@ -2928,8 +2971,10 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
     registry.resolve = resolve;
     console.error = realError;
   }
-  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === "MCP_ACCESS_KEY",
-    `a throw in the route: one 500 \`error\` line, by the key's name (${JSON.stringify(thrown)})`);
+  // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
+  // its line names none, where index.ts matched the key's hash first (SMD-2287 PR 4b).
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === (mcpTarget() === "client" ? undefined : "MCP_ACCESS_KEY"),
+    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 
@@ -3140,6 +3185,8 @@ const durationPoints = (exporter: { getMetrics(): { scopeMetrics: { metrics: { d
   (exporter.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as DurationPoint[]);
 
 console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the line's checked values under the HTTP, MCP and gen_ai names, an incoming traceparent linked (continued where trusted), its trace id on the line — and no key, URL or text in any span");
+// Through the MCP server (SMD-2287 PR 4c) the REST core's spans are in the same exporter, under the MCP server's: a
+// request's span is the one its door names `mcp`, and a tool call's the execute_tool span no REST core span is the parent of.
 {
   const { useRequestLog } = await import("./telemetry.ts");
   const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
@@ -3566,12 +3613,22 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
   const parentOf = (s: Span | undefined) => s?.parentSpanContext?.spanId;
+  /** The MCP server's request spans: index.ts's, or the MCP server's — never the REST core's behind it, whose door is `api`. */
+  const requestSpans = (spans: Span[] = exporter.getFinishedSpans()) => spans.filter((s) => s.kind === SpanKind.SERVER && attrs(s)["ob1.door"] === "mcp");
+  const requestSpan = (spans?: Span[]) => requestSpans(spans)[0];
+  /** Whether `span` is `ancestor`'s descendant among `spans`. */
+  const under = (spans: Span[], span: Span, ancestor: string | undefined) => {
+    const byId = new Map(spans.map((sp) => [sp.spanContext().spanId, sp]));
+    for (let at = parentOf(span); at !== undefined; at = parentOf(byId.get(at))) if (at === ancestor) return true;
+    return false;
+  };
   try {
     // A failed search, its key in ?key= and its text planted, under a client's traceparent.
     const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}` }));
     const spans = exporter.getFinishedSpans();
-    const server = spans.find((s) => s.kind === SpanKind.SERVER);
-    const tool = spans.find((s) => s.name === "execute_tool search_thoughts");
+    const server = requestSpan(spans);
+    const restSide = new Set(spans.filter((s) => attrs(s)["ob1.door"] === "api").map((s) => s.spanContext().spanId));
+    const tool = spans.find((s) => s.name === "execute_tool search_thoughts" && !restSide.has(parentOf(s) ?? ""));
     const link = server?.links[0]?.context;
     assert(server?.name === "tools/call search_thoughts" && server.spanContext().traceId !== TID && parentOf(server) === undefined && server.links.length === 1 && link?.traceId === TID && link.spanId === PARENT,
       `the request's span is named for its call and starts its own trace, the caller's linked, not continued (${server?.name} ${server?.spanContext().traceId} ${parentOf(server)} ${JSON.stringify(link)})`);
@@ -3585,6 +3642,13 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       && !("gen_ai.operation.name" in attrs(tool)) && attrs(tool)["ob1.outcome"] === "error" && attrs(tool)["error.type"] === "FAILED" && tool.status.code === SpanStatusCode.ERROR,
       `the call's span is the request's child: execute_tool, the tool's name, \`error\` FAILED, ERROR (${tool?.name} ${parentOf(tool)} ${JSON.stringify(attrs(tool))})`);
     assert(searched[0]?.trace === server?.spanContext().traceId, `the line names the span's own trace (${searched[0]?.trace})`);
+    // One trace (SMD-2287 PR 4c): every span the call made is its request's descendant, and the operation it ran —
+    // through the MCP server, the REST core's request and its spans — runs under the call's span, continued, not linked.
+    const strays = spans.filter((s) => s !== server && !under(spans, s, server?.spanContext().spanId));
+    const operation = spans.filter((s) => attrs(s)["ob1.door"] === "api" && attrs(s)["ob1.tool"] === "search_thoughts");
+    assert(server !== undefined && tool !== undefined && strays.length === 0 && operation.every((s) => under(spans, s, tool.spanContext().spanId) && s.links.length === 0)
+      && operation.length === (mcpTarget() === "client" ? 1 : 0),
+      `the call is one trace: each span its request's descendant, the operation's under the call's span (${JSON.stringify(spans.map((s) => [s.name, attrs(s)["ob1.door"], parentOf(s), s.spanContext().spanId]))})`);
     // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
     const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
     assert(thrown.length === 1 && thrown[0][0] === "exception" && /^exception\.type(,ob1\.fault\.code)?$/.test(String(thrown[0][1])) && /^[A-Z][A-Za-z0-9]*$/.test(String(tool?.events[0]?.attributes?.["exception.type"])),
@@ -3592,7 +3656,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     // Trusted, the caller's trace is continued: the request's span its span's child, the line its trace.
     exporter.reset();
     const trustedLine = await trusting(() => linesOf(() => post(callOf("brain_info", {}), { traceparent })));
-    const continued = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    const continued = requestSpan();
     assert(continued?.spanContext().traceId === TID && parentOf(continued) === PARENT && continued.links.length === 0 && trustedLine[0]?.trace === TID,
       `with OB1_OTEL_TRUST_TRACEPARENT=1 the caller's trace is continued, and the line names it (${continued?.spanContext().traceId} ${parentOf(continued)})`);
     // A throw in the MCP route (the registry's) has its kind on the request's span, as the REST core's onError's does (review pass 3).
@@ -3609,9 +3673,14 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       registry.resolve = resolveReal;
       console.error = errorReal;
     }
-    const routeThrew = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
-    assert(JSON.stringify(routeThrew?.events.map((e) => [e.name, e.attributes])) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]),
-      `a throw in the MCP route: its kind on the request's span, no message (${JSON.stringify(routeThrew?.events)})`);
+    const routeSpans = exporter.getFinishedSpans();
+    const routeThrew = requestSpan(routeSpans);
+    // Through the MCP server the registry is the REST core's: the throw's kind is on its request's span, under the MCP
+    // server's (PR 4c), whose own span has the kind of what it met — a 500 — since an answer carries no exception's.
+    const threwAt = mcpTarget() === "client" ? routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId)) : routeThrew;
+    const routeEvents = (sp: Span | undefined) => JSON.stringify(sp?.events.map((e) => [e.name, e.attributes]));
+    assert(routeEvents(threwAt) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]) && routeEvents(routeThrew)?.includes('"exception"') === true && !JSON.stringify(routeSpans.map((sp) => sp.events)).includes(PLANTED),
+      `a throw in the MCP route: its kind on the request's span — through the MCP server, the REST core's under it — no message (${routeEvents(threwAt)} ${routeEvents(routeThrew)})`);
     // A keyless caller at a mirror is refused at its key: its point labels no tool (PR 2c review pass 3).
     await fetch(`${BASE}/mcp/worker-status`).then((r) => r.text());
     await tracing.flush();
@@ -3634,13 +3703,13 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     exporter.reset();
     await fetch(`${BASE}/mcp/worker-status`, { headers: { "x-brain-key": KEY } }).then((r) => r.text());
     await fetch(`${BASE}/mcp/worker-retry-failed`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }).then((r) => r.text());
-    const mirrorFaults = exporter.getFinishedSpans().filter((sp) => sp.kind === SpanKind.SERVER).map((sp) => [sp.name, sp.events.map((e) => e.name)]);
+    const mirrorFaults = requestSpans().map((sp) => [sp.name, sp.events.map((e) => e.name)]);
     assert(JSON.stringify(mirrorFaults) === JSON.stringify([["GET /worker-status", ["exception"]], ["POST /worker-retry-failed", ["exception"]]]),
       `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
     await post(callOf("brain_info", {}), {}, "/mcp");
-    const refusedAtKey = exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER);
+    const refusedAtKey = requestSpan();
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
     // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
@@ -3649,7 +3718,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
       Object.assign(t, { rpc: "tools/call", tool: "brain_info", outcome, code, refusedAtKey: atKey });
       t.end();
-      return attrs(exporter.getFinishedSpans().find((sp) => sp.kind === SpanKind.SERVER))["gen_ai.tool.name"];
+      return attrs(requestSpan())["gen_ai.tool.name"];
     };
     const counted = ["UNAUTHORIZED", "BUSY", "REVOKED", "AUTH_UNREACHABLE"].map((code) => byTool(code, false, "refused"));
     assert(counted.every((n) => n === "brain_info") && byTool("UNAUTHORIZED", true, "refused") === undefined && byTool("FAILED", false, "unrun") === undefined,
@@ -3658,7 +3727,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     // A call that answers, with no traceparent: a trace of its own, on the line too; no ERROR.
     exporter.reset();
     const listed = await linesOf(() => post(callOf("brain_info", {})));
-    const own = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const own = requestSpan();
     assert(own !== undefined && /^[0-9a-f]{32}$/.test(own.spanContext().traceId) && own.spanContext().traceId !== TID && listed[0]?.trace === own.spanContext().traceId
       && own.parentSpanContext === undefined && own.status.code === SpanStatusCode.UNSET && attrs(own)["ob1.outcome"] === "ok" && !("error.type" in attrs(own)),
       `with none, the request starts its own trace, which its line names; an \`ok\` span has no error (${own?.spanContext().traceId} ${listed[0]?.trace} ${own?.status.code})`);
@@ -3669,7 +3738,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     gone.abort();
     await Promise.resolve(worker.fetch(new Request(`http://mcp/mcp/worker-status`, { headers: { "x-brain-key": KEY }, signal: gone.signal }))).then((r) => r.text()).catch(() => {});
     await Bun.sleep(50);
-    const left = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const left = requestSpan();
     assert(attrs(left)["ob1.outcome"] === "abandoned" && !("http.response.status_code" in attrs(left)) && attrs(left)["http.route"] === "/worker-status" && left?.name === "GET /worker-status" && left.status.code === SpanStatusCode.UNSET,
       `an abandoned request's span carries no status it was never handed, and no error (${left?.name} ${JSON.stringify(attrs(left))})`);
 
@@ -3678,13 +3747,14 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     await post([callOf("brain_info", {}, 121), callOf("search_thoughts", { query: "batched" }, 122)]);
     await Bun.sleep(50);
     const batchSpans = exporter.getFinishedSpans();
-    const batch = batchSpans.find((s) => s.kind === SpanKind.SERVER);
-    const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId);
+    const batch = requestSpan(batchSpans);
+    // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
+    const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();
     await Promise.resolve(worker.fetch(new Request("http://mcp/mcp", { method: "PROPFIND" }))).then((r) => r.text());
-    const odd = exporter.getFinishedSpans().find((s) => s.kind === SpanKind.SERVER);
+    const odd = requestSpan();
     assert(odd?.name === "HTTP" && attrs(odd)["http.request.method"] === "_OTHER", `a method outside the known set is _OTHER, its span HTTP (${odd?.name} ${JSON.stringify(attrs(odd))})`);
 
     // Nothing a client sent reaches a span: the key (in the query and a header), the planted text, a tool name carrying it.
@@ -3716,7 +3786,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     cutOpenRequests();
     const cutSpans = exporter.getFinishedSpans();
     const cutTool = cutSpans.find((sp) => sp.name === "execute_tool brain_info");
-    const cutRequest = cutSpans.find((sp) => sp.kind === SpanKind.SERVER);
+    const cutRequest = requestSpan(cutSpans);
     assert(cutTool !== undefined && attrs(cutTool)["ob1.outcome"] === "cut" && cutTool.status.code === SpanStatusCode.ERROR && cutTool.parentSpanContext?.spanId === cutRequest?.spanContext().spanId && attrs(cutRequest)["ob1.outcome"] === "cut",
       `a tool call the stop cuts ends \`cut\`, ERROR, under its request's \`cut\` span (${JSON.stringify(cutSpans.map((sp) => [sp.name, attrs(sp)["ob1.outcome"]]))})`);
   } finally {
@@ -3729,14 +3799,18 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   // A real `bun index.ts` with a collector named: it says where its spans,
   // metrics and log records go, and its stop sends what is batched (the span
   // batch's own delay is 5 s) and the metrics' last reading before it exits. A
-  // keyless tools/list, refused at the key, reads no store.
+  // keyless tools/list, refused at the key, reads no store. Through the MCP
+  // server, its own entry (SMD-2287 PR 4c), which refuses that request before
+  // it calls the REST core: a port that never answers stands in for one.
   const received: Record<string, string[]> = {};
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const mcp = await serveChild(import.meta.dir, "index.ts", {
+  const throughClient = mcpTarget() === "client";
+  const mcp = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}`,
     OTEL_SERVICE_NAME: "ob1-mcp-probe",
+    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "" } : {}),
   }, { waitForSdk: true });
   let out = "";
   try {
@@ -4856,6 +4930,40 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     }
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
+    // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
+    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
+    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
+    await stopTelemetry();
+    const probed = new InMemorySpanExporter();
+    const probedLogs = new InMemoryLogRecordExporter();
+    const probedPoints = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const { useRequestLog } = await import("./telemetry.ts");
+    const probeLines: string[] = [];
+    const beforeLog = useRequestLog((l) => probeLines.push(l));
+    const VALID = ANONYMOUS_PER_MINUTE + 10, WRONG = 3;
+    try {
+      await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: probed, logs: probedLogs, metrics: probedPoints }) }));
+      now += 60_000;
+      const head = async (key: string) => (await worker.fetch(new Request("http://mcp/mcp/health", { method: "HEAD", headers: { "x-brain-key": key } }))).text();
+      for (let i = 0; i < VALID; i++) await head(KEY);
+      for (let i = 0; i < WRONG; i++) await head(`wrong-${i}`);
+      await (await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }))).text();
+      await flushTelemetry();
+    } finally {
+      useRequestLog(beforeLog);
+    }
+    const probeRecords = probeLines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const isHead = (attrs: Record<string, unknown> | undefined) => attrs?.["http.request.method"] === "HEAD" || attrs?.method === "HEAD";
+    const headSpans = probed.getFinishedSpans().filter((sp) => isHead(sp.attributes as Record<string, unknown>)).length;
+    const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
+    const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
+    const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
+    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
+    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
+      && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
+      `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
   } finally {
     await stopTelemetry();
     useBudgetClock(realClock);

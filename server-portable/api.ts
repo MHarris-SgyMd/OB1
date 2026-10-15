@@ -26,15 +26,25 @@ const core = createCore({ env, store: db, door: API_DOOR });
 /** The calls running — each request and each detached job run — counted for the stop (SMD-2250). */
 const calls = createCallCount();
 
-export const app = createRestApp({
-  core,
-  init: () => initEnv(),
-  keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
-  resolve: (principal) => agents().resolve(db(), principal),
-  track: calls.track,
-  plugins,
-  hooks,
-});
+/**
+ * The REST app over this core: its request lines to `log` where given, else
+ * the request log (telemetry.ts). mcp-server/stack.ts gives one, so in a
+ * suite the REST core's lines are apart from the MCP server's in front of it,
+ * as two processes' are (SMD-2287 PR 4b).
+ */
+export function restApp(log?: (line: string) => void) {
+  return createRestApp({
+    core,
+    init: () => initEnv(),
+    keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
+    resolve: (principal) => agents().resolve(db(), principal),
+    track: calls.track,
+    plugins,
+    hooks,
+    ...(log ? { log } : {}),
+  });
+}
+export const app = restApp();
 
 // Stopping on SIGTERM, what is in flight finished (SMD-2250), as the MCP
 // server stops: only when this module is Bun's entry, never in a suite that

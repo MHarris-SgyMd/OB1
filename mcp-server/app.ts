@@ -19,11 +19,14 @@ import type { Refusal } from "../server-portable/core/refusal.ts";
 import type { LoadedOp, LoadedPlugin } from "../server-portable/core/plugins.ts";
 import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
+import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
+import type { CallCount } from "../server-portable/shutdown.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
 import {
-  BUSY_MESSAGE, challengeResponse, corsHeaders, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS,
-  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, noteLegacyRoute, notificationRefusedResponse, rawPath, readBodyText,
-  REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, unauthorizedResponse, unavailableResponse, type MirrorTool,
+  BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS,
+  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody,
+  partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing,
+  unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type MirrorTool, type RequestParts,
 } from "../server-portable/mcp-edge.ts";
 import type { Answer, RestClient } from "../rest-client/index.ts";
 
@@ -59,14 +62,32 @@ export interface McpDeps {
    * not given is no tool here.
    */
   plugins?: () => readonly LoadedPlugin[];
+  /** The tool calls running, counted for the stop (SMD-2250), as index.ts counts its own: a call whose client left still runs to its end. */
+  toolCalls?: CallCount & { track<T>(run: () => T | Promise<T>): Promise<T> };
+  /** Set by the entry's stop when it cuts what is still in flight: a request it ends then is `cut`, said by the stop's line, not `abandoned`. */
+  stop?: { cut: boolean };
+}
+
+/**
+ * The REST core refused this server's own forward-scope key — unknown, out of
+ * scope, revoked: the server is misconfigured, whichever route asked. Said once
+ * in the log in these words wherever it arrives (review pass 5 of PR 4b: four
+ * routes said it four ways, one as the caller refused).
+ */
+export class ForwarderRefused extends Error {
+  /** The operator's fix, for the log alone: a client is told the forwarder was refused, never this server's settings (review pass 6). */
+  readonly hint = "set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds";
+  constructor(status: number, code: string | undefined) {
+    super(`the REST core refused this server's forwarder key (${status} ${code ?? "?"})`);
+  }
 }
 
 /** Who a request's key is, as the REST core's whoami says: its name, its scope and the operations it may call — or why not. */
 export type Standing =
   | { kind: "caller"; key: string; name: string; scope: string; operations: ReadonlySet<string> }
   | { kind: "none" } // no key, or none the core knows
-  | { kind: "revoked" }
-  | { kind: "busy" };
+  | { kind: "revoked"; name?: string }
+  | { kind: "busy"; name?: string };
 
 /**
  * The caller, as server-portable finds one: each key the request presents —
@@ -77,18 +98,22 @@ export type Standing =
  * this server fills is its own: refused there, the server is misconfigured,
  * and the request is a fault, never a caller's refusal.
  */
-export async function standingOf(rest: RestClient, req: Request, signal?: AbortSignal): Promise<Standing> {
+export async function standingOf(rest: RestClient, req: Request, signal?: AbortSignal, onUnknown?: (key: string) => void): Promise<Standing> {
   for (const key of presentedKeys(req)) {
     const a = await rest.call("whoami" as never, {} as never, { key, signal });
     const body = (a.body ?? {}) as { code?: string; credential?: string; name?: string; scope?: string; operations?: string[] };
     // This server's own key in the forwarder slot: busy is the registry's, as for a caller's key (review pass 3: it read
     // as a misconfiguration); refused, the server is misconfigured.
-    if (body.credential === "forwarder" && a.status === 503) return { kind: "busy" };
-    if (body.credential === "forwarder") throw new Error(`the REST core refused this server's forwarder key (${a.status} ${body.code ?? "?"}): set OB1_FORWARDER_KEY to a forward-scope key MCP_ACCESS_KEYS holds`);
+    // A caller's key the registry revoked or is busy on is named, as the REST core names it to a forwarder, for the line.
+    const named = typeof body.name === "string" ? { name: body.name } : {};
+    if (body.credential === "forwarder" && a.status === 503) return { kind: "busy", ...named };
+    if (body.credential === "forwarder") throw new ForwarderRefused(a.status, body.code);
     if (a.status === 200) return { kind: "caller", key, name: String(body.name), scope: String(body.scope), operations: new Set(body.operations ?? []) };
-    if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked" };
-    if (a.status === 503) return { kind: "busy" };
+    if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked", ...named };
+    if (a.status === 503) return { kind: "busy", ...named };
     if (a.status !== 401) throw new Error(`the REST core answered whoami ${a.status} ${body.code ?? ""}`.trim());
+    // A key the REST core does not know: the next decides, if one does.
+    onUnknown?.(key);
   }
   return { kind: "none" };
 }
@@ -106,9 +131,11 @@ type Outcome = { ok: true; value: unknown } | { ok: false; refusal: Refusal } | 
  * answered itself) is a fault naming its code.
  */
 export function outcomeOf(a: Answer): Outcome {
-  const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; issues?: { path: string; message: string }[] };
+  const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; credential?: string; issues?: { path: string; message: string }[] };
   if (body.refusal && typeof body.refusal === "object") return { ok: false, refusal: body.refusal };
   if (a.ok) return { ok: true, value: a.body };
+  // This server's forwarder refused mid-call: its misconfiguration, whichever operation asked (review pass 5). Busy is the registry's (turned).
+  if (body.credential === "forwarder" && a.status !== 503) return { fault: new ForwarderRefused(a.status, body.code) };
   if ((body.code === "FAILED" || body.code === "STORE_UNAVAILABLE") && typeof body.message === "string") return { fault: new Error(body.message) };
   if (body.code === "REFUSED_INPUT" && body.issues?.length) return { fault: new Error(body.issues.map((i) => `${i.path || "input"}: ${i.message}`).join("; ")) };
   return { fault: new Error(`the REST core answered ${a.status}${body.code ? ` ${body.code}` : ""}`) };
@@ -198,28 +225,56 @@ const WORDS: Record<ToolName, Words> = {
  * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
  * client sent them (argumentsById), which a plugin tool sends on.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments): McpServer {
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: FORK_VERSION });
-  const register = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
+  const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
+  // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
+  // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
+  // span's traceparent, so the operation's spans are its children, one trace.
+  const register = (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }, span: ToolSpan) => Promise<say.Reply>) =>
+    registerTool(name, spec, (input, ctx) => track(() => withToolSpan(name, (span) => handler(input, ctx, span))));
+  // One call's end on the request's record, for its line, and on its span: how it ended, and the code an error reply carries (index.ts's ended).
+  const ended = (reply: say.Reply, outcome: "ok" | "refused" | "error", span: ToolSpan): say.Reply => {
+    const code = reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined;
+    recordCall(record, outcome, code);
+    span.end(outcome, code);
+    return reply;
+  };
+  /**
+   * A fault's reply as the call's end — and a fault reply that itself throws is still an error, counted (index.ts's
+   * registerOp); this server's forwarder refused mid-call said in the log too, as on every route (review pass 6). The
+   * fault's kind on the call's span, never its message (PR 2c); a call this server refused before sending has none.
+   */
+  const faulted = (err: unknown, say_: () => say.Reply, span: ToolSpan): say.Reply => {
+    if (err instanceof ForwarderRefused) tell(err);
+    if (err !== null) span.fault(err);
+    try {
+      return ended(say_(), "error", span);
+    } catch (err) {
+      recordCall(record, "error", undefined);
+      throw err;
+    }
+  };
   for (const name of Object.keys(WORDS) as ToolName[]) {
     if (!caller.operations.has(name)) continue;
     const words = WORDS[name];
-    register(name, SPECS[name], async (input: never) => {
+    register(name, SPECS[name], async (input: never, _ctx, span) => {
       // The call and its rendering under one catch, as index.ts's registerOp runs
       // them: a reply that cannot be said is the tool's fault, its code the
       // session hook reads (review pass 1: a throw past it reached the SDK as an
       // uncoded error).
       try {
         let outcome = outcomeOf(await rest.call(name as never, input, { key: caller.key }));
-        if ("fault" in outcome) return words.fault(outcome.fault, input);
+        if ("fault" in outcome) return faulted(outcome.fault, () => words.fault((outcome as { fault: Error }).fault, input), span);
         if (name === "scan_thoughts" && outcome.ok) {
           // The handle's links under this server's endpoint, as atEndpoint puts them (jobs.ts): its /jobs routes, not the REST core's /v1/jobs.
           const handle = outcome.value as { jobId: string };
           outcome = { ok: true, value: { ...handle, poll: `${endpoint}/jobs/${handle.jobId}`, stream: `${endpoint}/jobs/${handle.jobId}/stream` } };
         }
-        return words.render(outcome as never, input);
+        const reply = words.render(outcome as never, input);
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err) {
-        return words.fault(err, input);
+        return faulted(err, () => words.fault(err, input), span);
       }
     });
   }
@@ -232,18 +287,20 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   // or a codec ran on its own output); the SDK's validation runs the steps too.
   for (const op of ops) {
     if (!caller.operations.has(op.tool)) continue;
-    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx) => {
+    register(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output }, async (_input: never, ctx, span) => {
       try {
         const id = JSON.stringify(ctx?.mcpReq?.id);
         const given = raw.get(id);
-        if (given === AMBIGUOUS) return say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`));
+        if (given === AMBIGUOUS) return faulted(null, () => say.failed(new Error(`two calls in this request share the JSON-RPC id ${id}: each call needs an id of its own`)), span);
         // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
-        if (!given) return say.failed(new Error(`this server could not read the arguments of call ${id} from its request`));
+        if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)), span);
         const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
         const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, { key: caller.key }));
-        return "fault" in outcome ? say.failed(outcome.fault) : say.renderPlugin(outcome as never);
+        if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault), span);
+        const reply = say.renderPlugin(outcome as never);
+        return ended(reply, reply.isError ? "refused" : "ok", span);
       } catch (err) {
-        return say.failed(err);
+        return faulted(err, () => say.failed(err), span);
       }
     });
   }
@@ -273,6 +330,31 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
   };
 
+  // Every request's record (SMD-1849, telemetry.ts's RequestTrace), made first
+  // and ended here, as index.ts's first middleware makes and ends it — the MCP
+  // endpoint and a job stream mark it deferred and end it themselves — save
+  // the liveness probe's: a GET or HEAD at a health path with no key, which
+  // gets no record at all. A route's throw is Hono's 500 (onError, below).
+  app.use("*", async (c, next) => {
+    const probe = (c.req.method === "GET" || c.req.method === "HEAD") && HEALTH_PATH.test(c.req.path)
+      && !c.req.path.startsWith("/.well-known/") && presentedKeys(c.req.raw).length === 0;
+    if (probe) return next();
+    const trace = beginRequest("mcp", c.req.raw);
+    try {
+      await trace.run(next);
+    } catch (err) {
+      trace.fault(err);
+      trace.end({ status: 500, outcome: "error" });
+      throw err;
+    }
+    if (trace.deferred || trace.ended) return;
+    const at = performance.now();
+    const gone = trace.clientGone;
+    const code = gone ? undefined : trace.code;
+    const outcome = gone ? "abandoned" : trace.outcome ?? outcomeOfStatus(c.res.status, code);
+    trace.end({ status: c.res.status, outcome, code }, at);
+  });
+
   // CORS preflight — required for browser/Electron-based clients (Claude Desktop, claude.ai).
   app.options("*", (c) => c.text("ok", 200, corsHeaders));
 
@@ -296,7 +378,10 @@ export function createMcpApp(deps: McpDeps): Hono {
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
-    const line = `mcp-server: ${lead}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}`;
+    // This server's forwarder refused is one misconfiguration, said in one line whichever route met it (review pass 6).
+    const said = err instanceof ForwarderRefused ? "this server is misconfigured" : lead;
+    const hint = err instanceof ForwarderRefused ? `: ${err.hint}` : "";
+    const line = `mcp-server: ${said}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}${hint}`;
     const now = Date.now();
     if (now - (lastSaid.get(line) ?? -Infinity) < 60_000) return;
     lastSaid.set(line, now);
@@ -304,21 +389,27 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
   /** The registry busy on a key between its check and the call: shown `ok`, as index.ts shows a busy key at every keyed route (review pass 3). */
   const busyNow = (a: Answer) => a.status === 503 && (a.body as { code?: string } | null)?.code === "BUSY";
+  /** The registry's word on a key it turned between its check and the call — busy, or revoked — or none (review pass 3 of PR 4b: a revoked one read as a fault). */
+  const turned = (a: Answer): { status: "busy" | "revoked" } | null =>
+    busyNow(a) ? { status: "busy" } : a.status === 401 && (a.body as { code?: string; credential?: string } | null)?.code === "REVOKED" && (a.body as { credential?: string }).credential !== "forwarder" ? { status: "revoked" } : null;
   /**
    * The caller of a keyed mirror or /health, its key's standing within
    * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
    * standing not had by then — the registry's tables locked — is none, and
    * the route shows `ok` (review pass 1: it waited out the REST timeout).
    */
-  const standingInTime = async (req: Request, budget: AbortSignal): Promise<Standing> => {
+  type Found = Standing | { kind: "fault"; err: unknown };
+  const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void): Promise<Found> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
     const standing = await Promise.race([
-      standingOf(deps.rest, req, budget).catch((err): Standing => {
-        if (!budget.aborted) sayOnce(err);
-        return { kind: "none" };
+      standingOf(deps.rest, req, budget, onUnknown).catch((err): Found => {
+        // The deadline's own abort is the registry's silence, shown nothing; any other throw is this server's fault (review pass 1 of PR 4b).
+        if (budget.aborted) return { kind: "none" };
+        sayOnce(err);
+        return { kind: "fault", err };
       }),
-      new Promise<Standing>((resolve) => {
+      new Promise<Found>((resolve) => {
         onAbort = () => resolve({ kind: "none" });
         budget.addEventListener("abort", onAbort, { once: true });
       }),
@@ -326,11 +417,53 @@ export function createMcpApp(deps: McpDeps): Hono {
     budget.removeEventListener("abort", onAbort);
     return standing;
   };
-  // A keyed mirror's caller: one whose key the REST core knows, stands by,
-  // and lets call the mirror's tool — else null, and the mirror shows `ok`.
-  const mirrorCaller = async (c: Context, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS)) => {
-    const standing = await standingInTime(c.req.raw, budget);
-    return standing.kind === "caller" && standing.operations.has(tool) ? standing : null;
+  /**
+   * A keyed route's caller — one whose key the REST core knows, stands by,
+   * and lets call the route's tool — or the route's answer to one it does not
+   * have: `ok`, a 200 that shows nothing. Its line, as index.ts's: the route
+   * as a template and its tool (nameRoute), the key's name once known, and
+   * `refused` for a caller shown nothing — REVOKED or BUSY where the registry
+   * said which (mcp-edge.ts shownNothing, notCleared).
+   */
+  type Caller = Extract<Standing, { kind: "caller" }>;
+  const keyedCaller = async (c: Context, route: string, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS), onUnknown?: (key: string) => void): Promise<Caller | Response> => {
+    const trace = nameRoute(c, route, tool);
+    const standing = await standingInTime(c.req.raw, budget, onUnknown);
+    if (standing.kind === "caller" && standing.operations.has(tool)) {
+      if (trace) trace.agent = standing.name;
+      return standing;
+    }
+    if (standing.kind === "revoked" || standing.kind === "busy") {
+      if (trace && standing.name) trace.agent = standing.name;
+      return notCleared(c, trace, { status: standing.kind });
+    }
+    // The REST core away, this server's forwarder refused, a whoami that threw: shown `ok` as before, its line
+    // `error` FAILED, not a key refused (review pass 1 of PR 4b: an outage read as every key turned away).
+    if (standing.kind === "fault") {
+      if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(standing.err); }
+      return c.text("ok", 200, corsHeaders);
+    }
+    return shownNothing(c, trace);
+  };
+  /**
+   * A keyed HEAD: no body to carry an answer, so liveness at once, asking the REST core nothing, a probe never
+   * waiting on the registry (review passes 1 and 2 of PR 4b: asking whoami first, a locked registry held it 1.8 s);
+   * its line `ok`, the route named and no key, where index.ts matched the key's hash. Liveness alone: its line and its
+   * point, its span and record unsent, so a monitor's probes spend none of the budget for requests no key was accepted
+   * for (PR 4c review pass 1).
+   */
+  const headAtOnce = (c: Context, route: string, tool: ToolName) => {
+    const trace = traceOf(c.req.raw);
+    if (trace) trace.liveness = true;
+    nameRoute(c, route, tool);
+    return c.text("ok", 200, corsHeaders);
+  };
+  /** A route that faulted: its line `error` FAILED, its kind on the span; a mirror's 200 {error} answer as index.ts's, or (`shownOk`) liveness. */
+  const faultedAt = (c: Context, err: unknown, shownOk = false) => {
+    if (err instanceof ForwarderRefused) sayOnce(err);
+    const trace = traceOf(c.req.raw);
+    if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(err); }
+    return shownOk ? c.text("ok", 200, corsHeaders) : c.json({ error: (err as Error).message }, 200, corsHeaders);
   };
 
   // /health: liveness, and with a key that may read it, what the brain is
@@ -339,8 +472,8 @@ export function createMcpApp(deps: McpDeps): Hono {
   // included — with this server's view of the public origin beside it.
   app.get("*", async (c, next) => {
     if (!HEALTH_PATH.test(c.req.path)) return next();
-    const keys = presentedKeys(c.req.raw);
-    if (keys.length === 0 || c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+    if (presentedKeys(c.req.raw).length === 0) return c.text("ok", 200, corsHeaders);
+    if (c.req.method === "HEAD") return headAtOnce(c, "/health", "brain_info");
     // The first key the REST core knows decides, as index.ts authenticates the
     // first that matches: a capture or revoked key before a read key is `ok`,
     // not the record (review pass 1).
@@ -349,12 +482,47 @@ export function createMcpApp(deps: McpDeps): Hono {
     // and the route answers `ok` (review pass 2: one after the other, a keyed
     // probe could wait twice the deadline).
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
-    const caller = await mirrorCaller(c, "brain_info", budget);
-    if (!caller) return c.text("ok", 200, corsHeaders);
+    // The record asked beside the key's standing, as index.ts starts its read with the registry's check: one after the
+    // other, a slow registry and a slow read each inside the deadline ran past it together (review passes 3 and 4 of PR
+    // 4b). A key's record is asked once every key before it is found unknown — the first that could decide, as index.ts
+    // reads the first key that matches, never one more (review pass 5: each valid key asked cost a read and a lookup).
+    // The REST core's registry runs one lookup per key at a time (agents.ts), so a read shares its key's whoami lookup;
+    // the edge's view starts beside them, for any key presented — index.ts starts it once a key matches its hash, at
+    // once; its probe is cached 30 s.
+    type Read = { a: Answer | null; fault: unknown };
+    const early = new AbortController();
+    const signal = AbortSignal.any([budget, early.signal]);
+    const keys = presentedKeys(c.req.raw);
+    const reads = new Map<string, Promise<Read>>();
+    const ask = (key: string | undefined) => {
+      if (key === undefined || reads.has(key)) return;
+      reads.set(key, deps.rest.call("health" as never, {} as never, { key, signal }).then((a): Read => ({ a, fault: null }), (fault): Read => ({ a: null, fault })));
+    };
+    ask(keys[0]);
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    const a = await deps.rest.call("health" as never, {} as never, { key: caller.key, signal: budget }).catch(() => null);
-    const body = a?.ok ? (a.body as Record<string, unknown> | null) : null;
-    if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return c.text("ok", 200, corsHeaders);
+    const caller = await keyedCaller(c, "/health", "brain_info", budget, (key) => ask(keys[keys.indexOf(key) + 1]));
+    if (caller instanceof Response) {
+      early.abort();
+      return caller;
+    }
+    ask(caller.key); // defensive: the deciding key's record is asked by now, every key before it unknown
+    const { a, fault } = await reads.get(caller.key)!;
+    early.abort();
+    // The deadline's own abort is the registry's silence: liveness, `refused` (index.ts's notCleared). Any other throw,
+    // or an answer that is no record and no liveness, is this server's fault: liveness all the same, its line `error`
+    // FAILED (review pass 2 of PR 4b: the REST core gone between the two calls read as the key refused).
+    // The caller was found; its record was not (review pass 3: the default lead sent the operator after the key).
+    const recordFault = (err: unknown) => {
+      sayOnce(err, "/health's record could not be read");
+      return faultedAt(c, err, true);
+    };
+    if (budget.aborted) return notCleared(c, traceOf(c.req.raw), null);
+    if (fault !== null || !a?.ok) return recordFault(fault ?? new Error(`the REST core answered /health ${a?.status}`));
+    const body = a.body as Record<string, unknown> | null;
+    // Liveness where the record was asked: the registry did not clear the key in time (index.ts's notCleared).
+    if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
+    // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
+    if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
     noteLegacyRoute(c.req.raw, caller.name);
     return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
@@ -363,46 +531,52 @@ export function createMcpApp(deps: McpDeps): Hono {
   const WORKER_STATUS_PATH = /(^|\/)worker-status\/?$/;
   app.get("*", async (c, next) => {
     if (!WORKER_STATUS_PATH.test(c.req.path)) return next();
-    const caller = await mirrorCaller(c, "worker_status");
-    if (!caller) return c.text("ok", 200, corsHeaders);
-    if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, "/worker-status", "worker_status");
+    const caller = await keyedCaller(c, "/worker-status", "worker_status");
+    if (caller instanceof Response) return caller;
     noteLegacyRoute(c.req.raw, caller.name);
     try {
       const answered = await deps.rest.call("worker_status", {}, { key: caller.key });
-      if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+      const word = turned(answered);
+      if (word) return notCleared(c, traceOf(c.req.raw), word);
       const o = outcomeOf(answered);
-      if ("fault" in o) return c.json({ error: o.fault.message }, 200, corsHeaders);
+      if ("fault" in o) return faultedAt(c, o.fault);
       // The operation answers an object (a tool result is one); this route has always answered the bare rows.
       return c.json(o.ok ? (o.value as { pools: unknown }).pools : [], 200, corsHeaders);
     } catch (e) {
-      return c.json({ error: (e as Error).message }, 200, corsHeaders);
+      return faultedAt(c, e);
     }
   });
 
   // The worker-queue actions as keyed POSTs (SMD-2132, SMD-2272), each its tool's REST mirror.
-  const MIRRORS: [RegExp, MirrorTool][] = [
-    [/(^|\/)worker-retry-failed\/?$/, "retry_failed"],
-    [/(^|\/)worker-release-leases\/?$/, "release_stale_leases"],
-    [/(^|\/)worker-run\/?$/, "run_worker"],
+  const MIRRORS: [RegExp, MirrorTool, string][] = [
+    [/(^|\/)worker-retry-failed\/?$/, "retry_failed", "/worker-retry-failed"],
+    [/(^|\/)worker-release-leases\/?$/, "release_stale_leases", "/worker-release-leases"],
+    [/(^|\/)worker-run\/?$/, "run_worker", "/worker-run"],
   ];
   app.post("*", async (c, next) => {
-    const tool = MIRRORS.find(([re]) => re.test(c.req.path))?.[1];
-    if (!tool) return next();
-    const caller = await mirrorCaller(c, tool);
-    if (!caller) return c.text("ok", 200, corsHeaders);
+    const mirror = MIRRORS.find(([re]) => re.test(c.req.path));
+    if (!mirror) return next();
+    const [, tool, route] = mirror;
+    const caller = await keyedCaller(c, route, tool);
+    if (caller instanceof Response) return caller;
     noteLegacyRoute(c.req.raw, caller.name);
     const body = await c.req.json().catch(() => null);
     const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     try {
       const answered = await deps.rest.call(tool, MIRROR_INPUT[tool](args) as never, { key: caller.key });
-      if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+      const word = turned(answered);
+      if (word) return notCleared(c, traceOf(c.req.raw), word);
       const o = outcomeOf(answered);
-      if ("fault" in o) return c.json({ error: o.fault.message }, 200, corsHeaders);
+      if ("fault" in o) return faultedAt(c, o.fault);
       if (o.ok) return c.json(o.value as object, 200, corsHeaders);
+      // A refusal's code on the record for the line, as it is answered (index.ts's).
+      const trace = traceOf(c.req.raw);
+      if (trace) trace.code = o.refusal.code;
       const words = MIRROR_WORDS[tool] as Record<string, string>;
       return c.json({ error: words[o.refusal.code], code: o.refusal.code }, 400, corsHeaders);
     } catch (e) {
-      return c.json({ error: (e as Error).message }, 200, corsHeaders);
+      return faultedAt(c, e);
     }
   });
 
@@ -414,27 +588,37 @@ export function createMcpApp(deps: McpDeps): Hono {
     const pollMatch = streamMatch ? null : JOBS_PATH.exec(c.req.path);
     if (!streamMatch && !pollMatch) return next();
     const id = (streamMatch ?? pollMatch)![2];
-    const caller = await mirrorCaller(c, "job_status");
-    if (!caller) return c.text("ok", 200, corsHeaders);
-    if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+    const route = streamMatch ? "/jobs/:id/stream" : "/jobs/:id";
+    if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, route, "job_status");
+    const caller = await keyedCaller(c, route, "job_status");
+    if (caller instanceof Response) return caller;
     noteLegacyRoute(c.req.raw, caller.name);
     if (streamMatch) {
       const upstream = await deps.rest.stream(id, { key: caller.key, signal: c.req.raw.signal });
       if (upstream.status !== 200 || !upstream.body) {
-        void upstream.body?.cancel().catch(() => {});
+        // A 401's code read, its body consumed by the read; any other's let go unread (review pass 4 of PR 4b: a clone
+        // after the cancel threw, and every 401 at the stream was a 500).
+        const refusal = upstream.status === 401 ? (await upstream.json().catch(() => null)) as { code?: string; credential?: string } | null : null;
+        if (upstream.status !== 401) void upstream.body?.cancel().catch(() => {});
         // Not there for this key: index.ts's 404. A fault — the durable job
         // store away — is Hono's 500, as index.ts's throw is; a key the REST
         // core no longer stands by is shown `ok` (review pass 2: all three read
         // "not found", which a poller gives up on).
         if (upstream.status === 404) return c.json({ error: "not found" }, 404, corsHeaders);
         if (upstream.status >= 500 && upstream.status !== 503) throw new Error(`the REST core answered the job stream ${upstream.status}`);
-        return c.text("ok", 200, corsHeaders);
+        // This server's forwarder refused or revoked there: its misconfiguration, a 500 said once, as at the poll (review pass 5 of PR 4b).
+        if (refusal?.credential === "forwarder") throw new ForwarderRefused(401, refusal.code);
+        return notCleared(c, traceOf(c.req.raw), upstream.status === 503 ? { status: "busy" } : refusal?.code === "REVOKED" ? { status: "revoked" } : null);
       }
       const response = new Response(upstream.body, { status: 200, headers: { ...corsHeaders, "content-type": "text/event-stream", "cache-control": "no-cache" } });
-      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream` });
+      // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
+      const trace = traceOf(c.req.raw);
+      const ends = trace ? endsWithStream(trace, c.req.raw.signal) : {};
+      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, ...ends });
     }
     const answered = await deps.rest.call("job_status", { job_id: id }, { key: caller.key });
-    if (busyNow(answered)) return c.text("ok", 200, corsHeaders);
+    const word = turned(answered);
+    if (word) return notCleared(c, traceOf(c.req.raw), word);
     const o = outcomeOf(answered);
     if ("fault" in o) throw o.fault;
     if (!o.ok) return c.json({ error: "not found" }, 404, corsHeaders);
@@ -444,69 +628,115 @@ export function createMcpApp(deps: McpDeps): Hono {
   // The MCP endpoint, POST at every path (index.ts's route): the caller's
   // standing first — refused as server-portable refuses, the edge's envelopes
   // and a notification's bare answer — then the SDK's transport over a server
-  // whose tools are the caller's operations.
+  // whose tools are the caller's operations. Its record, which the first
+  // middleware made, it ends itself, once, when the request ends — answered
+  // (with the bytes the transport wrote), refused at the key, left by its
+  // client, cut by the stop, stalled, or thrown — as index.ts's route does:
+  // the JSON-RPC method and tool once the body is read, the key's name once
+  // known, and how the tools ended; a tool call asked for that never ran to an
+  // end is `unrun`, and a batch says its worst.
   app.on(MCP_METHODS, "*", async (c) => {
+    const trace = traceOf(c.req.raw)!;
+    trace.deferred = true;
+    let parts: RequestParts = { toolCalls: 0 };
+    const read = (bodyText: string | null) => {
+      parts = partsOf(parsedBody(bodyText));
+      trace.rpc = parts.rpc;
+      trace.tool = parts.tool;
+    };
+    const call: CallRecord = {};
+    const finish = (end?: RequestOutcome, code?: string, bytes?: number) => {
+      if (trace.ended) return;
+      const ran = (call.ended ?? 0) < parts.toolCalls ? worseOutcome(call.outcome, "unrun") : call.outcome;
+      const outcome = end ?? ran ?? outcomeOfStatus(trace.status);
+      trace.end({ outcome, code: code ?? (outcome === call.outcome ? call.code : undefined), bytes });
+    };
+    /** Refused before any tool ran: the key, the registry; the answer's status and why. */
+    const refused = (response: Response, code: string): Response => {
+      trace.status = response.status;
+      trace.refusedAtKey = true;
+      finish("refused", code);
+      return response;
+    };
     const signal = c.req.raw.signal;
-    const started = performance.now();
     let label = "?";
     let settled = false;
     const abandoned = () => {
       if (settled) return;
       settled = true;
-      warn(abandonedRequestLine(label, performance.now() - started));
+      const cut = deps.stop?.cut === true;
+      warn((cut ? cutByStopLine : abandonedRequestLine)(label, performance.now() - trace.started));
+      finish(cut ? "cut" : "abandoned");
     };
     signal.addEventListener("abort", abandoned, { once: true });
     if (signal.aborted) {
+      // Gone before the route ran: the line and nothing else; 408 is the nearest name for what happened.
+      trace.status = 408;
       abandoned();
       return c.body(null, 408);
     }
     // Anything that throws from here — the REST core away, this server's
     // forwarder refused, the transport — is Hono's 500, the request settled
-    // first so a client gone after is no abandoned line (index.ts's catch;
-    // review passes 1 and 2).
+    // and its line written first (index.ts's catch; review passes 1 and 2).
     try {
       return await answer();
     } catch (err) {
       settled = true;
+      trace.status = 500;
+      trace.fault(err);
+      finish("error");
       throw err;
     }
     async function answer(): Promise<Response> {
       const standing = await standingOf(deps.rest, c.req.raw, signal);
       if (standing.kind === "none") {
         const edgeAnswer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
-        const target = refusalTarget(await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT));
+        const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
+        const target = refusalTarget(bodyText);
+        read(bodyText);
         settled = true;
-        if (edgeAnswer.kind === "challenge") return challengeResponse(edgeAnswer.origin, edgeAnswer.refusedToken, target);
-        if (edgeAnswer.kind === "unavailable") return unavailableResponse(target);
-        return target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse();
+        if (edgeAnswer.kind === "challenge") return refused(challengeResponse(edgeAnswer.origin, edgeAnswer.refusedToken, target), "UNAUTHORIZED");
+        if (edgeAnswer.kind === "unavailable") return refused(unavailableResponse(target), "AUTH_UNREACHABLE");
+        return refused(target.expectsReply ? unauthorizedResponse(target.id) : notificationRefusedResponse(), "UNAUTHORIZED");
       }
       if (standing.kind === "revoked" || standing.kind === "busy") {
-        const target = refusalTarget(await readBodyText(c.req.raw));
+        if (standing.name) trace.agent = standing.name;
+        const bodyText = await readBodyText(c.req.raw);
+        const target = refusalTarget(bodyText);
+        read(bodyText);
         settled = true;
-        if (standing.kind === "revoked") return target.expectsReply ? unauthorizedResponse(target.id, REVOKED_MESSAGE) : notificationRefusedResponse();
-        return target.expectsReply
+        if (standing.kind === "revoked") return refused(target.expectsReply ? unauthorizedResponse(target.id, REVOKED_MESSAGE) : notificationRefusedResponse(), "REVOKED");
+        return refused(target.expectsReply
           ? unauthorizedResponse(target.id, BUSY_MESSAGE, JSON_RPC_BUSY_CODE, { retryAfter: RETRY_AFTER_SECONDS })
-          : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS });
+          : notificationRefusedResponse({ retryAfter: RETRY_AFTER_SECONDS }), "BUSY");
       }
+      // Named from here on, so a line written later — the client gone, a throw — says whose key it was.
+      trace.agent = standing.name;
       noteLegacyRoute(c.req.raw, standing.name);
       noteUntooled(standing.operations);
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);
       label = requestLabel(rawBody);
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody));
+      read(rawBody);
+      const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
+      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err));
       const transport = new WebStandardStreamableHTTPServerTransport();
       await server.connect(transport);
       const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));
       if (!response) {
         settled = true;
+        trace.status = 500;
+        finish("error");
         return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
       }
       response.headers.delete("mcp-session-id");
       for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
+      trace.status = response.status;
+      // The line is written at the stream's end, with the bytes the transport wrote; a stall settles the request too.
       return withSseKeepalive(response, {
-        signal, label, startedAt: started, ...keepalive,
-        onEnd: () => { settled = true; },
-        onStall: () => { settled = true; },
+        signal, label, startedAt: trace.started, ...keepalive,
+        onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
+        onStall: () => { settled = true; finish("stalled"); },
         onCancel: abandoned,
       });
     }
@@ -520,8 +750,11 @@ export function createMcpApp(deps: McpDeps): Hono {
     return c.text("Internal Server Error", 500);
   });
 
-  // Whatever no route above matched: 405 with `Allow` (index.ts's notFound).
-  app.notFound((c) => c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS));
+  // Whatever no route above matched: 405 with `Allow` (index.ts's notFound) — and a line for a path the first middleware never saw (one holding an encoded line break), as index.ts writes it.
+  app.notFound((c) => {
+    if (!traceOf(c.req.raw)) beginRequest("mcp", c.req.raw).end({ status: 405, outcome: "refused" });
+    return c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS);
+  });
   return app;
 }
 

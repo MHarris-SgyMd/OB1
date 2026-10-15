@@ -36,8 +36,47 @@ now ordinary environment variables your platform's secret store supplies.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+# the check first: up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
+
+`instance.ts check` renders the stack as compose will: the same env files, `-f`
+files, profiles and project name (`--env-file`, `-f`, `--profile` and `-p` as
+for compose). With no `--env-file`, it reads `COMPOSE_ENV_FILES`, else the
+`.env` beside the first compose file, as compose does; a `COMPOSE_FILE` in the
+env file or the shell needs the same files given with `-f`. It runs only under
+`bun --no-env-file`, and never beside a Bun `--env-file`, since Bun would load a
+`.env` in the working directory into the check, where compose reads it as the
+shell's; otherwise it refuses, naming the command.
+
+It refuses an env file whose project was made from other env files (the ones
+compose records for `--env-file` or `COMPOSE_ENV_FILES`, or the project
+directory's `.env` where none was given), since that `up` would recreate the
+other brain's containers with this file's settings; an env file that only moved
+is recreated from with `up -d --force-recreate`. Then, for each host port the
+brain would publish, it says whether the port is free, already the same
+service's own, or held: by another brain's container (a stopped one included,
+which takes its port back when it starts; Docker's read from its port bindings),
+by another of this brain's services, by a second mapping of this brain's, or by
+a process on the host. A port this brain's service holds now is its own (a
+stopped container that also asks for it is named); a port its stopped service
+will take back is tried first, in case a process took it meanwhile. A refusal
+names the setting to change (`SERVER_PORT`, and the others "One env file is one
+brain" lists).
+
+It only reads, so it is safe beside a running brain: run it before every `up`.
+Each line is `✓` (free, or this brain's own), `✗` (a refusal, naming what to
+change), `?` (unknown: a stopped container's ports could not be read) or `·` (a
+note). Any exit but 0 means do not `up`: 2 is a refusal, a usage error or
+compose's own. It never prints compose's words, which can quote an env file's
+values: it says what failed from a line number, a setting's name and its own
+reading of the files (a quote left open, a port that is none), and names the
+`compose … config --quiet` command that prints them.
+
+It reads every container runtime on the PATH, docker and podman both
+(`--runtime` names one). Where compose's own bind failure, at the end of an
+`up`, names no setting, its refusal names the one to change (SMD-2873).
 
 The profile is the stack's own Ollama, where the server's model endpoint
 defaults; drop it when `deploy/.env` names another provider (an Ollama on the
@@ -167,8 +206,11 @@ on one machine, each from its own file, all from the one `compose.yaml`:
   - `POSTGRES_PORT`, `OLLAMA_PORT` and `JEV_PORT` for `compose.host-ports.yaml`,
     each with its `_BIND`.
 
-  Set each one in the second instance's file. Otherwise its `up` fails to bind,
-  in compose's words, which do not name the setting.
+  Set each one in the second instance's file. `bun --no-env-file
+  deploy/instance.ts check --env-file deploy/.env.<name>.local -f
+  deploy/compose.yaml`, with the same `-f` files and `--profile`s as its `up`,
+  says before that `up` which one is still taken, and by what; compose's own
+  bind failure names no setting.
 
 A second brain beside the first:
 
@@ -177,7 +219,8 @@ cp deploy/.env.example deploy/.env.ob1b.local   # .env.*.local: the root .gitign
 # deploy/.env.ob1b.local: its own POSTGRES_PASSWORD and MCP_ACCESS_KEYS, as in step 1, and
 #   COMPOSE_PROJECT_NAME=ob1b
 #   SERVER_PORT=8040
-docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
+bun --no-env-file deploy/instance.ts check --env-file deploy/.env.ob1b.local -f deploy/compose.yaml &&
+  docker compose --env-file deploy/.env.ob1b.local -f deploy/compose.yaml up -d --build
 OB1_SMOKE_KEY=<ob1b's key> ./deploy/smoke.sh http://127.0.0.1:8040/mcp
 ```
 
@@ -953,7 +996,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
-| `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
+| `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` — or at the REST core, for a request its forwarder carried — an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
 
 A line never holds the URL, its query string, a header (but an incoming
 `traceparent`'s trace id, the `trace` key), a key, a body, a tool's arguments
@@ -1032,15 +1075,15 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_SDK_DISABLED=true` | all of them off, with an endpoint set; said at start |
 | `OTEL_EXPORTER_OTLP_HEADERS` | headers for the collector (`authorization=Bearer …`) |
 | `OTEL_EXPORTER_OTLP_CERTIFICATE` | the path to a PEM CA certificate, for an https collector with its own; never `NODE_TLS_REJECT_UNAUTHORIZED=0`, which turns off every certificate check the server makes |
-| `OB1_OTEL_TRUST_TRACEPARENT=1` | continue a caller's `traceparent`, for a deployment whose proxy sets it. Unset — the default — a request starts its own trace and links the caller's: a caller chooses its `traceparent`, and continued it would choose the request's trace (joining any trace it knows, colliding with another request's line) and, under a ratio, its sampling |
+| `OB1_OTEL_TRUST_TRACEPARENT=1` | continue a caller's `traceparent`, for a deployment whose proxy sets it. Unset — the default — a request starts its own trace and links the caller's: a caller chooses its `traceparent`, and continued it would choose the request's trace (joining any trace it knows, colliding with another request's line) and, under a ratio, its sampling. The REST core continues one its forwarder carried whatever this says — a forward-scope key in `x-brain-forwarder`, the MCP server's tool call (SMD-2287) |
 | `OTEL_BSP_MAX_QUEUE_SIZE`, `OTEL_BLRP_MAX_QUEUE_SIZE` | the span batch's queue and the log batch's, 2,048 by default and 65,536 at most (said at start when held): each item waiting holds memory (a span 1–2 KB measured) |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`, `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | the items in one export, 512 by default and the queue at most; a value that is no whole number of at least 1 is ignored, and either is said at start |
 | `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BLRP_SCHEDULE_DELAY`, `OTEL_BSP_EXPORT_TIMEOUT`, `OTEL_BLRP_EXPORT_TIMEOUT` | each batch's delay (5 s for spans, 1 s for log records; 0 sends each as it comes) and export timeout (30 s), each held to 2,147,483,647 ms, past which a timer fires at once |
 | `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | how often the metrics are sent (60 s; a value under 1 s is ignored for the 60 s, one past 2,147,483,647 ms held there) and each export's timeout (30 s, at most the interval) |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | cumulative by default; `delta` for a backend that wants it |
-| `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server) or `open-brain-api` |
+| `OTEL_SERVICE_NAME` | the service's name; by default `open-brain` (the MCP server), `open-brain-api`, or `open-brain-mcp` (`mcp-server/`, SMD-2287) |
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
-| `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id. Under `always_off` a line names a trace no span was exported for |
+| `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id; the REST core trusts its forwarder's, so it samples the MCP server's tool calls as the MCP server does. Under `always_off` a line names a trace no span was exported for |
 
 In `deploy/`'s compose stacks the server and the REST core take
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
@@ -1383,7 +1426,7 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   (`POSTGRES_PRELOAD_LIBRARIES=pg_stat_statements,auto_explain`). The image
   ships Postgres's contrib modules (`auto_explain` among them) and pgvector,
   not `pg_cron` or another extension: a library it does not have stops
-  Postgres at its start, on every tier that copies the setting. Migration 092
+  Postgres at its start, on every tier that copies the setting. Migration 094
   creates the extension only as a superuser may: a migrator that is not one
   leaves it out and says so. Its views are `pg_monitor`'s alone, and each
   plain migrate run takes back a grant to `PUBLIC` that a restore without

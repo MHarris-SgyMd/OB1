@@ -193,10 +193,11 @@ Get the key at [openrouter.ai/keys](https://openrouter.ai/keys) (create one name
 From the `OB1` folder:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-(Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
+(The check says whether each host port is free and the env file this brain's own; `up` runs only when it passes — `deploy/README.md`, step 2. Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
 
 Seven containers start in order (five with hosted models — no Ollama and no pull): Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server, the REST core (internal unless you turn it on: `deploy/README.md`, "The REST core") and the proxy in front of them. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
 
@@ -493,6 +494,8 @@ The key in your URL or header is not one whose hash is in `MCP_ACCESS_KEYS`. The
 **❌ The capture landed but says it has no vector**
 
 `OB1_LLM_LOCAL=1` is missing from `deploy/.env` (Step 3.4) — or, with the OpenRouter lines, `OB1_EGRESS_POLICY=allow` is: the server refused to send the text to a model endpoint it wasn't told is local or allowed. Add the line, run Step 4's command again (with `-d`; a `restart` keeps the old values), and capture the thought again — a re-capture of the same text replaces its vector. (A whole brain of such rows is `db/reembed.ts`'s job, which needs the database published to the host: `db/README.md`, "Re-embedding", and `deploy/README.md`, "What is reachable from where".)
+
+If the note says the embedding provider at some address **was unavailable**, the model endpoint didn't answer — the stack's `ollama` container is stopped, an Ollama on the host isn't running, or a hosted provider is down. The thought is saved and keyword search finds it. Bring the provider back — run Step 4's command again (with `-d`) for the stack's own `ollama`, or `ollama serve` for one on the host — and capture the same text again to give it its vector.
 
 **❌ Search returns no results**
 

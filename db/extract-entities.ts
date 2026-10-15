@@ -72,6 +72,20 @@
  * prefix's rows with the longer reading's. A row failed by the old rule ("over EXTRACT_MAX_WINDOWS
  * (24); not extracted") comes back with --retry-failed and is extracted so.
  *
+ * A windowed thought's windows are kept as they parse (migration 093's
+ * extraction_progress, SMD-2694), so a claim that does not finish — a hard
+ * stop, a lapsed lease, a failed release — leaves them to the next claim of
+ * the same text, which sends only the windows still to do: a document longer
+ * than every sleep of the sleep scheduler (db/sleep.ts) advances by its
+ * windows at each, where it started again at its first. A window is reused
+ * only for the request it answered (the text's fingerprint, the windowing,
+ * the request's hash), a malformed one never; the hard stop counts itself on
+ * the thought in hand before its lease goes back, a stall only when it had
+ * held the thought at least STALL_FLOOR_MS, provider pauses aside. A first
+ * stop ends a windowed thought at its next window, those answered kept, not
+ * after its last. Each run prunes the rows no reader can use. --status lists
+ * them.
+ *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
  * enqueues every new or edited thought, and either the next run or a `--follow`
@@ -153,12 +167,12 @@
 
 import type { SQL } from "bun";
 import { hostname } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
-import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, windowingFor, windowList, type AbortedBy, type Extraction } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -214,8 +228,10 @@ const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.js
  * PassStop). Its hard stop returns the leases at once, aborts the model call
  * in hand — no further window or retry is sent (SMD-1794) — and wakes a
  * worker pausing on a provider error, and run() returns 130 (2 after the
- * provider's refusal), writing and releasing nothing for the thought in hand;
- * a --decide decider call in hand is waited for. A call after run() has
+ * provider's refusal), writing and releasing nothing for the thought in hand
+ * but its stop, counted while the claim is still the worker's (SMD-2694) — its
+ * windows answered so far were kept as each parsed; a --decide decider call
+ * in hand is waited for. A call after run() has
  * returned does nothing. Neither is used by --status or --dry-run, which have no pass.
  */
 export interface ExtractOptions {
@@ -279,7 +295,28 @@ export interface ExtractOptions {
   summary?: boolean;
   /** How the start went (worker-bootstrap.ts's StartResult): through, or refused and why — called once, as the pass begins or as the start refuses (SMD-2752). */
   onStart?: (r: StartResult) => void;
+  /**
+   * How long a hard stop must find the thought in hand, with no window saved
+   * since the last stop, to count as a stall (093's p_long): STALL_FLOOR_MS
+   * unless a test drives it faster (review pass 2 of SMD-2694).
+   */
+  stallFloorMs?: number;
 }
+
+/**
+ * A hard stop that finds a thought in hand for less than this, no window
+ * saved since the last, counts as a stop and not a stall (SMD-2694, review
+ * pass 2): on a busy day the sleep scheduler's sleeps can be seconds long, and
+ * three of them would mark a document advancing by its windows as stalled —
+ * what the scheduler acts on (SMD-2694). A minute is past the median single-window
+ * extraction on the stable brain (32 s, 2026-10-13), so a stop that long with
+ * nothing saved is a slow window, not a short sleep.
+ */
+const STALL_FLOOR_MS = 60_000;
+/** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 093's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
+const STOP_NOTE_WAIT_MS = 1_500;
+/** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
+const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; limit: number; follow: number };
@@ -753,6 +790,37 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
+  /**
+   * The thoughts with windows kept from a claim that did not finish, or with
+   * stops counted (093, SMD-2694) — pending, in flight or failed, the newest
+   * first, each row of the text and windowing in force (one of earlier text is
+   * replaced at the next claim, review pass 1) — each with how many windows
+   * are kept and how many stops took it, the latest of them in a row with
+   * none gained. Nothing on a brain before 093, or under a role that cannot
+   * read it.
+   */
+  async function printKept(limit = 10): Promise<void> {
+    let rows: { thought_id: string; status: string; windows: number | null; kept: number; stops: number; stalled: number; total: number }[];
+    try {
+      rows = (await sql`
+        SELECT e.thought_id, c.status, e.windows, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.stops, CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END AS stalled, count(*) OVER ()::int AS total
+          FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type) JOIN thoughts t ON t.id = e.thought_id
+         WHERE e.work_type = ${JOB} AND c.status IN ('pending', 'claimed', 'failed') AND e.windowing = ${JSON.stringify(WINDOWING)}
+           AND e.fingerprint = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
+         ORDER BY e.updated_at DESC LIMIT ${limit}`) as typeof rows;
+    } catch (e) {
+      const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+      if (code === "42P01" || code === "42501") return;
+      throw e;
+    }
+    if (rows.length === 0) return;
+    out(`  windows kept or stops counted on a claim that did not finish (${rows.length} of ${rows[0].total}) — the next claim of the same text sends only the windows still to do (SMD-2694):`);
+    for (const r of rows) {
+      const kept = r.kept ? `${r.kept}${r.windows ? ` of ${r.windows}` : ""} window(s) kept` : "no window kept";
+      out(`    ${r.thought_id}  ${r.status}, ${kept}, ${r.stops} stop(s)${r.stalled ? `, the last ${r.stalled} with none gained` : ""}`);
+    }
+  }
+
   const recorded = await atStart(async () => ({ key: ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key }));
   if (recorded === null) return stoppedWaiting();
   const recordedKey: string | undefined = recorded.key;
@@ -795,6 +863,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       err(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
       await printFailures();
     }
+    await printKept();
     if (DRY_RUN) {
       const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0) + (RETRY_PARTIAL ? c.partial : RETRY_LEFT_OUT ? c.leftOut : 0);
       out(
@@ -892,6 +961,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * again, and may already be another worker's (review pass 1).
    */
   let hardStopped = false;
+  /** The hard stop's release, returned again to a second hard call. */
+  let hardRelease: Promise<unknown> | null = null;
   /**
    * Aborted by the first stop (the hard stop finds it aborted, or aborts it):
    * a follower's sleep and a transient pause wake on it, so neither holds
@@ -982,32 +1053,137 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
     | { outcome: "abandoned" };
 
-  async function processRow(row: Row): Promise<Outcome> {
+  /**
+   * A long thought's answered windows, kept across a claim that does not
+   * finish (migration 093, SMD-2694): a hard stop — the sleep scheduler's
+   * wake, the operator's second signal — no longer throws them away, so the
+   * next claim of the same text sends only the windows still to do, and the
+   * stop is counted on the row. A courtesy, as the scheduler's tail move is: a
+   * brain before 093, or a role without the extraction group's grant on it,
+   * keeps nothing and says so once; another error is said once, and the
+   * thought goes on unkept.
+   */
+  const WINDOWING_SIG = JSON.stringify(WINDOWING);
+  let keeping = true;
+  /** Each kind said once: a passing error first does not hide the one that ends keeping (review pass 1). */
+  const saidKeeping = { passing: false, ended: false };
+  const keepingFailed = (e: unknown, what: string): void => {
+    const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+    // The table or a function missing, or the grant: no later write would land.
+    const ends = code === "42P01" || code === "42883" || code === "42501";
+    if (ends) keeping = false;
+    const kind = ends ? "ended" : "passing";
+    if (saidKeeping[kind]) return;
+    saidKeeping[kind] = true;
+    errAside(`  could not ${what} a long thought's kept windows (${(e as Error).message}) — ${ends ? "no window is kept across a stop this run: that needs migration 093 and the extraction group's grant on extraction_progress, which a running follower takes up once restarted" : "the thought goes on, its windows unkept"}`);
+  };
+  const hashOf = (sent: string): string => createHash("sha256").update(sent).digest("hex").slice(0, 32);
+  /**
+   * The thought each worker has in hand, for the hard stop's count (noteStop):
+   * set while processRow runs, with when it was taken up — moved on past a
+   * provider pause, which is the provider's time and not the window's
+   * (review pass 3) — which says whether the stop was long.
+   */
+  const inHand = new Map<string, { id: string; fingerprint: string; since: number }>();
+  const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
+  /**
+   * The hard stop's count for each worker, which the worker's own release
+   * waits for: the stop aborts the call in hand, and the worker unwinding to
+   * its finally released the claim first on another connection, so the count
+   * found it no longer held (review pass 1 — 26 of 40 stops lost at four
+   * workers, and every one with an idle second worker, the scheduler's shape).
+   */
+  const stopNotes = new Map<string, Promise<void>>();
+
+  /** The windows an earlier claim of this text kept, and where this claim keeps its own: none for a thought with no fingerprint. */
+  async function progressFor(row: Row, workerId: string): Promise<ExtractProgress | undefined> {
+    if (!keeping || row.fingerprint === null) return undefined;
+    const fingerprint = row.fingerprint;
+    type Kept = ExtractionWindow & { h?: string };
+    const kept = new Map<number, Kept>();
+    try {
+      const [r] = (await sql`SELECT fingerprint, windowing, parts FROM extraction_progress WHERE thought_id = ${row.id}::uuid AND work_type = ${JOB}`) as { fingerprint: string; windowing: string; parts: Record<string, Kept> }[];
+      // Windows of other text, or that fell under another windowing, are of no use: the first save replaces them.
+      if (r && r.fingerprint === fingerprint && r.windowing === WINDOWING_SIG) for (const [k, v] of Object.entries(r.parts)) kept.set(Number(k), v);
+    } catch (e) {
+      keepingFailed(e, "read");
+      if (!keeping) return undefined;
+    }
+    return {
+      // The first stop: a windowed thought ends at its next window, not its last (review pass 5).
+      between: onStop.signal,
+      kept(index, sent) {
+        const p = kept.get(index);
+        if (!p || p.h !== hashOf(sent)) return undefined;
+        // An answer of another shape — kept before a change to what a window
+        // returns — is asked again rather than merged (review pass 1). The
+        // containers only: an element of another shape still reaches the
+        // merge, which a changed prompt's new request hash usually prevents.
+        if (!Array.isArray(p.entities) || !Array.isArray(p.relations) || p.rejected === null || typeof p.rejected !== "object") return undefined;
+        const { h: _h, ...part } = p;
+        return part;
+      },
+      async save(part, sent, windows) {
+        // Past the hard stop too: a window saved before the stop's release
+        // lands is kept, and the function keeps nothing after (review pass 1
+        // — a window answered as the stop came was dropped).
+        if (!keeping) return;
+        try {
+          await sql`SELECT save_extraction_window(${row.id}::uuid, ${JOB}, ${workerId}, ${fingerprint}, ${WINDOWING_SIG}, ${windows}::int, ${part.index}::int, ${{ ...part, h: hashOf(sent) }}::jsonb)`;
+        } catch (e) {
+          keepingFailed(e, "keep");
+        }
+      },
+    };
+  }
+
+  /** The hard stop's count on the thought a worker has in hand (093's note_extraction_stop), before its lease goes back: the function counts only for the holder. */
+  async function noteStop(workerId: string): Promise<void> {
+    const t = inHand.get(workerId);
+    if (!t || !keeping) return;
+    // Long: held at least the floor. Not the thought's slowest window, which
+    // took a kept 280 s window's document out of the stall for good (review
+    // pass 3).
+    const long = Date.now() - t.since >= STALL_FLOOR;
+    try {
+      await sql`SELECT note_extraction_stop(${t.id}::uuid, ${JOB}, ${workerId}, ${t.fingerprint}, ${WINDOWING_SIG}, ${long})`;
+    } catch (e) {
+      keepingFailed(e, "count the stop of");
+    }
+  }
+
+  async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const t0 = Date.now();
     let extraction: Extraction;
     try {
+      const progress = await progressFor(row, workerId);
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
       // call — per window of a long thought (SMD-1879).
-      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal);
+      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress);
     } finally {
       llmMs += Date.now() - t0;
     }
     // Every call the thought cost: one per window, and one more per window
-    // that was retried (first review pass: the retries went uncounted).
+    // that was retried (first review pass: the retries went uncounted) — a
+    // window kept from an earlier claim cost none in this one (SMD-2694).
     calls += callsOf(extraction);
+    // The windows this claim sent, the kept ones out: their answers, retries
+    // and aborts were counted by the claim that made them.
+    const sent = extraction.parts?.filter((p) => !p.resumed);
     // Every answer counts, whatever the write then does: the signal is the
-    // model's, not the rows'.
-    answers += extraction.windows;
+    // model's, not the rows'. A malformed window is never kept, so every
+    // malformed answer is this claim's.
+    answers += sent ? sent.length : extraction.windows;
     answersMalformed += extraction.malformed ? extraction.windows : extraction.coverage?.malformed?.length ?? 0;
     // A per-window record, not a count over one: a prefix of one window of a
     // longer thought is windowed — sent "Part 1 of N" (review pass 2).
     if (extraction.parts) windowed++;
     // A runaway escalated to the larger model is counted as an escalation, not a
     // penalised retry, though it is both a runaway and a second call (SMD-2000).
-    if (extraction.escalated) escalated++;
-    else if (extraction.retried) retried++;
-    if (extraction.abortedMs !== undefined) aborted++;
+    if (sent ? sent.some((p) => p.escalated) : extraction.escalated) escalated++;
+    else if (sent ? sent.some((p) => p.retried) : extraction.retried) retried++;
+    if (sent ? sent.some((p) => p.abortedMs !== undefined) : extraction.abortedMs !== undefined) aborted++;
     if (hardStopped) return { outcome: "abandoned" };
     if (extraction.malformed) {
       malformed++;
@@ -1172,15 +1348,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             outcome = { outcome: "vanished" };
           } else {
             let stopAfter = false;
+            if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row);
+                outcome = await processRow(row, workerId);
               } catch (e) {
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
+                // A first stop ended it between windows, those answered kept: it
+                // goes back to the pool with the leases the finally returns, its
+                // attempt refunded, no stop counted (review pass 5).
+                if (e instanceof StoppedBetweenWindows) return;
                 // The database went away under the write: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -1242,6 +1423,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
                   await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  // The pause was the provider's: the thought's clock starts again (review pass 3).
+                  const paused = inHand.get(workerId);
+                  if (paused) paused.since = Date.now();
                   if (stopping || outage.reason !== null) return;
                 } else {
                   // Still failing after the pauses. This row is recorded failed
@@ -1254,6 +1438,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 }
               }
             }
+            // Its extraction is over: a stop from here on took no window from it.
+            inHand.delete(workerId);
             if (hardStopped) return;
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
@@ -1311,9 +1497,33 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           let ok: boolean;
           let gone = false;
           try {
-            [{ ok }] = await sql`
-              SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
+            const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
                                      ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
+            // A succeeded release spends the thought's kept windows (093), in
+            // the same statement: a delete after it, failed or cut short by an
+            // exit, left the row's stops beside a finished claim, which a later
+            // requeue of the same text revived (review pass 2). Of any text: a
+            // release that went through proves the claim still this worker's,
+            // and a row of earlier text kept would revive as well on a revert
+            // (review pass 4). A failed release keeps them, so --retry-failed resumes.
+            const spend = keeping && outcome.outcome === "succeeded";
+            if (spend) {
+              try {
+                [{ ok }] = await sql`
+                  WITH r AS (${release()}),
+                       d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
+                  SELECT ok FROM r`;
+              } catch (e) {
+                // The table or its grant gone since the start: the release alone, said once.
+                const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+                // Only 093's table's: a refusal on the claims themselves is the release's own (review pass 3).
+                if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
+                keepingFailed(e, "clear");
+                [{ ok }] = await release();
+              }
+            } else {
+              [{ ok }] = await release();
+            }
             if (!ok) {
               const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
               gone = !exists;
@@ -1358,12 +1568,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
       }
     } finally {
+      inHand.delete(workerId);
       hb.stop();
       beats += hb.beats;
       // Rows still held are handed back unfinished: out of --limit's count
       // before the release goes out, so another worker's claim of one counts it.
       for (const id of hb.held) taken.delete(id);
       let freed = 0;
+      // The hard stop's count first, while the claim is still this worker's.
+      await stopNotes.get(workerId);
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
@@ -1387,12 +1600,24 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // After the run has returned there is no pass to stop (review pass 1).
     if (detach.aborted) return null;
     if (stopping) {
+      // Once: a second hard call — a wake and the operator's signal on one
+      // pass — counted the stop again (review pass 2).
+      if (hardRelease) return hardRelease;
       hardStopped = true;
       onStop.abort();
       onHardStop.abort();
       halt.abort();
-      // Started before the line is written: a Writer that throws does not keep the leases.
-      const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
+      // Started before the line is written: a Writer that throws does not keep
+      // the leases. Each thought in hand has its stop counted first, while its
+      // claim is still the worker's (093, SMD-2694).
+      const release = Promise.all([...activeWorkers].map((w) => {
+        // Bounded: a count waiting on a lock held the release past the CLI's
+        // exit, and the lease for its whole TTL (review pass 2).
+        const noted = Promise.race([noteStop(w), unrefSleep(STOP_NOTE_WAIT_MS)]);
+        stopNotes.set(w, noted);
+        return noted.then(() => sql`SELECT release_claims_for_worker(${JOB}, ${w})`).catch(() => null);
+      }));
+      hardRelease = release;
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return release;
     }
@@ -1504,6 +1729,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
     const added = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
+    // Once a run, 093's rows no reader can use (review pass 5): beside a
+    // claim released succeeded — left only when the table was out of reach at
+    // the release — or of this pool's thoughts at text they no longer hold.
+    // A row beside a failed claim at the text it holds stays, for
+    // --retry-failed.
+    if (firstPass && keeping) {
+      await sql`
+        DELETE FROM extraction_progress e
+         USING thought_work_claims c, thoughts t
+         WHERE c.thought_id = e.thought_id AND c.work_type = e.work_type AND t.id = e.thought_id
+           AND (c.status = 'succeeded' OR (e.work_type = ${JOB} AND e.fingerprint <> COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))))`
+        .catch((e: unknown) => keepingFailed(e, "prune"));
+    }
     firstPass = false;
     const before = await counts();
     if (added > 0 || !FOLLOW) out(`  pool: ${added} thought(s) added`);

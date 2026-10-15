@@ -128,7 +128,9 @@ OB1_LLM_LOCAL=1                             # the endpoint is on this box — de
 ```
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+# deploy/instance.ts check first (deploy/README.md, step 2): up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 That profile adds an `ollama` service and a one-shot job that pulls both models
@@ -181,8 +183,11 @@ stack's own `ollama` service are all remote to the gate until the flag says
 otherwise — which is why both blocks above carry the line. A refused capture is
 not lost: it lands with its text and fingerprint and no vector, the reply says
 so and names the rule, the decision sits on the row's audit entry, and a later
-`db/reembed.ts` pass against an endpoint the gate allows fills the vector in. A
-refused search says which tool works without a model call
+`db/reembed.ts` pass against an endpoint the gate allows fills the vector in.
+Nor is a capture whose provider is down (stopped, unreachable, timing out or
+answering 5xx): it lands the same way, the reply saying the provider was
+unavailable, and the same text sent again once it answers takes its vector
+(SMD-2888). A refused search says which tool works without a model call
 (`search_thoughts_keyword`). Terms are `unit:value`, comma-separated — `actor`
 (the access key's name), `source`, `type`, `topic` (a row's metadata, known to
 the passes and the re-embed, not at a first capture), `marker` (a literal in the
@@ -393,7 +398,8 @@ a leak of it can add a thought and cannot read one
 A fourth, `--scope forward`, grants nothing at all: every server refuses it as a
 caller. It is for the MCP server's own use when it forwards a client's key to the
 REST core, which reads it in a header of its own (`x-brain-forwarder`) and
-records it as who carried the request (SMD-2284). Give it to no client.
+records it as who carried the request (SMD-2284), continuing that request's
+`traceparent` (SMD-2287). Give it to no client.
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
 custom connectors are URL-only, so this fork keeps that form — but query strings
@@ -458,10 +464,13 @@ below.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
+# deploy/instance.ts check first (deploy/README.md, step 2): up runs only when it passes
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml &&
+  podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
 
 # …or, for the fully local path:
-podman compose -f deploy/compose.yaml --profile local-models up --build
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 Five services in order (seven with `local-models`): Postgres with pgvector, a migration job that applies the
