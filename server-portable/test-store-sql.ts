@@ -1264,6 +1264,16 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
          && row.older.created_at != null && row.newer.created_at != null && row.older.created_at < row.newer.created_at,
          "…with both thoughts inline, the older captured first");
   assert(row.reviewedAt === null && row.reviewNote === null && row.supersedingId === null, "…and the review fields null while pending");
+  // 093 (SMD-2707): each side's writer through list_proposal_writers, by the
+  // page's ids; on a brain without it the page still lists, with no writer.
+  assert(row.older.writer !== null && row.newer.writer !== null && row.older.writer.captureOnly === false && row.newer.writer.captureOnly === false
+      && row.older.supersededBy === null && row.newer.supersededBy === null && row.sameCapturer === false,
+    `…and each side's writer read (093): neither a capture-only key's text, nothing superseding either, no capturer in common (${JSON.stringify({ older: row.older.writer, newer: row.newer.writer, sameCapturer: row.sameCapturer })})`);
+  await admin5`DROP FUNCTION list_proposal_writers(uuid[])`;
+  const pre093 = await store.listSupersessionProposals({});
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("093_") });
+  assert(pre093.length === 1 && pre093[0].id === pid && pre093[0].older.writer === null && pre093[0].newer.writer === null && (await store.listSupersessionProposals({}))[0]?.newer.writer !== null,
+    "…without 093 the page still lists, no writer read; 093 applied, the writers read again");
   assert((await store.listSupersessionProposals({ status: "accepted" })).length === 0, "a status filter applies");
   await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
   assert((await store.listSupersessionProposals({})).length === 0, "an accepted proposal leaves the pending list");

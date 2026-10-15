@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -620,7 +620,18 @@ export class PostgrestStore implements ThoughtStore {
       p_lineage: opts.lineage ?? null,
     });
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map(normaliseProposal);
+    const rows = (data ?? []) as Record<string, unknown>[];
+    // 093 (SMD-2707): each side's writer, by the page's ids; a brain short of
+    // 093 lists without them (the reply says so).
+    let writers: Record<string, unknown>[] = [];
+    let read = false;
+    if (rows.length) {
+      const w = await this.client.rpc("list_proposal_writers", { p_ids: rows.map((r) => String(r.id)) });
+      if (w.error && !WRITERS_MISSING.test(w.error.message)) throw new Error(w.error.message);
+      writers = (w.data ?? []) as Record<string, unknown>[];
+      read = !w.error;
+    }
+    return withWriters(rows, writers, read).map(normaliseProposal);
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {

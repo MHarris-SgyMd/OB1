@@ -6535,6 +6535,106 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(stmt !== undefined && repooled.length === 0 && others > 0, `…and that statement clears exactly those claims (${others} other succeeded claim(s) kept)`);
   }
 
+  // SMD-2707 (migration 093): --list names who wrote each side. A capture-only
+  // key's text proposed to stand over an operator's is flagged WRITER and its
+  // accept refused without --force, naming both writers; the reverse is not.
+  // A side the hook has since superseded names the pointer an accept clears,
+  // and the accept says it cleared it.
+  {
+    const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+    const HOOK = { name: "hook-16", agent_id: await agentOf("a", "hook-16", "capture"), via: "test-door", scope: "capture" };
+    const OPER = { name: "oper-16", agent_id: await agentOf("b", "oper-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('hook-16', 'agent'), set_agent_kind('oper-16', 'operator')`;
+    const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+      ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(40)}::vector) AS r`)[0].r as { id: string }).id;
+    const propose = async (older: string, newer: string) =>
+      String((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.95::numeric, 'the rota changed', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const W = await cap("[16w] the rota is weekly, the operator's word", OPER);
+    const C = await cap("[16w] the rota is now daily, replacing the weekly one", HOOK);
+    const N = await cap("[16w] the hook's next word on the rota", HOOK, C);
+    const pw = await propose(W, C);
+    const C2 = await cap("[16w] the hook's older note on the on-call", HOOK);
+    const W2 = await cap("[16w] the operator's newer word on the on-call", OPER);
+    const pr = await propose(C2, W2);
+    const listW = await consolidate("--list");
+    const blk = (out: string, pid: string) => out.split("\n\n").find((b) => b.includes(`proposal ${pid}`)) ?? "";
+    const bw = blk(listW.out, pw), br = blk(listW.out, pr);
+    assert(bw.includes(`ID: ${C}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        superseded by ${N}\n        an accept that makes this side stand clears a capture-only pointer, ${N} onto this side: it then no longer supersedes what it pointed at`)
+        && bw.includes(`ID: ${W}\n        By: oper-16 (operator) · trust operator`),
+      `--list names each side's writer under its id, and the hook's own later pointer onto its side (${bw.replace(/\n/g, " ⏎ ").slice(0, 700)})`);
+    assert(/the NEWER thought supersedes the older {2}WRITER\n/.test(bw)
+        && bw.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side) — read both writers before accepting; the accept takes --force")
+        && bw.includes(`--accept ${pw} --force`),
+      "…flags the capture-only key's text proposed to stand, says why, and puts --force on its accept");
+    assert(br !== "" && !/WRITER|writer:/.test(br) && br.includes(`--accept ${pr}    --reject ${pr}`),
+      `…and the operator's text standing over the hook's is not flagged, its accept without --force (${br.replace(/\n/g, " ⏎ ").slice(0, 300)})`);
+    assert(same(await consolidateInProcess({ list: "pending" }), listW), "…and run() in-process lists it byte for byte");
+    const refusedW = await consolidate("--accept", pw);
+    const [{ status: stillPending }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${pw}::uuid`;
+    assert(refusedW.code === 1 && refusedW.out.includes(`accept refused: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side). newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: oper-16 (operator) · trust operator. Read both with --list pending and pass --force if that side should stand, or --reject ${pw}`)
+        && stillPending === "pending" && (await supersedesOf(C)) === null && (await supersedesOf(N)) === C,
+      `accepting it without --force is refused, naming both writers, and nothing is written (${refusedW.out.trim().slice(0, 300)})`);
+    const forcedW = await consolidate("--accept", pw, "--force");
+    assert(forcedW.code === 0 && forcedW.out.includes(`accepted ${pw}: ${C} now supersedes ${W}`)
+        && forcedW.out.includes(`lapsed: ${N} no longer supersedes ${C} — its capturer's capture-only pointer, cleared by this accept`)
+        && (await supersedesOf(C)) === W && (await supersedesOf(N)) === null,
+      `with --force it is accepted, and the reply names the hook's pointer the accept cleared (${forcedW.out.trim().replace(/\n/g, " ⏎ ").slice(0, 400)})`);
+    // SMD-1873's case as it is met, at equal trust (review pass 4): a write
+    // key of agent kind — flagged for the capture scope alone, and refused.
+    const PEER = { name: "peer-16", agent_id: await agentOf("c", "peer-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('peer-16', 'agent')`;
+    const W7 = await cap("[16w] an agent's note on the standup time", PEER);
+    const C7 = await cap("[16w] the hook's copy of the note on the standup time", HOOK);
+    const pe = await propose(W7, C7);
+    const be = blk((await consolidate("--list")).out, pe);
+    const refusedE = await consolidate("--accept", pe);
+    assert(be.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's — read both writers before accepting; the accept takes --force")
+        && refusedE.code === 1 && refusedE.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's. newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: peer-16 (agent) · trust agent.")
+        && (await supersedesOf(C7)) === null,
+      `at equal trust the hook's copy proposed to stand is flagged for its capture scope alone, and refused without --force (${refusedE.out.trim().slice(0, 200)})`);
+    // Review pass 1: a rejected flagged row is guarded too — 029 accepts a
+    // rejected row, and the guard read pending and stale alone.
+    const C5 = await cap("[16w] the hook's note on the standup", HOOK);
+    const W5 = await cap("[16w] the operator's note on the standup", OPER);
+    const pj = await propose(W5, C5);
+    const rejected = await consolidate("--reject", pj);
+    const reaccept = await consolidate("--accept", pj);
+    assert(rejected.code === 0 && reaccept.code === 1 && reaccept.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's") && reaccept.out.includes("Read both with --list rejected and pass --force if that side should stand; left as it is, it stays rejected") && (await supersedesOf(C5)) === null,
+      `a rejected flagged proposal accepted again without --force is refused as a pending one is (${reaccept.out.trim().slice(0, 160)})`);
+    // A lineage pair also flagged WRITER: its refusal names the flag its
+    // --force would also waive (review pass 2).
+    const C9 = await cap("[16w] the hook's page drawn from the operator's note", HOOK);
+    const W9 = await cap("[16w] the operator's note the page is drawn from", OPER);
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${W9}::text) WHERE id = ${C9}::uuid`;
+    const pl = await propose(W9, C9);
+    const lin = await consolidate("--accept", pl);
+    assert(lin.code === 1 && lin.out.includes("one side's derived_from names the other") && lin.out.includes("— it also accepts over its WRITER flag: an accept would make the NEWER side stand: its text is a capture-only key's"),
+      `a lineage pair also flagged WRITER is refused as a lineage pair, naming the flag its --force would also waive (${lin.out.trim().slice(0, 200)})`);
+    // An undirected one: no --direction asks for one first; the flagged
+    // direction is refused, the other accepted plainly.
+    const C6 = await cap("[16w] the hook's note on the release", HOOK);
+    const W6 = await cap("[16w] the operator's note on the release", OPER);
+    const pu = String((await sql`SELECT record_supersession_proposal(${W6}::uuid, ${C6}::uuid, 'conflict_undirected', 0.95::numeric, 'which stands', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const listU = blk((await consolidate("--list")).out, pu);
+    const noDir = await consolidate("--accept", pu);
+    const newerDir = await consolidate("--accept", pu, "--direction", "newer");
+    const olderDir = await consolidate("--accept", pu, "--direction", "older");
+    assert(listU.includes(`--accept ${pu} --direction newer --force    --accept ${pu} --direction older    --reject ${pu}`)
+        && noDir.code === 1 && /pass --direction newer or --direction older/.test(noDir.out) && !/WRITER|would stand/.test(noDir.out)
+        && newerDir.code === 1 && newerDir.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's")
+        && olderDir.code === 0 && olderDir.out.includes(`accepted ${pu}: ${W6} now supersedes ${C6}`),
+      `an undirected flagged row lists an accept per direction, --force on the flagged one; no --direction asks for one, the flagged one is refused, the other accepted (${[noDir.out, newerDir.out, olderDir.out].map((o) => o.trim().slice(0, 80)).join(" | ")})`);
+    // A brain short of 093: the accept says the writer check did not run and
+    // the rest answers as before.
+    await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
+    const plainR = await consolidate("--accept", pr);
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("093_") });
+    assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
+      `…and on a brain short of 093 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);
+    await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid)`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
+  }
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
