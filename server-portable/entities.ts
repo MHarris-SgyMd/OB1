@@ -117,7 +117,7 @@ export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "reje
 
 /**
  * Where a long thought's answered windows are kept across a claim that does
- * not finish (db/extract-entities.ts over migration 089, SMD-2694). `sent` is
+ * not finish (db/extract-entities.ts over migration 092, SMD-2694). `sent` is
  * the window's request as it would be sent — its messages — so a window is
  * reused only for exactly the text it answered: a change of the thought, the
  * chunker, the header rule or the prompt is a window asked again.

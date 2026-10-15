@@ -1431,7 +1431,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
 
   // SMD-2694: the windows a stopped claim answered are kept, and the next
   // claim of the same text sends only the rest. An in-memory store stands in
-  // for 089's table: it keeps what `save` hands it and answers `kept` only for
+  // for 092's table: it keeps what `save` hands it and answers `kept` only for
   // the request a window answered.
   const { callsOf: callsOfD } = await import("./entities.ts");
   type Stored = { part: ExtractionWindow; sent: string; windows: number };
@@ -1487,7 +1487,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(reqs.length === 1 && reqs[0].part === `[Part ${proseAt! + 1} of ${all} of a longer note]` && reasked.coverage === undefined,
          `a malformed window kept anyway is asked again, and its answer now parses (${reqs.map((r) => r.part).join(" | ")})`);
   // A prefix cut to one window is a windowed thought sent once: nothing after
-  // it to resume, so nothing kept (review pass 1 — 089 refuses a one-window row).
+  // it to resume, so nothing kept (review pass 1 — 092 refuses a one-window row).
   let lone = 0;
   const countsSaves: ExtractProgress = { kept: () => undefined, save: async () => { lone++; } };
   reqs.length = 0;

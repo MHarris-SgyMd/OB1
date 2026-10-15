@@ -72,7 +72,7 @@
  * prefix's rows with the longer reading's. A row failed by the old rule ("over EXTRACT_MAX_WINDOWS
  * (24); not extracted") comes back with --retry-failed and is extracted so.
  *
- * A windowed thought's windows are kept as they parse (migration 089's
+ * A windowed thought's windows are kept as they parse (migration 092's
  * extraction_progress, SMD-2694), so a claim that does not finish — a hard
  * stop, a lapsed lease, a failed release — leaves them to the next claim of
  * the same text, which sends only the windows still to do: a document longer
@@ -297,7 +297,7 @@ export interface ExtractOptions {
   onStart?: (r: StartResult) => void;
   /**
    * How long a hard stop must find the thought in hand, with no window saved
-   * since the last stop, to count as a stall (089's p_long): STALL_FLOOR_MS
+   * since the last stop, to count as a stall (092's p_long): STALL_FLOOR_MS
    * unless a test drives it faster (review pass 2 of SMD-2694).
    */
   stallFloorMs?: number;
@@ -313,7 +313,7 @@ export interface ExtractOptions {
  * nothing saved is a slow window, not a short sleep.
  */
 const STALL_FLOOR_MS = 60_000;
-/** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 089's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
+/** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 092's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
 const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
@@ -792,11 +792,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   /**
    * The thoughts with windows kept from a claim that did not finish, or with
-   * stops counted (089, SMD-2694) — pending, in flight or failed, the newest
+   * stops counted (092, SMD-2694) — pending, in flight or failed, the newest
    * first, each row of the text and windowing in force (one of earlier text is
    * replaced at the next claim, review pass 1) — each with how many windows
    * are kept and how many stops took it, the latest of them in a row with
-   * none gained. Nothing on a brain before 089, or under a role that cannot
+   * none gained. Nothing on a brain before 092, or under a role that cannot
    * read it.
    */
   async function printKept(limit = 10): Promise<void> {
@@ -1055,11 +1055,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   /**
    * A long thought's answered windows, kept across a claim that does not
-   * finish (migration 089, SMD-2694): a hard stop — the sleep scheduler's
+   * finish (migration 092, SMD-2694): a hard stop — the sleep scheduler's
    * wake, the operator's second signal — no longer throws them away, so the
    * next claim of the same text sends only the windows still to do, and the
    * stop is counted on the row. A courtesy, as the scheduler's tail move is: a
-   * brain before 089, or a role without the extraction group's grant on it,
+   * brain before 092, or a role without the extraction group's grant on it,
    * keeps nothing and says so once; another error is said once, and the
    * thought goes on unkept.
    */
@@ -1075,7 +1075,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const kind = ends ? "ended" : "passing";
     if (saidKeeping[kind]) return;
     saidKeeping[kind] = true;
-    errAside(`  could not ${what} a long thought's kept windows (${(e as Error).message}) — ${ends ? "no window is kept across a stop this run: that needs migration 089 and the extraction group's grant on extraction_progress, which a running follower takes up once restarted" : "the thought goes on, its windows unkept"}`);
+    errAside(`  could not ${what} a long thought's kept windows (${(e as Error).message}) — ${ends ? "no window is kept across a stop this run: that needs migration 092 and the extraction group's grant on extraction_progress, which a running follower takes up once restarted" : "the thought goes on, its windows unkept"}`);
   };
   const hashOf = (sent: string): string => createHash("sha256").update(sent).digest("hex").slice(0, 32);
   /**
@@ -1137,7 +1137,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     };
   }
 
-  /** The hard stop's count on the thought a worker has in hand (089's note_extraction_stop), before its lease goes back: the function counts only for the holder. */
+  /** The hard stop's count on the thought a worker has in hand (092's note_extraction_stop), before its lease goes back: the function counts only for the holder. */
   async function noteStop(workerId: string): Promise<void> {
     const t = inHand.get(workerId);
     if (!t || !keeping) return;
@@ -1499,7 +1499,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           try {
             const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
                                      ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
-            // A succeeded release spends the thought's kept windows (089), in
+            // A succeeded release spends the thought's kept windows (092), in
             // the same statement: a delete after it, failed or cut short by an
             // exit, left the row's stops beside a finished claim, which a later
             // requeue of the same text revived (review pass 2). Of any text: a
@@ -1516,7 +1516,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               } catch (e) {
                 // The table or its grant gone since the start: the release alone, said once.
                 const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
-                // Only 089's table's: a refusal on the claims themselves is the release's own (review pass 3).
+                // Only 092's table's: a refusal on the claims themselves is the release's own (review pass 3).
                 if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
                 keepingFailed(e, "clear");
                 [{ ok }] = await release();
@@ -1609,7 +1609,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       halt.abort();
       // Started before the line is written: a Writer that throws does not keep
       // the leases. Each thought in hand has its stop counted first, while its
-      // claim is still the worker's (089, SMD-2694).
+      // claim is still the worker's (092, SMD-2694).
       const release = Promise.all([...activeWorkers].map((w) => {
         // Bounded: a count waiting on a lock held the release past the CLI's
         // exit, and the lease for its whole TTL (review pass 2).
@@ -1729,7 +1729,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
     const added = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
-    // Once a run, 089's rows no reader can use (review pass 5): beside a
+    // Once a run, 092's rows no reader can use (review pass 5): beside a
     // claim released succeeded — left only when the table was out of reach at
     // the release — or of this pool's thoughts at text they no longer hold.
     // A row beside a failed claim at the text it holds stays, for

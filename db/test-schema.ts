@@ -13676,7 +13676,7 @@ console.log("\n[79] Migration 088: update_thought answers what it did — the ro
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[80] Migration 089: extraction_progress — a long thought's windows kept for the claim's holder only, replaced under another text or windowing, the stops counted and a stop that gained nothing stalled; the row goes with its claim (SMD-2694)");
+console.log("\n[82] Migration 092: extraction_progress — a long thought's windows kept for the claim's holder only, replaced under another text or windowing, the stops counted and a stop that gained nothing stalled; the row goes with its claim (SMD-2694)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -13689,14 +13689,14 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
   const sc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["save_extraction_window(uuid, text, text, text, text, int, int, jsonb)"])).c ?? "";
   const nc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_stop(uuid, text, text, text, text, boolean)"])).c ?? "";
-  assert([tc, sc, nc].every((c) => /Migration 089 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 089, the ticket and the holder rule");
+  assert([tc, sc, nc].every((c) => /Migration 092 \/ SMD-2694/.test(c)) && /holder/.test(sc) && /holds the claim/.test(nc), "the table's and both functions' comments name 092, the ticket and the holder rule");
   const lockCfg = (await q<{ n: string; c: string[] | null }>(`SELECT proname AS n, proconfig AS c FROM pg_proc WHERE proname IN ('save_extraction_window', 'note_extraction_stop') ORDER BY proname`)).map((r) => `${r.n}:${(r.c ?? []).join(",")}`).join(" ");
   assert(lockCfg === "note_extraction_stop:lock_timeout=1s save_extraction_window:lock_timeout=1s", `both functions give up a lock wait after a second, so the stop's release is not queued behind them (review pass 3) (${lockCfg})`);
 
   await db.exec(`DELETE FROM thoughts`);
   const JOB = "extract:stub-80@p2";
   const thought = async (text: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [text])).id;
-  const id = await thought("[80] a long document");
+  const id = await thought("[82] a long document");
   await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
   const [claimed] = await q<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'w-80', 1, 900)`, [JOB]);
   assert(claimed?.thought_id === id, "the thought claimed by w-80");
@@ -13744,7 +13744,7 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
     "once the lease is returned the old holder's save and stop write nothing — the row stands as it was");
 
   // A single-window thought keeps no window: its first stop makes the row.
-  const lone = await thought("[80] one window");
+  const lone = await thought("[82] one window");
   await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, lone]);
   await q(`SELECT claim_thoughts($1, 'w-80b', 2, 900)`, [JOB]);
   r = (await note("w-80b", "fpL", "winA", lone, false)) && await row(lone);
@@ -13753,8 +13753,8 @@ console.log("\n[80] Migration 089: extraction_progress — a long thought's wind
   assert(r && r.stops === 3 && r.stalled === 1, `a long stop stalls it, and a short one after leaves the stall as it was (${JSON.stringify(r)})`);
 
   const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
-  await reapply("089");
-  assert(JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "089 re-applied: the rows stand");
+  await reapply("092");
+  assert(JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "092 re-applied: the rows stand");
   await db.exec(`DELETE FROM thought_work_claims WHERE work_type = '${JOB}' AND thought_id = '${lone}'`);
   assert((await row(lone)) === undefined && (await row()) !== undefined, "a claim row deleted by hand takes its kept windows with it, and only its own");
   await db.exec(`DELETE FROM thoughts WHERE id = '${id}'`);

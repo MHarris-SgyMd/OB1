@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 089: a long thought's finished extraction windows survive a stop —
+-- Migration 092: a long thought's finished extraction windows survive a stop —
 --                kept per claim, so the next claim of the same text resumes
 --                where the last one stopped rather than at its first window,
 --                and the stops counted, with how many gained nothing (SMD-2694)
@@ -78,7 +78,7 @@ DO $rc$
 BEGIN
   IF to_regclass('thought_work_claims') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 089 needs 015 (thought_work_claims); this schema lacks it',
+      MESSAGE = 'migration 092 needs 015 (thought_work_claims); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS extraction_progress (
 );
 
 COMMENT ON TABLE extraction_progress IS
-  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the windows saved since the last, and how many long stops in a row saved none. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 089 / SMD-2694.';
+  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the windows saved since the last, and how many long stops in a row saved none. Written by save_extraction_window and note_extraction_stop for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 092 / SMD-2694.';
 COMMENT ON COLUMN extraction_progress.fingerprint IS
   'The content fingerprint (003) of the text the windows answered; a write under another replaces the row.';
 COMMENT ON COLUMN extraction_progress.windowing IS
@@ -177,7 +177,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION save_extraction_window(uuid, text, text, text, text, int, int, jsonb) IS
-  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, the windows of one of another window count (its stops kept), and a window kept under the same index; counts the save in gained. Migration 089 / SMD-2694.';
+  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, the windows of one of another window count (its stops kept), and a window kept under the same index; counts the save in gained. Migration 092 / SMD-2694.';
 
 -- ---------------------------------------------------------------------------
 -- note_extraction_stop — count a hard stop for the claim's holder
@@ -230,4 +230,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean) IS
-  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1 on a long stop (p_long) and kept on a short one; gained back to 0. Migration 089 / SMD-2694.';
+  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1 on a long stop (p_long) and kept on a short one; gained back to 0. Migration 092 / SMD-2694.';
