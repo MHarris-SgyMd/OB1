@@ -3039,8 +3039,11 @@ cannot drain: extraction is let out for the newer work meanwhile, at most
 once a minute, and set aside again once it reaches the stalled thought(s),
 which wait for consolidation, so the judge, on the same chat endpoint, does
 not queue behind their window when it answers (SMD-3008); the let-out runs
-one worker, and each stalled thought it reaches is stopped, a stop counted
-on it. Mid-pass, a judge answering 5xx is waited for only past those
+one worker, its claims read by this process's worker ids so a lease another
+left does not count, and each stalled thought it reaches is stopped, a stop
+counted on it. If the judge answers and consolidation drains while it is
+out, it goes on with one worker under `--workers 1`, and with more it is
+set aside once it holds nothing, so the drain's resume starts them all. Mid-pass, a judge answering 5xx is waited for only past those
 pauses, a minute and more.
 A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says

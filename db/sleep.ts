@@ -75,9 +75,10 @@
  * judge is not left waiting behind the window. While consolidation waits for
  * its provider — at its start, or mid-pass past its workers' pauses
  * (consolidate.ts's providerWait) — its pool cannot drain, and extraction is
- * let out for the newer work meanwhile, at most once a minute, then set aside
- * again once it reaches the stalled thought(s), which wait for consolidation
- * (SMD-3008): the judge model failing while the extraction model serves, as
+ * let out for the newer work meanwhile, with one worker, at most once a
+ * minute, then set aside again once it holds a stalled thought — its own
+ * claims, by worker id — or holds nothing and nothing newer is left; the
+ * stalled thought(s) wait for consolidation (SMD-3008): the judge model failing while the extraction model serves, as
  * both are on the one chat endpoint. Mid-pass, a judge answering 5xx is
  * waited for only past those pauses, a minute and more. The thought is tried in every
  * sleep once consolidation's pool drains, and finished by the first sleep
@@ -281,16 +282,17 @@ const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
  * joins past them (SMD-2694), as it would never join behind them.
  */
 const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claimed > 0 && p.pending + p.claimed === p.stalled;
+/** Extraction's worker ids in this process (extract-entities.ts's `workerId`, heldHere's prefix). */
+const MINE = `extract-${hostname()}-${process.pid}-`;
 /**
  * Extraction has only stalled thoughts in hand while newer work waits behind
  * them — a row pending that is not stalled, or a thought not yet in the pool:
  * a capture made during the sleep, which a sync write's is, as nothing wakes
  * the brain for it (SMD-3008). The pool is not all stalled, so consolidation
  * would not join past it either, and both waited out the window in hand.
+ * In hand is this process's: a lapsed lease another left is not (review pass 2).
  */
-/** Extraction's worker ids in this process (extract-entities.ts's `workerId`, heldHere's prefix). */
-const MINE = `extract-${hostname()}-${process.pid}-`;
-const queuesBehind = (p: Pool): boolean => p.claimed > 0 && p.stalled - p.stalledPending === p.claimed && p.pending - p.stalledPending + p.unpooled > 0;
+const queuesBehind = (p: Pool): boolean => p.mine > 0 && p.stalledMine === p.mine && p.pending - p.stalledPending + p.unpooled > 0;
 
 /**
  * 093's rows that speak for the thought as it stands and the windowing in
@@ -926,6 +928,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * no clock (015), so the date is an order, not a delay; a wake's tail move
    * dates them now again, and the next sleep forward. A courtesy, as the
    * wake's tail move is: one that fails is said once, and returns false.
+   * A lapsed lease is moved too: a scheduler gone left it claimed, and the
+   * next claim reaps it with its old date, ahead of the sleep's captures
+   * (review pass 2).
    */
   let saidRetail = false;
   const stoppedLast = async (): Promise<boolean> => {
@@ -935,7 +940,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         UPDATE thought_work_claims c SET enqueued_at = now() + make_interval(days => ${FORWARD_DAYS}) + o.rn * interval '1 microsecond'
           FROM (SELECT c2.thought_id, row_number() OVER (ORDER BY CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END, c2.enqueued_at, c2.thought_id) AS rn
                   FROM thought_work_claims c2 JOIN extraction_progress e USING (thought_id, work_type) JOIN thoughts t ON t.id = c2.thought_id
-                 WHERE c2.work_type = ${JOBS.extract} AND c2.status = 'pending' AND e.stops > 0 AND ${currentProgress(sql, SIG)}) o
+                 WHERE c2.work_type = ${JOBS.extract} AND (c2.status = 'pending' OR (c2.status = 'claimed' AND c2.ttl_expires_at < now()))
+                   AND e.stops > 0 AND ${currentProgress(sql, SIG)}) o
          WHERE c.thought_id = o.thought_id AND c.work_type = ${JOBS.extract}`;
       return true;
     } catch (e) {
@@ -1157,15 +1163,25 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // (093 gone or refused since): a lease another left is not its own,
         // and would re-park it every minute (review pass 1).
         const stalledInHand = !ex.stalledRead || ex.stalledMine > 0;
-        if (stalledInHand || (ex.mine === 0 && ex.pending === ex.stalledPending)) {
-          out(`  extraction ${stalledInHand ? "has reached the stalled thought(s)" : "has done the newer work"} — set aside again until consolidation drains`);
+        // (Two statements: a claim reaped between them reads more stalled
+        // pending than pending, so `<=`: review pass 2.)
+        if (stalledInHand || (ex.mine === 0 && ex.pending <= ex.stalledPending)) {
+          out(`  extraction ${!ex.stalledRead ? "cannot tell the stalled thought(s) now" : stalledInHand ? "has reached the stalled thought(s)" : "has done the newer work"} — set aside again until consolidation drains`);
           if (await setAside()) return stopped();
           aside = false;
           parked = true;
         } else if (!judgeWaits()) {
           const co = await reading(() => poolOf(sql, "consolidate", JOBS.consolidate));
           if (co === null) return stopped();
-          if (drained(co)) aside = false;
+          // The let-out ran one worker: with more, it ends through the
+          // set-aside once it holds nothing, so the drain's resume starts them
+          // all, where it ran one for the rest of the sleep (review pass 2).
+          if (drained(co) && WORKERS === 1) aside = false;
+          else if (drained(co) && ex.mine === 0) {
+            if (await setAside()) return stopped();
+            aside = false;
+            parked = true;
+          }
         }
       } else if (!consolidating || !FOLLOW) {
         const pools = await reading(async () => ({ extract: await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
