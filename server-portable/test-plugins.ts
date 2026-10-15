@@ -21,7 +21,7 @@ import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
-import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
+import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
@@ -480,16 +480,8 @@ console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for t
     useRequestLog(before);
   }
   const lines = said.map((l) => JSON.parse(l) as Record<string, unknown>);
-  if (mcpTarget() === "client") {
-    // The MCP server writes no line of its own yet (SMD-2287 PR 4b): the lines are the REST core's — the call's
-    // whoami, then the operation's route, the tool named on it, as it ended.
-    const op = lines.find((l) => l.route === "/v1/plugins/example/recent");
-    assert(lines.length === 2 && lines.every((l) => l.door === "api") && lines.filter((l) => l.route === "/v1/whoami").length === 1 && op?.tool === "example_recent" && op.outcome === "error" && op.code === "FAILED",
-      `a plugin tool's call is on the REST core's line as it ended: \`error\` FAILED (${said.join(" / ")})`);
-  } else {
-    const line = lines[0] ?? {};
-    assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
-  }
+  const line = lines[0] ?? {};
+  assert(said.length === 1 && line.tool === "example_recent" && line.outcome === "error" && line.code === "FAILED", `a plugin tool's call is on its line as it ended: \`error\` FAILED, not \`unrun\` (${said.join(" / ")})`);
   const bad = await rpc("read-raw", "tools/call", { name: "example_recent", arguments: { limit: 50 } });
   assert(JSON.stringify(bad).includes("limit") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument past its schema is refused before the operation runs");
 }
@@ -692,6 +684,32 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
     assert(hookSpan?.name === "POST /hooks/example/capture" && hookSpan.attributes["error.type"] === "FAILED" && events.length === 1 && events[0].name === "exception"
       && JSON.stringify(events[0].attributes) === JSON.stringify({ "exception.type": "TypeError", "ob1.fault.code": "ECONNRESET" }) && !JSON.stringify(spans.map((sp) => [sp.attributes, sp.events])).includes("secret-host"),
       `a webhook's fault on its request's span: the throw's kind and code, FAILED, nothing of the message (${JSON.stringify(spans.map((sp) => [sp.name, sp.events]))})`);
+  }
+  // Past the anonymous budget, a delivery the plugin accepted still sends its span; one it refused does not (SMD-1849 PR 3a review pass 3).
+  {
+    const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
+    const { setUpTelemetry } = await import("./otel-setup.ts");
+    const { ANONYMOUS_PER_MINUTE, flushTelemetry, startTelemetry, stopTelemetry, useBudgetClock } = await import("./telemetry.ts");
+    const exporter = new InMemorySpanExporter();
+    const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    const realClock = useBudgetClock(() => 60_000 * 1_000);
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
+    const statuses: unknown[] = [];
+    try {
+      await startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-api-test", { exporter }) }));
+      answer = async () => coreOk({ id: "t-hook" });
+      for (let i = 0; i < ANONYMOUS_PER_MINUTE + 1; i++) await (await deliver(on, body, {})).text();
+      await (await deliver(on, body, sign(body))).text();
+      await flushTelemetry();
+      statuses.push(...exporter.getFinishedSpans().filter((sp) => sp.name === "POST /hooks/example/capture").map((sp) => sp.attributes["http.response.status_code"]));
+    } finally {
+      await stopTelemetry();
+      useBudgetClock(realClock);
+      if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
+    }
+    assert(statuses.length === ANONYMOUS_PER_MINUTE + 1 && statuses.slice(0, -1).every((st) => typeof st === "number" && st >= 400) && statuses.at(-1) === 202,
+      `past the minute's ${ANONYMOUS_PER_MINUTE}, the unsigned delivery the plugin refused sends no span, the signed one it accepted does (${JSON.stringify([statuses.length, statuses.at(-1)])})`);
   }
   // A chunked body with no length, past the limit: cut as it arrives, never read whole.
   let pulled = 0;

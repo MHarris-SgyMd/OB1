@@ -193,10 +193,11 @@ Get the key at [openrouter.ai/keys](https://openrouter.ai/keys) (create one name
 From the `OB1` folder:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile local-models up --build
+bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile local-models &&
+  podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-(Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
+(The check says whether each host port is free and the env file this brain's own; `up` runs only when it passes — `deploy/README.md`, step 2. Docker: `docker compose …`. The profile adds the two model containers; with hosted models, leave `--profile local-models` off. `--build` builds the server image from your checkout, so a later `git pull` takes effect on the next start with it.)
 
 Seven containers start in order (five with hosted models — no Ollama and no pull): Postgres with pgvector, a one-shot job that applies the schema and exits, the models' runtime and a one-shot job that pulls the two models, then the MCP server, the REST core (internal unless you turn it on: `deploy/README.md`, "The REST core") and the proxy in front of them. The first run downloads the images and about 7 GB of models (SETUP.md has the sizes), so give it a while; every later start is seconds.
 
