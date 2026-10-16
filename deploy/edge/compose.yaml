@@ -1,0 +1,139 @@
+# The edge proxy (SMD-2876): one origin in front of several brains, each a
+# compose project of its own (docs/one-brain-per-stack.md, SMD-2872). It is a
+# project of its own too, and joins no brain's network: it reaches each brain
+# through the brain's published port, the forwarder's, as any client on the
+# host does, and routes by host, <brain>.<domain> (localhost by default), so a
+# brain is served at the root of an origin of its own and its /mcp, its
+# discovery documents and its authorization server stay its own.
+#
+# Run it with deploy/edge/edge.ts, which renders the registry (which brains,
+# on which ports) into ./dynamic/routes.yaml, picks the shape for the runtime
+# and runs compose with the edge's settings and nothing of the shell's:
+#
+#   bun --no-env-file deploy/edge/edge.ts up
+#
+# Two shapes, one per runtime, because no one binding reaches a brain's
+# loopback-bound port from a container on both (measured 2026-10-09 and
+# 2026-10-15, docs/one-brain-per-stack.md, "Measured"):
+#   bridge (profile `bridge`, podman machine)  a container on a network of its
+#           own, its port published on the host's 127.0.0.1 (podman machine
+#           publishes a port on one loopback alone, refusing the second,
+#           measured: edge.ts refuses to run beside anything on [::1]:port);
+#           it dials each brain at host.containers.internal, which podman
+#           resolves to the host, where the brain's loopback port answers;
+#   host (profile `host`, Docker Engine on Linux)  the host's network: it
+#           listens on both of the host's loopbacks, 127.0.0.1 and [::1], so
+#           no other process takes the clients that try ::1 first, and dials
+#           each brain at 127.0.0.1. Under podman machine the Mac cannot
+#           reach a listener in the VM's own loopback, so this shape is
+#           Linux's alone.
+# Each brain stays on loopback in both.
+#
+# The edge holds no key and injects no credential or identity (the ADR's row
+# 7): a client's `?key=` or x-brain-key passes through to the brain the host
+# names, unchanged. Through the edge, a brain's authorization server sees one
+# client address, the edge's (the maintainer's call, 2026-10-15; SMD-2309):
+# its per-address limits then lock out every client behind the edge at once.
+# Check 36 of scripts/check-fork-consistency.ts holds this file whole, and
+# the table edge.ts renders.
+name: ob1-edge
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # The bridge shape. The same Traefik, by digest, as compose.yaml's proxy,
+  # confined as it is, with the same access log (no query string, no header,
+  # no userinfo: a connector carries its key as `?key=`), and the file
+  # provider alone, reading the table edge.ts renders. Its labels: the
+  # table's digest, and the host addresses it holds, which edge.ts reads so a
+  # re-up is no clash with itself.
+  edge:
+    profiles: [bridge]
+    image: docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    environment:
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
+      TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: drop
+      TRAEFIK_PING: "true"
+      TRAEFIK_PING_ENTRYPOINT: ping
+      TRAEFIK_ENTRYPOINTS_PING_ADDRESS: "127.0.0.1:8082"
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+    # The rendered table, read-only. A changed table changes the label, so
+    # an `up` recreates the container on it, whether or not the runtime's
+    # bind mount carries the file provider's change notice.
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro,z
+    labels:
+      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}
+      ob1.edge-addresses: "127.0.0.1:${EDGE_PORT:-8090}"
+    ports:
+      - "127.0.0.1:${EDGE_PORT:-8090}:8000"
+    networks: [web]
+    dns_search: ["."]
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *logging
+
+  # The host shape: the bridge shape's container on the host's network, so
+  # it publishes nothing and its entrypoints are the host's own addresses —
+  # the edge's port on each loopback (web, web6; the table's routers take
+  # both), and the ping its healthcheck asks.
+  edge-host:
+    profiles: [host]
+    image: docker.io/library/traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    environment:
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: "127.0.0.1:${EDGE_PORT:-8090}"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: "[::1]:${EDGE_PORT:-8090}"
+      TRAEFIK_ENTRYPOINTS_WEB6_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
+      TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: drop
+      TRAEFIK_PING: "true"
+      TRAEFIK_PING_ENTRYPOINT: ping
+      TRAEFIK_ENTRYPOINTS_PING_ADDRESS: "127.0.0.1:${EDGE_PING_PORT:-8091}"
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro,z
+    labels:
+      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}
+      ob1.edge-addresses: "127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}"
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *logging
+
+# The bridge shape's own network, outward: host.containers.internal is
+# reached through its gateway, which an internal network has none of.
+networks:
+  web: {}
