@@ -361,10 +361,10 @@ const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql, db
  * update_thought, which 098 last defines (SMD-2744, SMD-3045): 073 applied by hand
  * alone puts its bodies back — upsert_thought's merge a capture-only key's
  * re-capture into the row it lands on, update_thought's answers no stamp, so
- * the reply to a patch naming trust says "merged" again — so every remedy
- * that names 073 names 080 and 098 after it.
+ * the reply to a patch naming trust says "merged" again, and its unlink takes
+ * no review lock — so every remedy that names 073 names 080 and 098 after it.
  */
-const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql and db/migrations/098_unlink_takes_review_lock.sql — they last define upsert_thought and update_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on and answer an edit with no stamp (bun migrate.ts --reapply runs every file in order).";
+const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql and db/migrations/098_unlink_takes_review_lock.sql — they last define upsert_thought and update_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on, answer an edit with no stamp and take no review lock for an unlink (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";

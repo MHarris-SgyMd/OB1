@@ -199,10 +199,11 @@ function definedIn(file: string): string[] {
  * did (SMD-2744): before it, a closure reached 073's stamp functions through
  * update_thought; 088 defines update_thought alone (review pass 5 of PR 2:
  * twelve restores lost 073, and [51]-[55] ran on 055's stamp bodies). 098 is
- * 088's update_thought with the review lock for an unlink (SMD-3045), so it
- * carries 073 too.
+ * 088's update_thought with the review lock for an unlink (SMD-3045) and
+ * carries 073 for the same reason; 088, no longer a last definer, needs no
+ * entry.
  */
-const CARRIES: Record<string, string> = { "088": "073", "098": "073" };
+const CARRIES: Record<string, string> = { "098": "073" };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -14872,7 +14873,6 @@ console.log("\n[88] Migration 098: an unlink takes the review lock — update_th
   // one call holds the review lock as well (review pass 1: a gate skipped
   // when content arrives passed every other cell).
   const unlinkText = await held(`update_thought($1::uuid, $2::text, p_provenance => $3::jsonb)`, [t, "[88] the row edited, unlinked with new text", JSON.stringify({ supersedes: null })]);
-  await db.query(`SELECT update_thought($1::uuid, $2::text)`, [t, "[88] the row edited"]);
   // And beside the other arguments a caller sends with it — a patch, the
   // stale-read guard, an actor (review pass 3: a gate skipped for any of
   // them passed every behaviour cell).
