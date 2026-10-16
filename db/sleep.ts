@@ -263,6 +263,8 @@ export interface SleepOptions {
   stallFloorMs?: number;
   /** The least time between two restarts or let-outs of extraction (RESTART_EVERY_MS) unless a test drives it faster. */
   restartEveryMs?: number;
+  /** The passes' own poll for new work, in seconds (PASS_FOLLOW_S) unless a test drives it faster (SMD-3048). */
+  passFollowS?: number;
 }
 
 /**
@@ -669,7 +671,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // failed before it propagates, as a pass that throws at a sleep does in
     // the loop below, rather than leave the last process's row (review pass 3).
     const code = await (pass === "extract" ? runExtract : runConsolidate)({
-      url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: opts.signal, check: true,
+      url, env, workers: WORKERS, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: opts.signal, check: true,
       onStart: (r) => { result = r; }, writer: tagged(pass, () => false),
     }).catch(async (e: unknown) => {
       await endAtStart().catch(() => {});
@@ -853,7 +855,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // would wait for at a wake (SMD-2752). Its start is reported, so a
     // refusal is told apart.
     const common = {
-      url, env, workers, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
+      url, env, workers, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
       banner: false, summary: false,
       onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
