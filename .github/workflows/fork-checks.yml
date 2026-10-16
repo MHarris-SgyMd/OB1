@@ -2475,7 +2475,22 @@ jobs:
           # shellcheck disable=SC2016 # a Go template's variables, not the shell's
           off_own() { for c in $(canary_left); do docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$c" | grep -v '^open-brain-canary_' || true; done; }
           on_stable_mesh() { docker network inspect -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' open-brain_mesh | grep '^open-brain-canary-' || true; }
-          health() { curl -s --max-time 20 -H "x-brain-key: $OB1_SMOKE_KEY" "http://127.0.0.1:$1/health"; }
+          # Each brain's keyed /health with its own key: stable's on 8010, the
+          # canary's (SMD-2874 PR 2, read from its env file once it is made) on
+          # any other port.
+          health() { local k="$CANARY_KEY"; case "$1" in 8010/*) k="$OB1_SMOKE_KEY" ;; esac; curl -s --max-time 20 -H "x-brain-key: $k" "http://127.0.0.1:$1/health"; }
+          # tools/list at a brain with a key: `ok` when it lists, `refused` when
+          # the brain refuses the key (a JSON-RPC error, HTTP 200; or the OAuth
+          # challenge, HTTP 401, at a stack with OAuth configured).
+          listed() {
+            local out
+            out="$(curl -s --max-time 20 -w '\n%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $2" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "http://127.0.0.1:$1/mcp")"
+            if [ "$(tail -n 1 <<<"$out")" = 401 ]; then echo refused; return; fi
+            sed '$d' <<<"$out" | sed -n 's/^data: //p; /^{/p' | tail -n 1 \
+              | jq -r 'if (.result.tools | length) > 0 then "ok" elif .error then "refused" else "?" end'
+          }
+          CANARY_KEY=""
           export PATH="/tmp/fake-bin:$PATH" FAKE_URL=""
           : > /tmp/fake-claude.log
           refused() {
@@ -2501,6 +2516,11 @@ jobs:
           # database-monitor passwords too, dummies (nothing here runs the
           # profile).
           printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
+          # SMD-3032 and SMD-2874 PR 2: the plugin role's password and the
+          # webhook secrets, dummies too (no plugin runs here), which the
+          # canary's file must not hold as stable's; taken out of .env again
+          # once the first up has made the canary's file.
+          printf 'OB1_PLUGIN_DB_PASSWORD=ci-dummy-plugin-password-0123456789\nOB1_HOOK_SECRETS=demo=ci-dummy-hook-secret\n' >> .env
           # SMD-2875: through the first up's refresh, every 0.2 s, the tier
           # halves' containers, found by the label tier.sh gives each (both are
           # made before either runs; the source's lasts until its hand-off has
@@ -2563,7 +2583,27 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
+          # SMD-2874 PR 2: the canary's own write key, minted, its hash alone in
+          # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
+          # plugin role password of its own; no webhook secret of stable's.
+          CANARY_KEY="$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")"
+          [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "open-brain-canary:write:$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own key alone" >&2; exit 1; }
+          for h in $(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | cut -d: -f3); do
+            if grep -qF "$h" .env.canary.local; then echo "the canary's env file holds a key hash of stable's" >&2; exit 1; fi
+          done
+          grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
+          canary_plugin="$(sed -n 's/^OB1_PLUGIN_DB_PASSWORD=//p' .env.canary.local | tr -d "\"'")"
+          if [ -z "$canary_plugin" ] || [ "$canary_plugin" = ci-dummy-plugin-password-0123456789 ]; then echo "the canary's plugin role password is not its own" >&2; exit 1; fi
+          if grep -qF ci-dummy-hook-secret .env.canary.local; then echo "the canary's env file holds stable's webhook secret" >&2; exit 1; fi
+          sed -i '/^OB1_PLUGIN_DB_PASSWORD=ci-dummy/d; /^OB1_HOOK_SECRETS=demo=ci-dummy/d' .env
+          # Neither brain takes the other's key: stable's smoke key lists nothing
+          # at the canary, the canary's nothing at stable, and each lists at its
+          # own (SMD-2874's Verify).
+          [ "$(listed 8011 "$OB1_SMOKE_KEY")" = refused ] || { echo "the canary took stable's key" >&2; exit 1; }
+          [ "$(listed 8010 "$CANARY_KEY")" = refused ] || { echo "stable took the canary's key" >&2; exit 1; }
+          [ "$(listed 8011 "$CANARY_KEY")" = ok ] || { echo "the canary refused its own key" >&2; exit 1; }
+          [ "$(listed 8010 "$OB1_SMOKE_KEY")" = ok ] || { echo "stable refused its own key" >&2; exit 1; }
           # SMD-2873: the file names the canary's own project, so compose given it
           # alone acts on the canary; one naming another is refused at an up.
           grep -qx 'COMPOSE_PROJECT_NAME="open-brain-canary"' .env.canary.local || { echo "the canary's env file does not name its project" >&2; exit 1; }
@@ -2574,11 +2614,11 @@ jobs:
           if [ "$rc" != 2 ] || ! grep -F "COMPOSE_PROJECT_NAME names open-brain, not the canary's project, open-brain-canary" /tmp/canary-guard.out; then cat /tmp/canary-guard.out >&2; echo "an up did not refuse a canary env file naming stable's project" >&2; exit 1; fi
           # A canary file from before SMD-2873 names no project, as the dogfood's
           # does: an up lets it through with a note, and here stops at the
-          # smoke key's refusal, which comes next.
+          # refusal of another connector under the name, which comes later.
           (umask 077 && grep -v '^COMPOSE_PROJECT_NAME=' .env.canary.local > .env.canary-noname.local)
-          rc=0; OB1_SMOKE_KEY='' ./canary.sh up --canary-env-file .env.canary-noname.local > /tmp/canary-noname.out 2>&1 || rc=$?
+          rc=0; FAKE_URL=http://127.0.0.1:9999/ ./canary.sh up --connect --canary-env-file .env.canary-noname.local > /tmp/canary-noname.out 2>&1 || rc=$?
           rm -f .env.canary-noname.local
-          if [ "$rc" != 2 ] || ! grep -F 'names no project: add COMPOSE_PROJECT_NAME=open-brain-canary' /tmp/canary-noname.out || ! grep -F 'up smoke-tests the canary with OB1_SMOKE_KEY' /tmp/canary-noname.out; then cat /tmp/canary-noname.out >&2; echo "an up did not let a canary env file naming no project through with its note" >&2; exit 1; fi
+          if [ "$rc" != 2 ] || ! grep -F 'names no project: add COMPOSE_PROJECT_NAME=open-brain-canary' /tmp/canary-noname.out || ! grep -F "is not this canary's at user scope" /tmp/canary-noname.out; then cat /tmp/canary-noname.out >&2; echo "an up did not let a canary env file naming no project through with its note" >&2; exit 1; fi
           # The password through docker's environment, and grep's pattern from a
           # file, so neither is on a command line (review pass 3).
           login() { PGPASSWORD="$3" docker run --rm --network "$1" -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h "$2" -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
@@ -2605,23 +2645,30 @@ jobs:
           # SMD-2875: the diff over HTTP. Stable's logged searches (the tier
           # step's keyword search and smoke.sh's, both keyword: the hybrid and
           # current arms are held by test-brain-compare.ts) replayed on stable
-          # at /mcp and on the canary at its own port's /mcp, each with the smoke key,
-          # which the canary takes: a canary just refreshed from stable answers
+          # at /mcp and on the canary at its own port's /mcp, each with its own key
+          # (SMD-2874 PR 2): a canary just refreshed from stable answers
           # as stable does. A window after every search compared nothing, exit 3.
-          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp > /tmp/tier-diff.out 2>&1 || rc=$?
+          rc=0; bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp --from-key "$OB1_SMOKE_KEY" --to-key "$CANARY_KEY" > /tmp/tier-diff.out 2>&1 || rc=$?
           if [ "$rc" != 0 ] || ! grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-diff.out || ! grep -F 'what moved: nothing' /tmp/tier-diff.out; then cat /tmp/tier-diff.out >&2; echo "the --diff of a canary just refreshed from stable did not pass (exit $rc)" >&2; exit 1; fi
-          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
+          rc=0; bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp --from-key "$OB1_SMOKE_KEY" --to-key "$CANARY_KEY" --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
           if [ "$rc" != 3 ] || ! grep -F 'logged no searches in the window' /tmp/tier-empty.out; then cat /tmp/tier-empty.out >&2; echo "a --diff that compared nothing exited $rc, not 3" >&2; exit 1; fi
-          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY" "$CANARY_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed a key" >&2; exit 1; fi
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
           echo 'OB1_QUERY_LOG_RETENTION_DAYS=31' >> .env
+          # SMD-3032: the plugins' login role made on stable's password, as a
+          # canary that ran plugins before its file had a password of its own
+          # holds it: migrate.ts never changes it, so the up must (code review).
+          cq "CREATE ROLE ob1_plugins LOGIN PASSWORD 'ci-dummy-plugin-password-0123456789'" > /dev/null
           touch /tmp/provider-stub-wrong
           rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
-          if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
+          plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
+          plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
+          if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
@@ -2645,7 +2692,8 @@ jobs:
           # compose reads it from then on, its old port freed, and a connector
           # left there named.
           FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh --port 8012 up --no-smoke | tee /tmp/canary-moved.out
-          grep -F "wrote SERVER_PORT=\"8012\" to the canary's env file, $PWD/.env.canary.local (its SERVER_PORT was 8011)" /tmp/canary-moved.out
+          grep -F "wrote to the canary's env file, $PWD/.env.canary.local: SERVER_PORT=\"8012\" (it said 8011)" /tmp/canary-moved.out
+          [ "$(grep -c '^SERVER_PORT=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one SERVER_PORT line after the move" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, a port this canary no longer answers on: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-moved.out
           [ "$(stat -c %a .env.canary.local)" = 600 ] || { echo ".env.canary.local is not mode 600 after the port was written: $(stat -c %a .env.canary.local)" >&2; exit 1; }
           # shellcheck disable=SC2016 # compose's variable, not the shell's
@@ -2660,7 +2708,16 @@ jobs:
           # the forwarder there, and a connector left at the port it published
           # when the run began is still named (code review).
           echo 'SERVER_PORT="8013"' >> .env.canary.local
+          # …with stable's keys beside the canary's, as a file made before
+          # SMD-2874 PR 2 holds them: the up takes them out, by count, keeps the
+          # canary's own key, and leaves one MCP_ACCESS_KEYS line.
+          printf 'MCP_ACCESS_KEYS="%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          stable_keys="$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | grep -c .)"
           FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
+          grep -F "removed $stable_keys of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          if grep -F 'minted' /tmp/canary-edited.out; then echo "the up minted a key where the canary had its own" >&2; exit 1; fi
+          [ "$(grep -c '^MCP_ACCESS_KEYS=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one MCP_ACCESS_KEYS line" >&2; exit 1; }
+          [ "$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")" = "$CANARY_KEY" ] || { echo "the canary's key changed" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8013 ] || { echo "the canary's forwarder did not move to the edited port, 127.0.0.1:8013" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"

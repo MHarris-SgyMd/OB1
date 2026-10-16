@@ -1988,8 +1988,8 @@ deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to postg
 # --to-key, else its ?key=, else OB1_COMPARE_KEY, which then goes to both
 # brains. The variable or the connector keeps a key off the command line.
 bun --no-env-file db/tier.ts --diff --from open-brain --to open-brain-canary --since 2026-01-01
-OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff \
-  --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8000/canary/mcp
+bun --no-env-file db/tier.ts --diff \
+  --from http://127.0.0.1:8000/mcp --to http://127.0.0.1:8011/mcp   # a key for each: no key opens both (SMD-2874)
 # stable into the canary deploy/canary.sh stood up (canary.sh runs this itself):
 # each side a `postgres` on its own network, --env-file the canary's file and
 # --from-env-file stable's; --project names the canary's project, which a
@@ -2238,7 +2238,7 @@ record. `canary.sh` stands the canary beside it, and takes it down again
 
 ```bash
 # from a branch worktree, name the running stack's env file (deploy/.env is gitignored)
-export OB1_SMOKE_KEY=…   # a raw write key whose hash is in MCP_ACCESS_KEYS; the canary takes stable's keys
+# the canary mints its own key: no key of stable's is needed, or opens it
 deploy/canary.sh --env-file ~/OB1/deploy/.env --port 8011 up --connect   # the first up names its port
 deploy/canary.sh --env-file ~/OB1/deploy/.env up                         # later ones read it from its env file
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
@@ -2279,6 +2279,14 @@ setting, each with the value compose read, quoted afresh, but for these:
   the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
   `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
   comment; SMD-2882);
+- **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
+  its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
+  `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
+  their role's database password `OB1_PLUGIN_DB_PASSWORD`. In their place the
+  canary gets keys of its own (below) and, where stable sets one, a plugin
+  role password of its own, which every `up` sets the plugins' login role
+  to, where the canary's Postgres has one (migrate.ts makes that role once
+  and never changes its password);
 - **stable's `COMPOSE_PROJECT_NAME`**: the file names the canary's own
   project instead, `COMPOSE_PROJECT_NAME="<canary>"`, so compose given that file
   alone acts on the canary, never on stable (SMD-2873);
@@ -2316,7 +2324,12 @@ From then on the file is the canary's own:
   stable's password, takes its own at its next `up`. Neither password opens
   the other stack's database, and the canary's servers hold no database
   credential of stable's. They do hold stable's other settings, its provider
-  keys and access-key hashes among them, as the canary always has.
+  keys among them, as the canary always has.
+- **The keys.** See "Its own keys", below. A file made before SMD-2874 holds
+  stable's access keys, and one made before SMD-3032 stable's plugin role
+  password: the next `up` takes stable's keys out (by count), mints the
+  canary's, clears any raw key or webhook secret of stable's, gives the
+  plugin role a password of its own, and says each by name.
 - **Stable's changes.** A setting stable gains or changes later does not reach
   the canary, and `up` names each one that differs (the name, never the
   value; the port, address, tier and profiles canary.sh sets are not named).
@@ -2324,8 +2337,29 @@ From then on the file is the canary's own:
   `up` makes it again. `down --volumes` leaves it, and a canary stood up again
   makes its database on it.
 
-It takes stable's access keys with the rest, so a client reaches it with
-stable's keys. The tier and the compose profiles (none) are the canary's own. Each tier has its own Postgres server, never a second
+**Its own keys** (SMD-2874). No key of stable's opens the canary, and no key
+of the canary's opens stable. Its `MCP_ACCESS_KEYS` holds a write key `up`
+mints, named for the canary's project (`open-brain-canary:write:<sha256>`,
+or `open-brain-canary-2` and on when an entry of the canary's holds that name),
+and the raw key is the file's `OB1_CANARY_KEY`, which `up` smokes and
+registers the connector with and which no container is handed. For another
+client, mint a key with `bun server-portable/keygen.ts --name <client>
+--scope read|write` and add the line it prints to the canary's
+`MCP_ACCESS_KEYS`; `up` keeps any entry that is not stable's. A refresh copies
+stable's `ob1_agents` and `ob1_agent_keys` rows into the canary, but those
+grant nothing: a key is accepted by `MCP_ACCESS_KEYS` alone, and those rows
+can only refuse one (`revoke_agent_key`). The canary's key registers its own
+agent at its first request. `up` writes these settings with
+`deploy/env-file.ts` (one line a setting, through a symlink), so it needs
+`bun` on PATH; a setting it must rewrite that spans lines is refused (write it on one
+line, entries separated by commas), and comments inside `MCP_ACCESS_KEYS` are
+not kept when `up` rewrites it. Of `OB1_HOOK_SECRETS`, stable's pairs are
+taken out and the canary's own kept. Stable's keys are those its env file holds now: a key stable rotated out
+before this canary's file was mended reads as the canary's own, so take it
+out of the file by hand. Stable's keys set in the shell are unset
+for the run, as its database password is, so they never reach the canary.
+
+The tier and the compose profiles (none) are the canary's own. Each tier has its own Postgres server, never a second
 database on stable's: a canary exists to absorb the risky migration, reembed
 or index rebuild, and a shared server would share its memory, its WAL and its
 crashes with the record.
@@ -2335,8 +2369,9 @@ forwarder: `http://127.0.0.1:N/mcp`, on loopback whatever `SERVER_BIND` says
 for stable (SMD-2874; docs/one-brain-per-stack.md). The first `up` needs
 `--port N`, which it writes to the canary's env file as `SERVER_PORT`; later
 ones read it there. A `--port` that differs is the canary's port from then
-on: `up` appends it to the file as its last `SERVER_PORT`, which compose
-reads, reads it back, and says so. It does the same for the address, tier and
+on: `up` writes it to the file, one line a setting, its old line removed and
+the new one at the file's end
+(`deploy/env-file.ts`), reads it back through compose, and says so. It does the same for the address, tier and
 profiles when the file holds others than the canary's own, as one made
 before SMD-2874 does (stable's). Stable's port (its env file's
 `SERVER_PORT`, else 8000, or the port its forwarder publishes) is refused.
@@ -2360,10 +2395,19 @@ own origin instead, its two servers on stable's `mesh` network
 `up --port N`: its servers are recreated on its own networks alone, on the
 same volume, behind its own proxy on `N`, and its env file, whose
 `SERVER_PORT` was stable's, takes `N` and the canary's own address, tier and
-profiles (appended, the rest of the file as it was). A connector left at `/canary/mcp`
+profiles (their old lines removed and the new ones at the file's end, the
+rest of the file as it was). A connector left at `/canary/mcp`
 is stable's URL, not the canary's: `up` names it, `up --connect` refuses to
 replace it until it is removed (`claude mcp remove --scope user
-open-brain-canary`), and `down` leaves it alone.
+open-brain-canary`), and `down` leaves it alone. That same `up` takes
+stable's keys out of the file and mints the canary's own (SMD-2874 PR 2): a
+key of the canary's own in `MCP_ACCESS_KEYS` is kept, as is an
+`OB1_WORKER_KEY` whose hash is the canary's (one of stable's is cleared), so a
+canary sleep worker keeps its key; `--connect` registers the connector with
+the new key, and an `up` without it says the connector holds one the canary
+no longer takes. `COMPOSE_PROFILES` becomes `""`: a profile's service the
+canary runs (its sleep scheduler, say) is started by naming the profile on
+the command line, as it always was beside canary.sh's empty one.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
@@ -2430,7 +2474,7 @@ stable is redeployed:
    nothing serves the copy mid-restore through the connector, or writes rows
    the restore then collides with. `OB1_GIT_SHA` is the checkout's
    `git describe`, unless the shell sets it.
-4. It smoke-tests the canary with `OB1_SMOKE_KEY`. The keyed `/health` must
+4. It smoke-tests the canary with its own key, `OB1_CANARY_KEY`. The keyed `/health` must
    say `tier` `canary`, and `smoke.sh` must pass. Then the vector arm, which
    `smoke.sh` leaves out. A candidate thought is searched for by its own text, with
    every literal that search matches exactly taken out: SMD keys, dates,
@@ -2456,10 +2500,10 @@ stable is redeployed:
      had one before the refresh: then a migration emptied the vectors, or the
      model changed without a reembed, and the smoke fails.
 
-   `--no-smoke` skips the smoke and needs no key.
+   `--no-smoke` skips the smoke.
 5. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
-   names another), at user scope, under the same key; a new
+   names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
 
 `down` removes the canary's containers and its own networks. It
@@ -2500,9 +2544,13 @@ is the canary's life, in four `up`s:
 - `up --port 8011 --connect` over a stable carrying the protective mark
   `stable`. The canary must answer at `127.0.0.1:8011/mcp` with tier
   `canary` and OAuth not configured, its env file must hold its own port,
-  address, tier and profiles, every canary container must be on the canary's
-  own networks alone, and stable's mesh must hold none; its probe must pass
-  on a thought whose text holds literals, searched for without them;
+  address, tier and profiles, and its own minted key alone in
+  `MCP_ACCESS_KEYS` (no key hash of stable's, a plugin role password of its
+  own, no webhook secret of stable's), every canary container must be on the
+  canary's own networks alone, and stable's mesh must hold none. Stable's
+  smoke key must list nothing at the canary and the canary's nothing at
+  stable, each listing at its own; its probe must pass on a thought whose text
+  holds literals, searched for without them;
 - a second `up`, with no `--port` (its env file's) under
   `SERVER_BIND=0.0.0.0`, against a provider stub serving another model. The
   canary's forwarder must stay on loopback and stable's `/canary/mcp` be the
@@ -2513,8 +2561,11 @@ is the canary's life, in four `up`s:
   answering 200 with a `Deprecation` header;
 - a fourth `up`, on `--port 8012`: written to the canary's env file (written
   mode 600, compose reading 8012), its forwarder moved, 8011 free, and a
-  connector left at 8011 named; then 8013 edited into the file by hand, and
-  an `up` with no `--port` moves there and names the connector left at 8012;
+  connector left at 8011 named, one `SERVER_PORT` line left; then 8013
+  edited into the file by hand with stable's keys added back to
+  `MCP_ACCESS_KEYS`, and an `up` with no `--port` moves there, names the
+  connector left at 8012, and takes stable's keys out by count, keeping the
+  canary's own key and one `MCP_ACCESS_KEYS` line;
 - `down --volumes` refused on a canary stamped `working`, an empty canary
   deleted, and nothing to delete once the volume is gone (a local-scope
   connector left alone);
