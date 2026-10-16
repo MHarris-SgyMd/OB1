@@ -319,7 +319,8 @@
  *      percent-escaped YAML tag, no !reset or !override and no directive;
  *      compose.yaml's proxy as held, its observability collector whole
  *      (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
- *      environment, SMD-1849), and its forwarder (SMD-2583), with the
+ *      environment, SMD-1849), its Postgres exporter and that one's role
+ *      step whole (PG_EXPORTER_SERVICE, PG_MONITOR_ROLE_SERVICE), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
  *      deploy/forwarder.ts; an overlay's only its own table's mount,
  *      no config but the file's own table's (compose.yaml's forwarder's too), no name compose takes with no -f
@@ -342,7 +343,7 @@
  *      `.HostIp` is docker's struct field and `.HostIP` podman's, so an
  *      `inspect -f` template naming either fails under the other CLI
  *      (SMD-2677); the address is read from the binding's JSON, whose key
- *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
+ *      both spell HostIp (deploy/instance.ts's portsFromBindings). Any file git tracks
  *      or would track, a `{{ … }}` action at a time; no exceptions
  *  31. a plugin stays inside its schema and its role (SMD-2310) — an
  *      accident guard in front of the database's boundary, not a sandbox: its
@@ -6259,7 +6260,7 @@ const FORWARDER_SERVICE = {
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) aside: the image by its digest,
  * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
- * container's loopback, every call out off, Loki's retention, the mesh alone. Its environment holds telemetry's sign-in and
+ * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
  * exposure; a change to it is made here too, on purpose (review pass 1).
  */
 const LGTM_SERVICE = {
@@ -6307,11 +6308,48 @@ const LGTM_SERVICE = {
     LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h",
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
+    // The collector's scrape of pg-exporter on `telemetry` (SMD-1849 PR 3b), one argument with no space in it.
+    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
-  networks: { mesh: { aliases: ["lgtm.ob1.internal"] } },
+  networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
   healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
   restart: "unless-stopped",
+};
+/**
+ * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
+ * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
+ * which statements it names and how much of their text, and its own queries left out. Held whole because CI never starts the profile:
+ * a superuser's DSN, an image by tag or a dropped --member-of passed every other check (review pass 1).
+ */
+const PG_EXPORTER_SERVICE = {
+  image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
+  profiles: ["observability"],
+  read_only: true,
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  command: [
+    "--collector.stat_statements",
+    "--collector.stat_statements.include_query",
+    "--collector.stat_statements.query_length=120",
+    "--collector.stat_statements.limit=100",
+    "--collector.stat_statements.exclude_users=ob1_monitor",
+  ],
+  environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
+  depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
+  networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  restart: "unless-stopped",
+};
+const PG_MONITOR_ROLE_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-migrate",
+  pull_policy: "never",
+  profiles: ["observability"],
+  environment: { DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain", OB1_MONITOR_DB_PASSWORD: "${OB1_MONITOR_DB_PASSWORD:-}" },
+  command: ["bun", "login-role.ts", "--role", "ob1_monitor", "--password-env", "OB1_MONITOR_DB_PASSWORD", "--member-of", "pg_monitor"],
+  depends_on: { postgres: { condition: "service_healthy" }, migrate: { condition: "service_completed_successfully" } },
+  restart: "no",
+  networks: ["data"],
 };
 /** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
@@ -6326,7 +6364,6 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
   "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
-  "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
@@ -6337,6 +6374,7 @@ const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
 /** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. */
@@ -6361,10 +6399,9 @@ const SERVICE_BUILDS: Record<string, unknown> = {
 };
 /** The networks each file defines, exactly; a file not named here defines none. */
 const FILE_NETWORKS: Record<string, Mapping> = {
-  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true } },
+  "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true }, telemetry: { internal: true } },
   "compose.host-ports.yaml": { "postgres-port": {} },
   "compose.grafana-port.yaml": { "grafana-port": {} },
-  "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
 };
 /** The networks each file's services join, and the names each answers to there, exactly; a service not named here sets no `networks` (compose.yaml's proxy aside, PROXY_SERVICE's). */
 const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
@@ -6385,15 +6422,14 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     "orchestration-runner-role": ["data"],
     "orchestration-runner": ["data", "egress"],
     auth: { mesh: { aliases: ["auth.ob1.internal"] }, "auth-egress": {} },
-    // The observability profile's collector and Grafana (SMD-1849 PR 3a): the servers send to it and the proxy shows it, on `mesh` alone.
-    lgtm: { mesh: { aliases: ["lgtm.ob1.internal"] } },
+    // The observability profile's collector and Grafana (SMD-1849 PR 3a): the servers send to it and the proxy shows it, on `mesh`; it scrapes pg-exporter on `telemetry` (PR 3b).
+    lgtm: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
+    // The observability profile's database numbers (SMD-1849 PR 3b): the role step on `data`; the exporter on `data` and `telemetry`, where lgtm alone scrapes it.
+    "pg-monitor-role": ["data"],
+    "pg-exporter": { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
   },
   "compose.host-ports.yaml": { postgres: ["postgres-port"] },
   "compose.grafana-port.yaml": { lgtm: ["grafana-port"] },
-  "compose.canary.yaml": {
-    server: { "stable-mesh": { aliases: [tierMeshName("mcp", "canary")] } },
-    api: { "stable-mesh": { aliases: [tierMeshName("api", "canary")] } },
-  },
 };
 /** A name compose takes for its own with no -f, in any case (compose finds it so on a case-insensitive disk, macOS, measured): an override it reads beside compose.yaml, or a default name — docker-compose.y*ml, compose.yml, a case variant of compose.yaml — that compose warns about and skips beside compose.yaml but a checkout on such a disk can put in its place. */
 const AUTOLOADED_COMPOSE = /^(compose\.override|(docker|podman|container)-compose(\.override)?)\.ya?ml$|^compose\.yml$/i;
@@ -6443,6 +6479,13 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const ldiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(lgtm, ["logging"]))), LGTM_SERVICE, "services.lgtm", ldiffs);
     if (ldiffs.length) flag("proxy", `${ldiffs.slice(0, 6).join("; ")}${ldiffs.length > 6 ? `; and ${ldiffs.length - 6} more` : ""} — compose.yaml's lgtm is check 28's LGTM_SERVICE: Grafana's anonymous access, its admin password's refusal, the backends' loopback and every call out are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3a)`);
+    // The Postgres exporter and its role's step, whole (SMD-1849 PR 3b review pass 1): the role it reads as and what it names are their keys.
+    for (const [name, held, lit] of [["pg-exporter", PG_EXPORTER_SERVICE, "PG_EXPORTER_SERVICE"], ["pg-monitor-role", PG_MONITOR_ROLE_SERVICE, "PG_MONITOR_ROLE_SERVICE"]] as const) {
+      const svc = isMapping(services[name]) ? services[name] : undefined;
+      const pdiffs: string[] = [];
+      pathDiffs(JSON.parse(JSON.stringify(omitKeys(svc, ["logging"]))), held, `services.${name}`, pdiffs);
+      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership and which statements it names are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
+    }
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
     pathDiffs(fconfig?.content, FORWARDER_SCRIPT, "configs.forwarder.content", sdiffs);
@@ -6525,7 +6568,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.yaml's anchor redefined behind U+2028 on a comment, which compose reads and Bun.YAML does not (measured)", "compose.yaml", "\nservices:\n", "\n# a note\u2028x-shadow: &proxy-routes \"http: {}\"\n\nservices:\n"],
   ["compose.yaml's anchor redefined behind U+0085 on a comment", "compose.yaml", "\nservices:\n", "\n# a note\u0085x-shadow: &proxy-routes \"http: {}\"\n\nservices:\n"],
   ["compose.host-ports.yaml replacing the table behind U+2028 on a comment, which compose merges and Bun.YAML does not see (measured, pass 1)", "compose.host-ports.yaml", "\nservices:\n", "\n# a note\u2028configs: {proxy-routes: {content: 'http: {routers: {all: {rule: \"PathPrefix(`/`)\", priority: 100, service: canary}}}'}}\n\nservices:\n"],
-  ["compose.canary.yaml replacing the table behind U+2029 on a comment", "compose.canary.yaml", "\nservices:\n", "\n# a note\u2029configs: {proxy-routes: {content: 'http: {}'}}\n\nservices:\n"],
+  ["compose.grafana-port.yaml replacing the table behind U+2029 on a comment", "compose.grafana-port.yaml", "\nservices:\n", "\n# a note\u2029configs: {proxy-routes: {content: 'http: {}'}}\n\nservices:\n"],
   ["compose.yaml that does not parse", "compose.yaml", "x-proxy-routes: &proxy-routes |\n", "x-proxy-routes: &proxy-routes [\n"],
   ["a Go template on a comment line in compose.api-public.yaml's table", "compose.api-public.yaml", "    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"],
   ["compose.api-public.yaml's label its own table", "compose.api-public.yaml", "      ob1.proxy-api-route: *api-route\n", "      ob1.proxy-api-route: \"http: {}\"\n"],
@@ -6546,10 +6589,10 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a docker-compose.override.yml spelt with U+212A, which compose on macOS reads with no -f (measured, pass 4)", "doc\u212ager-compose.override.yml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["compose.host-ports.yaml naming the project, which renames the proxy's networks (measured, pass 4)", "compose.host-ports.yaml", "\nservices:\n", "\nname: open-brain-canary\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a !!binary key, which compose decodes and Bun.YAML does not (measured, pass 6)", "compose.host-ports.yaml", "\nservices:\n", "\n!!binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
-  ["compose.canary.yaml defining compose.api-public.yaml's config behind a verbatim !<…binary> key (measured, pass 7)", "compose.canary.yaml", "\nservices:\n", "\n!<tag:yaml.org,2002:binary> Y29uZmlncw==: {proxy-api-route: {content: \"http: {}\"}}\n\nservices:\n"],
-  ["a %TAG directive in compose.canary.yaml, which can redefine the primary handle so that !binary is !!binary (measured, pass 7)", "compose.canary.yaml", "# The canary tier on stable's mesh (SMD-2294).", "%TAG ! tag:yaml.org,2002:\n---\n# The canary tier on stable's mesh (SMD-2294)."],
-  ["compose.canary.yaml with a !!binary key after a comma in a flow mapping (measured, pass 7)", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {a: 1,!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
-  ["compose.canary.yaml with a !!binary key opening a flow mapping", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
+  ["compose.grafana-port.yaml defining compose.api-public.yaml's config behind a verbatim !<…binary> key (measured, pass 7)", "compose.grafana-port.yaml", "\nservices:\n", "\n!<tag:yaml.org,2002:binary> Y29uZmlncw==: {proxy-api-route: {content: \"http: {}\"}}\n\nservices:\n"],
+  ["a %TAG directive in compose.grafana-port.yaml, which can redefine the primary handle so that !binary is !!binary (measured, pass 7)", "compose.grafana-port.yaml", "# The observability profile's Grafana on a loopback port of its own (SMD-1849", "%TAG ! tag:yaml.org,2002:\n---\n# The observability profile's Grafana on a loopback port of its own (SMD-1849"],
+  ["compose.grafana-port.yaml with a !!binary key after a comma in a flow mapping (measured, pass 7)", "compose.grafana-port.yaml", "\nservices:\n", "\nx-flow: {a: 1,!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
+  ["compose.grafana-port.yaml with a !!binary key opening a flow mapping", "compose.grafana-port.yaml", "\nservices:\n", "\nx-flow: {!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a percent-escaped !%21binary key (measured, pass 7)", "compose.host-ports.yaml", "\nservices:\n", "\n!%21binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
   ["compose.api-public.yaml defining a second config, which a later overlay could mount", "compose.api-public.yaml", "\nconfigs:\n  proxy-api-route:\n", "\nconfigs:\n  extra-routes:\n    content: \"http: {}\"\n  proxy-api-route:\n"],
   ["compose.api-public.yaml's config made external beside its content", "compose.api-public.yaml", "    content: *api-route\n", "    content: *api-route\n    external: true\n"],
@@ -6558,18 +6601,18 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
   ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
   ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
-  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
-  ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.grafana-port.yaml joining the stack's mesh by a second key, external by its name, with a shadow on it answering as the MCP server (SMD-2685, measured on the canary's overlay before SMD-2874)", "compose.grafana-port.yaml", "\nnetworks:\n  grafana-port: {}\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  mesh-2:\n    name: open-brain_mesh\n    external: true\n  grafana-port: {}\n"],
+  ["compose.grafana-port.yaml defining a second key for the stack's mesh", "compose.grafana-port.yaml", "\nnetworks:\n  grafana-port: {}\n", "\nnetworks:\n  mesh-2:\n    name: open-brain_mesh\n    external: true\n  grafana-port: {}\n"],
   ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
   // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
   ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
-  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
+  ["compose.yaml's Postgres on the mesh too, beside every backend the proxy reaches", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
   ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
   ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.3-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
   ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
   ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
   ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
-  ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
+  ["a !override on lgtm's networks in compose.grafana-port.yaml, which compose honours and Bun.YAML reads past", "compose.grafana-port.yaml", "  lgtm:\n    networks: [grafana-port]\n", "  lgtm:\n    networks: !override [grafana-port]\n"],
   ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.3-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
   ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
@@ -6713,7 +6756,8 @@ checkBoundedLogs();
 // --runtime podman, and a connector check lost stable's LAN address from the
 // hosts it matches. CI runs docker alone, so no job sees a template that only
 // one CLI evaluates; this does. The address comes from `{{json .}}` of the
-// binding.
+// binding, as canary.sh's bound_ip read it until SMD-2874 left it nothing to
+// read.
 /** A `{{ … }}` action naming `.HostIp` or `.HostIP` as a field: the action may span lines, not cross its closing `}}`. */
 const HOST_IP_FIELD = /\{\{(?:[^}]|\}(?!\}))*?\.HostI[pP]/g;
 /** [text, hit] — what check 30 must catch, and what it must not. */
@@ -6742,7 +6786,7 @@ function checkHostIpTemplates() {
   if (!files.includes("deploy/canary.sh")) fail(SELF, "check 30's listing does not reach deploy/canary.sh — the listing is broken, not the tree clean");
   for (const rel of files) {
     for (const line of hostIpFieldsIn(readFileSync(join(ROOT, rel), "utf8"))) {
-      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/canary.sh's bound_ip does");
+      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/instance.ts's portsFromBindings does");
     }
   }
 }
@@ -7069,7 +7113,7 @@ const RESTART_POLICIES: Record<string, string> = {
   "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
-  lgtm: "unless-stopped",
+  lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
 };
 /** Where a compose file's services stray from `held`: [the service (null for the file), what is wrong]. */
 function restartGapsIn(text: string, held: Record<string, string>): [service: string | null, detail: string][] {
