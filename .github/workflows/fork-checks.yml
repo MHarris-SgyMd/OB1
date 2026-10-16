@@ -1848,9 +1848,11 @@ jobs:
       # refusal, and the key is in no line of the edge's log; an unknown host
       # is the edge's 404. The edge is on the host's network and on no
       # network of either brain. Refused: edge.ts run where Bun would load
-      # deploy/.env, and a new edge port a host process holds while the edge
-      # runs, which keeps serving. A changed registry (ob1b's port renamed
-      # ob1c) is served after up. With ob1b's forwarder stopped, its host is a
+      # deploy/.env; a new edge port a host process holds on 127.0.0.1 or
+      # [::1] while the edge runs, which keeps serving; a file beside the
+      # table. A changed registry (ob1b's port renamed ob1c) is served after
+      # an up under umask 077 with the table's directory made afresh. With
+      # ob1b's forwarder stopped, its host is a
       # bare 404 and the stack's still answers. Then the edge goes, and ob1b
       # with its volume (logs first, when the step failed).
       - name: The edge proxy reaches both brains through their published ports
@@ -1858,18 +1860,18 @@ jobs:
         run: |
           # A throwaway key, masked: a failure below dumps the edge's log, which would print it were it there.
           echo "::add-mask::$OB1_SMOKE_KEY"
-          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file /dev/null -p ob1-edge -f edge/compose.yaml --profile host logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 30 forwarder proxy 2>/dev/null || true; fi; bun --no-env-file edge/edge.ts down > /dev/null 2>&1 || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -rf .env.ob1b.local edge/brains.local.yaml edge/brains.held.yaml edge/brains.next.yaml edge/dynamic; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file /dev/null -p ob1-edge -f edge/compose.yaml --profile host logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 30 forwarder proxy 2>/dev/null || true; fi; bun --no-env-file edge/edge.ts down > /dev/null 2>&1 || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -rf .env.ob1b.local edge/brains.local.yaml /tmp/edge-held.yaml /tmp/edge-next.yaml edge/dynamic; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
           printf 'edge:\n  port: 8090\nbrains:\n  stable:\n    port: 8010\n  ob1b:\n    port: 8040\n' > edge/brains.local.yaml
           bun --no-env-file edge/edge.ts check | tee /tmp/edge-check.out
           grep -F 'Docker Engine on Linux, rootful: the host shape' /tmp/edge-check.out
           grep -F 'stable: 127.0.0.1:8010 is published by open-brain-forwarder-1, of project open-brain' /tmp/edge-check.out
           grep -F 'ob1b: 127.0.0.1:8040 is published by ob1b-forwarder-1, of project ob1b' /tmp/edge-check.out
           bun --no-env-file edge/edge.ts up
+          # Each brain at its host, on each loopback: the edge holds its port on both, so no other process takes the clients that try ::1 first.
           for b in stable ob1b; do
-            [ "$(curl -s --max-time 10 "http://$b.localhost:8090/health" || true)" = ok ] || { echo "$b does not answer at its host through the edge" >&2; exit 1; }
+            [ "$(curl -s -4 --max-time 10 "http://$b.localhost:8090/health" || true)" = ok ] || { echo "$b does not answer at its host through the edge on 127.0.0.1" >&2; exit 1; }
+            [ "$(curl -s -g --max-time 10 -H "Host: $b.localhost:8090" 'http://[::1]:8090/health' || true)" = ok ] || { echo "$b does not answer at its host through the edge on [::1]" >&2; exit 1; }
           done
-          # The edge holds its port on both loopbacks, so no other process takes the clients that try ::1 first.
-          [ "$(curl -s -g --max-time 10 -H 'Host: stable.localhost:8090' 'http://[::1]:8090/health' || true)" = ok ] || { echo "the edge does not answer on [::1]:8090" >&2; exit 1; }
           if ! { [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health || true)" = ok ] && [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health || true)" = ok ]; }; then echo "a brain stopped answering on its own port beside the edge" >&2; exit 1; fi
           list='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
           got="$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" -d "$list" http://stable.localhost:8090/mcp || true)"
@@ -1896,18 +1898,29 @@ jobs:
           # Run from deploy/, whose .env (a brain's secrets) Bun would load into it: refused without --no-env-file, naming it.
           rc=0; bun edge/edge.ts check > /tmp/edge-bunenv.out 2>&1 || rc=$?
           if [ "$rc" != 2 ] || ! grep -qF 'Run it as: bun --no-env-file' /tmp/edge-bunenv.out; then cat /tmp/edge-bunenv.out >&2; echo "the edge ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
-          # A new edge port a host process holds, while the edge runs on its old one: refused before anything changes.
-          python3 -m http.server 8092 --bind 127.0.0.1 > /dev/null 2>&1 &
-          SQUAT=$!
-          for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/8092) 2>/dev/null && break; sleep 0.25; done
-          sed '0,/  port: 8090/s//  port: 8092/' edge/brains.local.yaml > edge/brains.held.yaml
-          rc=0; bun --no-env-file edge/edge.ts up --registry edge/brains.held.yaml > /tmp/edge-held.out 2>&1 || rc=$?
-          kill "$SQUAT"; SQUAT=""
-          if [ "$rc" != 2 ] || ! grep -qF '127.0.0.1:8092 (edge.port) already answers, and not as this edge' /tmp/edge-held.out; then cat /tmp/edge-held.out >&2; echo "a held edge port was not refused while the edge ran (exit $rc)" >&2; exit 1; fi
-          [ "$(curl -s --max-time 10 http://stable.localhost:8090/health || true)" = ok ] || { echo "the refused up stopped the running edge" >&2; exit 1; }
+          # A new edge port a host process holds, on either loopback, while the edge runs on its old one: refused before anything changes.
+          for squat in "127.0.0.1 8092" "::1 8094"; do
+            read -r addr port <<<"$squat"
+            shown="$addr:$port"
+            if [ "$addr" = ::1 ]; then shown="[::1]:$port"; fi
+            python3 -m http.server "$port" --bind "$addr" > /dev/null 2>&1 &
+            SQUAT=$!
+            for _ in $(seq 1 40); do if curl -s -g -o /dev/null --max-time 1 "http://$shown/"; then break; fi; sleep 0.25; done
+            sed "0,/  port: 8090/s//  port: $port/" edge/brains.local.yaml > /tmp/edge-held.yaml
+            rc=0; bun --no-env-file edge/edge.ts up --registry /tmp/edge-held.yaml > /tmp/edge-held.out 2>&1 || rc=$?
+            kill "$SQUAT"; SQUAT=""
+            if [ "$rc" != 2 ] || ! grep -qF "$shown (edge.port) already answers, and not as this edge" /tmp/edge-held.out; then cat /tmp/edge-held.out >&2; echo "an edge port held on $shown was not refused while the edge ran (exit $rc)" >&2; exit 1; fi
+            [ "$(curl -s --max-time 10 http://stable.localhost:8090/health || true)" = ok ] || { echo "the refused up stopped the running edge" >&2; exit 1; }
+          done
+          # A file beside the table, which Traefik would load: refused.
+          touch edge/dynamic/extra.yaml
+          rc=0; bun --no-env-file edge/edge.ts up > /tmp/edge-stray.out 2>&1 || rc=$?
+          rm -f edge/dynamic/extra.yaml
+          if [ "$rc" != 2 ] || ! grep -qF 'holds extra.yaml beside routes.yaml' /tmp/edge-stray.out; then cat /tmp/edge-stray.out >&2; echo "a stray file beside the table was not refused (exit $rc)" >&2; exit 1; fi
           # A changed registry is served after up: ob1b's port under the name ob1c, and ob1b gone (Traefik's router miss).
-          sed 's/^  ob1b:$/  ob1c:/' edge/brains.local.yaml > edge/brains.next.yaml && mv edge/brains.next.yaml edge/brains.local.yaml
-          bun --no-env-file edge/edge.ts up
+          # Under umask 077, with the table's directory made afresh: the edge's user (65534) still reads it.
+          sed 's/^  ob1b:$/  ob1c:/' edge/brains.local.yaml > /tmp/edge-next.yaml && cp /tmp/edge-next.yaml edge/brains.local.yaml
+          (umask 077 && rm -rf edge/dynamic && bun --no-env-file edge/edge.ts up)
           [ "$(curl -s --max-time 10 http://ob1c.localhost:8090/health || true)" = ok ] || { echo "the changed registry's ob1c is not served after up" >&2; exit 1; }
           [ "$(curl -s --max-time 10 http://ob1b.localhost:8090/health || true)" = "404 page not found" ] || { echo "ob1b, gone from the registry, is still routed after up" >&2; exit 1; }
           docker compose --env-file .env.ob1b.local -f compose.yaml stop forwarder

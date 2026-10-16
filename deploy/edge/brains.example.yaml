@@ -5,7 +5,8 @@
 # edge.port    the edge's own port, on the host's loopback (default 8090);
 # edge.ping_port  under Docker Engine on Linux, where the edge is on the
 #              host's network, the port its healthcheck asks, on loopback
-#              (default one above edge.port); unused under podman machine;
+#              (default one above edge.port); unused under podman machine,
+#              but no brain may take it either;
 # edge.domain  each brain is served at <name>.<domain>:<port>: localhost (the
 #              default) or a name under it, since the edge listens on
 #              loopback alone;

@@ -7595,7 +7595,7 @@ const edgeEnvironment = (entrypoints: Record<string, string>, ping: string) => (
   TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false",
 });
 const EDGE_LOGGING = { driver: "json-file", options: { "max-size": "10m", "max-file": "3" } };
-const edgeService = (profile: string, ports: string) => ({
+const edgeService = (profile: string, addresses: string) => ({
   profiles: [profile],
   image: PROXY_SERVICE.image,
   user: "65534:65534",
@@ -7603,7 +7603,7 @@ const edgeService = (profile: string, ports: string) => ({
   security_opt: ["no-new-privileges:true"],
   read_only: true,
   volumes: ["./dynamic:/etc/traefik/dynamic:ro,z"],
-  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}", "ob1.edge-ports": ports },
+  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}", "ob1.edge-addresses": addresses },
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
   restart: "unless-stopped",
   logging: EDGE_LOGGING,
@@ -7613,12 +7613,12 @@ const EDGE_COMPOSE = {
   name: "ob1-edge",
   services: {
     edge: {
-      ...edgeService("bridge", "${EDGE_PORT:-8090}"),
+      ...edgeService("bridge", "127.0.0.1:${EDGE_PORT:-8090}"),
       environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:8082"),
       ports: ["127.0.0.1:${EDGE_PORT:-8090}:8000"], networks: ["web"], dns_search: ["."],
     },
     "edge-host": {
-      ...edgeService("host", "${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}"),
+      ...edgeService("host", "127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}"),
       environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: "127.0.0.1:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete", TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: "[::1]:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB6_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:${EDGE_PING_PORT:-8091}"),
       network_mode: "host",
     },
@@ -7627,6 +7627,7 @@ const EDGE_COMPOSE = {
 };
 /** What deploy/edge/edge.ts renders for deploy/edge/brains.example.yaml in a shape, byte for byte. */
 const edgeRouteTable = (dial: string, entrypoints: string) => "http:\n  routers:\n"
+  + `    _edge-probe:\n      rule: "Host(\`_edge.localhost\`)"\n      entryPoints: [${entrypoints}]\n      service: noop@internal\n`
   + ["canary", "stable"].map((b) => `    ${b}:\n      rule: "Host(\`${b}.localhost\`)"\n      entryPoints: [${entrypoints}]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b}\n`).join("")
   + "  middlewares:\n    edge-strip:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n          X-OB1-Legacy-Route: \"\"\n"
   + routeErrors("brain-absent", "502")
@@ -7670,7 +7671,7 @@ const EDGE_PROBES: [string, "compose.yaml" | "edge.ts" | "files", string, string
   ["the host shape off [::1], where another process would take the clients that try it first", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: \"[::1]:${EDGE_PORT:-8090}\"\n", ""],
   ["the host table's routers off [::1]'s entrypoint", "edge.ts", "host: \"web, web6\"", "host: \"web\""],
   ["the edge joining a brain's network", "compose.yaml", "networks:\n  web: {}\n", "networks:\n  web: {}\n  brain:\n    name: open-brain_mesh\n    external: true\n"],
-  ["the engine's socket mounted into the host shape's edge", "compose.yaml", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-ports: \"${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}\"\n", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-ports: \"${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}\"\n"],
+  ["the engine's socket mounted into the host shape's edge", "compose.yaml", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-addresses: \"127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}\"\n", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-addresses: \"127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}\"\n"],
   ["the edge trusting a PROXY line from the private ranges", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n      TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: \"10.0.0.0/8\"\n"],
   ["the edge's table not deleting X-Brain-Forwarder", "edge.ts", "          X-Brain-Forwarder: \\\"\\\"\\n", ""],
   ["the edge's table routing a brain by path, beside its host", "edge.ts", "rule: \"Host(\\`${b.name}.${r.domain}\\`)\"", "rule: \"Host(\\`${b.name}.${r.domain}\\`) || PathPrefix(\\`/${b.name}\\`)\""],

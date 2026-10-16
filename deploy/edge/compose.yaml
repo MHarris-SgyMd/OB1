@@ -49,7 +49,7 @@ services:
   # confined as it is, with the same access log (no query string, no header,
   # no userinfo: a connector carries its key as `?key=`), and the file
   # provider alone, reading the table edge.ts renders. Its labels: the
-  # table's digest, and the host ports it holds, which edge.ts reads so a
+  # table's digest, and the host addresses it holds, which edge.ts reads so a
   # re-up is no clash with itself.
   edge:
     profiles: [bridge]
@@ -79,7 +79,7 @@ services:
       - ./dynamic:/etc/traefik/dynamic:ro,z
     labels:
       ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}
-      ob1.edge-ports: "${EDGE_PORT:-8090}"
+      ob1.edge-addresses: "127.0.0.1:${EDGE_PORT:-8090}"
     ports:
       - "127.0.0.1:${EDGE_PORT:-8090}:8000"
     networks: [web]
@@ -123,7 +123,7 @@ services:
       - ./dynamic:/etc/traefik/dynamic:ro,z
     labels:
       ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}
-      ob1.edge-ports: "${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}"
+      ob1.edge-addresses: "127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}"
     network_mode: host
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]

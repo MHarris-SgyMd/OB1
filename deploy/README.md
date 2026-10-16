@@ -294,8 +294,10 @@ there.
   sign-ins therefore lock out every client behind the edge for the
   lockout's length.
 - **The domain is `localhost` or a name under it.** The edge listens on
-  loopback alone, and a name that another resolver answers would send a
-  client's key off the machine over plain HTTP.
+  loopback alone. Under that domain, the resolvers that follow RFC 6761 answer
+  loopback themselves, where a public name would send a client's key off the
+  machine over plain HTTP. A Linux resolver that doesn't follow it needs the
+  hosts lines above.
 - **Two shapes**, because no one binding reaches a brain's loopback port from
   a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
   - **Under a rootful podman machine** (`podman machine inspect --format
@@ -307,14 +309,21 @@ there.
   - **On Docker Engine on Linux**, it runs on the host's network, listens on
     both 127.0.0.1 and `[::1]`, and dials each brain at 127.0.0.1. Its
     healthcheck's ping is on `edge.ping_port`. A host with IPv6 turned off
-    has no `[::1]`, and the edge does not start there.
+    has no `[::1]`, so `check` and `up` refuse there, saying so.
 
   `edge.ts` picks the shape from the runtime. Every other runtime is refused
   until `--shape bridge` or `--shape host` names one: a rootless podman
-  machine, a rootless engine, podman on Linux, and Docker Desktop. Docker
-  Desktop has no known working shape. Its containers name the host
-  `host.docker.internal`, not the bridge shape's name, and a host-network
-  container there listens inside its VM, out of the Mac's reach.
+  machine, a rootless engine, podman on Linux, and Docker Desktop.
+  `--shape host` under podman machine is refused outright, since it was
+  measured unreachable from the Mac. Docker Desktop has no known working
+  shape. Its containers name the host `host.docker.internal`, not the bridge
+  shape's name, and a host-network container there listens inside its VM,
+  out of the Mac's reach.
+- **`up` checks that the table is served.** The table has a probe route of
+  its own, `_edge.<domain>`, which no brain's name can take and which
+  answers 418. Until that route answers, `up` treats the table as not
+  loaded. In that case it recreates the edge once, and then fails, naming
+  the log. It never asks a brain, so a brain that is down doesn't fail `up`.
 - **Changing the registry:** `up` again. The table's digest is a label on
   the edge's container, so a changed table recreates it.
 
