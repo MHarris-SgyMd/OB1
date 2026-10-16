@@ -536,8 +536,9 @@ if mode == "own-fix":
     # behind (review pass 1). Read off the file'"'"'s own lines, not its value: a
     # value holding \n written on one line (canary.sh'"'"'s own `write` escapes a
     # line break so) is replaced whole (review pass 2).
-    def spans_lines(path, name):
-        for line in open(path, encoding="utf-8", errors="replace").read().split("\n"):
+    file_lines = open(out, encoding="utf-8", errors="replace").read().split("\n")
+    def spans_lines(name):
+        for line in file_lines:
             m = re.match(r"\s*(?:export\s+)?%s\s*=\s*(.*)$" % name, line)
             if not m or m.group(1)[:1] not in ("\"", "'"'"'"):
                 continue
@@ -552,7 +553,7 @@ if mode == "own-fix":
             else:
                 return True
         return False
-    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(out, n)]
+    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(n)]
     stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set())
     fix, said = {}, []
     # The canary'"'"'s port, address, tier and profiles (SMD-2874 PR 1).
@@ -711,9 +712,14 @@ apply_own() {
   OWN_SAID=""
   # SHOWN names the canary's env file in a refusal, not the copy (review pass 2).
   fix="$(SHOWN="$CANARY_ENV" CANARY_PORT="$PORT" env_file own-fix "$ENV_FILE" "$1" 2>&1)" || { OWN_WHY="$fix"; return 1; }
-  OWN_SAID="$(printf '%s' "$fix" | python3 -c 'import json, sys; print("; ".join(json.load(sys.stdin)["said"]))')" || { OWN_WHY="env_file own-fix gave no answer"; return 1; }
+  # One parse: what was said on the first line (joined, so one line), the
+  # values as JSON on the second, held in the shell and piped, never argv.
+  local said_values values
+  said_values="$(printf '%s' "$fix" | python3 -c 'import json, sys; d = json.load(sys.stdin); print("; ".join(d["said"])); print(json.dumps(d["values"]))')" || { OWN_WHY="env_file own-fix gave no answer"; return 1; }
+  OWN_SAID="$(printf '%s\n' "$said_values" | head -n 1)"
   [ -n "$OWN_SAID" ] || return 0
-  OWN_WHY="$(printf '%s' "$fix" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["values"]))' | bun --no-env-file "$HERE/env-file.ts" set "$1" 2>&1)" || return 1
+  values="$(printf '%s\n' "$said_values" | sed -n 2p)"
+  OWN_WHY="$(printf '%s' "$values" | bun --no-env-file "$HERE/env-file.ts" set "$1" 2>&1)" || return 1
   left="$(CANARY_PORT="$PORT" env_file own-fix "$ENV_FILE" "$1" 2>&1 | python3 -c 'import json, sys; print(" ".join(json.load(sys.stdin)["values"]))' 2>&1)" || { OWN_WHY="compose could not read it back"; return 1; }
   [ -z "$left" ] || { OWN_WHY="compose read $left otherwise back"; return 1; }
 }
