@@ -1410,9 +1410,9 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   block read and write seconds for the 100 statements that took the most time
   (of those above the tenth percentile of total time: the exporter's own query
   leaves out the rest), each by `queryid`, `user` and `datname`, with
-  `pg_stat_statements_query_id_total` naming each `queryid`'s normalized text cut to
-  120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c FROM
-  match_thoughts($1 ::vector, …)`, measured); connections by state,
+  `pg_stat_statements_query_id_total` naming each `queryid`'s normalized text
+  cut to 120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c
+  FROM match_thoughts($1 ::vector, …)`, measured); connections by state,
   `pg_stat_activity_count` by database and state — the servers' pool among
   them, which their client cannot count — and the exporter's default
   collectors (`pg_up`, locks, database sizes, the WAL). The statements are the
@@ -1457,16 +1457,16 @@ read to one the stack writes; CI's "The observability profile's dashboard
 reads every series it names" runs each query on the pinned images). `lgtm`
 carries the file's sha256 as a label, so an `up -d` after the dashboard
 changed recreates it: compose recreates a container for a changed label, not
-for a changed inline config alone, and recreating it restarts Prometheus,
-Loki and Tempo, which replay their write-ahead logs while the servers' sends
-fail for those seconds. Grafana's home is the dashboard only where no user or
-organisation has picked a home of its own. Prometheus ingests a zero at the start of
-each of the servers' series (`created-timestamp-zero-ingestion`): their
-counters are born at their first count, which a rate otherwise never counts,
-so one failure would read 0 (measured); series already stored are as they
-were. The series the collector scrapes —
-pg-exporter's and its own — get no such zero, so its losses have totals beside
-their rate. Its rows, each panel saying what it counts:
+for a changed inline config alone, and recreating it restarts Prometheus, Loki
+and Tempo, which replay their write-ahead logs while the servers' sends fail
+for those seconds. Grafana's home is the dashboard only where no user or
+organisation has picked a home of its own. Prometheus ingests a zero at the
+start of each of the servers' series (`created-timestamp-zero-ingestion`):
+their counters are born at their first count, which a rate otherwise never
+counts, so one failure would read 0 (measured); series already stored are as
+they were. The series the collector scrapes — pg-exporter's and its own — get
+no such zero, so its losses have totals beside their rate. Its rows, each
+panel saying what it counts:
 - **Requests**, both servers: per second by door and the tool each ran (an
   MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
   `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
@@ -1498,22 +1498,22 @@ their rate. Its rows, each panel saying what it counts:
 Its variables pick the server (`open-brain`, `open-brain-api`, each server's
 own `service.name`), a pipeline tier (for the request, provider, store and job
 rows; a stack that is no tier sends none, so All takes a path-mode canary's
-beside stable's and stable alone cannot be picked) and the database (All takes every one but Postgres's templates, the
-brain's being `openbrain`). Grafana will not save a change made to it — it is
-provisioned (measured) — so save a copy to keep one; to change the stack's
-own, export the copy's JSON (not "for sharing externally", which writes
-`${DS_…}` placeholders) over `deploy/observability/dashboard.json`, put back
-its uid `ob1`, its title `Open Brain` and `"editable": false` (a saved copy
-has its own of each; check 36 says so), and run `bun
-scripts/inline-dashboard.ts`, which writes compose.yaml's inline copy and
-`lgtm`'s labels. Loki refused every record with the disk under `lgtm-data` 92%
-full (measured on a podman machine; its write-ahead log's threshold is 90%),
-answering the collector "Ingester is shutting down": only `lgtm`'s own log
-and the dashboard's last two panels say so. The records sent meanwhile are
-lost; free room (`compose exec lgtm sh -c 'du -sh /data/*'` says what each
-backend holds), then `compose restart lgtm` (whether Loki takes records again
-by itself once under 90% is unmeasured). Nothing on the dashboard shows the
-disk itself.
+beside stable's and stable alone cannot be picked) and the database (All takes
+every one but Postgres's templates, the brain's being `openbrain`). Grafana
+will not save a change made to it — it is provisioned (measured) — so save a
+copy to keep one; to change the stack's own, export the copy's JSON (not "for
+sharing externally", which writes `${DS_…}` placeholders) over
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
+Brain` and `"editable": false` (a saved copy has its own of each; check 36
+says so), and run `bun scripts/inline-dashboard.ts`, which writes
+compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
+the disk under `lgtm-data` 92% full (measured on a podman machine; its
+write-ahead log's threshold is 90%), answering the collector "Ingester is
+shutting down": only `lgtm`'s own log and the dashboard's last two panels say
+so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
+'du -sh /data/*'` says what each backend holds), then `compose restart lgtm`
+(whether Loki takes records again by itself once under 90% is unmeasured).
+Nothing on the dashboard shows the disk itself.
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14

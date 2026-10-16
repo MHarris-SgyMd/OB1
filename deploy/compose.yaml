@@ -2047,12 +2047,14 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_CLOUD_MIGRATION_ENABLED: "false"
-      # The provisioned dashboard (the grafana-dashboard config) is the page Grafana opens on.
+      # The provisioned dashboard (the grafana-dashboard config) is the page
+      # Grafana opens on.
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/open-brain-dashboard.json
-      # A zero at each series' start (its OTLP start time): the servers' counters
-      # are born at their first count, which a rate otherwise never counts — one
-      # failure read 0 on every failure panel (PR 3c review pass 2; measured: a
-      # tool called once, its increase 0, with this 1.007).
+      # A zero at each of the servers' series' start (its OTLP start time):
+      # their counters are born at their first count, which a rate otherwise
+      # never counts — one failure read 0 on every failure panel (PR 3c review
+      # pass 2; measured: a tool called once, its increase 0, with this 1.007).
+      # Series the collector scrapes get none (measured).
       PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090 --enable-feature=created-timestamp-zero-ingestion"
       # Loki keeps every log record for ever unless its compactor's retention is
       # on: 14 days, as Tempo keeps its traces by default; Prometheus keeps 15 days.

@@ -1673,8 +1673,8 @@ jobs:
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
-          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on the substituted
-          # render alone: --no-interpolate leaves two files' labels a list,
+          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on
+          # the substituted render alone: --no-interpolate leaves two files' labels a list,
           # and their environment one too, which `env` reads as a mapping
           # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
           # shellcheck disable=SC2016 # jq's variables, not the shell's
@@ -2899,8 +2899,9 @@ jobs:
       # three totals), empty
       # where it has none — but the NO_TRAFFIC panel, whose events this
       # traffic does not make; each Loki query must return a record (one that
-      # parsed and has an outcome); each Tempo query must find a trace (the stub's
-      # 404 ends a provider span in error). So this holds every name, and every label a
+      # parsed and has an outcome); each Tempo query must find a trace (the
+      # stub's 404 ends a provider span in error). So this holds every name,
+      # and every label a
       # matcher requires, on the pinned images; check 36 holds the names and
       # labels without a running profile. Loki refuses every record with its
       # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
@@ -2939,7 +2940,8 @@ jobs:
           [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
           docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter server api
           ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
-          # Each call's tool, status and, where the tool refused, isError; curl's own failure as status 000.
+          # Each call's tool, status and, where the tool refused, isError;
+          # curl's own failure as status 000.
           call() {
             local code
             rm -f /tmp/call-body
@@ -2980,7 +2982,8 @@ jobs:
             exit 1
           }
           if grep -v ' 200$' <<<"$first"; then said "a tool call above did not answer 200 without isError, so the dashboard's queries would wait on traffic that is not there"; fi
-          # Grafana provisions in a service of its own after its health answers: up to 30 s for it.
+          # Grafana provisions in a service of its own after its health
+          # answers: up to 30 s for it.
           for _ in $(seq 30); do
             # shellcheck disable=SC2016 # the password is lgtm's own variable, expanded in its shell
             if in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/uid/ob1' > /tmp/grafana-dashboard.json 2> /dev/null; then break; fi
@@ -2988,7 +2991,8 @@ jobs:
           done
           [ "$(jq '.meta.provisioned' /tmp/grafana-dashboard.json 2> /dev/null)" = true ] || said "Grafana has no provisioned dashboard ob1: compose.yaml's provider did not load deploy/observability/dashboard.json"
           # shellcheck disable=SC2016 # as above
-          # Grafana 13 answers its home with a redirect to the file's dashboard by its title's slug (measured on the pin).
+          # Grafana 13 answers its home with a redirect to the file's
+          # dashboard by its title's slug (measured on the pin).
           home=$(in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/home' | jq -r '.redirectUri // .dashboard.title') || said "Grafana's home did not answer"
           [[ "$home" == */open-brain || "$home" == "Open Brain" ]] || said "Grafana does not open on the dashboard Open Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
