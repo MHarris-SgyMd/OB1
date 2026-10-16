@@ -11,8 +11,10 @@
 //
 // The registry is deploy/edge/brains.local.yaml unless --registry names another (deploy/edge/brains.example.yaml
 // says what it holds). Each brain is served at http://<name>.<domain>:<port>, routed by host, so its /mcp, its
-// discovery documents and its authorization server stay its own; an unknown host is the edge's 404, and a brain
-// that is down is a bare 404 on its own host alone. The edge holds no key: a client's own passes through.
+// discovery documents and its authorization server stay its own; an unknown host is the edge's 404, and any 502 —
+// a brain that is down, or one whose own proxy answers 502 — is a bare 404 on that brain's host alone. The edge
+// holds no key: a client's own passes through. The domain is localhost or under it: the edge listens on loopback
+// alone, and a name another resolver answers would carry a client's key off the box in the clear.
 //
 // The shape (deploy/edge/compose.yaml says why there are two): podman machine is `bridge`, Docker Engine on Linux
 // `host`, each measured (2026-10-09, 2026-10-15); any other runtime — Docker Desktop, a rootless engine, podman on
@@ -20,10 +22,11 @@
 //
 // --no-env-file: compose is run with the edge's settings alone — no env file (`--env-file /dev/null`), and none of
 // the shell's COMPOSE_* or EDGE_* — but Bun would load a .env in the working directory into this script, and
-// deploy/.env holds a brain's secrets. Run without it, `check` and `up` refuse, naming the command.
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// deploy/.env holds a brain's secrets. Run without it, `check`, `up` and `down` refuse, naming the command.
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
-import { bunEnvProblem, listens, reason, shellQuote } from "../instance.ts";
+import { PS_ARGS, bunEnvProblem, containersIn, holds, listens, reason, shellQuote } from "../instance.ts";
 
 const HERE = import.meta.dir;
 const COMPOSE = join(HERE, "compose.yaml");
@@ -36,12 +39,20 @@ const USAGE = `usage: bun --no-env-file deploy/edge/edge.ts check|render|up [--r
 
 export type Shape = "bridge" | "host";
 export const SHAPES: Shape[] = ["bridge", "host"];
-/** Where each shape dials a brain's loopback port: podman's name for the host from a container, or the host's own loopback. */
-export const DIAL: Record<Shape, string> = { bridge: "host.containers.internal", host: "127.0.0.1" };
+/** Where each shape dials a brain's loopback port: podman's name for the host from a container, written rooted so
+ *  no search domain is tried for it (deploy/compose.yaml's rule; it is in the container's /etc/hosts, measured), or
+ *  the host's own loopback. */
+export const DIAL: Record<Shape, string> = { bridge: "host.containers.internal.", host: "127.0.0.1" };
+/** The entrypoints a router takes: the host shape listens on both loopbacks, so no other process holds [::1]:port
+ *  and takes the clients that try it first (a *.localhost name resolves to ::1 first, measured); podman machine
+ *  publishes one port on one of them alone (it refuses the second, measured). */
+export const ENTRYPOINTS: Record<Shape, string> = { bridge: "web", host: "web, web6" };
 export type Registry = { port: number; pingPort: number; domain: string; brains: { name: string; port: number }[] };
 
 const NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/** Words YAML 1.1 reads as a boolean or a null, which a router or service name in the table would become. */
+const YAML_WORDS = new Set(["y", "n", "yes", "no", "on", "off", "true", "false", "null"]);
 const isMapping = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isPort = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535;
 
@@ -59,16 +70,18 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
   const port = e.port ?? 8090;
   if (!isPort(port)) problems.push(`edge.port: ${JSON.stringify(port)} is not a port (1-65535)`);
   const pingPort = e.ping_port ?? (isPort(port) ? port + 1 : 0);
-  if (!isPort(pingPort)) problems.push(`edge.ping_port: ${JSON.stringify(pingPort)} is not a port (1-65535)`);
+  if (!isPort(pingPort)) problems.push(e.ping_port === undefined ? `edge.ping_port: unset, so one above edge.port, ${port as number + 1}, which is not a port — set it` : `edge.ping_port: ${JSON.stringify(pingPort)} is not a port (1-65535)`);
   else if (pingPort === port) problems.push("edge.ping_port: the edge's own port, where its ping would be a route");
   const domain = e.domain ?? "localhost";
   // The domain and each name go into a Host rule in a table Traefik renders as a Go template, so neither holds
   // anything but a host name's characters: no backtick, brace, quote or space.
   if (typeof domain !== "string" || domain.length > 200 || !domain.split(".").every((l) => LABEL.test(l))) problems.push(`edge.domain: ${JSON.stringify(domain)} is not a lower-case host name (letters, digits, hyphens, dots)`);
+  else if (domain !== "localhost" && !domain.endsWith(".localhost")) problems.push(`edge.domain: ${domain} is not localhost or a name under it — the edge listens on loopback alone, and a name another resolver answers would send a client's key off the box over plain HTTP`);
   const brains: Registry["brains"] = [];
   if (!isMapping(doc.brains) || Object.keys(doc.brains).length === 0) problems.push("brains: names no brain");
   else for (const [name, def] of Object.entries(doc.brains)) {
     if (!NAME.test(name)) { problems.push(`brains.${JSON.stringify(name)}: a brain's name is lower-case letters, digits and hyphens, starting with a letter, as one label of a host name`); continue; }
+    if (YAML_WORDS.has(name)) { problems.push(`brains.${name}: a word YAML reads as a boolean or a null, which the edge's table would name its router and service — choose another`); continue; }
     if (!isMapping(def)) { problems.push(`brains.${name}: not a mapping (port: N)`); continue; }
     for (const k of Object.keys(def)) if (k !== "port") problems.push(`brains.${name}.${k}: not a key the edge reads (port)`);
     if (!isPort(def.port)) { problems.push(`brains.${name}.port: ${JSON.stringify(def.port)} is not a port (1-65535) — the brain's SERVER_PORT`); continue; }
@@ -83,7 +96,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
 
 /** The edge's route table for a registry and shape: a router by host per brain, its two middlewares, its service at the shape's dial host. No comment: Traefik renders the file as a Go template first. */
 export function renderRoutes(r: Registry, shape: Shape): string {
-  const routers = r.brains.map((b) => `    ${b.name}:\n      rule: "Host(\`${b.name}.${r.domain}\`)"\n      entryPoints: [web]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b.name}\n`).join("");
+  const routers = r.brains.map((b) => `    ${b.name}:\n      rule: "Host(\`${b.name}.${r.domain}\`)"\n      entryPoints: [${ENTRYPOINTS[shape]}]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b.name}\n`).join("");
   const services = r.brains.map((b) => `    ${b.name}:\n      loadBalancer:\n        servers:\n          - url: "http://${DIAL[shape]}:${b.port}"\n`).join("");
   return "http:\n  routers:\n" + routers
     + "  middlewares:\n"
@@ -103,31 +116,51 @@ export function decideShape(f: Facts): { shape?: Shape; why: string } {
   return { why: `${what}: no shape of the edge was measured there (deploy/edge/compose.yaml) — name one with --shape bridge or --shape host, and check that each brain answers through it` };
 }
 
+/** The facts in a runtime's own words: `podman info --format json`, or docker's `version --format '{{json .Server}}'` and `info --format '{{json .}}'`. */
+export function factsFrom(runtime: string, platform: string, info: string, version = ""): Facts {
+  if (runtime === "podman") {
+    const i = JSON.parse(info) as { host?: { security?: { rootless?: boolean }; os?: string } };
+    return { runtime, platform, engine: "podman", rootless: i.host?.security?.rootless === true, desktop: false, osType: i.host?.os ?? "" };
+  }
+  const server = JSON.parse(version || "null") as { Components?: { Name?: string }[] } | null;
+  const i = JSON.parse(info) as { OperatingSystem?: string; OSType?: string; SecurityOptions?: string[] };
+  const podman = (server?.Components ?? []).some((c) => /podman/i.test(c.Name ?? ""));
+  return { runtime, platform, engine: podman ? "podman" : "docker", rootless: (i.SecurityOptions ?? []).some((s) => /rootless/.test(s)), desktop: /docker desktop/i.test(i.OperatingSystem ?? ""), osType: i.OSType ?? "" };
+}
+
 /** The facts of a runtime, from its own `info` and `version`. */
 function factsOf(runtime: string): Facts | string {
   const run = (args: string[]) => { const r = Bun.spawnSync([runtime, ...args], { stdout: "pipe", stderr: "pipe" }); return { ok: r.exitCode === 0, out: r.stdout.toString(), err: r.stderr.toString() }; };
-  const base = { runtime, platform: process.platform };
-  if (runtime === "podman") {
-    const i = run(["info", "--format", "json"]);
-    if (!i.ok) return `podman info failed: ${reason(i.err)}`;
-    const info = JSON.parse(i.out) as { host?: { security?: { rootless?: boolean }; os?: string } };
-    return { ...base, engine: "podman", rootless: info.host?.security?.rootless === true, desktop: false, osType: info.host?.os ?? "" };
-  }
-  const v = run(["version", "--format", "{{json .Server}}"]);
+  const v = runtime === "podman" ? { ok: true, out: "", err: "" } : run(["version", "--format", "{{json .Server}}"]);
   if (!v.ok) return `${runtime} version failed: ${reason(v.err)}`;
-  const server = JSON.parse(v.out) as { Components?: { Name?: string }[] } | null;
-  const podman = (server?.Components ?? []).some((c) => /podman/i.test(c.Name ?? ""));
-  const i = run(["info", "--format", "{{json .}}"]);
+  const i = runtime === "podman" ? run(["info", "--format", "json"]) : run(["info", "--format", "{{json .}}"]);
   if (!i.ok) return `${runtime} info failed: ${reason(i.err)}`;
-  const info = JSON.parse(i.out) as { OperatingSystem?: string; OSType?: string; SecurityOptions?: string[] };
-  return { ...base, engine: podman ? "podman" : "docker", rootless: (info.SecurityOptions ?? []).some((s) => /rootless/.test(s)), desktop: /docker desktop/i.test(info.OperatingSystem ?? ""), osType: info.OSType ?? "" };
+  try { return factsFrom(runtime, process.platform, i.out, v.out); } catch { return `${runtime} info did not read as JSON`; }
 }
 
 /** The environment compose runs in: the shell's, but for anything that would steer compose or the edge's settings, and then the edge's. */
 export function composeEnv(env: Record<string, string | undefined>, r: Registry, sha: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) if (v !== undefined && !/^(COMPOSE_|EDGE_)/.test(k)) out[k] = v;
-  return { ...out, EDGE_BIND: "127.0.0.1", EDGE_PORT: String(r.port), EDGE_PING_PORT: String(r.pingPort), EDGE_ROUTES_SHA256: sha };
+  return { ...out, EDGE_PORT: String(r.port), EDGE_PING_PORT: String(r.pingPort), EDGE_ROUTES_SHA256: sha };
+}
+
+/** Each shape's service in deploy/edge/compose.yaml. */
+export const SERVICE: Record<Shape, string> = { bridge: "edge", host: "edge-host" };
+
+/** The edge's own containers, running: its service, and the host ports it holds (its `ob1.edge-ports` label). */
+export function edgesIn(listing: string): { service: string; ports: number[] }[] {
+  return listing.split("\n").filter((l) => l.includes("|")).map((l) => {
+    const [service = "", ports = ""] = l.split("|");
+    return { service, ports: ports.split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0) };
+  });
+}
+const EDGE_PS = ["ps", "--filter", `label=com.docker.compose.project=${PROJECT}`, "--filter", "status=running", "--format", '{{.Label "com.docker.compose.service"}}|{{.Label "ob1.edge-ports"}}'];
+
+/** What publishes a brain's port, from the runtime's container list: a compose project's service, or nothing. */
+export function holderOf(listing: string, port: number): string {
+  const c = containersIn(listing).find((x) => x.state === "running" && holds(x.ports, { hostIp: "127.0.0.1", port, protocol: "tcp" }));
+  return c ? `is published by ${c.name}, of project ${c.project || "(none)"}` : "";
 }
 
 const composeArgs = (runtime: string, profiles: string[], extra: string[]) => [runtime, "compose", "--env-file", "/dev/null", "-p", PROJECT, "-f", COMPOSE, ...profiles.flatMap((p) => ["--profile", p]), ...extra];
@@ -167,21 +200,37 @@ function shapeFor(o: Options): { shape: Shape; why: string } {
   return { shape: d.shape, why: d.why };
 }
 
-/** The edge's own container, running: it holds the edge's ports, so an `up` over it is no clash. */
-function edgeRunning(runtime: string): boolean {
-  const r = Bun.spawnSync([runtime, "ps", "--filter", `label=com.docker.compose.project=${PROJECT}`, "--filter", "status=running", "--format", "{{.Names}}"], { stdout: "pipe", stderr: "pipe" });
-  return r.exitCode === 0 && r.stdout.toString().trim() !== "";
+const spawn = (cmd: string[]) => { const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" }); return { ok: r.exitCode === 0, out: r.stdout.toString(), err: r.stderr.toString() }; };
+
+/**
+ * Each address the edge would take, refused when something not the edge answers there: its port on 127.0.0.1, and on
+ * [::1] — which the host shape holds too, and the bridge shape cannot, so anything there would take every client that
+ * tries ::1 first, its key with it — and the host shape's ping. A port the running edge holds (its label) is its own.
+ * Each brain's port is noted: what publishes it, or that nothing answers.
+ */
+async function ports(o: Options, r: Registry, shape: Shape, running: { service: string; ports: number[] }[]): Promise<{ refusals: string[]; notes: string[] }> {
+  const held = new Set(running.flatMap((e) => e.ports));
+  const refusals: string[] = [];
+  const mine: [string, string, number][] = [["127.0.0.1", "edge.port", r.port], ["::1", "edge.port", r.port], ...(shape === "host" ? [["127.0.0.1", "edge.ping_port", r.pingPort] as [string, string, number]] : [])];
+  for (const [host, key, port] of mine) {
+    // The bridge shape never holds [::1]: whatever answers there is not the edge, running or not.
+    const own = held.has(port) && !(shape === "bridge" && host === "::1");
+    if (!own && await listens(host, port)) refusals.push(`${host.includes(":") ? `[${host}]` : host}:${port} (${key}) already answers, and not as this edge${host === "::1" ? " — a client asking <name>.localhost tries ::1 first, so it would take each client's key" : ""}: stop it, or set ${key} in the registry to a port free on both loopbacks`);
+  }
+  const listing = spawn([o.runtime, ...PS_ARGS]);
+  const notes: string[] = [];
+  for (const b of r.brains) {
+    const by = listing.ok ? holderOf(listing.out, b.port) : "";
+    if (by) notes.push(`${b.name}: 127.0.0.1:${b.port} ${by}`);
+    else if (await listens("127.0.0.1", b.port)) notes.push(`${b.name}: 127.0.0.1:${b.port} answers, but no container of ${o.runtime} publishes it — check the registry names this brain's port`);
+    else notes.push(`${b.name}: nothing answers on 127.0.0.1:${b.port} now — its host is a 404 until the brain is up`);
+  }
+  return { refusals, notes };
 }
 
-/** Each port the edge would take, refused when something not the edge listens there; each brain's port, noted when nothing does. */
-async function ports(o: Options, r: Registry, shape: Shape): Promise<{ refusals: string[]; notes: string[] }> {
-  const own = edgeRunning(o.runtime);
-  const refusals: string[] = [];
-  const mine: [string, number][] = shape === "host" ? [["edge.port", r.port], ["edge.ping_port", r.pingPort]] : [["edge.port", r.port]];
-  if (!own) for (const [key, port] of mine) if (await listens("127.0.0.1", port)) refusals.push(`127.0.0.1:${port} (${key}) already answers, and not as this edge: set ${key} in the registry to a free port`);
-  const notes: string[] = [];
-  for (const b of r.brains) if (!(await listens("127.0.0.1", b.port))) notes.push(`${b.name}: nothing answers on 127.0.0.1:${b.port} now — its host is a 404 until the brain is up`);
-  return { refusals, notes };
+/** The table's directory holds the table alone: Traefik's file provider loads every YAML or TOML file under it, so a leftover would be routes no check holds. */
+export function strayIn(entries: string[]): string[] {
+  return entries.filter((f) => f !== "routes.yaml");
 }
 
 const urls = (r: Registry) => r.brains.map((b) => `  ${b.name}: http://${b.name}.${r.domain}:${r.port}/mcp`).join("\n");
@@ -200,21 +249,72 @@ async function main(cmd: string, args: string[]) {
   if (cmd === "render") { process.stdout.write(renderRoutes(registry, o.shape ?? "bridge")); return; }
   const { shape, why } = shapeFor(o);
   const table = renderRoutes(registry, shape);
-  const { refusals, notes } = await ports(o, registry, shape);
+  const ps = spawn([o.runtime, ...EDGE_PS]);
+  if (!ps.ok) { console.error(`${o.runtime} ps failed: ${reason(ps.err)}`); process.exit(2); }
+  const running = edgesIn(ps.out);
+  const { refusals, notes } = await ports(o, registry, shape, running);
+  const stray = existsSync(ROUTES_DIR) ? strayIn(readdirSync(ROUTES_DIR)) : [];
+  if (stray.length) refusals.push(`${ROUTES_DIR} holds ${stray.join(", ")} beside routes.yaml — Traefik would load each as routes no check holds: move them out`);
   console.log(`edge: ${why}`);
   for (const n of notes) console.log(`note: ${n}`);
   if (refusals.length) { for (const x of refusals) console.error(x); process.exit(2); }
   if (cmd === "check") { console.log(`the brains, through the edge:\n${urls(registry)}`); return; }
-  // up: the table into the file provider's directory (written beside it and renamed over, so Traefik never reads
-  // half a file), then compose, with the table's digest as a label so a changed table recreates the container.
-  mkdirSync(ROUTES_DIR, { recursive: true, mode: 0o755 });
-  const tmp = join(ROUTES_DIR, `.routes.${process.pid}.tmp`);
-  writeFileSync(tmp, table, { mode: 0o644 });
-  renameSync(tmp, join(ROUTES_DIR, "routes.yaml"));
+  // up: the other shape's edge goes first (a service under a profile not named is no orphan to compose), then the
+  // table into the file provider's directory, readable by the edge's user (65534) whatever the umask, and written
+  // only when it changed — in place, not renamed over: on podman machine a rename racing the container's recreate
+  // left Traefik's file provider never started, the edge healthy and every host a 404 (3 runs in 10, measured);
+  // a changed table changes the digest label, so the container is recreated on it and no half-read one serves on.
+  for (const other of SHAPES.filter((s) => s !== shape && running.some((e) => e.service === SERVICE[s]))) {
+    const rm = Bun.spawnSync(composeArgs(o.runtime, [other], ["rm", "-s", "-f", SERVICE[other]]), { env: composeEnv(process.env, registry, ""), stdout: "inherit", stderr: "inherit" });
+    if (rm.exitCode !== 0) { console.error(`the ${other} shape's edge could not be removed first`); process.exit(1); }
+  }
+  mkdirSync(ROUTES_DIR, { recursive: true });
+  chmodSync(ROUTES_DIR, 0o755);
+  const file = join(ROUTES_DIR, "routes.yaml");
+  if (!existsSync(file) || readFileSync(file, "utf8") !== table) writeFileSync(file, table);
+  chmodSync(file, 0o644);
   const sha = new Bun.CryptoHasher("sha256").update(table).digest("hex");
   const up = Bun.spawnSync(composeArgs(o.runtime, [shape], ["up", "-d", "--remove-orphans", "--wait", "--wait-timeout", "60"]), { env: composeEnv(process.env, registry, sha), stdout: "inherit", stderr: "inherit" });
-  if (up.exitCode !== 0) { console.error(`the edge did not come up; its log: ${composeArgs(o.runtime, [shape], ["logs"]).map(shellQuote).join(" ")}`); process.exit(1); }
+  const logs = composeArgs(o.runtime, [shape], ["logs"]).map(shellQuote).join(" ");
+  if (up.exitCode !== 0) { console.error(`the edge did not come up; its log: ${logs}`); process.exit(1); }
+  // Healthy says Traefik runs, not that it serves the table: its ping passes with no provider started. So ask it.
+  const served = await servedAt(registry);
+  if (served !== "served") { console.error(`the edge is up but ${served} — its log: ${logs}`); process.exit(1); }
+  // The bridge shape cannot hold [::1]:port: said once more now it is up, since a process may have taken it since.
+  if (shape === "bridge" && await listens("::1", registry.port)) { console.error(`[::1]:${registry.port} answers, and not as this edge — a client asking <name>.localhost tries ::1 first, so it would take each client's key: stop it, then up again`); process.exit(1); }
   console.log(`the brains, through the edge:\n${urls(registry)}`);
+}
+
+/** Traefik's own answer where no router matches: its 404, with this body. A brain's route answers anything else — its
+ *  brain's answer, or brain-absent's 404 with no body. */
+export const ROUTER_MISS = "404 page not found\n";
+
+/** One GET of a brain's /health through the edge at 127.0.0.1, its Host the brain's: the status and body, or null when nothing answers. */
+function ask(port: number, host: string): Promise<{ status: number; body: string } | null> {
+  return new Promise((ok) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: "/health", method: "GET", headers: { host }, timeout: 3000 }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => { body += c; });
+      res.on("end", () => ok({ status: res.statusCode ?? 0, body }));
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => ok(null));
+    req.end();
+  });
+}
+
+/** Whether the edge serves the table: "served", or what it does instead, after up to ten seconds (the file provider loads the table a moment after Traefik starts). */
+export async function servedAt(r: Registry, get = ask, tries = 20, pauseMs = 500): Promise<string> {
+  const b = r.brains[0];
+  let last = "";
+  for (let i = 0; i < tries; i++) {
+    const got = await get(r.port, `${b.name}.${r.domain}:${r.port}`);
+    if (got && !(got.status === 404 && got.body === ROUTER_MISS)) return "served";
+    last = got ? `${b.name}.${r.domain} is Traefik's router miss: the table is not loaded` : `nothing answers on 127.0.0.1:${r.port}: the edge is not reachable from this host (a host shape under podman machine listens in the VM)`;
+    if (i < tries - 1) await Bun.sleep(pauseMs);
+  }
+  return last;
 }
 
 async function selfCheck() {
@@ -234,14 +334,44 @@ async function selfCheck() {
     ["a brain on the edge's port or its ping's is refused", /is the edge's own/.test(problems("brains:\n  a:\n    port: 8090\n")) && /is the edge's own/.test(problems("brains:\n  a:\n    port: 8091\n"))],
     ["the ping on the edge's own port is refused", /where its ping would be a route/.test(problems("edge:\n  port: 9000\n  ping_port: 9000\nbrains:\n  a:\n    port: 9001\n"))],
     ["not YAML, or not a mapping, is refused", /does not parse/.test(problems("brains: [\n")) && /not one YAML mapping/.test(problems("- a\n"))],
-    ["the bridge table dials host.containers.internal, the host table 127.0.0.1, each at the brain's port", ex !== undefined && renderRoutes(ex, "bridge").includes('url: "http://host.containers.internal:8011"') && renderRoutes(ex, "host").includes('url: "http://127.0.0.1:8010"') && !renderRoutes(ex, "host").includes("host.containers.internal")],
+    ["the bridge table dials host.containers.internal, the host table 127.0.0.1, each at the brain's port", ex !== undefined && renderRoutes(ex, "bridge").includes('url: "http://host.containers.internal.:8011"') && renderRoutes(ex, "host").includes('url: "http://127.0.0.1:8010"') && !renderRoutes(ex, "host").includes("host.containers.internal")],
     ["each brain's router is its host alone, with the strip and the 404 for a brain that is down", ex !== undefined && ex.brains.every((b) => renderRoutes(ex, "bridge").includes(`    ${b.name}:\n      rule: "Host(\`${b.name}.localhost\`)"\n      entryPoints: [web]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b.name}\n`))],
     ["the table is YAML Traefik reads: a router, a service per brain, the two middlewares, nothing else", (() => { if (!ex) return false; const t = Bun.YAML.parse(renderRoutes(ex, "bridge")) as { http: { routers: object; services: object; middlewares: object } }; return Object.keys(t).join() === "http" && Object.keys(t.http.routers).join() === "canary,stable" && Object.keys(t.http.services).join() === "canary,stable" && Object.keys(t.http.middlewares).join() === "edge-strip,brain-absent"; })()],
     ["the table holds no comment and no Go template", ex !== undefined && !/#|\{\{/.test(renderRoutes(ex, "bridge"))],
     ["podman machine on macOS is the bridge shape; rootless, or on Linux, is no shape", decideShape(facts({ runtime: "podman", engine: "podman", platform: "darwin" })).shape === "bridge" && decideShape(facts({ engine: "podman", platform: "darwin", rootless: true })).shape === undefined && decideShape(facts({ engine: "podman", platform: "linux" })).shape === undefined],
     ["Docker Engine on Linux is the host shape; Docker Desktop, rootless or on macOS is no shape, and says to name one", decideShape(facts({})).shape === "host" && [facts({ desktop: true }), facts({ rootless: true }), facts({ platform: "darwin" })].every((f) => { const d = decideShape(f); return d.shape === undefined && /--shape bridge or --shape host/.test(d.why); })],
     ["the docker CLI on podman machine's engine is the bridge shape", decideShape(facts({ engine: "podman", platform: "darwin", osType: "linux" })).shape === "bridge"],
-    ["compose's environment drops the shell's COMPOSE_* and EDGE_* and sets the edge's own", (() => { if (!ex) return false; const e = composeEnv({ PATH: "/bin", COMPOSE_PROFILES: "host", COMPOSE_FILE: "x.yaml", EDGE_PORT: "1", EDGE_BIND: "0.0.0.0", DOCKER_HOST: "unix:///x" }, ex, "abc"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_PROFILES" in e) && !("COMPOSE_FILE" in e) && e.EDGE_PORT === "8090" && e.EDGE_BIND === "127.0.0.1" && e.EDGE_PING_PORT === "8091" && e.EDGE_ROUTES_SHA256 === "abc"; })()],
+    ["compose's environment drops the shell's COMPOSE_* and EDGE_* and sets the edge's own", (() => { if (!ex) return false; const e = composeEnv({ PATH: "/bin", COMPOSE_PROFILES: "host", COMPOSE_FILE: "x.yaml", EDGE_PORT: "1", EDGE_BIND: "0.0.0.0", DOCKER_HOST: "unix:///x" }, ex, "abc"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_PROFILES" in e) && !("COMPOSE_FILE" in e) && e.EDGE_PORT === "8090" && !("EDGE_BIND" in e) && e.EDGE_PING_PORT === "8091" && e.EDGE_ROUTES_SHA256 === "abc"; })()],
+    ["a domain not localhost or under it is refused; one under it reads", /not localhost or a name under it/.test(problems("edge:\n  domain: example.com\nbrains:\n  a:\n    port: 9000\n")) && /not localhost or a name under it/.test(problems("edge:\n  domain: localhost.example.com\nbrains:\n  a:\n    port: 9000\n")) && parseRegistry("edge:\n  domain: brains.localhost\nbrains:\n  a:\n    port: 9000\n").registry?.domain === "brains.localhost"],
+    ["a name YAML reads as a boolean or a null is refused", ["null", "true", "false", "yes", "no", "on", "off", "y", "n"].every((n) => /a word YAML reads/.test(problems(`brains:\n  ${n}:\n    port: 9000\n`)))],
+    ["the host table's routers take both loopbacks' entrypoints, the bridge table's one; the bridge dials the host's name rooted", ex !== undefined && renderRoutes(ex, "host").includes("      entryPoints: [web, web6]\n") && !renderRoutes(ex, "bridge").includes("web6") && renderRoutes(ex, "bridge").includes('url: "http://host.containers.internal.:8010"')],
+    ["edge not a mapping, a port or ping that is no port, a domain not a string or too long or with an edge hyphen, a brain not a mapping: each refused", /edge: not a mapping/.test(problems("edge: 1\nbrains:\n  a:\n    port: 9000\n")) && /edge\.port: .* is not a port/.test(problems("edge:\n  port: 0\nbrains:\n  a:\n    port: 9000\n")) && /edge\.ping_port: 70000 is not a port/.test(problems("edge:\n  ping_port: 70000\nbrains:\n  a:\n    port: 9000\n")) && /edge\.domain/.test(problems("edge:\n  domain: 5\nbrains:\n  a:\n    port: 9000\n")) && /edge\.domain/.test(problems(`edge:\n  domain: ${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(30)}.localhost\nbrains:\n  a:\n    port: 9000\n`)) && /edge\.domain/.test(problems("edge:\n  domain: -a.localhost\nbrains:\n  a:\n    port: 9000\n")) && /edge\.domain/.test(problems("edge:\n  domain: a-.localhost\nbrains:\n  a:\n    port: 9000\n")) && /brains\.a: not a mapping/.test(problems("brains:\n  a:\n"))],
+    ["edge.port 65535 with no ping_port says the derived ping is the trouble, and to set it", /unset, so one above edge\.port, 65536, which is not a port — set it/.test(problems("edge:\n  port: 65535\nbrains:\n  a:\n    port: 9000\n"))],
+    ["a Linux engine whose OSType is not linux is no shape", decideShape(facts({ osType: "" })).shape === undefined && decideShape(facts({ osType: "windows" })).shape === undefined],
+    ["podman's info reads: rootful or rootless, its OS", (() => { const f = factsFrom("podman", "darwin", '{"host":{"os":"linux","security":{"rootless":false}}}'); const r = factsFrom("podman", "darwin", '{"host":{"os":"linux","security":{"rootless":true}}}'); return f.engine === "podman" && !f.rootless && f.osType === "linux" && decideShape(f).shape === "bridge" && r.rootless && decideShape(r).shape === undefined; })()],
+    ["docker's version and info read: Engine, Desktop, rootless, the podman engine behind the docker CLI", (() => {
+      const engine = '{"Components":[{"Name":"Engine"},{"Name":"containerd"}]}';
+      const ubuntu = '{"OperatingSystem":"Ubuntu 24.04 LTS","OSType":"linux","SecurityOptions":["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"]}';
+      const e = factsFrom("docker", "linux", ubuntu, engine);
+      const desk = factsFrom("docker", "darwin", '{"OperatingSystem":"Docker Desktop","OSType":"linux","SecurityOptions":[]}', engine);
+      const rl = factsFrom("docker", "linux", '{"OperatingSystem":"Ubuntu","OSType":"linux","SecurityOptions":["name=seccomp","name=rootless"]}', engine);
+      const pm = factsFrom("docker", "darwin", '{"OperatingSystem":"fedora","OSType":"linux","SecurityOptions":["name=seccomp,profile=default","name=selinux"]}', '{"Components":[{"Name":"Podman Engine"},{"Name":"Conmon"}]}');
+      return e.engine === "docker" && decideShape(e).shape === "host" && desk.desktop && decideShape(desk).shape === undefined && rl.rootless && decideShape(rl).shape === undefined && pm.engine === "podman" && decideShape(pm).shape === "bridge";
+    })()],
+    ["served: a brain's answer or brain-absent's empty 404 is served; Traefik's router miss or no answer, after its tries, is not, and says which", await (async () => {
+      const r = parseRegistry("brains:\n  a:\n    port: 9000\n").registry!;
+      const seen: string[] = [];
+      const ok = await servedAt(r, async (port, host) => { seen.push(`${port} ${host}`); return { status: 200, body: "ok" }; }, 3, 0);
+      const absent = await servedAt(r, async () => ({ status: 404, body: "" }), 3, 0);
+      const miss = await servedAt(r, async () => ({ status: 404, body: ROUTER_MISS }), 3, 0);
+      const none = await servedAt(r, async () => null, 3, 0);
+      let n = 0;
+      const late = await servedAt(r, async () => (++n < 3 ? { status: 404, body: ROUTER_MISS } : { status: 200, body: "ok" }), 3, 0);
+      return ok === "served" && seen[0] === "8090 a.localhost:8090" && absent === "served" && /router miss: the table is not loaded/.test(miss) && /nothing answers on 127\.0\.0\.1:8090/.test(none) && late === "served" && n === 3;
+    })()],
+    ["the running edge's service and ports are read from its labels", JSON.stringify(edgesIn("edge-host|8090,8091\nedge|8095\n\n")) === JSON.stringify([{ service: "edge-host", ports: [8090, 8091] }, { service: "edge", ports: [8095] }])],
+    ["a brain's port is named by the running container that publishes it, not a stopped one", holderOf("id1|open-brain-forwarder-1|127.0.0.1:8010->8000/tcp|open-brain|forwarder|running||\nid2|old-forwarder-1|127.0.0.1:8011->8000/tcp|old|forwarder|exited||\n", 8010) === "is published by open-brain-forwarder-1, of project open-brain" && holderOf("id2|old-forwarder-1|127.0.0.1:8011->8000/tcp|old|forwarder|exited||\n", 8011) === ""],
+    ["the table's directory may hold the table alone", strayIn(["routes.yaml"]).length === 0 && strayIn(["routes.yaml", ".routes.123.tmp"]).join() === ".routes.123.tmp" && strayIn(["routes.yaml", "old.yaml", "x.toml"]).join() === "old.yaml,x.toml"],
     ["compose is run with no env file, as ob1-edge, on the edge's own file", composeArgs("docker", ["host"], ["up"]).join(" ") === `docker compose --env-file /dev/null -p ob1-edge -f ${COMPOSE} --profile host up`],
   ];
   for (const [name, ok] of cases) console.log((ok ? "ok   " : "FAIL ") + name);

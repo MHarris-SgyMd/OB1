@@ -256,8 +256,10 @@ instance. The alternative is one Ollama on the host that every instance names
 ## Several brains behind one edge
 
 The edge proxy (SMD-2876) puts several brains behind one port, each at a host
-of its own: `http://<name>.localhost:8090/mcp`. `*.localhost` resolves to
-loopback with no hosts entry. The edge is a compose project of its own,
+of its own: `http://<name>.localhost:8090/mcp`. curl, Bun and browsers resolve
+`*.localhost` to loopback themselves, and macOS and systemd-resolved do too.
+On another Linux resolver, give each name a hosts line (`127.0.0.1
+stable.localhost`). The edge is a compose project of its own,
 `ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
 published port, as any client on the host does, and joins no brain's network.
 Because each brain is served at the root of its own host, its `/mcp`, its
@@ -265,32 +267,54 @@ discovery documents and its authorization server stay its own.
 
 ```bash
 cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by git
-# deploy/edge/brains.local.yaml: each brain by name, with its SERVER_PORT
+# deploy/edge/brains.local.yaml: each brain by name, with the port it is published on
+bun --no-env-file deploy/edge/edge.ts check  # the shape, what publishes each brain's port, the URLs; starts nothing
 bun --no-env-file deploy/edge/edge.ts up     # renders the table, picks the shape, starts the edge
-bun --no-env-file deploy/edge/edge.ts check  # what up would do, without starting anything
 bun --no-env-file deploy/edge/edge.ts down
 ```
+
+A brain's port is its env file's `SERVER_PORT`: 8000 unless set, or 8010
+for the dogfood stack. A canary stood up with `deploy/canary.sh up --port N`
+is on port N. A path-mode canary has no port of its own: it is stable's
+`/canary/mcp`, so `http://stable.localhost:8090/canary/mcp` through the edge.
+`check` names the container that publishes each port, so a registry that
+swaps two ports, which would send one brain's key to the other, shows up
+there.
 
 - **Each brain still answers on its own port**, and keeps its own keys. The
   edge holds no key. A client's `?key=` or `x-brain-key` header passes
   through unchanged to the brain the host names.
-- **A brain that is down** gets a bare 404 on its own host alone, and an
-  unknown host gets the edge's 404.
+- **Any 502 becomes a bare 404 on that brain's host alone.** That covers a
+  brain that is down, and also a running brain whose own proxy answers 502,
+  such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
 - **The authorization server's per-address limits see the edge's address**
-  for every client that comes through the edge.
+  for every client that comes through the edge. One client's failed
+  sign-ins therefore lock out every client behind the edge for the
+  lockout's length.
+- **The domain is `localhost` or a name under it.** The edge listens on
+  loopback alone, and a name that another resolver answers would send a
+  client's key off the machine over plain HTTP.
 - **Two shapes**, because no one binding reaches a brain's loopback port from
   a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
-  - under podman machine, the edge is a container that publishes
-    `127.0.0.1:<port>` and dials each brain at `host.containers.internal`;
-  - on Docker Engine on Linux, it runs on the host's network, listens on
-    127.0.0.1 and dials each brain there, with its healthcheck's ping on
-    `edge.ping_port`.
+  - **Under a rootful podman machine** (`podman machine inspect --format
+    '{{.Rootful}}'`), the edge is a container that publishes
+    `127.0.0.1:<port>` and dials each brain at `host.containers.internal`.
+    podman publishes a port on one loopback only, so `[::1]:<port>` is left
+    to anything else. A client asking for `<name>.localhost` tries `::1`
+    first, so `check` and `up` refuse while something answers there.
+  - **On Docker Engine on Linux**, it runs on the host's network, listens on
+    both 127.0.0.1 and `[::1]`, and dials each brain at 127.0.0.1. Its
+    healthcheck's ping is on `edge.ping_port`. A host with IPv6 turned off
+    has no `[::1]`, and the edge does not start there.
 
-  `edge.ts` picks the shape from the runtime. Any other runtime (Docker
-  Desktop, a rootless engine, podman on Linux) is refused until `--shape
-  bridge` or `--shape host` names one.
+  `edge.ts` picks the shape from the runtime. Every other runtime is refused
+  until `--shape bridge` or `--shape host` names one: a rootless podman
+  machine, a rootless engine, podman on Linux, and Docker Desktop. Docker
+  Desktop has no known working shape. Its containers name the host
+  `host.docker.internal`, not the bridge shape's name, and a host-network
+  container there listens inside its VM, out of the Mac's reach.
 - **Changing the registry:** `up` again. The table's digest is a label on
   the edge's container, so a changed table recreates it.
 

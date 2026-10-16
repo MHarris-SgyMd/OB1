@@ -394,8 +394,8 @@
  *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
  *      value for value — compose.yaml's proxy's Traefik and access log, no
  *      trusted PROXY line, read-only and confined, the bridge shape on a
- *      network of its own published on loopback and the host shape on the
- *      host's network, joining no brain's — with check 28's character and tag
+ *      network of its own published on 127.0.0.1 and the host shape on the
+ *      host's network on both loopbacks, joining no brain's — with check 28's character and tag
  *      rules and no other compose file beside it; and deploy/edge/edge.ts
  *      renders brains.example.yaml, in each shape, as EDGE_ROUTE_TABLE, byte
  *      for byte: a router by host per brain, its header strip and its 404 for
@@ -7561,12 +7561,14 @@ checkCiParity();
 //   characters, tags, parse  as check 28's: compose and Bun.YAML read the
 //       file alike;
 //   service  the file is EDGE_COMPOSE, value for value: project ob1-edge; the
-//       bridge shape on a network of its own and the host shape on the host's,
-//       each under its profile; compose.yaml's proxy's Traefik by digest and
-//       its access log (built from PROXY_SERVICE, so the two move together),
-//       but no trusted PROXY line — a client reaches the edge directly; read
-//       only, confined, the file provider alone on the rendered table mounted
-//       read-only, no socket; the port on loopback by default;
+//       bridge shape on a network of its own, published on 127.0.0.1, and the
+//       host shape on the host's, listening on 127.0.0.1 and [::1], each under
+//       its profile; compose.yaml's proxy's Traefik by digest (PROXY_SERVICE's
+//       image) and the same access log, its environment named key by key so
+//       no trust the brain's proxy gains (a PROXY line, a forwarded header)
+//       is the edge's by inheritance — a client reaches the edge directly;
+//       read only, confined, the file provider alone on the rendered table
+//       mounted read-only, no socket;
 //   table  edge.ts renders the example registry, in each shape, as
 //       EDGE_ROUTE_TABLE: a router by host per brain with the strip of the two
 //       headers a brain's proxy reads from its own and the 404 for a brain
@@ -7575,14 +7577,25 @@ checkCiParity();
 //       template), and parseRegistry refuses a name or domain that could carry one.
 // That each shape reaches a brain, and the brain no network of the edge's, CI
 // holds live ("The edge proxy reaches both brains through their published ports").
-/** deploy/edge/compose.yaml's Traefik environment: the proxy's, but its own entrypoints and no trusted PROXY line. */
-const edgeEnvironment = (web: string, ping: string) => ({
-  ...omitKeys(PROXY_SERVICE.environment, ["TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS"]),
-  TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: web,
+/** deploy/edge/compose.yaml's Traefik environment, each key named here rather than taken from the proxy's, so a
+ *  trust the brain's proxy gains (a forwarded header, a PROXY line) is never the edge's by inheritance: its
+ *  entrypoints, the file provider, and the proxy's access log (no query string, header or userinfo) and ping. */
+const edgeEnvironment = (entrypoints: Record<string, string>, ping: string) => ({
+  ...entrypoints,
+  TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
+  TRAEFIK_ACCESSLOG: "true",
+  TRAEFIK_ACCESSLOG_FORMAT: "json",
+  TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: "drop",
+  TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: "drop",
+  TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: "drop",
+  TRAEFIK_PING: "true",
+  TRAEFIK_PING_ENTRYPOINT: "ping",
   TRAEFIK_ENTRYPOINTS_PING_ADDRESS: ping,
+  TRAEFIK_GLOBAL_CHECKNEWVERSION: "false",
+  TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false",
 });
 const EDGE_LOGGING = { driver: "json-file", options: { "max-size": "10m", "max-file": "3" } };
-const edgeService = (profile: string) => ({
+const edgeService = (profile: string, ports: string) => ({
   profiles: [profile],
   image: PROXY_SERVICE.image,
   user: "65534:65534",
@@ -7590,7 +7603,7 @@ const edgeService = (profile: string) => ({
   security_opt: ["no-new-privileges:true"],
   read_only: true,
   volumes: ["./dynamic:/etc/traefik/dynamic:ro,z"],
-  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}" },
+  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}", "ob1.edge-ports": ports },
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
   restart: "unless-stopped",
   logging: EDGE_LOGGING,
@@ -7599,18 +7612,26 @@ const edgeService = (profile: string) => ({
 const EDGE_COMPOSE = {
   name: "ob1-edge",
   services: {
-    edge: { ...edgeService("bridge"), environment: edgeEnvironment(":8000", "127.0.0.1:8082"), ports: ["${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}:8000"], networks: ["web"], dns_search: ["."] },
-    "edge-host": { ...edgeService("host"), environment: edgeEnvironment("${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}", "127.0.0.1:${EDGE_PING_PORT:-8091}"), network_mode: "host" },
+    edge: {
+      ...edgeService("bridge", "${EDGE_PORT:-8090}"),
+      environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:8082"),
+      ports: ["127.0.0.1:${EDGE_PORT:-8090}:8000"], networks: ["web"], dns_search: ["."],
+    },
+    "edge-host": {
+      ...edgeService("host", "${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}"),
+      environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: "127.0.0.1:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete", TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: "[::1]:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB6_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:${EDGE_PING_PORT:-8091}"),
+      network_mode: "host",
+    },
   },
   networks: { web: {} },
 };
 /** What deploy/edge/edge.ts renders for deploy/edge/brains.example.yaml in a shape, byte for byte. */
-const edgeRouteTable = (dial: string) => "http:\n  routers:\n"
-  + ["canary", "stable"].map((b) => `    ${b}:\n      rule: "Host(\`${b}.localhost\`)"\n      entryPoints: [web]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b}\n`).join("")
+const edgeRouteTable = (dial: string, entrypoints: string) => "http:\n  routers:\n"
+  + ["canary", "stable"].map((b) => `    ${b}:\n      rule: "Host(\`${b}.localhost\`)"\n      entryPoints: [${entrypoints}]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b}\n`).join("")
   + "  middlewares:\n    edge-strip:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n          X-OB1-Legacy-Route: \"\"\n"
   + routeErrors("brain-absent", "502")
   + "  services:\n" + [["canary", 8011], ["stable", 8010]].map(([b, p]) => routeService(String(b), `http://${dial}:${p}`)).join("");
-const EDGE_ROUTE_TABLE = { bridge: edgeRouteTable("host.containers.internal"), host: edgeRouteTable("127.0.0.1") } as const;
+const EDGE_ROUTE_TABLE = { bridge: edgeRouteTable("host.containers.internal.", "web"), host: edgeRouteTable("127.0.0.1", "web, web6") } as const;
 const EDGE_RULES = ["files", "characters", "tags", "parse", "service", "table"] as const;
 type EdgeRule = (typeof EDGE_RULES)[number];
 type EdgeTree = { files: string[]; compose: string; example: string; render: (example: string, shape: "bridge" | "host") => string };
@@ -7645,13 +7666,15 @@ const EDGE_PROBES: [string, "compose.yaml" | "edge.ts" | "files", string, string
   ["a line led by U+2028 in the edge's file", "compose.yaml", "\nservices:\n", "\n# a note x-shadow: 1\nservices:\n"],
   ["an !override on the edge's networks, the same list to Bun.YAML", "compose.yaml", "    networks: [web]\n", "    networks: !override [web]\n"],
   ["the edge's file not YAML", "compose.yaml", "services:\n", "services: [\n"],
-  ["the bridge shape published on every interface by default", "compose.yaml", "\"${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}:8000\"", "\"${EDGE_BIND:-0.0.0.0}:${EDGE_PORT:-8090}:8000\""],
+  ["the bridge shape published on every interface", "compose.yaml", "\"127.0.0.1:${EDGE_PORT:-8090}:8000\"", "\"${EDGE_PORT:-8090}:8000\""],
+  ["the host shape off [::1], where another process would take the clients that try it first", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: \"[::1]:${EDGE_PORT:-8090}\"\n", ""],
+  ["the host table's routers off [::1]'s entrypoint", "edge.ts", "host: \"web, web6\"", "host: \"web\""],
   ["the edge joining a brain's network", "compose.yaml", "networks:\n  web: {}\n", "networks:\n  web: {}\n  brain:\n    name: open-brain_mesh\n    external: true\n"],
-  ["the engine's socket mounted into the edge", "compose.yaml", "    volumes:\n      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n    network_mode: host\n", "    volumes:\n      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n    network_mode: host\n"],
+  ["the engine's socket mounted into the host shape's edge", "compose.yaml", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-ports: \"${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}\"\n", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-ports: \"${EDGE_PORT:-8090},${EDGE_PING_PORT:-8091}\"\n"],
   ["the edge trusting a PROXY line from the private ranges", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n      TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: \"10.0.0.0/8\"\n"],
   ["the edge's table not deleting X-Brain-Forwarder", "edge.ts", "          X-Brain-Forwarder: \\\"\\\"\\n", ""],
   ["the edge's table routing a brain by path, beside its host", "edge.ts", "rule: \"Host(\\`${b.name}.${r.domain}\\`)\"", "rule: \"Host(\\`${b.name}.${r.domain}\\`) || PathPrefix(\\`/${b.name}\\`)\""],
-  ["the bridge shape dialling a brain's mesh name", "edge.ts", "bridge: \"host.containers.internal\"", "bridge: \"mcp.ob1.internal.\""],
+  ["the bridge shape dialling a brain's mesh name", "edge.ts", "bridge: \"host.containers.internal.\"", "bridge: \"mcp.ob1.internal.\""],
 ];
 async function checkEdge() {
   const dir = join(ROOT, "deploy", "edge");
