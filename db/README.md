@@ -3395,9 +3395,10 @@ bound on a capture, computed from them, plus a minute (a call that makes no mode
 call ends at 30 s). The banner prints what was resolved. The endpoint
 and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
 which `deploy/canary.sh up --connect` registers at the canary's own port with
-its own key (SMD-2874); `--key-from` names another entry, and `--mcp` another
-endpoint for its key. A stack's own endpoint is `/mcp` on its `SERVER_PORT`
-(8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
+its own key (SMD-2874); the key is the entry's `x-brain-key`, or the `?key=` on
+its url. `--key-from` names another entry; `--mcp` names another endpoint and
+needs `--key-from` beside it, as another brain refuses the canary's key. A
+stack's own endpoint is `/mcp` on its `SERVER_PORT` (8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
 404 from v2.0.0 (SMD-3101).
 
 Captures are real writes:

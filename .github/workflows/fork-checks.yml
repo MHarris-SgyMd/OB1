@@ -1925,9 +1925,9 @@ jobs:
           done
           # The stand-ins answer on the mesh, so a route to them would reach
           # them: one container polls both, each try bounded at 2 s, for 40
-          # tries; its own error, if it has one, stays in the log.
-          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } process.exit(1)' > /dev/null \
-            || { echo "a stand-in never answered on the mesh, so this step proves nothing" >&2; exit 1; }
+          # tries, and prints each one's last failure if they never both do.
+          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'const last = {}; for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok || ((last[t] = `HTTP ${r.status}`), false), (e) => ((last[t] = `${e?.name ?? "Error"} ${e?.code ?? e?.message ?? ""}`), false)))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } console.error(JSON.stringify(last)); process.exit(1)' > /dev/null \
+            || { docker logs --tail 20 ob1-ci-canary-stand-in >&2; docker logs --tail 20 ob1-ci-working-stand-in >&2; echo "a stand-in never answered on the mesh (each one's last failure above), so this step proves nothing" >&2; exit 1; }
           offprefix " beside a stand-in under each tier's old mesh name"
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }

@@ -85,8 +85,6 @@ type Answer = { status: number; msg: Record<string, any> | null };
 /** The content every probe starts with; search_thoughts_keyword on it finds any left behind. */
 export const PROBE_PREFIX = "SMD-3024 latency probe";
 
-/** The endpoint when --mcp is not given: this Mac's canary, on stable's origin (a stack's own endpoint is /mcp on its SERVER_PORT, 8000 by default). */
-
 /** The deadline of an MCP call that makes no model call: initialize, brain_info, and the cleanup's deletes, search and reads. */
 const QUICK_MS = 30_000;
 
@@ -255,14 +253,23 @@ export function schedule(want: Record<Kind, number>): { kind: Kind; i: number }[
   return order;
 }
 
-/** A connector's url and key from ~/.claude.json, the url only where --mcp names none. */
-function connectorFrom(name: string, mcp: string | undefined): { mcp: string; key: string } {
-  const entry = JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"))?.mcpServers?.[name];
-  const key = entry?.headers?.["x-brain-key"];
-  if (typeof key !== "string" || key === "") throw new Error(`~/.claude.json has no x-brain-key for mcpServers["${name}"]`);
-  const url = mcp ?? entry?.url;
-  if (typeof url !== "string" || url === "") throw new Error(`~/.claude.json has no url for mcpServers["${name}"]; give --mcp`);
+/** A connector entry's url and key: its x-brain-key header, else the key on its url, as deploy/canary.sh reads a connector's;
+ * the url only where --mcp names none. Throws, naming neither, when the entry has no key or no url to use. */
+export function connectorOf(entry: unknown, name: string, mcp: string | undefined): { mcp: string; key: string } {
+  const e = entry as { url?: unknown; headers?: Record<string, unknown> } | undefined;
+  const own = typeof e?.url === "string" && e.url !== "" ? e.url : undefined;
+  let key = e?.headers?.["x-brain-key"];
+  if ((typeof key !== "string" || key === "") && own) {
+    try { key = new URL(own).searchParams.get("key") ?? undefined; } catch { /* a url that does not parse holds no key */ }
+  }
+  if (typeof key !== "string" || key === "") throw new Error(`~/.claude.json has no key for mcpServers["${name}"], in an x-brain-key header or on its url`);
+  const url = mcp ?? own;
+  if (url === undefined) throw new Error(`~/.claude.json has no url for mcpServers["${name}"]; give --mcp`);
   return { mcp: url, key };
+}
+
+function connectorFrom(name: string, mcp: string | undefined): { mcp: string; key: string } {
+  return connectorOf(JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"))?.mcpServers?.[name], name, mcp);
 }
 
 async function main(): Promise<void> {
@@ -290,6 +297,11 @@ async function main(): Promise<void> {
   const count = (name: "searches" | "captures" | "embeds" | "metadata", absent: number) => cli.int(name, { absent, min: 0, max: 10_000 });
   const want = { search: count("searches", 60), capture: count("captures", 30), embed: count("embeds", 40), metadata: count("metadata", 20) };
   const keep = cli.has("keep-probes");
+  // Another endpoint is another brain, which refuses the canary's key (SMD-2874): it names its connector.
+  if (cli.value("mcp") !== undefined && cli.value("key-from") === undefined) {
+    console.error("bench-live.ts: --mcp names another brain, whose key the canary's is not: give --key-from with the connector whose key it takes.");
+    process.exit(2);
+  }
   const { mcp, key } = connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
@@ -634,6 +646,16 @@ export function selfCheck(): number {
   ok(tierRefusal("canary") === null && tierRefusal("working") === null, "the canary and a working brain may be benched");
   ok(tierRefusal("stable") !== null && tierRefusal(null) !== null && tierRefusal(undefined) !== null && tierRefusal("") !== null, "stable (tier stable, or none) is refused, as is any brain with no tier");
   ok(shownUrl("http://127.0.0.1:8010/canary/mcp?key=SECRET") === "http://127.0.0.1:8010/canary/mcp", "the banner never prints a URL's query");
+  // The connector: its header's key, else the one on its url; its url unless --mcp names one (SMD-3101).
+  const conn = (entry: unknown, mcp?: string) => { try { return connectorOf(entry, "c", mcp); } catch (e) { return (e as Error).message; } };
+  const same = (a: unknown, b: object) => JSON.stringify(a) === JSON.stringify(b);
+  ok(same(conn({ url: "http://h:8011/mcp", headers: { "x-brain-key": "H" } }), { mcp: "http://h:8011/mcp", key: "H" }), "a connector's url and its header's key");
+  ok(same(conn({ url: "http://h:8011/mcp?key=Q" }), { mcp: "http://h:8011/mcp?key=Q", key: "Q" }), "with no header, the key on its url, as canary.sh reads one");
+  ok(same(conn({ url: "http://h:8011/mcp?key=Q", headers: { "x-brain-key": "H" } }), { mcp: "http://h:8011/mcp?key=Q", key: "H" }), "the header's key wins over the url's");
+  ok(same(conn({ url: "http://h:8011/mcp", headers: { "x-brain-key": "H" } }, "http://o:8000/mcp"), { mcp: "http://o:8000/mcp", key: "H" }), "--mcp names the endpoint, the entry the key");
+  ok(conn({ url: "http://h:8011/mcp" }) === `~/.claude.json has no key for mcpServers["c"], in an x-brain-key header or on its url`, "no key anywhere is refused");
+  ok(conn({ headers: { "x-brain-key": "H" } }) === `~/.claude.json has no url for mcpServers["c"]; give --mcp`, "no url and no --mcp is refused");
+  ok(typeof conn(undefined) === "string", "no such entry is refused");
   ok(shownUrl("http://user:SECRET@host:8000/mcp") === "http://host:8000/mcp", "the banner never prints a URL's userinfo");
   ok(shownUrl("not a url") === "(an endpoint that does not parse)", "an endpoint that does not parse is not echoed");
   const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED", path: "http://127.0.0.1:9/mcp?key=SECRET", errno: 0 });
