@@ -1447,8 +1447,13 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
     const text = await r.text();
     // The proxy's legacy root route marks every answer it carries; --check
     // reads it off the config to say the url must move to /mcp (SMD-2686).
+    // Its tier routes mark theirs too, with a Link to the canary's section
+    // rather than /mcp's, where /mcp would be stable's (SMD-3057).
     const deprecation = r.headers.get("deprecation");
-    if (deprecation) cfg.deprecation = deprecation;
+    if (deprecation) {
+      cfg.deprecation = deprecation;
+      cfg.deprecatedTier = /#a-canary-beside-the-stack>/.test(r.headers.get("link") ?? "");
+    }
     // Every url this prints is masked (SMD-2743): a message lands in the log.
     const at = shownUrl(cfg.url);
     const wrongUrl = (what) => new CaptureError("refused", `${what} from ${at} — not the MCP endpoint, or a proxy in front of it; check the url in ${CONFIG_PATH}`);
@@ -2411,7 +2416,11 @@ export async function main(argv) {
     if (cfg.summary === "model") console.log(modelStatusLine(cfg));
     // An answer from the root through the proxy's legacy route works until
     // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
-    if (cfg.deprecation) {
+    // A tier's route through stable's proxy closes then too (SMD-3057), and
+    // its /mcp is stable's: the tier's own port is the url to set.
+    if (cfg.deprecation && cfg.deprecatedTier) {
+      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to the tier's own port in ${urlSource()}, not stable's /mcp (deploy/README.md, "A canary beside the stack")`);
+    } else if (cfg.deprecation) {
       let to = "its /mcp";
       const u = new URL(cfg.url); // endpointOf made it, so it parses
       if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);

@@ -1917,6 +1917,7 @@ jobs:
           bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
           bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
+          deprecated || { cat /tmp/tier-head >&2; echo "the bodiless 404 at /working/mcp with no tier carries no Deprecation header and Link" >&2; exit 1; }
           offprefix() {
             for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
               bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
@@ -1946,16 +1947,17 @@ jobs:
             [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
             for s in 401 404 429 500 503 504; do
               c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
-              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header: only a 502 is the proxy's" >&2; exit 1; fi
+              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head && deprecated; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header or the deprecation: only a 502 is the proxy's" >&2; exit 1; fi
             done
             bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
+            deprecated || { cat /tmp/tier-head >&2; echo "the $tier tier's own 502, made the bodiless 404, carries no Deprecation header and Link" >&2; exit 1; }
           done
           offprefix " beside both tiers"
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
           c=$(code "$B/mcp/health") || c="no answer (curl exit $?)"
-          { [ "$c" = 200 ] && ! grep -qi '^deprecation:' /tmp/tier-head; } || { echo "stable's own /mcp/health answered $c, or carries the tiers' Deprecation header" >&2; exit 1; }
+          { [ "$c" = 200 ] && ! grep -qi '^deprecation:' /tmp/tier-head && ! grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; } || { echo "stable's own /mcp/health answered $c, or carries the tiers' Deprecation header or Link" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
           for tier in canary working; do
             for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
