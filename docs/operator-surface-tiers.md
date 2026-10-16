@@ -98,7 +98,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
 - **`/.well-known/` stays a 404 except three routed paths, and those only while the `auth` profile is configured:**
   - `/.well-known/oauth-protected-resource/mcp` goes to the MCP server (RFC 9728).
   - `/.well-known/oauth-authorization-server/auth` goes to the authorization server (RFC 8414).
-  - The bare `/.well-known/oauth-authorization-server` goes to the authorization server too. Claude Code 2.1.275 fetches only that URL and ignores the issuer's path (anthropics/claude-code#95270). With one authorization server (decision 14) the route conflicts with nothing. Its document names the issuer `…/auth`, not the bare origin, so whether Claude Code accepts it is a proof-of-concept check.
+  - The bare `/.well-known/oauth-authorization-server` goes to the authorization server too. Claude Code 2.1.275 fetches only that URL and ignores the issuer's path (anthropics/claude-code#95270). With one authorization server (decision 14) the route conflicts with nothing. With one per brain (SMD-2872), behind the edge proxy each brain is at a host of its own, so the bare route there names that brain's server alone (SMD-2876). Its document names the issuer `…/auth`, not the bare origin, so whether Claude Code accepts it is a proof-of-concept check.
   The first two use the path-inserted form those RFCs define for a resource or issuer that lives under a path.
   - **As built (SMD-1846 PR 2, 2026-10-02):**
     - The proxy routes the authorization server's paths while it *answers*. Otherwise Traefik's 502 is rewritten to a 404, so an origin without it reads as "no OAuth here".

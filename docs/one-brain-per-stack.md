@@ -12,7 +12,7 @@ Each Open Brain is a self-contained stack:
 "The edge proxy" is a separate stack in front of several brains. It is not each brain's own `edge` network, the outward network its forwarder publishes the port on.
 
 Two needs used to be met by joining brains' networks. Here neither is:
-- **Brains that work together** (import, export, exchanging ideas) do it over HTTP, through the edge proxy, which reaches each brain through its published port (row 6, proposed; open question 1).
+- **Brains that work together** (import, export, exchanging ideas) do it over HTTP, through the edge proxy, which reaches each brain through its published port (row 6, built by SMD-2876).
 - **Validating a build against stable** (refresh, replay, diff, promote) treats the canary as one more instance, and the tier tools as clients of two instances. A working tier is an instance too.
 
 ## Why
@@ -43,18 +43,18 @@ Validation needs a second brain to compare against. Federation needs brains that
 | 3 | **Brains mesh together behind a separate edge proxy**, its own project. | the maintainer's direction | a network shared by brains; brain-to-brain database links |
 | 4 | **Each brain has its own authorization server** (when its `auth` profile is on). | follows from 1 under today's wiring: the authorization server is reached as `auth.ob1.internal` on the brain's own mesh | one authorization server for every tier (SMD-2282 decision 14) |
 | 5 | **Each brain's database is reached only through its own project.** | follows from 1 | one container on both brains' data networks |
-| 6 | **The edge reaches each brain through the brain's published port.** | proposed; SMD-2876 settles it (open question 1) | the edge joining the brains' networks |
-| 7 | **The edge holds no key and injects no credential or identity.** A client's own key passes through, unchanged, to the brain the client names. | proposed; SMD-2876 | the edge as an authenticating gateway for several brains |
+| 6 | **The edge reaches each brain through the brain's published port.** | built (SMD-2876 PR 1; the maintainer's choice of shape, 2026-10-15): brains stay on loopback, and the edge takes one shape per runtime (open question 1) | the edge joining the brains' networks |
+| 7 | **The edge holds no key and injects no credential or identity.** A client's own key passes through, unchanged, to the brain the client names. | built (SMD-2876 PR 1): it asserts no client address either, so the per-address limits see the edge as one client (open question 2, the maintainer's choice) | the edge as an authenticating gateway for several brains |
 | 8 | **An instance is its env file**: `COMPOSE_PROJECT_NAME`, `SERVER_PORT`/`SERVER_BIND` and the profile ports, all in the one file. `compose.yaml` stays one file for every instance. | proposed; SMD-2873 (measured to work today) | a compose file per instance; `name:` edited per copy |
 | 9 | **Tier tools reach each brain through its own project.** Refresh by a dump passed from a container on stable's network to one on the canary's; replay and diff over HTTP; promote's read through the canary's project and its write through stable's. | built: replay and diff over HTTP (SMD-2875 PR 1), refresh and promote one half per project (PR 2) | the joined container |
 | 10 | **Each brain has its own access keys.** A brain calling another is an HTTP client with a key the other issued, and a canary is an instance with its own port and keys. | proposed here; SMD-2874 for the canary. It doesn't follow from row 1: the canary takes stable's keys because `canary.sh` copies them into its env file, which needs no shared network. | the canary accepting stable's keys |
 
-Some answers to the open questions would amend a row:
+Some answers to the open questions would have amended a row. SMD-2876 took none of them (2026-10-15, the maintainer's choices; open questions 1–3 below):
 - question 1's shared network for the forwarders and the edge amends rows 1 and 6;
 - either option in question 2 that has the edge assert a client's address amends row 7;
 - question 3's shared authorization server amends row 4, and if the edge hosts it, it is row 7's rejected alternative.
 
-Any of these needs the maintainer, not SMD-2876 alone.
+Any of these would have needed the maintainer, not SMD-2876 alone.
 
 ## Measured (2026-10-09)
 
@@ -101,9 +101,23 @@ What each column was:
 What else the runs showed:
 - **Isolation:** on both runtimes, a container on another network can't resolve a brain's containers by name. The only way in is the published port.
 - **A false failure:** one podman client network that was created fresh got 10.89.10.0/24 and failed everything, including reaching the host. That is a known fault of this machine's podman with some fresh networks, not part of the result. The same client on 10.89.77.0/24 behaves as in the table.
-- **Not measured:** rootless Docker, rootless podman, rootful podman on native Linux, Docker Desktop, and host-network mode.
+- **Not measured:** rootless Docker, rootless podman, rootful podman on native Linux, Docker Desktop, and host-network mode (measured 2026-10-15, below).
 
 So no loopback-only binding works for an edge in a container on both runtimes. Binding all interfaces works on both, but exposes the brain on the LAN. That is the edge's first decision (open question 1).
+
+### Host-network mode and the two loopbacks (2026-10-15, SMD-2876)
+
+The setup was the same as above: scratch Bun targets, with Docker Engine 29.9 in a throwaway `docker:dind`.
+
+| | podman machine (macOS, rootful) | Docker Engine 29.9 on Linux |
+|---|---|---|
+| host-network container → brain published on `127.0.0.1` | reached | reached |
+| the host → a host-network listener on `127.0.0.1` | **not reached** (the VM's loopback is not forwarded to the Mac) | reached |
+| bridge container → a host-network listener on the bridge gateway, via `host-gateway` | (not applicable) | reached |
+
+Also measured:
+- **podman machine publishes one host port on one loopback only.** It refuses to publish `127.0.0.1:P` and `[::1]:P` together. A `127.0.0.1:P` publish leaves the Mac's `[::1]:P` free for any process to bind.
+- **`*.localhost` resolves to `::1`, then `127.0.0.1`**, in Bun and curl with no hosts entry. A client asking `<name>.localhost` therefore tries `::1` first.
 
 ## What changes
 
@@ -136,7 +150,7 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
 - **Promote** (built, SMD-2875 PR 2) reads the canary's `schema_version` and writes stable's `tier`, `promoted_schema_version` and `promoted_at`. The read runs in a container on the canary's network, the write in one on stable's.
 
 **New:**
-- the edge proxy: `deploy/edge/`, its own project and port (SMD-2876);
+- the edge proxy: `deploy/edge/`, its own project and port (SMD-2876; built: PR 1 for key clients, PR 2 for sign-in at each brain's host on it);
 - the federation contract: brain-to-brain operations through the edge, where there are none today beyond compare and refresh (SMD-2877).
 
 **Retired, or replaced:** `compose.tiers.yaml` and check 27, retired or replaced by a launcher of instances and the edge (SMD-2878).
@@ -147,14 +161,14 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
 
 - **SMD-2282** (`docs/operator-surface-tiers.md`):
   - decision 4, one reverse proxy in front of a brain's own servers, is **kept**;
-  - decision 14 ("One authorization server for every tier … under one public origin") is **amended** by row 4: each brain runs its own authorization server. Whether brains behind the edge share one is open question 3;
+  - decision 14 ("One authorization server for every tier … under one public origin") is **amended** by row 4: each brain runs its own authorization server. Behind the edge each keeps its own, at its own host (open question 3, answered);
   - its passages built on tiers as paths are superseded:
     - the "Brain tiers" bullet (tiers "behind `/canary/...`") and its "As built (SMD-2294)" paragraph;
     - the `/canary/...` row of its route list;
     - the reason it gives for a separate `data` network, that the mesh is not per project because a canary joins stable's;
     - the migration-order and "What else this touches" rows that put the tiers on proxy paths;
     - the MCP clients row, which names `/canary/mcp` as the canary's URL;
-    - the note that the bare `/.well-known/oauth-authorization-server` route "conflicts with nothing" with one authorization server. With one per brain behind one edge origin, it does (open question 3).
+    - the note that the bare `/.well-known/oauth-authorization-server` route "conflicts with nothing" with one authorization server. Behind the edge each brain has an origin of its own, its host on it, so the bare route there names that brain's server alone (open question 3, answered).
 - **SMD-2294:**
   - PR 1's tier routes (#314), except `tier-off` until SMD-2532;
   - PR 2's mesh join (#316);
@@ -172,15 +186,28 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
    - a brain calling a peer has the same problem in the other direction: a loopback-bound edge is unreachable from a brain's container on Docker on Linux.
 
    A network joined only by the brains' forwarders and the edge would work on both runtimes, but it brings back the alias rules check 28 holds for the mesh today (and amends rows; see the list under the table).
+
+   **Answered (SMD-2876, the maintainer's choice, 2026-10-15):** one edge shape per runtime, with brains kept on loopback. No row is amended. See "Host-network mode and the two loopbacks", above.
+   - **Under podman machine**, the edge is a container on a network of its own. It publishes `127.0.0.1:<port>` and dials each brain at `host.containers.internal`. It refuses to run beside anything on `[::1]:<port>`.
+   - **On Docker Engine on Linux**, it runs on the host's network. It listens on `127.0.0.1` and `[::1]` and dials `127.0.0.1`.
+   - **Any other runtime** is refused until the operator names a shape.
+   - **A brain calling the edge** is SMD-2877's. On Docker on Linux it could use a second entrypoint on the bridge gateway, which was measured reachable.
 2. **The client's address through the edge** (SMD-2876). A brain's forwarder sends the PROXY protocol's first line to its proxy. With `OB1_AUTH_TRUSTED_PROXY` set, the authorization server's per-address limits (`deploy/auth/limits.ts`) then see each client's address. They are off without it, and `/mcp` has no rate limits by design (SMD-2309). Through an edge, every request would carry the edge's address. The options:
    - the forwarder accepts a PROXY line from an edge it trusts;
    - the edge writes the client into `X-Forwarded-For`. The brain's proxy trusts that header, which compose's doesn't today, and the authorization server reads the second hop (`OB1_AUTH_FORWARDED_HOPS=2`). This is the shape `deploy/.env.example` describes for a host tunnel;
    - the limits treat the edge as one client.
 
    The first two amend a row (see the list under the table).
+
+   **Answered (the maintainer's choice, 2026-10-15): the limits treat the edge as one client.** Row 7 holds: the edge asserts nothing. One client's failed sign-ins through the edge lock out every client behind it for the lockout's length (`deploy/README.md` says so). Revisit with SMD-2309 if an edge is ever published beyond loopback.
 3. **Routing and identity at the edge** (SMD-2876, SMD-2286):
    - **Path or host routing.** A brain's OAuth challenge fires only at its origin's `Host` and exactly the path `/mcp`, since RFC 9728 wants the protected-resource document's `resource` identical to the URL the client used (SMD-2382, as built). Path routing at the edge (`/<brain>/mcp`) therefore breaks a brain's OAuth unless the brain learns its path. Host routing (`<brain>.<domain>`) keeps it.
    - **The authorization server.** Brains behind one edge either share one or each keeps its own. Under one origin, the bare `/.well-known/oauth-authorization-server` route that Claude Code fetches can name only one.
+
+   **Answered (the maintainer's choice, 2026-10-15): routing by host, `<name>.<domain>`.**
+   - The domain is `localhost` or a name under it, since the edge listens on loopback alone.
+   - Each brain behind the edge is the root of an origin of its own. A brain running the `auth` profile sets `OB1_PUBLIC_ORIGIN` to `http://<name>.localhost:<edge port>`. Plain HTTP is allowed there: both copies of the origin rule, `server-portable/oauth-edge.ts` and `deploy/auth/layout.ts`, read a name under `localhost` as loopback (SMD-2876 PR 2).
+   - Through the edge, at that host, the challenge, the protected-resource document and the bare discovery route are each that brain's own. Each brain keeps its own authorization server, so row 4 holds. At the brain's own port it answers keys alone.
 4. **The federation contract** (SMD-2877):
    - which operations a peer may call (export, import, search, capture), with which key scope;
    - what an imported thought records (source brain, source id, source trust per SMD-1724);

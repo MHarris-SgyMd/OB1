@@ -289,6 +289,15 @@ there.
   such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
+- **Sign-in (OAuth) through the edge.** A brain running the `auth` profile
+  sets its env file's `OB1_PUBLIC_ORIGIN` to its host on the edge,
+  `http://<name>.localhost:8090`. Plain HTTP is allowed there, because a name
+  under `localhost` is loopback. A client given `http://<name>.localhost:8090/mcp`
+  is then challenged and finds that brain's own authorization server at
+  `/.well-known/oauth-authorization-server`. Each brain behind the edge has its
+  own origin, so its own discovery documents and its own authorization
+  server. Asked at its own port, which is not its origin's host, the brain
+  answers keys alone, with no challenge.
 - **The authorization server's per-address limits see the edge's address**
   for every client that comes through the edge. One client's failed
   sign-ins therefore lock out every client behind the edge for the

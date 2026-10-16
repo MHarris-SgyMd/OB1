@@ -38,8 +38,15 @@
 
 import { queryOf } from "./auth.ts";
 
-/** The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone. */
+/**
+ * The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone — localhost, a name under it
+ * (RFC 6761 reserves `.localhost` for loopback, and the edge proxy serves each brain at `<name>.localhost`, SMD-2876),
+ * 127.0.0.1 or [::1]. The URL parser has already lowered the case; an empty label or a trailing dot is no such name.
+ * The authorization server's copy is deploy/auth/layout.ts.
+ */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const UNDER_LOCALHOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+localhost$/;
+const loopbackHost = (hostname: string) => LOOPBACK_HOSTS.has(hostname) || UNDER_LOCALHOST.test(hostname);
 
 /** The scopes the authorization server issues (deploy/auth/layout.ts SCOPES), one per caller's key scope (auth.ts CLIENT_SCOPES; a forwarder's grants nothing and has none). */
 export const OAUTH_SCOPES = ["brain:read", "brain:write", "brain:capture"] as const;
@@ -95,7 +102,7 @@ export function originProblem(value: string | undefined): string | null {
     return `OB1_PUBLIC_ORIGIN is not a URL (${shown(given)})`;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return `OB1_PUBLIC_ORIGIN must be https:// (${shown(given)})`;
-  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) return `OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback (${shown(given)})`;
+  if (url.protocol === "http:" && !loopbackHost(url.hostname)) return `OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback: localhost or a name under it, 127.0.0.1 or [::1] (${shown(given)})`;
   if (given.replace(/\/$/, "") !== url.origin) return `OB1_PUBLIC_ORIGIN must be an origin alone, with no path, query, fragment or credentials (${shown(given)} — the origin is ${url.origin})`;
   return null;
 }

@@ -95,8 +95,15 @@ export function layout(origin: string, tiers: TierName[], services: Record<strin
 }
 export type Layout = ReturnType<typeof layout>;
 
-/** The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone. */
+/**
+ * The hosts an `http:` origin may name: OAuth 2.1 allows plain HTTP for loopback alone — localhost, a name under it
+ * (RFC 6761 reserves `.localhost` for loopback, and the edge proxy serves each brain at `<name>.localhost`, SMD-2876),
+ * 127.0.0.1 or [::1]. The URL parser has already lowered the case; an empty label or a trailing dot is no such name.
+ * The MCP server's copy is server-portable/oauth-edge.ts.
+ */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const UNDER_LOCALHOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+localhost$/;
+const loopbackHost = (hostname: string) => LOOPBACK_HOSTS.has(hostname) || UNDER_LOCALHOST.test(hostname);
 
 /**
  * The value as an error may quote it: up to its first `?` or `#`. A pasted
@@ -129,7 +136,7 @@ export function originFromEnv(env: Record<string, string | undefined> = process.
     throw new Error(`OB1_PUBLIC_ORIGIN is not a URL (${shown(given)}): give the origin, e.g. https://brain.example.com`);
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`OB1_PUBLIC_ORIGIN must be https:// (${shown(given)})`);
-  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) throw new Error(`OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback (${shown(given)})`);
+  if (url.protocol === "http:" && !loopbackHost(url.hostname)) throw new Error(`OB1_PUBLIC_ORIGIN must be https:// unless its host is loopback: localhost or a name under it, 127.0.0.1 or [::1] (${shown(given)})`);
   if (given.replace(/\/$/, "") !== url.origin) throw new Error(`OB1_PUBLIC_ORIGIN must be an origin alone, with no path, query, fragment or credentials (${shown(given)} — the origin is ${url.origin})`);
   return url.origin;
 }
