@@ -13518,6 +13518,46 @@ console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created
   }
 }
 
+console.log("\n[45] Migration 098 on a real Postgres: a lock on a table the stated-status label reads costs a search at most 200 ms and its label, never the hold — the call fails 55P03, the store answers null and says so once, then reads again (SMD-2540)");
+{
+  const holder = new SQL({ url: URL_!, max: 1 }), caller = new SQL({ url: URL_!, max: 1 });
+  const { createStore } = await import("../server-portable/store.ts");
+  const store = await createStore({ OB1_STORE: "sql", DATABASE_URL: URL_! });
+  const realWarn = console.warn, warned: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  // Whatever happens, the lock goes in 4 s: without 098's lock_timeout the reads below would wait it out, and fail, not hang.
+  const safety = setTimeout(() => release(), 4000);
+  try {
+    let locked = () => {};
+    const lockTaken = new Promise<void>((r) => (locked = r));
+    const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+    await lockTaken;
+    const t0 = performance.now();
+    const direct = await caller`SELECT count(*) FROM ticket_status_inputs(ARRAY[]::uuid[], ARRAY['SMD-1'])`.then(() => "answered", (e: { errno?: unknown }) => String(e?.errno));
+    const directMs = performance.now() - t0;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    const t1 = performance.now();
+    const viaStore = [await store.ticketStatusInputs([], ["SMD-1"]), await store.ticketStatusInputs([], ["SMD-1"])];
+    const storeMs = performance.now() - t1;
+    console.warn = realWarn;
+    release();
+    await holding;
+    const after = await store.ticketStatusInputs([], ["SMD-1"]);
+    assert(direct === "55P03" && directMs < 1500,
+      `under an ACCESS EXCLUSIVE lock on thought_audit the call gives up with 55P03 (${direct}) in ${Math.round(directMs)} ms, not the hold`);
+    assert(viaStore.every((x) => x === null) && storeMs < 3000 && warned.length === 1 && /stated-status label not read \(55P03\)/.test(warned[0] ?? "") && after !== null,
+      `…the store answers null twice in ${Math.round(storeMs)} ms and says so once, then reads again once the lock goes (${JSON.stringify({ warned: warned.map((w) => w.slice(0, 60)), after: after !== null })})`);
+  } finally {
+    clearTimeout(safety);
+    release();
+    console.warn = realWarn;
+    await store.close();
+    await holder.close();
+    await caller.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

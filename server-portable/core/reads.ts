@@ -227,16 +227,23 @@ export const resultLabel = (checked: MovedHit | undefined): { moved?: MovedType[
   checked?.moved.length ? { moved: typesOf(checked.moved), ...(checked.notRead > 0 ? { movedNotRead: checked.notRead } : {}) } : {};
 
 export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, MovedHit>> {
-  const naming = hits.filter((h) => ticketsNamed(h.content).length > 0);
+  // A ticket row tells its own status and is never labelled (movedAmong): its keys are not sent.
+  const naming = hits.filter((h) => h.metadata?.issue === undefined && ticketsNamed(h.content).length > 0);
   if (naming.length === 0) return {};
-  const over = superseded ?? await store.supersededAmong(naming.map((h) => h.id));
-  // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
-  const open = naming.filter((h) => !over[h.id]);
   // Each hit's first MOVED_READ keys mentioned (stated-status.ts): 095's call grows with the keys sent.
-  const tickets = [...new Set(open.flatMap((h) => keysInOrder(h.content).slice(0, MOVED_READ)))];
+  const keysOf = (rows: typeof naming) => [...new Set(rows.flatMap((h) => keysInOrder(h.content).slice(0, MOVED_READ)))];
+  if (superseded === null) {
+    // search has not read supersession: both reads at once (review pass 7), the superseded hits' keys
+    // sent too and their rows left out by movedAmong.
+    const [over, inputs] = await Promise.all([store.supersededAmong(naming.map((h) => h.id)), store.ticketStatusInputs(naming.map((h) => h.id), keysOf(naming))]);
+    return inputs ? movedAmong(naming, over, inputs) : {};
+  }
+  // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
+  const open = naming.filter((h) => !superseded[h.id]);
+  const tickets = keysOf(open);
   if (tickets.length === 0) return {};
   const inputs = await store.ticketStatusInputs(open.map((h) => h.id), tickets);
-  return inputs ? movedAmong(naming, over, inputs) : {};
+  return inputs ? movedAmong(naming, superseded, inputs) : {};
 }
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {

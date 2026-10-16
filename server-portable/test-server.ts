@@ -2745,14 +2745,17 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const someCalls = calls.splice(0);
   const given = await movedOf(store(inputs), [over], { [id(3)]: id(9) });
   const givenCalls = calls.splice(0);
+  // A ticket row's keys are never sent: it is never labelled.
+  await movedOf(store(inputs), [{ ...naming, metadata: { issue: "SMD-9" } }], {});
+  const rowCalls = calls.splice(0);
   const nul = await movedOf(store(null), [naming], {});
   const nulCalls = calls.splice(0);
   await movedOf(store(inputs), [sixty], {});
   const sent = (calls.splice(0)[0] ?? "").split(" ")[2]?.split(",") ?? [];
   assert(JSON.stringify(none) === "{}" && noneCalls.length === 0
-      && JSON.stringify(someCalls) === JSON.stringify([`superseded ${id(2)},${id(3)}`, `inputs ${id(2)} SMD-1`]) && JSON.stringify(Object.keys(some)) === JSON.stringify([id(2)])
-      && JSON.stringify(given) === "{}" && givenCalls.length === 0 && JSON.stringify(nul) === "{}" && nulCalls.length === 1 && sent.length === MOVED_READ && sent.at(-1) === "SMD-1010",
-    `movedOf: no hit naming a ticket reads nothing; otherwise supersession over the naming hits only (when the caller has not read it) and one read of the unsuperseded hits and their tickets; every naming hit superseded reads nothing more; a store answering null labels nothing; a hit's first ${MOVED_READ} keys by mention are sent, no more (${JSON.stringify({ noneCalls, someCalls, givenCalls, sent: sent.length })})`);
+      && JSON.stringify(someCalls) === JSON.stringify([`superseded ${id(2)},${id(3)}`, `inputs ${id(2)},${id(3)} SMD-1,SMD-2`]) && JSON.stringify(Object.keys(some)) === JSON.stringify([id(2)])
+      && JSON.stringify(given) === "{}" && givenCalls.length === 0 && JSON.stringify(nul) === "{}" && rowCalls.length === 0 && nulCalls.length === 1 && sent.length === MOVED_READ && sent.at(-1) === "SMD-1010",
+    `movedOf: no hit naming a ticket reads nothing, nor a ticket row; when the caller has not read supersession, it and the naming hits' inputs at once (movedAmong leaving the superseded out); else one read of the unsuperseded hits and their tickets; every naming hit superseded reads nothing more; a store answering null labels nothing; a hit's first ${MOVED_READ} keys by mention are sent, no more (${JSON.stringify({ noneCalls, someCalls, givenCalls, sent: sent.length })})`);
 
   // The sweep's gaps (review pass 6): a head with no history, an `issue` of null, a count of one, and the two label shapes the core builds.
   const noHistory = movedAmong([hit(1, "SMD-1 is in progress")], {}, { lifecycle: new Set(), heads: new Map([["SMD-1", st("Done", "completed")]]), history: new Map() });
