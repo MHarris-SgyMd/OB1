@@ -42,8 +42,8 @@
 // - a tick whose calls all met an outage is the provider away, said once,
 //   until a call is answered; a sweep's end drops the holds of rows no longer
 //   waiting, and with no outage hold left the outage is over.
-// An egress refusal or a body that is not JSON is the row's failure and says
-// nothing either way.
+// An egress refusal is the row's failure and says nothing either way; a body
+// that is not JSON (a proxy's page) is taken as an outage.
 
 import { createEmbedder, providerDown, ProviderError, type Embedder } from "../embed.ts";
 import { hostOf, mayLeaveBox, refusesEverything, type EgressRecord, type EgressSubject } from "../egress.ts";
@@ -302,7 +302,11 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         try {
           embedded = await embedder.embedCapture(row.content, gate.subject);
         } catch (e) {
-          const down = providerDown(e);
+          // A body that is not JSON — a proxy's page in front of a provider that
+          // is away — is taken as an outage here, held and stopped as one, never
+          // as an answer (review pass 5: as the row's own failure it cost eight
+          // calls a tick and holds no return let go).
+          const down = providerDown(e) ?? (e instanceof ProviderError && e.kind === "body" ? { reason: "provider_body", detail: faultWords(e) } : null);
           if (down) {
             hold(row.id, down.detail, true);
             outages++;
@@ -312,8 +316,8 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
             continue;
           }
           // An HTTP status that is no outage's is the provider answering, with
-          // a refusal of this input; an egress refusal or a body that is not
-          // JSON is the row's, and says nothing of the provider.
+          // a refusal of this input; an egress refusal is the row's, and says
+          // nothing of the provider.
           if (e instanceof ProviderError && e.kind === "http") answer();
           else outagesInARow = 0;
           hold(row.id, faultWords(e), false);

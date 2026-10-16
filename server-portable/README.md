@@ -116,8 +116,9 @@ alone with an outage's answer is held like any: answers let it go until its
 third failure, after which it waits out its own hold; tried as the only call
 of a tick, it reads as the provider away until then, and two such texts side
 by side read so each time their holds end, every few sweeps at most. An egress
-refusal or a body that is not JSON is the row's failure and says nothing
-either way. A sweep's end drops the holds of rows no longer waiting (mended by
+refusal is the row's failure and says nothing either way; a body that is not
+JSON (a proxy's page in front of a provider that is away) is taken as an
+outage. A sweep's end drops the holds of rows no longer waiting (mended by
 another writer, or deleted), and with no outage hold left the outage is over.
 The only row waiting through a long outage has failed more than twice by the
 provider's return, so it waits out its hold: up to 8 sweeps, about 9

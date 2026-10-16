@@ -1408,7 +1408,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       assert(t.recovered && !state.down && !state.held.has(id(9)), `a 400 during an outage: recovered, the outage's hold let go (the row it held, no longer waiting, dropped at the sweep's end) (${JSON.stringify({ recovered: t.recovered, nine: state.held.get(id(9)) })})`);
       bad.delete("four-oh-oh");
     }
-    // A body that is not JSON, or an egress refusal, is the row's failure and says nothing of the provider: an outage stands through it.
+    // A body that is not JSON (a proxy's page) is taken as an outage — held as one, no answer — and two stop the tick.
     {
       bad.set("html-body", -1);
       const rows = [row(1, "writer", {}, "open-brain", "html-body text")];
@@ -1417,8 +1417,16 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       state.down = true;
       state.held.set(id(9), { failures: 1, until: 99, outage: true });
       const t = await mendOnce(ctx, state);
-      assert(!t.recovered && t.failed === 1 && state.held.get(id(1))?.outage === false && /not JSON/.test(t.firstError ?? ""), `a 200 that is not JSON: the row held, no recovery read into it (${JSON.stringify({ ...t, firstError: t.firstError })})`);
+      assert(!t.recovered && t.failed === 1 && state.held.get(id(1))?.outage === true && /not JSON/.test(t.firstError ?? ""), `a 200 that is not JSON: held as an outage's, no recovery read into it (${JSON.stringify({ ...t, firstError: t.firstError })})`);
       bad.delete("html-body");
+      // A proxy's page for every call: two calls, the tick stopped, the provider away.
+      bad.set("", -1);
+      const many = harness(Array.from({ length: 10 }, (_, i) => row(i + 1, "writer")), local());
+      const ms = newMendState();
+      const before = calls;
+      const tp = await mendOnce(many.ctx, ms);
+      bad.delete("");
+      assert(calls - before === 2 && tp.down?.reason === "provider_body" && ms.down, `a proxy's page for every call: two calls, stopped, the provider away (${calls - before}, ${tp.down?.reason})`);
     }
     // The rows an outage held mended by another writer: the sweep's end drops
     // their holds, and with none left the outage is over for this mender.
