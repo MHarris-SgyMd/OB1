@@ -375,7 +375,9 @@ if (want("5")) {
 // connect. This pool predates the migration, so open a fresh one, of one
 // connection. Every shard does it here, outside [5b], so each later section
 // meets the pool a full run gives it, the database's settings in force on it
-// (SMD-3048).
+// (SMD-3048). [5b] holds the settings, in the rest; nothing in the other
+// shards reads them or the pool's size today (with this back inside [5b],
+// they pass), so this is for a section a rebalance moves out of the rest.
 await sql.close();
 sql = new SQL({ url: URL_, max: 1 });
 
@@ -13577,17 +13579,23 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   const full = counts(lines.filter((l) => shardOf(l) === undefined));
   const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
   // On every run, the README's own sum: one count a shard, adding up to the
-  // full run's once [end], which every run has, is counted once.
+  // full run's once [end], which every run has, is counted once. An
+  // assertion outside a want() section counts in every shard too, and shows
+  // here as the shards adding up to more than the full run.
   const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (SHARD_NAMES.length - 1);
-  docCheck([...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum),
-    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})`);
+  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
+  docCheck(sumHolds,
+    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for a section or assertion with no want(), which runs in every shard"}`);
   // No two headers share an id: a copied header would take its section to the other's shard unseen.
   const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
   docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
   // Every section a shard lists is one this file has: a stale id would leave the shard short of what it says.
-  const listed = SHARD === undefined ? [...LISTED] : SHARD === "rest" ? [] : SHARDS[SHARD];
-  const absent = listed.filter((id) => !begun.has(id));
-  docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
+  // The rest lists none: its job leaves a stale id to the shard that lists it.
+  if (SHARD !== "rest") {
+    const listed = SHARD === undefined ? [...LISTED] : SHARDS[SHARD];
+    const absent = listed.filter((id) => !begun.has(id));
+    docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
+  }
   const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
   const run = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
   if (skipped() === 0) {
