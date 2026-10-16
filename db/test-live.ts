@@ -13218,6 +13218,174 @@ console.log("\n[43] Migration 095: the stated-status label's inputs read the hit
   }
 }
 
+console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
+{
+  const xsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    const [{ offered, installed }] = (await xsql`SELECT (SELECT count(*)::int FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered, (SELECT count(*)::int FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed`) as { offered: number; installed: number }[];
+    assert(offered === installed, `096 created pg_stat_statements exactly where the server offers it (offered ${offered}, installed ${installed})`);
+    if (installed === 1) {
+      // Readable by pg_monitor alone: PUBLIC's default grant revoked, so the plugins' login role and the servers' reach neither view.
+      const [g] = (await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') AS public_view, has_table_privilege('public', 'pg_stat_statements_info', 'SELECT') AS public_info,
+                                     has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS public_fn,
+                                     has_table_privilege('pg_monitor', 'pg_stat_statements', 'SELECT') AS monitor_view, has_function_privilege('pg_monitor', 'pg_stat_statements(boolean)', 'EXECUTE') AS monitor_fn`) as Record<string, boolean>[];
+      assert(!g.public_view && !g.public_info && !g.public_fn && g.monitor_view && g.monitor_fn, `096 revokes the views and their function from PUBLIC and grants them to pg_monitor (${JSON.stringify(g)})`);
+    }
+    const [{ superuser }] = (await xsql`SELECT rolsuper AS superuser FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean }[];
+    if (installed !== 1 || !superuser) {
+      skip("096 as a migrator that is no superuser, the grants a restore gives back, and login-role.ts --member-of", installed !== 1 ? "the server does not offer pg_stat_statements" : "the connection's role is not a superuser");
+    } else {
+      const publicReads = async () => ((await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS p`) as { p: boolean }[])[0].p;
+      // 096 as a role that is no superuser and owns nothing of the extension's: where it is confined already, PUBLIC holding nothing, its GRANT is an error, not a warning (review pass 2: the run stopped there); where it is not there, an untrusted extension may not be created (review pass 1: the run stopped there too). Both are warnings.
+      await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_nosuper; CREATE ROLE ob1_live_nosuper NOLOGIN`);
+      const file096 = readFileSync(join(HERE, "migrations", "096_pg_stat_statements.sql"), "utf8");
+      const asNosuper = async (): Promise<string | null> => {
+        try {
+          await xsql.begin(async (tx) => { await tx.unsafe("SET LOCAL ROLE ob1_live_nosuper"); await tx.unsafe(file096); });
+          return null;
+        } catch (e) {
+          return (e as Error).message;
+        }
+      };
+      let confinedRun: string | null = "not run", stillConfined = false, leftOutRun: string | null = "not run";
+      try {
+        confinedRun = await asNosuper();
+        stillConfined = !(await publicReads());
+        await xsql.unsafe("DROP EXTENSION pg_stat_statements");
+        leftOutRun = await asNosuper();
+      } finally {
+        await xsql.unsafe("DROP ROLE ob1_live_nosuper");
+      }
+      const [{ left }] = (await xsql`SELECT count(*)::int AS left FROM pg_extension WHERE extname = 'pg_stat_statements'`) as { left: number }[];
+      assert(confinedRun === null && stillConfined, `096 run by a role that neither owns the confined views nor holds a grant on them warns and leaves the grants as they were, not a failure (${confinedRun ?? "applied"}; still confined ${stillConfined})`);
+      assert(leftOutRun === null && left === 0, `096 run by a role that is no superuser leaves pg_stat_statements out with a warning, not a failure (${leftOutRun ?? "applied"}; installed ${left})`);
+      // The run that applies 096 as a role that may not create the extension says it left it out, and what applies it (review pass 2: no suite ran that line).
+      const MIG_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mig:ob1-live-mig-password-0123@");
+      if (MIG_URL === URL_) {
+        skip("a plain run as a role that is no superuser says it left pg_stat_statements out", "DATABASE_URL carries no credentials to swap for the role's");
+      } else {
+        let leftOutNote: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig`);
+          await xsql`DELETE FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`;
+          leftOutNote = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const [{ recorded }] = (await xsql`SELECT count(*)::int AS recorded FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`) as { recorded: number }[];
+        assert(leftOutNote.code === 0 && /096_pg_stat_statements\.sql {2}left pg_stat_statements out: the server offers it, and this role could not create it/.test(leftOutNote.stdout) && /psql -d '[^']+' -v ON_ERROR_STOP=1 -f db\/migrations\/096_pg_stat_statements\.sql/.test(leftOutNote.stdout) && recorded === 1,
+          `a plain run as a role that is no superuser applies 096, says it left pg_stat_statements out and the file to apply as a superuser, exit 0 (exit ${leftOutNote.code}; ${(leftOutNote.stdout.split("\n").find((l) => /left pg_stat_statements out/.test(l)) ?? leftOutNote.stderr.trim().split("\n")[0] ?? "").trim().slice(0, 140)}; recorded ${recorded})`);
+      }
+      // A tier refresh's pg_restore -x creates the extension again with its own grants, PUBLIC's among them, under a ledger that records 096: the next plain run takes them back, and the one after has nothing to do.
+      await xsql.unsafe("CREATE EXTENSION pg_stat_statements");
+      const restored = await publicReads();
+      const healed = await migrate();
+      const after = await publicReads();
+      const quiet = await migrate();
+      assert(restored && healed.code === 0 && /↻ {2}096_pg_stat_statements\.sql {2}ran again: PUBLIC could read pg_stat_statements/.test(healed.stdout) && !after && quiet.code === 0 && !/096_pg_stat_statements\.sql {2}ran again/.test(quiet.stdout),
+        `a plain run takes back the grants a restore gave PUBLIC on pg_stat_statements, says so, and the next run is quiet (restored ${restored}, exit ${healed.code}, after ${after}, quiet exit ${quiet.code}: ${healed.stdout.split("\n").find((l) => /ran again/.test(l)) ?? "no ran-again line"})`);
+      // The function alone given back: the view reads through it, so the run reads the functions' grants too (review pass 2: that half of the read went untested).
+      await xsql.unsafe("GRANT EXECUTE ON FUNCTION pg_stat_statements(boolean) TO PUBLIC");
+      const fnHealed = await migrate();
+      const fnAfter = await publicReads();
+      assert(fnHealed.code === 0 && /ran again: PUBLIC could read pg_stat_statements/.test(fnHealed.stdout) && !fnAfter,
+        `a grant to PUBLIC on the function alone is taken back by the next plain run too (exit ${fnHealed.code}, after ${fnAfter})`);
+      // A plain run as a role that does not own the views, over a grant to PUBLIC: it may not take it back, warns naming the file, and exits 0; the owner's next run does (review pass 3: that branch went untested).
+      if (MIG_URL !== URL_) {
+        let warned: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig; GRANT SELECT ON pg_stat_statements TO PUBLIC`);
+          warned = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const stillPublic = await publicReads();
+        const ownerRun = await migrate();
+        const ownerAfter = await publicReads();
+        assert(warned.code === 0 && /⚠ {2}096_pg_stat_statements\.sql {2}ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can/.test(warned.stderr) && /-f db\/migrations\/096_pg_stat_statements\.sql/.test(warned.stderr) && stillPublic && ownerRun.code === 0 && !ownerAfter,
+          `a run as a role that does not own the views warns, names the file, exits 0 and leaves PUBLIC's grant; the owner's next run takes it (exit ${warned.code}: ${warned.stderr.trim().split("\n")[0]?.slice(0, 120)}; public ${stillPublic} → ${ownerAfter})`);
+      }
+
+      // login-role.ts --member-of pg_monitor on a real server: created, run again, and each membership it would not give refused (review pass 1: no suite ran it).
+      const MROLE = "ob1_live_monitor";
+      const MGR_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mgr:ob1-live-mgr-password-0123@");
+      const dropM = () => xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_monitor_member; DROP ROLE IF EXISTS ${MROLE}; DROP ROLE IF EXISTS ob1_live_monitor_adm; DROP ROLE IF EXISTS ob1_live_monitor_mgd; DROP ROLE IF EXISTS ob1_live_monitor_mgd2; DROP ROLE IF EXISTS ob1_live_mgr`);
+      const loginRoleAs = (url: string, name: string, ...extra: string[]) => {
+        const child = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "login-role.ts"), "--role", name, "--password-env", "OB1_LIVE_MONITOR_PW", "--url", url, ...extra], { cwd: HERE, env: { ...process.env, OB1_ENV_FILES: "off", OB1_LIVE_MONITOR_PW: "ob1-live-monitor-password-0123" } as Record<string, string> });
+        return { code: child.exitCode, out: child.stdout.toString(), err: child.stderr.toString() };
+      };
+      const loginRole = (...extra: string[]) => loginRoleAs(URL_!, MROLE, ...extra);
+      const inherits = async (name: string) => ((await xsql`SELECT pg_has_role(${name}, 'pg_monitor', 'USAGE') AS u`) as { u: boolean }[])[0].u;
+      const membership = async () => ((await xsql`SELECT bool_or(m.admin_option) AS admin, bool_or((to_jsonb(m) ->> 'set_option')::boolean) AS set, count(*)::int AS n FROM pg_auth_members m WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${MROLE}) AND m.roleid = 'pg_monitor'::regrole`) as { admin: boolean | null; set: boolean | null; n: number }[])[0];
+      await dropM();
+      try {
+        const created = loginRole("--member-of", "pg_monitor");
+        const m1 = await membership();
+        // NOINHERIT between the runs, and on Postgres 16 the grant itself WITH INHERIT FALSE (where a role's INHERIT only sets new grants'): a member that inherits nothing holds none of pg_monitor's privileges (review pass 2), and the run puts both back.
+        const [{ pg16 }] = (await xsql`SELECT current_setting('server_version_num')::int >= 160000 AS pg16`) as { pg16: boolean }[];
+        await xsql.unsafe(`ALTER ROLE ${MROLE} NOINHERIT${pg16 ? `; GRANT pg_monitor TO ${MROLE} WITH INHERIT FALSE` : ""}`);
+        const inheritsBefore = await inherits(MROLE);
+        const again = loginRole("--member-of", "pg_monitor");
+        const inheritsAgain = await inherits(MROLE);
+        assert(created.code === 0 && /created .*a member of pg_monitor/.test(created.out) && m1.n > 0 && m1.admin === false && m1.set !== true && !inheritsBefore && again.code === 0 && /updated/.test(again.out) && inheritsAgain,
+          `login-role.ts --member-of pg_monitor creates the role a member of pg_monitor without ADMIN OPTION or (Postgres 16) SET, and run again over a membership that inherits nothing updates it holding pg_monitor's privileges (exit ${created.code}/${again.code}; ${JSON.stringify(m1)}; inherits ${inheritsBefore} → ${inheritsAgain})`);
+        await xsql.unsafe(`GRANT pg_monitor TO ${MROLE} WITH ADMIN OPTION`);
+        const admin = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy: each grantor's row named (review pass 2).
+        const printed = admin.err.match(/REVOKE ADMIN OPTION FOR [^;]*;/g) ?? [];
+        for (const statement of printed) await xsql.unsafe(statement);
+        const afterRemedy = loginRole("--member-of", "pg_monitor");
+        assert(printed.length > 0 && printed.every((st) => / GRANTED BY /.test(st)) && afterRemedy.code === 0,
+          `the WITH ADMIN OPTION refusal prints a REVOKE … GRANTED BY for each grantor, and run as printed the next run passes (${printed.join(" ") || "none printed"}; exit ${afterRemedy.code}: ${afterRemedy.err.trim().slice(0, 120)})`);
+        await xsql.unsafe(`CREATE ROLE ob1_live_monitor_member NOLOGIN; GRANT ${MROLE} TO ob1_live_monitor_member`);
+        const member = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy (review pass 4: a plain REVOKE could fail on a dependent grant).
+        const memberPrinted = member.err.match(/REVOKE "?ob1_live_monitor"? FROM [^;]*;/g) ?? [];
+        for (const statement of memberPrinted) await xsql.unsafe(statement);
+        const afterMemberRemedy = loginRole("--member-of", "pg_monitor");
+        // A superuser migrator is never made a member of what it creates: one made a member by hand is refused, not exempt, or its inheriting members would hold pg_monitor (review pass 4).
+        await xsql.unsafe(`GRANT ${MROLE} TO CURRENT_USER`);
+        const superMember = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE ${MROLE} FROM CURRENT_USER`);
+        const [{ me }] = (await xsql`SELECT current_user AS me`) as { me: string }[];
+        assert(memberPrinted.length > 0 && memberPrinted.every((st) => / GRANTED BY .* CASCADE;$/.test(st)) && afterMemberRemedy.code === 0 && superMember.code === 2 && new RegExp(`${me} is a member of ${MROLE}`).test(superMember.err),
+          `the members refusal prints each row's REVOKE … GRANTED BY … CASCADE, which run as printed lets the next run pass, and a superuser migrator made a member is refused, not exempt (${memberPrinted.join(" ") || "none printed"}; exit ${afterMemberRemedy.code}; ${superMember.code}: ${superMember.err.trim().slice(0, 100)})`);
+        await xsql.unsafe(`DROP ROLE ob1_live_monitor_member; GRANT pg_read_all_data TO ${MROLE}`);
+        const other = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE pg_read_all_data FROM ${MROLE}`);
+        const without = loginRole();
+        assert(admin.code === 2 && /WITH ADMIN OPTION/.test(admin.err) && member.code === 2 && /ob1_live_monitor_member is a member of ob1_live_monitor, and would hold pg_monitor through it/.test(member.err) && other.code === 2 && /is a member of pg_read_all_data/.test(other.err) && without.code === 2 && /is a member of pg_monitor/.test(without.err),
+          `login-role.ts refuses the membership WITH ADMIN OPTION, a role with members, another membership, and pg_monitor's without --member-of, each exit 2 (${[admin, member, other, without].map((r) => `${r.code}: ${r.err.trim().slice(0, 90)}`).join(" | ")})`);
+        // A migrator that is no superuser, with CREATEROLE and pg_monitor WITH ADMIN OPTION (a managed Postgres's shape): on Postgres 16 it is made an ADMIN-only member of each role it creates, which holds nothing through it, and its re-run was refused for that row (review pass 2).
+        if (MGR_URL === URL_) {
+          skip("a CREATEROLE migrator that is no superuser runs login-role.ts --member-of twice", "DATABASE_URL carries no credentials to swap for the role's");
+        } else {
+          await xsql.unsafe(`CREATE ROLE ob1_live_mgr LOGIN CREATEROLE PASSWORD 'ob1-live-mgr-password-0123'; GRANT pg_monitor TO ob1_live_mgr WITH ADMIN OPTION`);
+          const mgd1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgd2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgdInherits = await inherits("ob1_live_monitor_mgd");
+          assert(mgd1.code === 0 && /created/.test(mgd1.out) && mgd2.code === 0 && /updated/.test(mgd2.out) && mgdInherits,
+            `a CREATEROLE migrator that is no superuser creates the role and runs again, its own ADMIN-only row on it no refusal (exit ${mgd1.code}/${mgd2.code}: ${(mgd2.err || mgd2.out).trim().slice(0, 120)}; inherits ${mgdInherits})`);
+          // Another role's ADMIN-only row is not the creator's: it can grant itself the role, and pg_monitor's reads with it (review pass 3: a filter on INHERIT and SET let it through).
+          await xsql.unsafe(`CREATE ROLE ob1_live_monitor_adm NOLOGIN; GRANT ob1_live_monitor_mgd TO ob1_live_monitor_adm WITH ${pg16 ? "ADMIN TRUE, INHERIT FALSE, SET FALSE" : "ADMIN OPTION"}`);
+          const mgdAdm = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          await xsql.unsafe("DROP ROLE ob1_live_monitor_adm");
+          // A creator whose createrole_self_grant makes its own row INHERIT and SET (Postgres 16's setting for the old behaviour) runs again too (review pass 3: refused from the second run on).
+          await xsql.unsafe(`ALTER ROLE ob1_live_mgr SET createrole_self_grant = 'set, inherit'`);
+          const self1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          const self2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          assert(mgdAdm.code === 2 && /ob1_live_monitor_adm is a member of ob1_live_monitor_mgd/.test(mgdAdm.err) && self1.code === 0 && self2.code === 0 && /updated/.test(self2.out),
+            `another role holding ADMIN OPTION on the role is refused, and a creator's own row, under createrole_self_grant too, never is (exit ${mgdAdm.code}: ${mgdAdm.err.trim().slice(0, 100)} | ${self1.code}/${self2.code}: ${(self2.err || self2.out).trim().slice(0, 100)})`);
+        }
+      } finally {
+        await dropM();
+      }
+    }
+  } finally {
+    await xsql.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
