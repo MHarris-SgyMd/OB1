@@ -39,13 +39,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlin
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
@@ -11355,12 +11357,23 @@ if (want("38")) {
     const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
     const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    // A mend (SMD-2889): the servers' vector mender giving a row saved without
+    // one its vector is background work, as the passes are — it leaves the
+    // brain asleep, though its event's actor_kind is NULL.
+    const mendText = "A row saved without a vector, which the mender gives one.";
+    const bare = ((await sql`SELECT upsert_thought(${mendText}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${bare}::uuid`;
+    const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
+      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-model'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
+    const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
     await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
     assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
-      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+      `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
+    assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
+      `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
     ac.abort();
     const followCode = await following;
     const endBeat = await beat();
@@ -12327,8 +12340,8 @@ if (want("38b")) {
     // judge's pool never drained, and parked extraction got nothing for the
     // sleep (SMD-3008). The judge on its own model, as a judge that will not
     // load beside a serving extraction model is; at its start (a probe
-    // answering 500) and mid-pass (judgements answering "not found", a missing
-    // model, which a follower waits out at once rather than after its pauses).
+    // answering 500) and mid-pass (judgements answering "not found", which
+    // starts the wait at once rather than after the pauses, its probes 500).
     const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
     const COJ = consolidateKey(JUDGE);
     const judgeCase = async (mid: boolean) => {
@@ -12343,17 +12356,25 @@ if (want("38b")) {
       await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
       await capture("We bill monthly, decided in March.", 3, 0);
       await capture("We bill annually now.", 0, 0);
-      // At its start, beside a lease a scheduler gone left on a stalled thought
-      // of its own — not this process's, so it neither sets the let-out
+      // At its start, beside a lease another host's scheduler holds on a
+      // stalled thought — not this process's, so it neither sets the let-out
       // aside nor is claimed (a day left on it) — and with two workers, the
       // let-out's one worker not claiming the stalled thought beside the
       // note (review pass 2).
       if (!mid) {
-        const foreign = await capture("The stuckdoc note another host's scheduler left a lease on.", 0, 21);
-        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'extract-otherhost-1-0-deadbeef', claimed_at = now(), ttl_expires_at = now() + interval '1 day', attempt_count = 1
-                   WHERE thought_id = ${foreign}::uuid AND work_type = ${EX}`;
-        const [{ fpf }] = await sql`SELECT content_fingerprint AS fpf FROM thoughts WHERE id = ${foreign}::uuid`;
-        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${foreign}::uuid, ${EX}, ${fpf}, ${sig}, 3, 3)`;
+        /** A stalled thought another scheduler holds a lease on, under `worker`, claimed `ago` before now, a day left on it. */
+        const plantLease = async (text: string, axis: number, worker: string, ago: string) => {
+          const id = await capture(text, 0, axis);
+          await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${worker}, claimed_at = now() - ${ago}::interval, ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                     WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+          const [{ fpl }] = await sql`SELECT content_fingerprint AS fpl FROM thoughts WHERE id = ${id}::uuid`;
+          await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fpl}, ${sig}, 3, 3)`;
+        };
+        await plantLease("The stuckdoc note another host's scheduler left a lease on.", 21, "extract-otherhost-1-0-deadbeef", "0 seconds");
+        // And one under this process's own worker-id prefix, claimed before the
+        // run began — a container restarted in place keeps its hostname and pid,
+        // and its last run's lease lives on: not this run's (post-merge review).
+        await plantLease("The stuckdoc note this container's last run left a lease on.", 22, `extract-${hostname()}-${process.pid}-9-deadbeef`, "10 minutes");
       }
       // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
       judgeProbeDown = !mid;
@@ -12506,6 +12527,19 @@ if (want("38b")) {
     await Promise.race([orderRun, Bun.sleep(15_000)]);
     assert(order.moved && order.n === 2 && order.ids[0] === planted,
       `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
+    // A forward date outlives its stop record: a thought finished since and put
+    // back by a --retry-* flag keeps it, and went behind every capture for up
+    // to 30 days. The sleep's move dates it now (post-merge review).
+    const retried = await capture("A note put back by --retry-partial after it finished.", 0, 23);
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '20 days' WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`;
+    let stopRetried: PassStop | null = null;
+    const retriedRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopRetried = s; }, writer: { out: () => {}, err: () => {} } });
+    const redated = await pollUntil(async () => ((await sql`SELECT enqueued_at <= now() AS ok FROM thought_work_claims WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`)[0] as { ok: boolean } | undefined)?.ok === true, 15_000);
+    (stopRetried as PassStop | null)?.();
+    await (stopRetried as PassStop | null)?.();
+    await Promise.race([retriedRun, Bun.sleep(15_000)]);
+    await sql`DELETE FROM thoughts WHERE id = ${retried}::uuid`;
+    assert(redated, "a forward-dated row that is no longer a stopped thought (put back by a retry after it finished) is dated now as a sleep begins, not left behind every capture");
     // A scheduler started while thoughts are held names them before its first sleep.
     // The row case C's scheduler ended names its own stuck thought: gone first.
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
