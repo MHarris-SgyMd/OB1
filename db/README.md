@@ -4094,11 +4094,12 @@ claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working
   --header "x-brain-key: <key>"
 ```
 
-A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
-same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
+A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers at
+`/mcp` on a loopback port of its own (SMD-2874; "A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
-key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`:
-`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
+key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`
+(one key opens both: the canary takes stable's keys):
+`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as
 Basic beside the key, on any Bun, and are in neither the label nor the
