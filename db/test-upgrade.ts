@@ -537,7 +537,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // extraction windows kept, SMD-2694), 094 (a proposal's listing names
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
-  // it, SMD-1849) and 097 (one walk for 082's lapse, SMD-3035)
+  // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035) and 098 (an
+  // unlink takes the review lock, SMD-3045)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -662,13 +663,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // by name without 068 or 060 ([20ap]); 096 creates pg_stat_statements
   // where the server offers it, needing nothing; 097 adds the lapse's walk
   // and redefines 092's lapse and 094's read as calls of it, refusing by
-  // name without 092 or 094 ([20aq]) — all
+  // name without 092 or 094 ([20aq]); 098 redefines 088's update_thought,
+  // refusing by name without 073 ([20ar]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 68, `030 is among the last sixty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 69, `030 is among the last sixty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4251,6 +4253,55 @@ console.log("\n[20aq] Migration 097: refused by name without 092 or 094; onto a 
   const [{ r }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false) AS r`;
   const [{ s }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${N}::uuid`;
   assert((r as { ok: boolean }).ok === true && s === null, `the accept after it lapses the hook's pointer the read named (${JSON.stringify(r)}, ${s})`);
+  await sql.close();
+}
+
+console.log("\n[20ar] Migration 098: refused by name without 073; onto a populated brain at the file before it — an unlink there holds no review lock, after it holds one, and an edit answers as it did; no row and no audit row moved by the file; a re-apply a no-op (SMD-3045)");
+{
+  const the098 = MIGRATIONS.find((f) => f.endsWith("_unlink_takes_review_lock.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "073" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 098 needs 073 (ob1_declared_trust, ob1_actor_stamp); this schema lacks it",
+    `098 on a schema stopped before 073 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the098 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('lap-key', 'agent')`;
+  const LAP = { name: "lap-key", via: "open-brain" };
+  const made = async (content: string, axis: number) => ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor: LAP }}::jsonb, ${vec(axis)}::vector) AS r`)[0].r as { id: string }).id;
+  const older = await made("upgrade 098: the older note", 1), newer = await made("upgrade 098: the newer note", 2), third = await made("upgrade 098: a third note", 3);
+  await sql`SELECT update_thought(p_id := ${newer}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
+  await sql`SELECT update_thought(p_id := ${third}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
+  // Whether a call's transaction holds the review lock once the call returns.
+  const holdsReviewLock = async (id: string) => {
+    let n = -1;
+    await sql.begin(async (tx: SQL) => {
+      await tx`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${LAP}::jsonb, p_provenance := '{"supersedes": null}'::jsonb)`;
+      n = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295)`)[0].n);
+    });
+    return n;
+  };
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const beforeLock = await holdsReviewLock(third);
+  assert(beforeLock === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock})`);
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
+  const [fn] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'update_thought'`;
+  assert(fn?.fns === 1 && /ob1:pointer-write-takes-review-lock/.test(String(fn.body)) && /ob1:patch-merged-beside-the-stamp/.test(String(fn.body)), `one update_thought, 098's gate on 088's body (${fn?.fns})`);
+  assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
+  const afterLock = await holdsReviewLock(newer);
+  const edit = (await sql`SELECT update_thought(p_id := ${older}::uuid, p_metadata_patch := ${{ topic: "after" }}::jsonb, p_actor := ${LAP}::jsonb) AS r`)[0].r as { ok: boolean; stamp?: Record<string, unknown>; same_text?: boolean; metadata_merged?: boolean };
+  const [{ s }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${newer}::uuid`;
+  assert(afterLock === 1 && s === null && edit.ok && edit.same_text === true && edit.metadata_merged === true && edit.stamp?.actor_name === "lap-key",
+    `after it, an unlink holds the review lock to the end of its transaction and clears the pointer (${afterLock}, ${s}), and an edit answers as 088's did (${JSON.stringify(edit)})`);
+  // A re-apply moves nothing.
+  const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 098 is a no-op: no row or audit row moved");
   await sql.close();
 }
 

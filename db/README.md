@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2890 assertions: 2890 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-seven (97) migrations applied, and
+`bun test-schema.ts` prints `2899 assertions: 2899 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-eight (98) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-3045).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1623,9 +1623,11 @@ write's cycle let 092's re-firing clear it and 060 then refused the write.
 Outside raw cycles nothing cleared below the bound changes. The walk reads
 one snapshot and re-reads each cleared row, not the path below it: a link
 moved out from under the event's row between the two still has the pointers
-above it cleared, and one moved in misses its own — under an accept only an
-unlink moves one, since a re-point onto a thought waits on the review lock
-(092 had the window one level wide; SMD-3046, SMD-3045). No signature
+above it cleared, and one moved in misses its own. Under an accept nothing
+moves one since 098: every pointer write through `update_thought`, an
+unlink included, and every delete waits on the review lock the accept
+holds. A taker that holds none — a write key's re-capture, a text move —
+still has the window (092 had it one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1633,6 +1635,29 @@ after an older tree's `--reapply` over a 097 brain run this tree's
 (the accept's clears, in order, against the read; the flag per pointer; the
 raw cycle), test-upgrade [20aq]; the behaviour cells of the trigger's [72]
 and [82] and the read's [84] unchanged.
+
+Migration 098 has an unlink take the review lock (SMD-3045). 088's
+`update_thought` took `ob1:supersession-review` only for a pointer onto a
+thought, so `{"supersedes": null}` ran straight through an accept, which
+holds that lock while its lapse reads the tree above the accepted row and
+clears what it found: an unlink committed between the two left the accept
+clearing a capture-only pointer above a link no longer under it (SMD-3035's
+review pass 2, raced live). The lock is now taken whenever the envelope
+names `supersedes`, a clear included and whatever the row's pointer — before
+the fingerprint lock and the row, 033's order — so either side waits for the
+other's transaction. That also closes the 40P01 the same pass found, a
+transaction unlinking a row and then re-pointing it while an accept waited
+on that row. Outside the order, now for an unlink as for a re-point: a
+transaction of several calls that holds a row and then writes a pointer
+waits on the lock an accept holds while the accept waits on its row (no
+shipped caller makes one; take the lock first, or write the pointer first).
+097's header still says only an unlink moves a link under an accept —
+migrations are append-only — and the paragraph above says what holds. 088's
+body otherwise verbatim, under its signature; it refuses to apply without
+073; 088 (or 060, 061, 073) re-applied puts the old gate back and 098 after
+it the lock. test-schema [88] (the gate, 088's DDL verbatim, the lock held
+by each call that names a pointer), test-live [6j] (each order, the other
+side waiting), test-upgrade [20ar].
 
 ## What changed relative to the guide
 
@@ -4634,8 +4659,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2890 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1375 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2899 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1381 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
