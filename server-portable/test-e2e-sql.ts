@@ -3515,8 +3515,8 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
         && block(wide).includes("⚠ Moved since written: LBL-2540 In Progress → Done (+10 more named past the first 50, not checked)"),
       `…a note mentioning sixty keys reads its first fifty and counts the other ten beside the move, in its line and \`movedNotRead\` (${notReadOf(wide)})`);
     assert([older, filed, dup].every((id) => fieldOf(id) === "null" && notReadOf(id) === 0 && !block(id).includes("Moved since written") && block(id) !== "")
-        && fieldOf(quiet) === "[]" && notReadOf(quiet) === 0 && !block(quiet).includes("Moved since written"),
-      `…the draft it supersedes, the note filed under the ticket and a duplicate's ticket row quoting it are not checked (null); the note on a ticket that never moved is, and nothing moved ([]) (${[older, filed, dup, quiet].map(fieldOf).join(" ")})`);
+        && fieldOf(quiet) === "[]" && notReadOf(quiet) === 10 && !block(quiet).includes("Moved since written"),
+      `…the draft it supersedes, the note filed under the ticket and a duplicate's ticket row quoting it are not checked (null); the note on a ticket that never moved is, and nothing moved ([]) of its first fifty, its other ten counted (${[older, filed, dup, quiet].map(fieldOf).join(" ")})`);
     // The rank is the search's: the same query with the label's inputs gone returns the same order.
     await sql`DROP FUNCTION ticket_status_inputs(uuid[], text[])`;
     try {

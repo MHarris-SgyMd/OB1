@@ -308,13 +308,14 @@ type has moved since the hit was written (SMD-2540): `search_thoughts` prints
 `⚠ Moved since written: SMD-2306 In Progress → Done; …` after the superseded
 and demoted lines, every moved ticket by key, and lists them in each hit's
 `moved` (`{ticket, was, now}` in status types; the REST answer carries each
-status's name and type); `search` starts that result's title `[moved since
-written: …]` — before the thought's own words, which could forge it at the
-end — and gives it `moved`. A status prints as its type's word (Triage,
+status's name and type); `search` gives that result `moved`, in status types
+over REST as well, and over MCP starts its title `[moved since written: …]` —
+before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
 Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
-A hit's first 50 keys, in the order it mentions them, are read; beside a move
-the rest are counted (`movedNotRead`, `(+N more keys not read)`). Written is
+A hit's first 50 keys, in the order it mentions them, are read; the rest are
+counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not
+checked)`). Written is
 the session's end the hook's last line records, else the row's stored time,
 and a ticket that already held its current type an hour later is the writer's
 own move, not labelled — the reading `evals/eval-stated-status.ts` measured
@@ -328,9 +329,10 @@ before 095; an empty one means checked and nothing moved. The inputs are one cal
 There is no switch: the label never moves a rank or refuses a search. A wrong
 label is a wrong reading of one ticket. Its status now is the ticket's head
 (`SELECT head_id, status, status_type FROM ob1_ticket_head WHERE issue =
-'SMD-…'`): any write key's ticket row can take it (SMD-3047), so
-`update_thought` or `delete_thought` the row that should not hold it, and
-board-sync's own row is read again. A list step can read a count as a ticket
+'SMD-…'`): a write key's ticket row with a later `linear_updated_at` takes
+it (SMD-3047), so `delete_thought` that row, or `update_thought` it with
+`metadata_patch: {"issue": null}` — an edit of its text alone leaves it the
+head — and board-sync's own row is read again. A list step can read a count as a ticket
 (`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
 exists and moved.
 

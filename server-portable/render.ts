@@ -18,7 +18,7 @@
 // everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
-import { movedWords, type Moved } from "./stated-status.ts";
+import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
@@ -134,7 +134,7 @@ const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[
 /** A hit's moved tickets for the words: none when not checked, or from a REST core older than the MCP server rendering its answer. */
 const movedIn = (moved: readonly Moved[] | null | undefined): readonly Moved[] => moved ?? [];
 /** The same as a typed field: the key and the status type then and now — each one token (095 reads only known lifecycle types). */
-const movedField = (moved: readonly Moved[] | undefined) => movedIn(moved).map((m) => ({ ticket: m.ticket, was: m.then.type, now: m.now.type }));
+const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(movedIn(moved));
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
@@ -518,10 +518,10 @@ export function currentSearchHint(msg: string): string {
  */
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
-    const words = movedWords(movedIn(moved), movedNotRead ?? 0);
+    const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
     const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${r.title}`;
-    return words ? { ...r, title, moved: movedField(moved), ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
+    return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
@@ -567,7 +567,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         if (demotion) parts.push(demotion);
         // SMD-2540: the tickets it names that moved since it was written; a
         // label, so the rank above is unchanged.
-        const moved = movedWords(movedIn(t.moved), t.movedNotRead ?? 0);
+        const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
         if (moved) parts.push(`⚠ Moved since written: ${moved}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.

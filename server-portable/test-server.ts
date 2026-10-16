@@ -2615,7 +2615,9 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
 
 console.log("\n[16m] The stated-status label in words and fields: every moved ticket named in its type's word, never the board's, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
 {
-  const { movedAmong, movedWords, MOVED_READ, TYPE_WORDS } = await import("./stated-status.ts");
+  const { movedAmong, movedWords: wordsOfTypes, typesOf, MOVED_READ, TYPE_WORDS } = await import("./stated-status.ts");
+  // The words read types only (review pass 5): what a reply carries, never a board's name.
+  const movedWords = (moved: Parameters<typeof typesOf>[0], notRead = 0) => wordsOfTypes(typesOf(moved), notRead);
   const { renderSearchThoughts, renderSearch } = await import("./render.ts");
   const st = (name: string, type: string) => ({ name, type });
   const m = (n: number) => ({ ticket: `SMD-${n}`, then: st("In Progress", "started"), now: st("Done", "completed") });
@@ -2661,8 +2663,9 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const moves = [{ at: T - 2 * H, ...st("In Progress", "started") }, { at: T + 3 * H, ...st("Done", "completed") }];
   const both = { ...inputs, heads: new Map([["SMD-1010", st("Done", "completed")], ["SMD-1009", st("Done", "completed")]]), history: new Map([["SMD-1010", moves], ["SMD-1009", moves]]) };
   const bounded = movedAmong([sixty], {}, both)[sixty.id];
-  assert(JSON.stringify(bounded?.moved.map((x) => x.ticket)) === JSON.stringify(["SMD-1010"]) && bounded?.notRead === 10,
-    `movedAmong: a hit's first ${MOVED_READ} keys by mention — the fiftieth labelled, the fifty-first (another hit's head) not — and the 10 past them counted beside the move (${JSON.stringify(bounded)})`);
+  const still = movedAmong([sixty], {}, { ...both, heads: new Map() })[sixty.id];
+  assert(JSON.stringify(bounded?.moved.map((x) => x.ticket)) === JSON.stringify(["SMD-1010"]) && bounded?.notRead === 10 && JSON.stringify(still) === JSON.stringify({ moved: [], notRead: 10 }),
+    `movedAmong: a hit's first ${MOVED_READ} keys by mention — the fiftieth labelled, the fifty-first (another hit's head) not — and the 10 past them counted, beside a move or not — an empty list then says nothing of them (${JSON.stringify({ bounded, still })})`);
 
   // The renders: the line after the superseded and demoted ones; the typed field tokens; an answer without `moved` reads as none.
   const id = (n: number) => `cccccccc-0000-4000-8000-00000000000${n}`;
@@ -2680,7 +2683,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   assert(JSON.stringify(hits[0].moved) === JSON.stringify([{ ticket: "SMD-1", was: "started", now: "completed" }, { ticket: "SMD-9", was: "unstarted", now: "completed" }]) && hits[1].moved === null,
     `…the typed field: keys and status types, never the board's names; a hit without \`moved\` (a REST core before it) null, not checked (${JSON.stringify(hits.map((h) => h.moved))})`);
   const c = renderSearch({ ok: true, value: { results: [
-    { id: id(1), title: "a page", url: "u1", trust: "ingested", moved: [m(2), m(3)] },
+    { id: id(1), title: "a page", url: "u1", trust: "ingested", moved: typesOf([m(2), m(3)]) },
     { id: id(2), title: "a note", url: "u2", trust: "operator", moved: [] },
     { id: id(3), title: "old", url: "u3", trust: undefined },
   ] } } as never);

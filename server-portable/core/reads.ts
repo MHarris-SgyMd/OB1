@@ -7,7 +7,7 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
-import { keysInOrder, MOVED_READ, movedAmong, ticketsNamed, type Moved, type MovedHit } from "../stated-status.ts";
+import { keysInOrder, MOVED_READ, movedAmong, ticketsNamed, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -131,7 +131,7 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * Absent, not empty, elsewhere: an MCP server older than this REST core passes
  * an unknown field through, and then only the results it is about carry it.
  */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: Moved[]; movedNotRead?: number }[] };
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -148,7 +148,8 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
-      ...(moved[t.id]?.moved.length ? { moved: moved[t.id].moved, ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
+      // Status types only, as the reply: an MCP server older than this REST core passes the field through to ChatGPT as it stands (review pass 5).
+      ...(moved[t.id]?.moved.length ? { moved: typesOf(moved[t.id].moved), ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
     })),
   });
 }
@@ -178,8 +179,13 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 
 /** What the query was taken to mean — every hybrid row carries the same four. */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
-/** A hybrid hit, with the newer thought that supersedes it (025), if any, and the tickets it names that moved since it was written (095, SMD-2540). */
-/** `moved` is null when the hit's tickets were not checked (superseded, a ticket row or a note under one, no written time, a brain before 095), empty when checked and none moved or it names none. */
+/**
+ * A hybrid hit, with the newer thought that supersedes it (025), if any, and
+ * the tickets it names that moved since it was written (095, SMD-2540):
+ * `moved` null when they were not checked (superseded, a ticket row or a note
+ * under one, no written time, a brain before 095), empty when checked and none
+ * moved or it names none; `movedNotRead` the keys past the first 50, not checked.
+ */
 export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number };
 export type SearchThoughtsResult = {
   query: string;

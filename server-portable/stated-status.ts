@@ -85,6 +85,9 @@ export function statusAt(history: readonly Change[], t: number): Status | undefi
 
 /** A ticket a hit no longer tells right: its status when the thought was written, and now. */
 export type Moved = { ticket: string; then: Status; now: Status };
+/** A moved ticket as a reply carries it: the key and the status TYPE then and now — never the board's names, which any write key can write. */
+export type MovedType = { ticket: string; was: string; now: string };
+export const typesOf = (moved: readonly Moved[]): MovedType[] => moved.map((m) => ({ ticket: m.ticket, was: m.then.type, now: m.now.type }));
 
 /**
  * The tickets `text` names that moved since it was written (moved-session-
@@ -108,7 +111,7 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
   return out;
 }
 
-/** A checked hit: the tickets that moved (none, maybe), and beside a move how many keys it mentions past MOVED_READ, not checked. */
+/** A checked hit: the tickets that moved (none, maybe), and how many keys it mentions past MOVED_READ, not checked. */
 export type MovedHit = { moved: Moved[]; notRead: number };
 
 /** What the label reads, as migration 095 answers it (store.ts's TicketStatusInputs; spelled here so this module imports nothing). */
@@ -124,7 +127,8 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
  * own status, never others'. Nor a hit with no written time: the session line
  * when it has one, else its stored time. Every other hit is absent — not
  * checked, which the reply says as `moved: null` (the maintainer's call,
- * review pass 4). The keys past MOVED_READ are counted beside a move only.
+ * review pass 4). Every checked hit counts the keys past MOVED_READ: an empty
+ * list beside a count says nothing about those (review pass 5).
  */
 export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, MovedHit> {
   const out: Record<string, MovedHit> = {};
@@ -135,7 +139,7 @@ export function movedAmong(hits: readonly { id: string; content: string; created
     // Its first MOVED_READ keys only, as movedOf reads them: another hit's may be among the heads.
     const keys = keysInOrder(h.content), read = new Set(keys.slice(0, MOVED_READ));
     const moved = movedSince(h.content, stored, (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
-    out[h.id] = { moved, notRead: moved.length > 0 ? Math.max(0, keys.length - MOVED_READ) : 0 };
+    out[h.id] = { moved, notRead: Math.max(0, keys.length - MOVED_READ) };
   }
   return out;
 }
@@ -160,8 +164,8 @@ const word = (type: string) => TYPE_WORDS[type] ?? "?";
  * keys past MOVED_READ were not read; null when none moved — a line that claims
  * nothing is not printed (review pass 3).
  */
-export function movedWords(moved: readonly Moved[], notRead = 0): string | null {
+export function movedWords(moved: readonly MovedType[], notRead = 0): string | null {
   if (moved.length === 0) return null;
-  const words = moved.map((m) => `${m.ticket} ${word(m.then.type)} → ${word(m.now.type)}`).join("; ");
+  const words = moved.map((m) => `${m.ticket} ${word(m.was)} → ${word(m.now)}`).join("; ");
   return notRead > 0 ? `${words} (+${notRead} more named past the first ${MOVED_READ}, not checked)` : words;
 }
