@@ -14046,9 +14046,10 @@ console.log("\n[82] Migration 092: a capture-only key's thought is taken while i
       && /092 \/ SMD-2708/.test(await comment("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)")) && /092 \/ SMD-2708/.test(await comment("ob1_capture_taken_by_log(uuid)"))
       && /ob1:capture-chain-reaches-outside/.test(await src("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)"))
       && /ob1:capture-pointer-lapses/.test(await src("ob1_lapse_capture_pointers()")) && /ob1:capture-pointer-checked-at-write/.test(await src("ob1_check_capture_pointer()"))
-      && ["ob1_thought_taken", "ob1_lapse_capture_pointers", "ob1_check_capture_pointer", "ob1_note_recapture", "ob1_chain_reaches_outside", "ob1_capture_taken_by_log"].every((f) => lastDefinerOf(f).startsWith("092"))
+      && ["ob1_thought_taken", "ob1_check_capture_pointer", "ob1_note_recapture", "ob1_chain_reaches_outside", "ob1_capture_taken_by_log"].every((f) => lastDefinerOf(f).startsWith("092"))
+      && lastDefinerOf("ob1_lapse_capture_pointers").startsWith("096")
       && lastDefinerOf("ob1_takes_thought").startsWith("082") && /'supersedes'/.test(trg?.d ?? ""),
-    `092's chain, its log read, the taken read, the lapse and the check, each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
+    `092's chain, its log read, the taken read and the check, the lapse (096's since SMD-3035), each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
 
   const HOOK = { name: "hook-82", agent_id: await agent("7", "hook-82", "capture"), via: "test-door", scope: "capture" };
   const NO_AGENT = { name: "hook-82", via: "test-door", scope: "capture" };
@@ -14206,6 +14207,9 @@ console.log("\n[82] Migration 092: a capture-only key's thought is taken while i
   assert(JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'thought_audit_lapse_capture_pointers'`)).n === 1,
     "092 re-applied: one trigger, no row and no event moved");
+  // 092 re-applied puts its own lapse back; 096 is its last definer since
+  // SMD-3035, and the sections after run on the shipped state.
+  await restoreShipped("ob1_lapse_capture_pointers");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -14309,10 +14313,10 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
   assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("094") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
       && lastDefinerOf("list_supersession_proposals").startsWith("070") && /ob1:listing-names-the-writers/.test(await src(SIG))
-      && lastDefinerOf("ob1_accept_lapses").startsWith("094") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
+      && lastDefinerOf("ob1_accept_lapses").startsWith("096") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
       && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
       && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
-    "the writers' read, ob1_capture_only_text and ob1_accept_lapses 094's, each its comment, the sentinels in the bodies; 070's listing untouched");
+    "the writers' read and ob1_capture_only_text 094's, ob1_accept_lapses 096's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
   assert(cols === "id,older_actor_name,older_actor_kind,older_trust,older_capture_only,older_superseded_by,older_lapses,older_takes,newer_actor_name,newer_actor_kind,newer_trust,newer_capture_only,newer_superseded_by,newer_lapses,newer_takes,same_capturer",
     `the proposal's id, each side's writer and superseder, then same_capturer (${cols})`);
 
@@ -14541,6 +14545,9 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   assert((await read()) === before && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await functionsNamed("list_proposal_writers")) === 1,
     "094 re-applied: one form, the same rows, no event");
+  // 094 re-applied puts its own read back; 096 is its last definer since
+  // SMD-3035, and the sections after run on the shipped state.
+  await restoreShipped("ob1_accept_lapses");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -14628,6 +14635,163 @@ console.log("\n[85] Migration 095: what the stated-status label reads, in one ca
   const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));
   await reapply("095");
   assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "095 re-applied: one function, the same rows");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[86] Migration 096: one walk for 082's lapse — ob1_lapse_walk is what the trigger clears and what the listing's read returns, in the walk's order; the lapse's own clearing events do not fire it again, the flag naming each clear and a hand-set one turning no lapse off; never the event's own row through a raw cycle; 092 or 094 re-applied, 096 puts the walk back; a re-apply a no-op (SMD-3035)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_accept_lapses");
+  await db.exec(`DELETE FROM thoughts`);
+
+  // The shape.
+  const WALK = "ob1_lapse_walk(uuid, uuid)", LAPSE = "ob1_lapse_capture_pointers()", READ = "ob1_accept_lapses(uuid, uuid)", TAKES = "ob1_accept_takes(uuid, uuid)";
+  const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const vol = (await one<{ v: string }>(`SELECT provolatile::text AS v FROM pg_proc WHERE oid = $1::regprocedure`, [WALK])).v;
+  const shape = async () => ["ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_accept_lapses"].every((f) => lastDefinerOf(f).startsWith("096"))
+    && /ob1:lapse-walk/.test(await src(WALK)) && /ob1:capture-pointer-lapses/.test(await src(LAPSE)) && /ob1:accept-lapses-read/.test(await src(READ))
+    && /ob1_lapse_walk\(NEW\.thought_id, v_to\)/.test(await src(LAPSE)) && /RETURN ob1_lapse_walk\(p_side, p_other\)/.test(await src(READ))
+    && /ob1_accept_takes\(p_row, p_onto\)/.test(await src(WALK));
+  assert((await shape()) && vol === "s"
+      && (await functionsNamed("ob1_lapse_walk")) === 1 && (await functionsNamed("ob1_accept_lapses")) === 1 && (await functionsNamed("ob1_lapse_capture_pointers")) === 1
+      && /096 \/ SMD-3035/.test(await comment(WALK)) && /096 \/ SMD-3035/.test(await comment(LAPSE)) && /096 \/ SMD-3035/.test(await comment(READ)) && /096 \/ SMD-3035/.test(await comment(TAKES))
+      && lastDefinerOf("ob1_accept_takes").startsWith("094"),
+    "096 defines the walk (STABLE) and redefines the lapse and the read as calls of it, each its comment and sentinel; the walk's gate is 094's ob1_accept_takes, its comment saying so");
+
+  // The trigger clears what the read returned, in its order. The hook's side
+  // S carries two of its capture-scoped pointers (082's check allows one: the
+  // second planted with it off, as a brain from before 082 holds it); the one
+  // re-captured by a write key — 082's log took both — and the hook's
+  // pointers K onto the one with the smaller id, K2 onto the other. The walk
+  // clears both onto S, then goes on from each to its own; 092's re-firing
+  // cleared K before the sibling, and a flag naming only the first clear
+  // lets the second re-fire and clear K2 before K (review pass 2).
+  const HOOK = { name: "hook-83", agent_id: await agent("8", "hook-83", "capture"), via: "test-door", scope: "capture" };
+  const WRITER = { name: "writer-83", agent_id: await agent("5", "writer-83", "write"), via: "test-door" };
+  const REVIEWER = { name: "consolidate-86", via: "consolidate", session: "job-86" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(86)])).r.id;
+  const unchecked = async <T>(body: () => Promise<T>) => {
+    await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
+    try { return await body(); } finally { await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`); }
+  };
+  const link = (id: string, to: string | null) =>
+    one(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, $2::jsonb, NULL, $3::jsonb, NULL)`, [id, JSON.stringify(WRITER), JSON.stringify({ supersedes: to })]);
+  const recapture = async (id: string) => (await one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [id, JSON.stringify(WRITER)])).r;
+  const pointerOf = async (id: string) => (await one<{ s: string | null }>(`SELECT supersedes::text AS s FROM thoughts WHERE id = $1::uuid`, [id])).s;
+  type Lapse = { id: string; onto: string };
+  // This transaction's clears, in the order appended.
+  const clears = () => q<Lapse>(`SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
+                                  WHERE created_at = now() AND action = 'update' AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL ORDER BY seq`);
+  const flag = async () => (await one<{ f: string | null }>(`SELECT current_setting('ob1.lapse_clearing', true) AS f`)).f;
+  /** Run `body` in a transaction rolled back after it, whatever it returns or throws. */
+  const rolledBack = async <T>(body: () => Promise<T>): Promise<T> => {
+    await db.exec("BEGIN");
+    try { return await body(); } finally { await db.exec("ROLLBACK"); }
+  };
+  const W = await cap("[86] the writer's rota: weekly", WRITER);
+  const S = await cap("[86] the hook's rota: daily", HOOK);
+  const first = await cap("[86] the hook's first word on the rota", HOOK, S);
+  const second = await unchecked(() => cap("[86] the hook's second word on the rota", HOOK, S));
+  const [lo, hi] = [first, second].sort();
+  await recapture(lo);
+  await recapture(hi);
+  const K = await unchecked(() => cap("[86] the hook's word after the re-captured one", HOOK, lo));
+  const K2 = await unchecked(() => cap("[86] the hook's word after the other re-captured one", HOOK, hi));
+  const pid = (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.95, '[86]', 0.9, 'consolidate:stub@p86') AS id`, [W, S])).id;
+  const read = (await one<{ l: Lapse[] }>(`SELECT ob1_accept_lapses($1::uuid, $2::uuid) AS l`, [S, W])).l;
+  const walked = (await one<{ l: Lapse[] }>(`SELECT ob1_lapse_walk($1::uuid, $2::uuid) AS l`, [S, W])).l;
+  const listed = (await one<{ l: Lapse[] }>(`SELECT newer_lapses AS l FROM list_proposal_writers(ARRAY[$1::uuid])`, [pid])).l;
+  const expect = [{ id: lo, onto: S }, { id: hi, onto: S }, { id: K, onto: lo }, { id: K2, onto: hi }];
+  assert(JSON.stringify(read) === JSON.stringify(expect) && JSON.stringify(walked) === JSON.stringify(expect) && JSON.stringify(listed) === JSON.stringify(expect),
+    `the read, the walk and the listing name both pointers onto the side, then the one onto each taken row, in that order (${JSON.stringify(read)})`);
+  // A second taking, the hook's pointer N2 onto H2 which a write key re-captures.
+  const H2 = await cap("[86] the hook's note on the oncall", HOOK);
+  const N2 = await cap("[86] the hook's next note on the oncall", HOOK, H2);
+  const accepted = await rolledBack(async () => {
+    const acc = (await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, false) AS r`, [pid, JSON.stringify(REVIEWER)])).r;
+    const cleared = await clears(), after = await flag();
+    await recapture(H2);
+    return { acc, cleared, after, again: (await clears()).slice(cleared.length) };
+  });
+  assert(accepted.acc.ok === true && JSON.stringify(accepted.cleared) === JSON.stringify(expect),
+    `the accept's lapse clears exactly what the read returned, in its order, each once — its own clearing events did not fire it again (${JSON.stringify(accepted.acc)}, ${JSON.stringify(accepted.cleared)})`);
+  assert(accepted.after === "" && JSON.stringify(accepted.again) === JSON.stringify([{ id: N2, onto: H2 }]),
+    `the flag reset after the lapse (${JSON.stringify(accepted.after)}), and a second taking in the same transaction lapses its own pointer (${JSON.stringify(accepted.again)})`);
+  // Review pass 2: the walk goes on from a cleared row 082's log took, and
+  // from no other — not from one taken only through its chain, whose
+  // pointer the clear removes (092's re-firing found it untaken). T3 is the
+  // hook's, linked by the write key onto the write key's thought (taken
+  // through its chain); the hook's pointer h3 onto T3 and K4 onto h3 planted
+  // with the check off. A write key's re-capture of T3 clears h3's pointer,
+  // and K4's stands.
+  const W3 = await cap("[86] the writer's note on the budget", WRITER);
+  const T3 = await cap("[86] the hook's note on the budget", HOOK);
+  await link(T3, W3);
+  const h3 = await unchecked(() => cap("[86] the hook's later note on the budget", HOOK, T3));
+  const K4 = await unchecked(() => cap("[86] the hook's word after its later budget note", HOOK, h3));
+  const walked3 = (await one<{ l: Lapse[] }>(`SELECT ob1_lapse_walk($1::uuid, $2::uuid) AS l`, [T3, W3])).l;
+  const chain = await rolledBack(async () => { await recapture(T3); return { cleared: await clears(), k4: await pointerOf(K4) }; });
+  assert(JSON.stringify(walked3) === JSON.stringify([{ id: h3, onto: T3 }]) && JSON.stringify(chain.cleared) === JSON.stringify(walked3) && chain.k4 === h3,
+    `the walk stops at a cleared row 082's log never took, though its chain reached outside: h3's pointer lapses, K4's onto h3 stands (${JSON.stringify(chain.cleared)}, ${chain.k4})`);
+  // The flag names one clear, read from inside the trigger: set by hand —
+  // even naming the very unlink a write key then makes of a row 082's log
+  // took, which reads as a clear — it turns no lapse off. R is the hook's,
+  // re-captured by the write key; the hook's pointer M onto it planted with
+  // the check off, as a brain from before 082 holds it.
+  const Q = await cap("[86] the hook's note on the release", HOOK);
+  const R = await cap("[86] the hook's later note on the release", HOOK, Q);
+  await recapture(R);
+  const M = await unchecked(() => cap("[86] the hook's word on the re-captured release note", HOOK, R));
+  const handSet = async (write: () => Promise<unknown>) => rolledBack(async () => {
+    await db.query(`SELECT set_config('ob1.lapse_clearing', $1, true)`, [`${R}>${Q}`]);
+    await write();
+    return (await clears()).filter((l) => l.id !== R);
+  });
+  const unlinked = await handSet(() => link(R, null));
+  assert(JSON.stringify(unlinked) === JSON.stringify([{ id: M, onto: R }]),
+    `a session that sets ob1.lapse_clearing by hand, naming the unlink it then makes, turns no lapse off: the hook's pointer onto the taken row lapses (${JSON.stringify(unlinked)})`);
+  // Review pass 2: a raw write's event fires the lapse from inside 060's
+  // audit trigger, so only the clear's exact shape is passed over — a raw
+  // write moving the text with the pointer, under the same flag, lapses.
+  const raw = await handSet(() => db.query(`UPDATE thoughts SET content = content || ' (moved raw)', supersedes = NULL WHERE id = $1::uuid`, [R]));
+  assert(JSON.stringify(raw) === JSON.stringify([{ id: M, onto: R }]),
+    `…nor for a raw write moving the text and the pointer together, which fires it from inside a trigger: the hook's pointer lapses (${JSON.stringify(raw)})`);
+  // Review pass 1: never the event's own row, through the walk on too. A raw
+  // write closes a cycle Y → H → P → Y (the hook's three, H taken by 082's
+  // log); a write key re-capturing P clears H's pointer onto P and walks on
+  // from H round to P, whose own pointer 092's re-firing cleared ahead of
+  // the event — and 060 refused the write.
+  const Y = await cap("[86] the hook's first note on the retro", HOOK);
+  const P = await cap("[86] the hook's second note on the retro", HOOK, Y);
+  const H = await cap("[86] the hook's third note on the retro", HOOK, P);
+  await recapture(H);
+  await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_lapse_capture_pointers`);
+  try { await db.query(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [H, Y]); }
+  finally { await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_lapse_capture_pointers`); }
+  const cyc = await rolledBack(async () => ({ r: await recapture(P), cleared: await clears(), kept: await pointerOf(P) }))
+    .catch((e: Error) => ({ err: e.message, r: undefined, cleared: [] as Lapse[], kept: null }));
+  assert(cyc.r === true && JSON.stringify(cyc.cleared) === JSON.stringify([{ id: H, onto: P }]) && cyc.kept === Y,
+    `through a raw cycle back to the event's row, the write lands: H's pointer onto P lapses, and P keeps its own (${JSON.stringify(cyc)})`);
+
+  // A re-apply moves nothing; 092 or 094 re-applied puts its own body back,
+  // and this file, applied after, the walk — the re-apply order.
+  const rows = async () => JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`));
+  const events = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
+  const rowsBefore = await rows(), eventsBefore = await events();
+  await reapply("096");
+  assert((await rows()) === rowsBefore && (await events()) === eventsBefore && (await shape())
+      && JSON.stringify((await one<{ l: Lapse[] }>(`SELECT ob1_accept_lapses($1::uuid, $2::uuid) AS l`, [S, W])).l) === JSON.stringify(expect),
+    "096 re-applied: one form each, the same lapses read, no row and no event moved");
+  await reapply("092");
+  await reapply("094");
+  const own = !/ob1_lapse_walk/.test(await src(LAPSE)) && !/ob1_lapse_walk/.test(await src(READ));
+  await reapply("096");
+  assert(own && (await shape()), "092 and 094 re-applied put their own lapse and read back; 096 re-applied after them, the walk");
   await db.exec(`DELETE FROM thoughts`);
 }
 

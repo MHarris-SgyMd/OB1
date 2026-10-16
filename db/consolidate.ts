@@ -893,13 +893,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                     // accepts under one actor name sharing now() each read the
                     // other's); the write path writes nothing inside a
                     // subtransaction, and test-live's lapse cell fails if it
-                    // ever does.
+                    // ever does. In the order the lapse cleared them, which is
+                    // the order --list named them (SMD-3035's one walk).
                     r.lapsed = (await tx`
                       SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
                        WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
                          AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
                          AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
-                       ORDER BY id`) as { id: string; onto: string }[];
+                       ORDER BY seq`) as { id: string; onto: string }[];
                   }
                   return r;
                 })

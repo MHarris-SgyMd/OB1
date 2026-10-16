@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2874 assertions: 2874 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-five (95) migrations applied, and
+`bun test-schema.ts` prints `2886 assertions: 2886 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-six (96) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-3035).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1505,7 +1505,7 @@ adds four functions:
   already points somewhere, or the pointer would loop or run past
   `update_thought`'s 1,001-row walk — or the new pointer does not take the
   side; then its capturer's capture-scoped pointers onto it and up the
-  chain).
+  chain). Since 096 it returns the walk the lapse itself clears.
 - `list_proposal_writers(uuid[])` — for the proposals named, each side's
   `actor_name`, `actor_kind` and trust (050, 073), whether its text is a
   capture-only key's alone, its first superseder, what an accept making it
@@ -1565,6 +1565,46 @@ no label rather than a failed search (`node_state`'s `thought_sources` is not
 read when only `open` is). It refuses to apply without 068 or 060. test-schema
 [85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
 test-store-sql and test-store-postgrest [17].
+
+Migration 096 gives 082's lapse one definition (SMD-3035). 094's
+`ob1_accept_lapses` was 092's lapse trigger read and not written, kept in
+step with it by hand, and SMD-2707's review found the copy drifting four
+times (lapses promised for refused accepts, the loop bound, the walk on from
+a row 082's log already took, the takes gate), each caught only by a one-off
+fuzz. `ob1_lapse_walk(row, onto)` is now the one walk: the pointers the lapse
+clears for an event that leaves the row's pointer at `onto`, in the order it
+clears them — none unless the row is taken now (094's `ob1_accept_takes`,
+092's read), else up from the row, each row's capturer's capture-scoped
+pointers onto it that no update has re-pointed, on through the pointers that
+stay, and on from a cleared row the log had already taken (the walk on). The
+trigger clears what it returns, each pointer re-read under its row lock and
+left when it moved or an update has written it since; its own clearing
+events do not fire it again — each is named in `ob1.lapse_clearing`
+(transaction-local) before it is appended, and only a firing from inside a
+trigger on an event that is that clear and nothing else reads it, so a flag
+set by hand turns no write function's lapse off (a raw write's or a
+cascade's pure clear of exactly the pair named it can) — since the walk
+already went on from them. `ob1_accept_lapses` keeps its own no-event gates
+(the side already points somewhere, a loop, update_thought's 1,001-row walk)
+and returns the walk; `db/consolidate.ts --accept` prints its `lapsed:`
+lines in the order cleared, which is the order `--list` named them. Three
+changes from 092: the walk on shares the event's one 1,001-row bound, where
+each of 092's re-firings counted afresh; the clears land breadth-first, in
+the walk's order; and the event's own row is never cleared, where a raw
+write's cycle let 092's re-firing clear it and 060 then refused the write.
+Outside raw cycles nothing cleared below the bound changes. The walk reads
+one snapshot and re-reads each cleared row, not the path below it: a link
+moved out from under the event's row between the two still has the pointers
+above it cleared, and one moved in misses its own — under an accept only an
+unlink moves one, since a re-point onto a thought waits on the review lock
+(092 had the window one level wide; SMD-3046, SMD-3045). No signature
+changes; the listings read the same. It refuses to apply without 092 or 094;
+092 or 094 re-applied puts its own body back and 096 after it the walk, so
+after an older tree's `--reapply` over a 096 brain run this tree's
+`--reapply` (a plain run skips 096, recorded as applied). test-schema [86]
+(the accept's clears, in order, against the read; the flag per pointer; the
+raw cycle), test-upgrade [20aq]; the behaviour cells of the trigger's [72]
+and [82] and the read's [84] unchanged.
 
 ## What changed relative to the guide
 
@@ -4412,7 +4452,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2874 assertions, PGlite, no container
+bun test-schema.ts                          # 2886 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1344 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
