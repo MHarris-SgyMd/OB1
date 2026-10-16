@@ -901,7 +901,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     (await sql`
       SELECT thought_id::text AS id, work_type AS job FROM thought_work_claims
        WHERE work_type IN (${JOBS.extract}, ${JOBS.consolidate}) AND status = 'claimed'
-         AND (starts_with(worker_id, ${`extract-${hostname()}-${process.pid}-`}) OR starts_with(worker_id, ${`consolidate-${hostname()}-${process.pid}-`}))`) as { id: string; job: string }[];
+         AND (starts_with(worker_id, ${MINE}) OR starts_with(worker_id, ${`consolidate-${hostname()}-${process.pid}-`}))`) as { id: string; job: string }[];
   /**
    * A wake's abandoned claims to the back of the queue. The release keeps
    * enqueued_at and counts no attempt (015), and claims are taken oldest
@@ -1049,6 +1049,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     let behindPolls = 0;
     let restartedAt = 0;
     const restartEvery = opts.restartEveryMs ?? RESTART_EVERY_MS;
+    /** Extraction's pool as this sleep reads it: 093's stalled read, this run's claims, the claims alone when asked. */
+    const extractPool = (claimsOnly = false) => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, claimsOnly, startedAt);
     /**
      * Extraction let out of the set-aside while consolidation waits for its
      * provider — at its start, or mid-pass (providerWait) — for the
@@ -1081,7 +1083,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       }
       return stopping;
     };
-    const firstPool = SIG === undefined ? null : await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, false, startedAt));
+    const firstPool = SIG === undefined ? null : await reading(() => extractPool());
     if (SIG !== undefined && firstPool === null) return stopped();
     if (firstPool && joinsPast(firstPool)) {
       out(`  extraction holds only ${firstPool.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains`);
@@ -1159,7 +1161,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           start("extract");
           parked = false;
         } else if (judgeWaits() && reorders && Date.now() - restartedAt >= restartEvery) {
-          const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt));
+          const ex = await reading(() => extractPool(true));
           if (ex === null) return stopped();
           // Only where the stalled thoughts can be told and moved behind the
           // newer work: otherwise one is claimed first, set aside at the next
@@ -1180,7 +1182,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // once only stalled thoughts are in hand, or nothing is left to do;
         // once the judge answers and consolidation drains, extraction stays
         // out, as after any drain.
-        const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt));
+        const ex = await reading(() => extractPool(true));
         if (ex === null) return stopped();
         // Any stalled thought this process holds, or one it can no longer tell
         // (093 gone or refused since): a lease another left is not its own,
@@ -1209,7 +1211,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           }
         }
       } else if (!consolidating || !FOLLOW) {
-        const pools = await reading(async () => ({ extract: await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, false, startedAt), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
+        const pools = await reading(async () => ({ extract: await extractPool(), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
         if (pools === null) return stopped();
         behindPolls = !consolidating && queuesBehind(pools.extract) ? behindPolls + 1 : 0;
         if (!consolidating && drained(pools.extract)) {

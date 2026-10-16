@@ -12279,19 +12279,19 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       // let-out's one worker not claiming the stalled thought beside the
       // note (review pass 2).
       if (!mid) {
-        const foreign = await capture("The stuckdoc note another host's scheduler left a lease on.", 0, 21);
-        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'extract-otherhost-1-0-deadbeef', claimed_at = now(), ttl_expires_at = now() + interval '1 day', attempt_count = 1
-                   WHERE thought_id = ${foreign}::uuid AND work_type = ${EX}`;
-        const [{ fpf }] = await sql`SELECT content_fingerprint AS fpf FROM thoughts WHERE id = ${foreign}::uuid`;
-        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${foreign}::uuid, ${EX}, ${fpf}, ${sig}, 3, 3)`;
+        /** A stalled thought another scheduler holds a lease on, under `worker`, claimed `ago` before now, a day left on it. */
+        const plantLease = async (text: string, axis: number, worker: string, ago: string) => {
+          const id = await capture(text, 0, axis);
+          await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${worker}, claimed_at = now() - ${ago}::interval, ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                     WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+          const [{ fpl }] = await sql`SELECT content_fingerprint AS fpl FROM thoughts WHERE id = ${id}::uuid`;
+          await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fpl}, ${sig}, 3, 3)`;
+        };
+        await plantLease("The stuckdoc note another host's scheduler left a lease on.", 21, "extract-otherhost-1-0-deadbeef", "0 seconds");
         // And one under this process's own worker-id prefix, claimed before the
         // run began — a container restarted in place keeps its hostname and pid,
         // and its last run's lease lives on: not this run's (post-merge review).
-        const before = await capture("The stuckdoc note this container's last run left a lease on.", 0, 22);
-        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${`extract-${hostname()}-${process.pid}-9-deadbeef`}, claimed_at = now() - interval '10 minutes', ttl_expires_at = now() + interval '1 day', attempt_count = 1
-                   WHERE thought_id = ${before}::uuid AND work_type = ${EX}`;
-        const [{ fpb }] = await sql`SELECT content_fingerprint AS fpb FROM thoughts WHERE id = ${before}::uuid`;
-        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${before}::uuid, ${EX}, ${fpb}, ${sig}, 3, 3)`;
+        await plantLease("The stuckdoc note this container's last run left a lease on.", 22, `extract-${hostname()}-${process.pid}-9-deadbeef`, "10 minutes");
       }
       // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
       judgeProbeDown = !mid;
