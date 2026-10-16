@@ -2184,12 +2184,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
-  // The proxy's legacy root route: the fake's answers, each marked deprecated (SMD-2686). It keeps the last url asked for.
+  // The proxy's legacy root route: the fake's answers, each marked deprecated with legacy-window's Link (SMD-2686). It keeps the last url asked for.
   let legacyAsked = "";
   const legacy = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     legacyAsked = req.url;
     const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
-    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200" } });
+    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200", Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"' } });
   } });
   const LEGACY = `http://127.0.0.1:${legacy.port}/`;
   writeFileSync(CONFIG, JSON.stringify({ url: LEGACY, key: "cap-key" }), { mode: 0o600 });
@@ -2217,8 +2217,21 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(onTierEnv.code === 0 && tierWarned(onTierEnv.err, TIER.replace("/canary/", "/working/"), "OB1_BRAIN_URL"), `…one from OB1_BRAIN_URL names the variable (${onTierEnv.err.trim().slice(0, 160)})`);
   tierLink = false;
   const onTierBare = await spawnScript(["--check"]);
+  assert(onTierBare.code === 0 && tierWarned(onTierBare.err, TIER, CONFIG), `…and a tier path whose answer has no Link is still a tier route, so a moved anchor never sends it to stable's /mcp (${onTierBare.err.trim().slice(0, 160)})`);
+  const CASED = TIER.replace("/canary/", "/Canary/");
+  writeFileSync(CONFIG, JSON.stringify({ url: CASED, key: "cap-key" }), { mode: 0o600 });
+  const onTierCased = await spawnScript(["--check"]);
+  assert(onTierCased.code === 0 && onTierCased.err.includes(`warning: ${CASED}/ answered through the proxy's deprecated legacy route`), `…though a path no tier router matches, in another case, is not (${onTierCased.err.trim().slice(0, 160)})`);
+  tierLink = true;
+  const FRONTED = `http://127.0.0.1:${tierRoute.port}/ob1/mcp`;
+  writeFileSync(CONFIG, JSON.stringify({ url: FRONTED, key: "cap-key" }), { mode: 0o600 });
+  const onTierFronted = await spawnScript(["--check"]);
   tierRoute.stop(true);
-  assert(onTierBare.code === 0 && tierWarned(onTierBare.err, TIER, CONFIG), `…and a tier path whose answer has no tier Link is still a tier route, so a moved anchor never sends it to stable's /mcp (${onTierBare.err.trim().slice(0, 160)})`);
+  assert(onTierFronted.code === 0 && tierWarned(onTierFronted.err, FRONTED, CONFIG), `…and a tier's Link is a tier route on any path, one behind a front's prefix included (${onTierFronted.err.trim().slice(0, 160)})`);
+  // A tier path the legacy route answered, its Link legacy-window's: stable's server took it, so it is the legacy warning, never "the tier itself".
+  writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}canary/mcp`, key: "cap-key" }), { mode: 0o600 });
+  const onLegacyTierPath = await spawnScript(["--check"]);
+  assert(onLegacyTierPath.code === 0 && onLegacyTierPath.err.includes(`warning: ${LEGACY}canary/mcp/ answered through the proxy's deprecated legacy route`) && !/tier route/.test(onLegacyTierPath.err), `…while a tier path answered with the legacy route's Link is the legacy route, stable's (${onLegacyTierPath.err.trim().slice(0, 160)})`);
   // A query on the url: the warning names the url and suggests its /mcp with the query's names kept and its values masked; the request itself carries the query unmangled (SMD-2743: it went as `?tenant=<value>/`).
   writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}?tenant=SEKRET-Q`, key: "cap-key" }), { mode: 0o600 });
   const onRootQ = await spawnScript(["--check"]);
