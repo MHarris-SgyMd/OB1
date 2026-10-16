@@ -3,7 +3,7 @@
  * Writes deploy/observability/dashboard.json into deploy/compose.yaml (SMD-1849 PR 3c): the
  * `grafana-dashboard` config's content (the file, six spaces in, each `$` doubled, since compose
  * reads one as a variable) and lgtm's two labels, each config's sha256 (compose recreates a
- * container for a changed label, not for a changed inline config alone). Check 36 holds all three;
+ * container for a changed label, not for a changed inline config alone). Check 37 holds all three;
  * run this after changing the file — an edit in Grafana saved as a copy and exported as JSON, say.
  *
  * Run: bun scripts/inline-dashboard.ts            (writes compose.yaml; says what changed)

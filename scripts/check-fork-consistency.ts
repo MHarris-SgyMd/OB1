@@ -318,7 +318,7 @@
  *      character but space and line feed, no `!!`, named-handle, verbatim or
  *      percent-escaped YAML tag, no !reset or !override and no directive;
  *      compose.yaml's proxy as held, its observability collector whole but its
- *      labels, which are check 36's (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
+ *      labels, which are check 37's (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
  *      environment, SMD-1849), its Postgres exporter and that one's role
  *      step whole (PG_EXPORTER_SERVICE, PG_MONITOR_ROLE_SERVICE), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
@@ -343,7 +343,7 @@
  *      `.HostIp` is docker's struct field and `.HostIP` podman's, so an
  *      `inspect -f` template naming either fails under the other CLI
  *      (SMD-2677); the address is read from the binding's JSON, whose key
- *      both spell HostIp (deploy/canary.sh's bound_ip). Any file git tracks
+ *      both spell HostIp (deploy/instance.ts's portsFromBindings). Any file git tracks
  *      or would track, a `{{ … }}` action at a time; no exceptions
  *  31. a plugin stays inside its schema and its role (SMD-2310) — an
  *      accident guard in front of the database's boundary, not a sandbox: its
@@ -392,7 +392,17 @@
  *      is a `typecheck` line; a line no step runs as written is stale; and
  *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
  *      — an excuse for what CI no longer has is reported too
- *  36. the provisioned dashboard reads what the stack writes (SMD-1849 PR
+ *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
+ *      value for value — compose.yaml's proxy's Traefik and access log, no
+ *      trusted PROXY line, read-only and confined, the bridge shape on a
+ *      network of its own published on 127.0.0.1 and the host shape on the
+ *      host's network on both loopbacks, joining no brain's — with check 28's character and tag
+ *      rules and no other compose file beside it; and deploy/edge/edge.ts
+ *      renders brains.example.yaml, in each shape, as EDGE_ROUTE_TABLE, byte
+ *      for byte: a router by host per brain, its header strip and its 404 for
+ *      a brain that is down, its service at the shape's dial host; each rule
+ *      the sole catch of a probe
+ *  37. the provisioned dashboard reads what the stack writes (SMD-1849 PR
  *      3c): compose.yaml's `grafana-dashboard` config is
  *      deploy/observability/dashboard.json with each `$` doubled, as its
  *      content alone, and its provider DASHBOARD_PROVIDER byte for byte; lgtm
@@ -408,7 +418,7 @@
  *      probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35 and 36 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36 and 37 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -6272,11 +6282,11 @@ const FORWARDER_SERVICE = {
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
-/** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 36's DASHBOARD_PROVIDER names the first. */
+/** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 37's DASHBOARD_PROVIDER names the first. */
 const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
 /**
- * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 36's,
+ * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
  * PR 3c) aside: the image by its digest,
  * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
  * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
@@ -6332,7 +6342,7 @@ const LGTM_SERVICE = {
     OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
-  // The provisioned dashboard and its provider (PR 3c), check 36's.
+  // The provisioned dashboard and its provider (PR 3c), check 37's.
   configs: [{ source: "grafana-dashboard", target: DASHBOARD_PATH }, { source: "grafana-dashboard-provider", target: DASHBOARD_PROVIDER_PATH }],
   networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
   healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
@@ -6387,11 +6397,10 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
   "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
-  "compose.canary.yaml": { services: { server: ["networks"], api: ["networks"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
-/** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583) and the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 36's), each its content alone; where each lands is SERVICE_CONFIGS'. */
+/** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583) and the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 37's), each its content alone; where each lands is SERVICE_CONFIGS'. */
 const BASE_CONFIGS = ["forwarder", "grafana-dashboard", "grafana-dashboard-provider"];
 /** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build`, `volumes` and `configs` SERVICE_BUILDS', SERVICE_MOUNTS' and SERVICE_CONFIGS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
 const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "configs", "networks", "ports", "x-env"];
@@ -6416,7 +6425,7 @@ const SERVICE_MOUNTS: Record<string, unknown[]> = {
   auth: ["auth-data:/data"],
   lgtm: ["lgtm-data:/data"],
 };
-/** Each compose.yaml service's `configs:`, exactly, beside the proxy's and the forwarder's (held whole): lgtm's dashboard and provider (SMD-1849 PR 3c); a service not named here mounts none. A config's content is fixed (BASE_CONFIGS, check 36), but where it lands — a path, a mode, an owner — is a mount, so it is held as SERVICE_MOUNTS holds those (review pass 1: a runner mounting the forwarder's script over an init path passed). */
+/** Each compose.yaml service's `configs:`, exactly, beside the proxy's and the forwarder's (held whole): lgtm's dashboard and provider (SMD-1849 PR 3c); a service not named here mounts none. A config's content is fixed (BASE_CONFIGS, check 37), but where it lands — a path, a mode, an owner — is a mount, so it is held as SERVICE_MOUNTS holds those (review pass 1: a runner mounting the forwarder's script over an init path passed). */
 const SERVICE_CONFIGS: Record<string, unknown[]> = {
   lgtm: LGTM_SERVICE.configs,
 };
@@ -6432,7 +6441,6 @@ const FILE_NETWORKS: Record<string, Mapping> = {
   "compose.yaml": { mesh: { internal: true }, data: { internal: true }, egress: {}, "auth-egress": {}, edge: {}, front: { internal: true }, telemetry: { internal: true } },
   "compose.host-ports.yaml": { "postgres-port": {} },
   "compose.grafana-port.yaml": { "grafana-port": {} },
-  "compose.canary.yaml": { "stable-mesh": { name: "${CANARY_STABLE_MESH:?deploy/canary.sh sets CANARY_STABLE_MESH to stable's mesh network}", external: true } },
 };
 /** The networks each file's services join, and the names each answers to there, exactly; a service not named here sets no `networks` (compose.yaml's proxy aside, PROXY_SERVICE's). */
 const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
@@ -6461,10 +6469,6 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   },
   "compose.host-ports.yaml": { postgres: ["postgres-port"] },
   "compose.grafana-port.yaml": { lgtm: ["grafana-port"] },
-  "compose.canary.yaml": {
-    server: { "stable-mesh": { aliases: [tierMeshName("mcp", "canary")] } },
-    api: { "stable-mesh": { aliases: [tierMeshName("api", "canary")] } },
-  },
 };
 /** A name compose takes for its own with no -f, in any case (compose finds it so on a case-insensitive disk, macOS, measured): an override it reads beside compose.yaml, or a default name — docker-compose.y*ml, compose.yml, a case variant of compose.yaml — that compose warns about and skips beside compose.yaml but a checkout on such a disk can put in its place. */
 const AUTOLOADED_COMPOSE = /^(compose\.override|(docker|podman|container)-compose(\.override)?)\.ya?ml$|^compose\.yml$/i;
@@ -6604,7 +6608,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.yaml's anchor redefined behind U+2028 on a comment, which compose reads and Bun.YAML does not (measured)", "compose.yaml", "\nservices:\n", "\n# a note\u2028x-shadow: &proxy-routes \"http: {}\"\n\nservices:\n"],
   ["compose.yaml's anchor redefined behind U+0085 on a comment", "compose.yaml", "\nservices:\n", "\n# a note\u0085x-shadow: &proxy-routes \"http: {}\"\n\nservices:\n"],
   ["compose.host-ports.yaml replacing the table behind U+2028 on a comment, which compose merges and Bun.YAML does not see (measured, pass 1)", "compose.host-ports.yaml", "\nservices:\n", "\n# a note\u2028configs: {proxy-routes: {content: 'http: {routers: {all: {rule: \"PathPrefix(`/`)\", priority: 100, service: canary}}}'}}\n\nservices:\n"],
-  ["compose.canary.yaml replacing the table behind U+2029 on a comment", "compose.canary.yaml", "\nservices:\n", "\n# a note\u2029configs: {proxy-routes: {content: 'http: {}'}}\n\nservices:\n"],
+  ["compose.grafana-port.yaml replacing the table behind U+2029 on a comment", "compose.grafana-port.yaml", "\nservices:\n", "\n# a note\u2029configs: {proxy-routes: {content: 'http: {}'}}\n\nservices:\n"],
   ["compose.yaml that does not parse", "compose.yaml", "x-proxy-routes: &proxy-routes |\n", "x-proxy-routes: &proxy-routes [\n"],
   ["a Go template on a comment line in compose.api-public.yaml's table", "compose.api-public.yaml", "    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"],
   ["compose.api-public.yaml's label its own table", "compose.api-public.yaml", "      ob1.proxy-api-route: *api-route\n", "      ob1.proxy-api-route: \"http: {}\"\n"],
@@ -6626,10 +6630,10 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a docker-compose.override.yml spelt with U+212A, which compose on macOS reads with no -f (measured, pass 4)", "doc\u212ager-compose.override.yml", "", "services:\n  server:\n    environment:\n      OB1_NOTE: \"1\"\n"],
   ["compose.host-ports.yaml naming the project, which renames the proxy's networks (measured, pass 4)", "compose.host-ports.yaml", "\nservices:\n", "\nname: open-brain-canary\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a !!binary key, which compose decodes and Bun.YAML does not (measured, pass 6)", "compose.host-ports.yaml", "\nservices:\n", "\n!!binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
-  ["compose.canary.yaml defining compose.api-public.yaml's config behind a verbatim !<…binary> key (measured, pass 7)", "compose.canary.yaml", "\nservices:\n", "\n!<tag:yaml.org,2002:binary> Y29uZmlncw==: {proxy-api-route: {content: \"http: {}\"}}\n\nservices:\n"],
-  ["a %TAG directive in compose.canary.yaml, which can redefine the primary handle so that !binary is !!binary (measured, pass 7)", "compose.canary.yaml", "# The canary tier on stable's mesh (SMD-2294).", "%TAG ! tag:yaml.org,2002:\n---\n# The canary tier on stable's mesh (SMD-2294)."],
-  ["compose.canary.yaml with a !!binary key after a comma in a flow mapping (measured, pass 7)", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {a: 1,!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
-  ["compose.canary.yaml with a !!binary key opening a flow mapping", "compose.canary.yaml", "\nservices:\n", "\nx-flow: {!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
+  ["compose.grafana-port.yaml defining compose.api-public.yaml's config behind a verbatim !<…binary> key (measured, pass 7)", "compose.grafana-port.yaml", "\nservices:\n", "\n!<tag:yaml.org,2002:binary> Y29uZmlncw==: {proxy-api-route: {content: \"http: {}\"}}\n\nservices:\n"],
+  ["a %TAG directive in compose.grafana-port.yaml, which can redefine the primary handle so that !binary is !!binary (measured, pass 7)", "compose.grafana-port.yaml", "# The observability profile's Grafana on a loopback port of its own (SMD-1849", "%TAG ! tag:yaml.org,2002:\n---\n# The observability profile's Grafana on a loopback port of its own (SMD-1849"],
+  ["compose.grafana-port.yaml with a !!binary key after a comma in a flow mapping (measured, pass 7)", "compose.grafana-port.yaml", "\nservices:\n", "\nx-flow: {a: 1,!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
+  ["compose.grafana-port.yaml with a !!binary key opening a flow mapping", "compose.grafana-port.yaml", "\nservices:\n", "\nx-flow: {!!binary bmFtZQ==: open-brain-canary}\n\nservices:\n"],
   ["compose.host-ports.yaml naming the project behind a percent-escaped !%21binary key (measured, pass 7)", "compose.host-ports.yaml", "\nservices:\n", "\n!%21binary bmFtZQ==: open-brain-canary\n\nservices:\n"],
   ["compose.api-public.yaml defining a second config, which a later overlay could mount", "compose.api-public.yaml", "\nconfigs:\n  proxy-api-route:\n", "\nconfigs:\n  extra-routes:\n    content: \"http: {}\"\n  proxy-api-route:\n"],
   ["compose.api-public.yaml's config made external beside its content", "compose.api-public.yaml", "    content: *api-route\n", "    content: *api-route\n    external: true\n"],
@@ -6638,18 +6642,18 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // Another service taking the proxy's traffic (SMD-2685; SMD-2658's review pass 3 ran each live).
   ["Ollama answering as the MCP server on the mesh from compose.host-ports.yaml (measured: the one registered first took 30 of 30 requests)", "compose.host-ports.yaml", "  ollama:\n    ports:\n", "  ollama:\n    networks:\n      mesh:\n        aliases: [mcp.ob1.internal]\n    ports:\n"],
   ["compose.yaml's REST core answering as the authorization server too, which takes /auth sign-in POSTs while the auth profile is off", "compose.yaml", "        aliases: [api.ob1.internal]\n", "        aliases: [api.ob1.internal, auth.ob1.internal]\n"],
-  ["compose.canary.yaml joining stable's mesh by a second key, with a shadow on it answering as stable's MCP server (measured)", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      stable-mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
-  ["compose.canary.yaml defining a second key for stable's mesh", "compose.canary.yaml", "\nnetworks:\n  stable-mesh:\n", "\nnetworks:\n  stable-mesh-2:\n    name: ${CANARY_STABLE_MESH}\n    external: true\n  stable-mesh:\n"],
+  ["compose.grafana-port.yaml joining the stack's mesh by a second key, external by its name, with a shadow on it answering as the MCP server (SMD-2685, measured on the canary's overlay before SMD-2874)", "compose.grafana-port.yaml", "\nnetworks:\n  grafana-port: {}\n", "  shadow:\n    image: oven/bun:1.4.3-alpine\n    networks:\n      mesh-2:\n        aliases: [mcp.ob1.internal]\n\nnetworks:\n  mesh-2:\n    name: open-brain_mesh\n    external: true\n  grafana-port: {}\n"],
+  ["compose.grafana-port.yaml defining a second key for the stack's mesh", "compose.grafana-port.yaml", "\nnetworks:\n  grafana-port: {}\n", "\nnetworks:\n  mesh-2:\n    name: open-brain_mesh\n    external: true\n  grafana-port: {}\n"],
   ["compose.yaml's mesh no longer internal", "compose.yaml", "  mesh:\n    internal: true\n  data:\n", "  mesh:\n    internal: false\n  data:\n"],
   // The network move (SMD-2583): Postgres where only what connects to it is, and no service back on compose's default network.
   ["compose.yaml's data network given a route out", "compose.yaml", "  data:\n    internal: true\n  egress: {}\n", "  data: {}\n  egress: {}\n"],
-  ["compose.yaml's Postgres on the mesh too, where a canary's server joins with stable's password", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
+  ["compose.yaml's Postgres on the mesh too, beside every backend the proxy reaches", "compose.yaml", "    networks: [data]\n    # As the servers': with none, a reboot", "    networks: [data, mesh]\n    # As the servers': with none, a reboot"],
   ["the authorization server on the stack's shared egress, beside Ollama, Jev, n8n and the runner", "compose.yaml", "        aliases: [auth.ob1.internal]\n      auth-egress: {}\n", "        aliases: [auth.ob1.internal]\n      egress: {}\n"],
   ["a new compose.yaml service that names no network, under a profile of its own, which lands on compose's default network (review pass 1)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  debug:\n    image: oven/bun:1.4.3-alpine\n    profiles: [\"debug\"]\n    logging: *logging\n\nnetworks:\n  # The ADR's networks"],
   ["n8n on compose's default network again", "compose.yaml", "    networks: [egress]\n    volumes:\n      # The store", "    networks: [egress, default]\n    volumes:\n      # The store"],
   ["compose.host-ports.yaml putting Postgres on the stack's egress", "compose.host-ports.yaml", "    networks: [postgres-port]\n", "    networks: [postgres-port, egress]\n"],
   ["compose.host-ports.yaml's Postgres network named as another project's", "compose.host-ports.yaml", "\nnetworks:\n  postgres-port: {}\n", "\nnetworks:\n  postgres-port:\n    name: open-brain-canary_data\n    external: true\n"],
-  ["a !override on the canary server's networks, which compose honours and Bun.YAML reads past", "compose.canary.yaml", "  server:\n    networks:\n", "  server:\n    networks: !override\n"],
+  ["a !override on lgtm's networks in compose.grafana-port.yaml, which compose honours and Bun.YAML reads past", "compose.grafana-port.yaml", "  lgtm:\n    networks: [grafana-port]\n", "  lgtm:\n    networks: !override [grafana-port]\n"],
   ["a sidecar in compose.yaml in the proxy's PID namespace with SYS_PTRACE, which wrote a route file Traefik loaded live (measured)", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  sidecar:\n    image: oven/bun:1.4.3-alpine\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n\nnetworks:\n  # The ADR's networks"],
   ["compose.yaml's Postgres privileged in the host's PID namespace", "compose.yaml", "    shm_size:", "    privileged: true\n    pid: host\n    shm_size:"],
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
@@ -6793,7 +6797,8 @@ checkBoundedLogs();
 // --runtime podman, and a connector check lost stable's LAN address from the
 // hosts it matches. CI runs docker alone, so no job sees a template that only
 // one CLI evaluates; this does. The address comes from `{{json .}}` of the
-// binding.
+// binding, as canary.sh's bound_ip read it until SMD-2874 left it nothing to
+// read.
 /** A `{{ … }}` action naming `.HostIp` or `.HostIP` as a field: the action may span lines, not cross its closing `}}`. */
 const HOST_IP_FIELD = /\{\{(?:[^}]|\}(?!\}))*?\.HostI[pP]/g;
 /** [text, hit] — what check 30 must catch, and what it must not. */
@@ -6822,7 +6827,7 @@ function checkHostIpTemplates() {
   if (!files.includes("deploy/canary.sh")) fail(SELF, "check 30's listing does not reach deploy/canary.sh — the listing is broken, not the tree clean");
   for (const rel of files) {
     for (const line of hostIpFieldsIn(readFileSync(join(ROOT, rel), "utf8"))) {
-      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/canary.sh's bound_ip does");
+      fail(`${rel}:${line}`, "a Go template names a port binding's address field — `.HostIp` is docker's struct field and `.HostIP` podman's, so the template fails under the other CLI (SMD-2677); read the binding's JSON, whose key both spell HostIp, as deploy/instance.ts's portsFromBindings does");
     }
   }
 }
@@ -7481,6 +7486,8 @@ const PARITY_SCRIPT = "db/ci-parity.sh";
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
+    "deploy-stack-brains": "a second brain, the tier refresh and a canary beside that stack, on Docker",
+    "deploy-stack-auth": "the import runner and the authorization server on that stack, on Docker",
     "auth-poc": "the authorization POC's own stacks in Docker (eval-auth.ts --up)",
   },
   scripts: {
@@ -7620,7 +7627,170 @@ function checkCiParity() {
 }
 checkCiParity();
 
-// ── 36. The provisioned dashboard reads what the stack writes (SMD-1849 PR 3c) ──
+// ── 36: the edge proxy is held whole, and the table it renders (SMD-2876) ──
+//
+// deploy/edge/ is a project of its own in front of several brains, each
+// reached through its published port (docs/one-brain-per-stack.md). Checks 13
+// and 28 read the files directly in deploy/, so this holds what is under
+// deploy/edge/:
+//   files  its compose file is compose.yaml alone — another (an override
+//       compose reads with no -f, a second shape) would run what nothing holds;
+//   characters, tags, parse  as check 28's: compose and Bun.YAML read the
+//       file alike;
+//   service  the file is EDGE_COMPOSE, value for value: project ob1-edge; the
+//       bridge shape on a network of its own, published on 127.0.0.1, and the
+//       host shape on the host's, listening on 127.0.0.1 and [::1], each under
+//       its profile; compose.yaml's proxy's Traefik by digest (PROXY_SERVICE's
+//       image) and the same access log, its environment named key by key so
+//       no trust the brain's proxy gains (a PROXY line, a forwarded header)
+//       is the edge's by inheritance — a client reaches the edge directly;
+//       read only, confined, the file provider alone on the rendered table
+//       mounted read-only, no socket;
+//   table  edge.ts renders the example registry, in each shape, as
+//       EDGE_ROUTE_TABLE: a router by host per brain with the strip of the two
+//       headers a brain's proxy reads from its own and the 404 for a brain
+//       that is down, and a service at the shape's dial host and the brain's
+//       port — nothing else, no comment (Traefik renders the file as a Go
+//       template), and parseRegistry refuses a name or domain that could carry one.
+// That each shape reaches a brain, and the brain no network of the edge's, CI
+// holds live ("The edge proxy reaches both brains through their published ports").
+/** deploy/edge/compose.yaml's Traefik environment, each key named here rather than taken from the proxy's, so a
+ *  trust the brain's proxy gains (a forwarded header, a PROXY line) is never the edge's by inheritance: its
+ *  entrypoints, the file provider, and the proxy's access log (no query string, header or userinfo) and ping. */
+const edgeEnvironment = (entrypoints: Record<string, string>, ping: string) => ({
+  ...entrypoints,
+  TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
+  TRAEFIK_ACCESSLOG: "true",
+  TRAEFIK_ACCESSLOG_FORMAT: "json",
+  TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: "drop",
+  TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: "drop",
+  TRAEFIK_ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME: "drop",
+  TRAEFIK_PING: "true",
+  TRAEFIK_PING_ENTRYPOINT: "ping",
+  TRAEFIK_ENTRYPOINTS_PING_ADDRESS: ping,
+  TRAEFIK_GLOBAL_CHECKNEWVERSION: "false",
+  TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false",
+});
+const EDGE_LOGGING = { driver: "json-file", options: { "max-size": "10m", "max-file": "3" } };
+const edgeService = (profile: string, addresses: string) => ({
+  profiles: [profile],
+  image: PROXY_SERVICE.image,
+  user: "65534:65534",
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  read_only: true,
+  volumes: ["./dynamic:/etc/traefik/dynamic:ro,z"],
+  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}", "ob1.edge-addresses": addresses },
+  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
+  restart: "unless-stopped",
+  logging: EDGE_LOGGING,
+});
+/** deploy/edge/compose.yaml as Bun.YAML reads it, x-* anchors aside. */
+const EDGE_COMPOSE = {
+  name: "ob1-edge",
+  services: {
+    edge: {
+      ...edgeService("bridge", "127.0.0.1:${EDGE_PORT:-8090}"),
+      environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:8082"),
+      ports: ["127.0.0.1:${EDGE_PORT:-8090}:8000"], networks: ["web"], dns_search: ["."],
+    },
+    "edge-host": {
+      ...edgeService("host", "127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}"),
+      environment: edgeEnvironment({ TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: "127.0.0.1:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete", TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: "[::1]:${EDGE_PORT:-8090}", TRAEFIK_ENTRYPOINTS_WEB6_HTTP_ALIASHEADERSSTRATEGY: "delete" }, "127.0.0.1:${EDGE_PING_PORT:-8091}"),
+      network_mode: "host",
+    },
+  },
+  networks: { web: {} },
+};
+/** What deploy/edge/edge.ts renders for deploy/edge/brains.example.yaml in a shape, byte for byte. */
+const edgeRouteTable = (dial: string, entrypoints: string) => "http:\n  routers:\n"
+  + `    _edge-probe:\n      rule: "Host(\`_edge.localhost\`)"\n      entryPoints: [${entrypoints}]\n      service: noop@internal\n`
+  + ["canary", "stable"].map((b) => `    ${b}:\n      rule: "Host(\`${b}.localhost\`)"\n      entryPoints: [${entrypoints}]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b}\n`).join("")
+  + "  middlewares:\n    edge-strip:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n          X-OB1-Legacy-Route: \"\"\n"
+  + routeErrors("brain-absent", "502")
+  + "  services:\n" + [["canary", 8011], ["stable", 8010]].map(([b, p]) => routeService(String(b), `http://${dial}:${p}`)).join("");
+const EDGE_ROUTE_TABLE = { bridge: edgeRouteTable("host.containers.internal.", "web"), host: edgeRouteTable("127.0.0.1", "web, web6") } as const;
+const EDGE_RULES = ["files", "characters", "tags", "parse", "service", "table"] as const;
+type EdgeRule = (typeof EDGE_RULES)[number];
+type EdgeTree = { files: string[]; compose: string; example: string; render: (example: string, shape: "bridge" | "host") => string };
+/** Every way deploy/edge/ strays from check 36, each with its rule; none when it holds. */
+function edgeProblems(t: EdgeTree): { rule: EdgeRule; message: string }[] {
+  const out: { rule: EdgeRule; message: string }[] = [];
+  const flag = (rule: EdgeRule, message: string) => { out.push({ rule, message }); };
+  const extra = t.files.filter((f) => /compose/i.test(f) && f !== "compose.yaml");
+  if (extra.length) flag("files", `${extra.join(", ")}: a compose file beside compose.yaml, which no check holds — compose reads an override with no -f, and the edge runs one file, by profile per shape`);
+  const odd = oddCharacters(t.compose);
+  if (odd.length) flag("characters", `compose.yaml line ${odd.join(", ")} carries a control, format or separator character other than the space and the line feed, which compose and Bun.YAML read apart (check 28's rule)`);
+  const tagged = [...t.compose.matchAll(/(^|[\s\[{,:?-])!(<|[A-Za-z0-9-]*[!%]|reset\b|override\b)|^%/gm)].map((m) => t.compose.slice(0, m.index).split("\n").length);
+  if (tagged.length) flag("tags", `compose.yaml line ${[...new Set(tagged)].join(", ")} carries a tag compose resolves and Bun.YAML reads past, or a % directive (check 28's rule)`);
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(t.compose); } catch (e) { return [...out, { rule: "parse", message: `compose.yaml does not parse as YAML: ${(e as Error).message}` }]; }
+  if (!isMapping(doc)) return [...out, { rule: "parse", message: "compose.yaml is not one YAML mapping" }];
+  const diffs: string[] = [];
+  pathDiffs(JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(doc).filter(([k]) => !k.startsWith("x-"))))), EDGE_COMPOSE, "", diffs);
+  if (diffs.length) flag("service", `compose.yaml: ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — the edge is check 36's EDGE_COMPOSE: it sits in front of every brain and carries each client's key, so a change to it is made there too, on purpose`);
+  for (const shape of ["bridge", "host"] as const) {
+    let got: string;
+    try { got = t.render(t.example, shape); } catch (e) { flag("table", `edge.ts does not render brains.example.yaml in the ${shape} shape: ${(e as Error).message}`); continue; }
+    const tdiffs: string[] = [];
+    pathDiffs(got, EDGE_ROUTE_TABLE[shape], "", tdiffs);
+    if (tdiffs.length) flag("table", `edge.ts renders brains.example.yaml in the ${shape} shape otherwise than check 36's EDGE_ROUTE_TABLE: ${tdiffs[0].replace("(the file) ", "")} — a route the edge serves changes here too, on purpose`);
+  }
+  return out;
+}
+/** [what the probe changes, the file under deploy/edge/, the text it replaces there (once), its replacement] — each must turn check 36 false. */
+const EDGE_PROBES: [string, "compose.yaml" | "edge.ts" | "files", string, string][] = [
+  ["a compose.override.yaml beside the edge's file", "files", "", "compose.override.yaml"],
+  ["a line led by U+2028 in the edge's file", "compose.yaml", "\nservices:\n", "\n# a note x-shadow: 1\nservices:\n"],
+  ["an !override on the edge's networks, the same list to Bun.YAML", "compose.yaml", "    networks: [web]\n", "    networks: !override [web]\n"],
+  ["the edge's file not YAML", "compose.yaml", "services:\n", "services: [\n"],
+  ["the bridge shape published on every interface", "compose.yaml", "\"127.0.0.1:${EDGE_PORT:-8090}:8000\"", "\"${EDGE_PORT:-8090}:8000\""],
+  ["the host shape off [::1], where another process would take the clients that try it first", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB6_ADDRESS: \"[::1]:${EDGE_PORT:-8090}\"\n", ""],
+  ["the host table's routers off [::1]'s entrypoint", "edge.ts", "host: \"web, web6\"", "host: \"web\""],
+  ["the edge joining a brain's network", "compose.yaml", "networks:\n  web: {}\n", "networks:\n  web: {}\n  brain:\n    name: open-brain_mesh\n    external: true\n"],
+  ["the engine's socket mounted into the host shape's edge", "compose.yaml", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-addresses: \"127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}\"\n", "      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n      ob1.edge-addresses: \"127.0.0.1:${EDGE_PORT:-8090},[::1]:${EDGE_PORT:-8090},127.0.0.1:${EDGE_PING_PORT:-8091}\"\n"],
+  ["the edge trusting a PROXY line from the private ranges", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n      TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: \"10.0.0.0/8\"\n"],
+  ["the edge's table not deleting X-Brain-Forwarder", "edge.ts", "          X-Brain-Forwarder: \\\"\\\"\\n", ""],
+  ["the edge's table routing a brain by path, beside its host", "edge.ts", "rule: \"Host(\\`${b.name}.${r.domain}\\`)\"", "rule: \"Host(\\`${b.name}.${r.domain}\\`) || PathPrefix(\\`/${b.name}\\`)\""],
+  ["the bridge shape dialling a brain's mesh name", "edge.ts", "bridge: \"host.containers.internal.\"", "bridge: \"mcp.ob1.internal.\""],
+];
+async function checkEdge() {
+  const dir = join(ROOT, "deploy", "edge");
+  if (!existsSync(join(dir, "compose.yaml")) || !existsSync(join(dir, "edge.ts")) || !existsSync(join(dir, "brains.example.yaml"))) { fail("deploy/edge", "compose.yaml, edge.ts or brains.example.yaml is missing — check 36 holds the edge proxy (SMD-2876)"); return; }
+  const files = readdirSync(dir).filter((f) => statSync(join(dir, f)).isFile());
+  const compose = readFileSync(join(dir, "compose.yaml"), "utf8");
+  const edgeTs = readFileSync(join(dir, "edge.ts"), "utf8");
+  const example = readFileSync(join(dir, "brains.example.yaml"), "utf8");
+  // edge.ts loaded from its text, so a probe's edit is what renders: a copy in a scratch directory, its import of
+  // ../instance.ts by that file's path.
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const scratch = mkdtempSync(join((await import("node:os")).tmpdir(), "ob1-check36-"));
+  let n = 0;
+  const renderOf = async (text: string) => {
+    const file = join(scratch, `edge-${n++}.ts`);
+    writeFileSync(file, text.replace('from "../instance.ts"', `from ${JSON.stringify(join(ROOT, "deploy", "instance.ts"))}`));
+    const mod = await import(file) as typeof import("../deploy/edge/edge.ts");
+    return (ex: string, shape: "bridge" | "host") => { const r = mod.parseRegistry(ex).registry; if (!r) throw new Error(mod.parseRegistry(ex).problems.join("; ")); return mod.renderRoutes(r, shape); };
+  };
+  try { await checkEdgeTree(files, compose, edgeTs, example, renderOf); } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+async function checkEdgeTree(files: string[], compose: string, edgeTs: string, example: string, renderOf: (text: string) => Promise<EdgeTree["render"]>) {
+  const tree: EdgeTree = { files, compose, example, render: await renderOf(edgeTs) };
+  const problems = edgeProblems(tree);
+  for (const p of problems) fail(`deploy/edge/${p.rule === "table" ? "edge.ts" : "compose.yaml"}`, `${p.message} (check 36, SMD-2876)`);
+  const soleCatch = new Set<EdgeRule>();
+  for (const [what, file, from, to] of EDGE_PROBES) {
+    const text = file === "compose.yaml" ? compose : file === "edge.ts" ? edgeTs : "";
+    if (file !== "files" && text.split(from).length !== 2) { fail(SELF, `check 36's probe "${what}" finds its anchor ${text.split(from).length - 1} times in deploy/edge/${file}, not once — re-anchor it`); continue; }
+    const probed: EdgeTree = file === "files" ? { ...tree, files: [...files, to] } : file === "compose.yaml" ? { ...tree, compose: compose.replace(from, to) } : { ...tree, render: await renderOf(edgeTs.replace(from, to)) };
+    const rules = new Set(edgeProblems(probed).map((p) => p.rule));
+    if (rules.size === 0) fail(SELF, `check 36 no longer catches ${what} (its own probe)`);
+    if (rules.size === 1) soleCatch.add([...rules][0]);
+  }
+  if (!problems.length) for (const rule of EDGE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 36's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
+}
+await checkEdge();
+// ── 37. The provisioned dashboard reads what the stack writes (SMD-1849 PR 3c) ──
 //
 // The observability profile's Grafana loads one dashboard at its start and
 // opens on it: deploy/observability/dashboard.json, which compose.yaml carries
@@ -7783,7 +7953,7 @@ function dashboardProblems(fileText: string, inline: unknown, provider: unknown,
   const out: [DashboardRule, string][] = [];
   const contentOf = (c: unknown) => isMapping(c) ? c.content : undefined;
   if (!isMapping(inline) || contentOf(inline) !== fileText.replace(/\$/g, "$$$$") || canonJson(Object.keys(inline)) !== canonJson(["content"])) out.push(["copy", `compose.yaml's configs.grafana-dashboard is not ${DASHBOARD_FILE} with each \`$\` doubled, as its content alone: compose reads a single \`$\` as a variable, so the dashboard Grafana loads would not be the file — run \`bun scripts/inline-dashboard.ts\`, which writes it and lgtm's labels`]);
-  if (!isMapping(provider) || contentOf(provider) !== DASHBOARD_PROVIDER || canonJson(Object.keys(provider)) !== canonJson(["content"])) out.push(["provider", `compose.yaml's configs.grafana-dashboard-provider is not check 36's DASHBOARD_PROVIDER byte for byte, as its content alone: it decides which file Grafana loads and whether its UI may save a change`]);
+  if (!isMapping(provider) || contentOf(provider) !== DASHBOARD_PROVIDER || canonJson(Object.keys(provider)) !== canonJson(["content"])) out.push(["provider", `compose.yaml's configs.grafana-dashboard-provider is not check 37's DASHBOARD_PROVIDER byte for byte, as its content alone: it decides which file Grafana loads and whether its UI may save a change`]);
   const wantLabels = { "ob1.grafana-dashboard": sha256Of(fileText), "ob1.grafana-dashboard-provider": sha256Of(DASHBOARD_PROVIDER) };
   if (canonJson(labels ?? null) !== canonJson(wantLabels)) out.push(["recreate", `compose.yaml's services.lgtm.labels is ${JSON.stringify(labels ?? null)} where it is ${JSON.stringify(wantLabels)}: compose recreates lgtm when a label changes and not when only an inline config does (docker/compose#11900), so without each config's sha256 an upgrade's \`up -d\` leaves Grafana on the old dashboard — \`bun scripts/inline-dashboard.ts\` writes them`]);
   let d: unknown;
@@ -7834,7 +8004,7 @@ function dashboardProblems(fileText: string, inline: unknown, provider: unknown,
     if (uid !== "prometheus") continue;
     const reads = promqlReads(text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"));
     const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
-    if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so the panel would show "No data" for ever — the names there are: the servers' \`*.duration\` histograms in server-portable/*.ts (instrumentNamesIn reads those alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 36's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
+    if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so the panel would show "No data" for ever — the names there are: the servers' \`*.duration\` histograms in server-portable/*.ts (instrumentNamesIn reads those alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
     const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
     const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
     for (const [name, read] of reads.selectors) {
@@ -7929,36 +8099,36 @@ const INSTRUMENT_PROBES: [string, string, string][] = [
 ];
 function checkDashboard() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
-    fail(SELF, `check 36 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1849)`);
+    fail(SELF, `check 37 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1849)`);
     return;
   }
   for (const [what, text, inline, provider, labels, expected] of DASHBOARD_PROBES) {
     const got = dashboardProblems(text, inline, provider, labels, DASHBOARD_PROBE_WRITTEN).map(([rule]) => rule);
-    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 36 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 37 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
   }
   for (const [what, code, name] of INSTRUMENT_PROBES) {
     const has = instrumentNamesIn([code]).has(name.replace(/^!/, ""));
-    if (has === name.startsWith("!")) fail(SELF, `check 36's instrument reading no longer holds its probe "${what}" (${name})`);
+    if (has === name.startsWith("!")) fail(SELF, `check 37's instrument reading no longer holds its probe "${what}" (${name})`);
   }
   const code = readdirSync(join(ROOT, "server-portable")).filter((f) => f.endsWith(".ts") && !f.startsWith("test-")).map((f) => readFileSync(join(ROOT, "server-portable", f), "utf8"));
   const instruments = instrumentNamesIn(code);
   const metricKeys = /const METRIC_KEYS = \[([^\]]*)\]/.exec(readFileSync(join(ROOT, "server-portable/telemetry.ts"), "utf8"));
   const requestLabels = metricKeys ? [...metricKeys[1].matchAll(/"([a-z0-9_.]+)"/g)].map((m) => m[1].replace(/\./g, "_")) : [];
-  if (!requestLabels.length) { fail(SELF, "check 36 reads no METRIC_KEYS from server-portable/telemetry.ts — the reading is broken, or the request's labels moved: the dashboard reads them"); return; }
-  if (canonJson([...requestLabels].sort()) !== canonJson([...DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds].sort())) fail(SELF, `check 36's DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds is ${JSON.stringify(DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds)} where telemetry.ts's METRIC_KEYS give ${JSON.stringify(requestLabels)}: a label the request's point no longer carries leaves a panel's legend blank, and the dashboard reads them (SMD-1849 PR 3c review pass 2)`);
+  if (!requestLabels.length) { fail(SELF, "check 37 reads no METRIC_KEYS from server-portable/telemetry.ts — the reading is broken, or the request's labels moved: the dashboard reads them"); return; }
+  if (canonJson([...requestLabels].sort()) !== canonJson([...DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds].sort())) fail(SELF, `check 37's DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds is ${JSON.stringify(DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds)} where telemetry.ts's METRIC_KEYS give ${JSON.stringify(requestLabels)}: a label the request's point no longer carries leaves a panel's legend blank, and the dashboard reads them (SMD-1849 PR 3c review pass 2)`);
   // Were these missed, the reading is broken, not the dashboard.
-  for (const n of Object.keys(DASHBOARD_INSTRUMENT_LABELS)) if (!instruments.has(`${n}_count`)) { fail(SELF, `check 36 reads no ${n} from server-portable/'s code, in seconds — the reading is broken, or the instrument moved: the dashboard reads it`); return; }
+  for (const n of Object.keys(DASHBOARD_INSTRUMENT_LABELS)) if (!instruments.has(`${n}_count`)) { fail(SELF, `check 37 reads no ${n} from server-portable/'s code, in seconds — the reading is broken, or the instrument moved: the dashboard reads it`); return; }
   const composeText = readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8");
   const doc = Bun.YAML.parse(composeText);
   const configs = isMapping(doc) && isMapping(doc.configs) ? doc.configs : {};
   const lgtm = isMapping(doc) && isMapping(doc.services) && isMapping(doc.services.lgtm) ? doc.services.lgtm : {};
   let fileText: string;
-  try { fileText = readFileSync(join(ROOT, DASHBOARD_FILE), "utf8"); } catch { fail(DASHBOARD_FILE, "missing — compose.yaml's lgtm loads it as the observability profile's dashboard (check 36, SMD-1849)"); return; }
+  try { fileText = readFileSync(join(ROOT, DASHBOARD_FILE), "utf8"); } catch { fail(DASHBOARD_FILE, "missing — compose.yaml's lgtm loads it as the observability profile's dashboard (check 37, SMD-1849)"); return; }
   // The generator the README and these messages name, run on the tree: where it can no longer write compose.yaml's copy, it says so here (review pass 5).
-  try { inlinedDashboard(composeText, fileText); } catch (e) { fail("scripts/inline-dashboard.ts", `can no longer write compose.yaml's inline copy of the dashboard: ${(e as Error).message} — the README sends an operator to it (check 36, SMD-1849)`); }
+  try { inlinedDashboard(composeText, fileText); } catch (e) { fail("scripts/inline-dashboard.ts", `can no longer write compose.yaml's inline copy of the dashboard: ${(e as Error).message} — the README sends an operator to it (check 37, SMD-1849)`); }
   const written = new Map([...instruments, ...Object.entries(DASHBOARD_IMAGE_SERIES)]);
   for (const [rule, detail] of dashboardProblems(fileText, configs["grafana-dashboard"], configs["grafana-dashboard-provider"], lgtm.labels, written)) {
-    fail(rule === "copy" || rule === "provider" || rule === "recreate" ? "deploy/compose.yaml" : DASHBOARD_FILE, `${detail} (check 36, SMD-1849)`);
+    fail(rule === "copy" || rule === "provider" || rule === "recreate" ? "deploy/compose.yaml" : DASHBOARD_FILE, `${detail} (check 37, SMD-1849)`);
   }
 }
 checkDashboard();

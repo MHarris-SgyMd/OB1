@@ -685,12 +685,12 @@ services:
       timeout: 5s
       retries: 12
     # `data` alone: internal, so no route out, and joined only by what
-    # connects to the database (SMD-2583). Not the mesh, which a tier of
-    # another project joins (compose.canary.yaml): compose names each
-    # container by its service name on every network it joins, and there
-    # `postgres` would answer that tier's server too, which then had only
-    # its own password (deploy/canary.sh's env file) between it and this
-    # database.
+    # connects to the database (SMD-2583). Not the mesh, beside every
+    # backend the proxy reaches: compose names each container by its service
+    # name on every network it joins, and a canary's servers joined this
+    # stack's mesh from SMD-2294 to SMD-2874, where `postgres` would have
+    # answered them with only the canary's own password between them and
+    # this database.
     networks: [data]
     # As the servers': with none, a reboot would bring the servers back
     # (Docker, or podman with its restart unit) without the database they
@@ -920,6 +920,11 @@ services:
       # less (SMD-2250). Unset, 10 — and stop_grace_period below reads the same
       # variable, so compose waits exactly what the server plans for.
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+      # Seconds between the vector mender's ticks, 1 to 86400, 0 or off for
+      # none: the servers embed the thoughts saved without a vector once the
+      # provider answers (SMD-2889). Unset, 60. Both this server and the REST
+      # core read it; a leader lock lets one mend at a time.
+      OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env, *otel-env]
@@ -1109,9 +1114,9 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
-    # authorization server as auth.ob1.internal, and another tier's MCP
-    # server, a compose project of its own that joins this mesh, as
-    # mcp.<tier>.ob1.internal (SMD-2294). It shares no network with Postgres,
+    # authorization server as auth.ob1.internal, and the tier routes' MCP
+    # servers as mcp.<tier>.ob1.internal (SMD-2294), which no project of
+    # another brain joins since SMD-2874. It shares no network with Postgres,
     # the model services, n8n or the workers, and has no route out.
     networks:
       front:
@@ -1671,9 +1676,9 @@ services:
       - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
     # `egress` alone: the vendors its workflows name, and the brain as
     # `server:8000` and the import runner as `orchestration-runner:8090`. Not
-    # the mesh: a tier of another project joins this stack's mesh, where
-    # compose names its server `server` too, and n8n would reach either
-    # (SMD-2294). `egress` is this project's own.
+    # the mesh, where every backend the proxy reaches is (a canary of another
+    # project joined it from SMD-2294 to SMD-2874, its server `server` too).
+    # `egress` is this project's own.
     networks: [egress]
     volumes:
       # The store: workflows, encrypted credentials, each workflow's cursor
@@ -1965,13 +1970,13 @@ services:
   # receiver writes with underscores and a unit suffix
   # (`gen_ai_client_operation_duration_seconds`, measured), and each flag below
   # is this pin's (measured: each binary started with it). A bump re-measures
-  # check 36's DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS and
+  # check 37's DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS and
   # DASHBOARD_DATASOURCES (the dashboard's rate window also rests on this
   # image's Prometheus data source, timeInterval 60s) and runs CI's "The
   # observability profile's dashboard reads every series it names", which
   # also fails should Prometheus stop taking created-timestamp-zero-ingestion.
   # Check 28 (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this
-  # service whole but its labels, which check 36 holds.
+  # service whole but its labels, which check 37 holds.
   #
   # Grafana's image signs anyone in as Admin unless told otherwise
   # (run-grafana.sh, GF_AUTH_ANONYMOUS_ENABLED defaulting to true): here
@@ -2081,7 +2086,7 @@ services:
         target: /otel-lgtm/open-brain-dashboard.json
       - source: grafana-dashboard-provider
         target: /otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml
-    # Each config's sha256 (check 36 holds them): compose recreates a
+    # Each config's sha256 (check 37 holds them): compose recreates a
     # container when a label changes, and not when only an inline config does
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard reaches Grafana on its `up -d`.
@@ -2151,7 +2156,7 @@ services:
   # internal `telemetry`, where lgtm's collector scrapes it every 30 s and
   # nothing else is; it publishes nothing. Confined as the authorization
   # server is: read-only, no capability, no new privileges. The dashboard's
-  # Postgres row reads its names (check 36's DASHBOARD_IMAGE_SERIES, measured
+  # Postgres row reads its names (check 37's DASHBOARD_IMAGE_SERIES, measured
   # on this pin): a bump re-measures them, and CI's "The observability
   # profile's dashboard reads every series it names" runs each query.
   pg-exporter:
@@ -2189,9 +2194,9 @@ networks:
   #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
   #          core (api.ob1.internal), the authorization server
   #          (auth.ob1.internal) and the observability profile's collector
-  #          (lgtm.ob1.internal), each called by that name; a tier of another
-  #          project joins it under its own (compose.canary.yaml), and a
-  #          path-mode canary's servers send to stable's collector there.
+  #          (lgtm.ob1.internal), each called by that name. No other
+  #          project joins it: a canary is a brain of its own, on its own
+  #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
   #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
@@ -2244,7 +2249,7 @@ configs:
   # Grafana loads at its start and opens on: deploy/observability/dashboard.json,
   # inline here as the route table is, so a release's compose.yaml carries it
   # with nothing else to fetch, each dollar sign doubled, since compose reads
-  # one as a variable. Check 36 (scripts/check-fork-consistency.ts) holds it
+  # one as a variable. Check 37 (scripts/check-fork-consistency.ts) holds it
   # to that file, and the file to the names the stack writes.
   grafana-dashboard:
     content: |
@@ -2996,7 +3001,7 @@ configs:
   # Where Grafana finds it: a file provider reading that one file into a
   # folder of its own, Grafana's UI refused a save of it, and kept, no longer
   # provisioned, rather than deleted should the file go; held byte for byte by
-  # check 36.
+  # check 37.
   grafana-dashboard-provider:
     content: |
       apiVersion: 1

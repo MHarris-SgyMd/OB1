@@ -339,6 +339,8 @@ const FUNCTIONS = [
   "list_proposal_writers(uuid[])",
   // 095 (SMD-2540): what the stated-status label reads.
   "ticket_status_inputs(uuid[], text[])",
+  // 097 (SMD-3035): the one walk 082's lapse clears and 094's read returns.
+  "ob1_lapse_walk(uuid, uuid)",
 ];
 
 /**
