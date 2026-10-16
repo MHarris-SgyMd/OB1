@@ -76,12 +76,14 @@
 #      starts the canary's Postgres; once its standing servers are stopped
 #      (4), sets its database's password to that file's, which a canary from
 #      before SMD-2583 had as stable's;
-#   3. refreshes it from stable through deploy/tier.sh (stable's password from
-#      stable's env file, the canary's from its own), on each project's
-#      database network — `data` (SMD-2583), or `default` for a stable from
-#      before it, read off its Postgres container. The refresh copies
-#      stable's database settings, 014's HNSW bounds among them (SMD-2037),
-#      and migrates the copy with this checkout;
+#   3. refreshes it from stable through deploy/tier.sh, one half in a
+#      container on each project's database network alone (SMD-2875):
+#      stable's half on stable's — `data` (SMD-2583), or `default` for a
+#      stable from before it, read off its Postgres container — with stable's
+#      password alone, from stable's env file; the canary's half on the
+#      canary's `data` with the canary's password alone, from its own. The
+#      refresh copies stable's database settings, 014's HNSW bounds among them
+#      (SMD-2037), and migrates the copy with this checkout;
 #   4. builds the server from this checkout and (re)creates it and the REST
 #      core, which runs the server's image, so their pools open on the
 #      refreshed database. Standing servers are stopped before the refresh, so
@@ -1030,7 +1032,10 @@ stable_vectors="$(psql_in "$STABLE_PG" "SELECT count(*) FROM (SELECT 1 FROM thou
   AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
 say "refresh $STABLE_PG → $CANARY_PG"
 refresh_rc=0
-"$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$CANARY_ENV" --from-env-file "$ENV_FILE" --network "$STABLE_DB_NET,${CANARY}_data" \
+# Each half on its own project's network (SMD-2875); the canary's project
+# names the image tier.sh builds, so stable's own tier runs keep theirs.
+"$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$CANARY_ENV" --from-env-file "$ENV_FILE" \
+  --project "$CANARY" --network "${CANARY}_data" --from-network "$STABLE_DB_NET" \
   --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary || refresh_rc=$?
 if [ "$refresh_rc" != 0 ]; then
   # tier.sh's own usage errors exit 2, which from here would read as "refused

@@ -136,6 +136,12 @@ jobs:
       # beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
+      # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
+      # side's password per half, the target's settings by name, the source
+      # container gone before the target starts, each refusal it tries
+      # before anything is made. The deploy-stack job runs it against a stack.
+      - name: tier.sh's two halves against a stub runtime
+        run: bun deploy/test-tier-sh.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -598,6 +604,19 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-items.ts --self-check && bun ingest-records.ts --self-check
+
+      # The latency harness's pure parts (SMD-3024): the answer reader (a reply
+      # that never parses, an answer to another request), the ok rule against
+      # the server's own capture replies built by renderCapture (saved without
+      # a vector, tagging that failed or was refused, a re-capture), the probe
+      # match its cleanup deletes by (never a thought that quotes a probe), the
+      # call schedule and the tier guard. Its flags are cli.ts's, held by the
+      # flag scanner's suite. No network, no database, no provider: main's
+      # cleanup, deadlines and signals are not run here.
+      - name: Latency harness rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: db
+        run: bun bench-live.ts --self-check
 
   replay-gate:
     name: Retrieval replay gate
@@ -2103,19 +2122,20 @@ jobs:
       # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
       # pg_restore, which no image in the stack carries together, so the
       # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
-      # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
-      # replay engine, the guards, and a refresh whose stand-in pg_restore
-      # fails, never a real one). deploy/tier.sh builds db/tier.Dockerfile
-      # and runs this checkout's tier.ts on the stack's network. The brain is
-      # given something to carry first: smoke.sh captures nothing, so one thought
-      # with a vector goes in through upsert_thought, and one keyword search that
-      # finds it goes through the server, which logs it. Then the refresh into a
-      # second database on the server, read back one test per line (a test inside
-      # an && list does not trip set -e: a schema-only copy passed that way in
-      # review), the tier stamp, a --replay that replays that search, a --diff
-      # that finds it unmoved and one over the empty window after the refresh
-      # that exits 3, and a retry over a copy left stamped stable, as a
-      # refresh that died after its restore leaves it. Then the two guards the
+      # has a pg14 client, which refuses a pg16 server; test-live [20] drives
+      # the guards and a refresh whose stand-in pg_restore fails, never a real
+      # one). deploy/tier.sh builds db/tier.Dockerfile and runs this checkout's
+      # tier.ts in it, each half of a verb in a container of its own
+      # (SMD-2875), both on the stack's network here. The brain is given something to carry
+      # first: smoke.sh captures nothing, so one thought with a vector goes in
+      # through upsert_thought, and one keyword search that finds it goes
+      # through the server, which logs it (the canary step's --diff replays
+      # it, over HTTP since SMD-2875). Then the refresh into a second database
+      # on the server, read back one test per line (a test inside an && list
+      # does not trip set -e: a schema-only copy passed that way in review),
+      # the tier stamp, tier.sh's refusal of a --diff, and a retry over a copy
+      # left stamped stable, as a refresh that died after its restore leaves
+      # it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
       # the brain under its service name and its container name is one
       # database, and a refresh the wrong way round lands on a brain with no
@@ -2146,18 +2166,10 @@ jobs:
           echo "database settings: stable $STABLE_SET, refreshed $COPY_SET"
           grep -q 'hnsw.max_scan_tuples=' <<<"$STABLE_SET" || { echo "stable has no HNSW bound to copy (014 seeds one)" >&2; exit 1; }
           [ "$STABLE_SET" = "$COPY_SET" ] || { echo "the refreshed copy's database settings differ from stable's" >&2; exit 1; }
-          ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
-          grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
-          ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
-          grep -F 'what moved: nothing' /tmp/tier-diff.out
-          # SMD-2182: with no --since the window starts at the copy's refresh,
-          # and stable has logged nothing since, so a --diff compares nothing:
-          # exit 3 through the wrapper, not the pass it used to be.
-          empty_rc=0
-          ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci > /tmp/tier-empty.out || empty_rc=$?
-          cat /tmp/tier-empty.out
-          [ "$empty_rc" = 3 ] || { echo "a --diff that compared nothing exited $empty_rc, not 3" >&2; exit 1; }
-          grep -F 'nothing to compare: stable logged no searches' /tmp/tier-empty.out
+          # SMD-2875: a replay or diff reaches the brains over HTTP and needs no
+          # container, so the wrapper refuses one, before it builds or joins anything.
+          rc=0; ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--diff runs over HTTP now' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not refuse a --diff (exit $rc)" >&2; exit 1; fi
           # A refresh that dies after its restore leaves the source's ob1_config
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the
@@ -2175,13 +2187,25 @@ jobs:
           refused postgres open-brain-postgres-1 'name the same database'
           refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
           # SMD-2873: the networks are the project's that the env file names (the
-          # runs above, on .env, which names none, joined open-brain's); and
-          # --project with --network is refused.
+          # runs above, on .env, which names none, joined open-brain's).
           (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
           rc=0; ./tier.sh --env-file /tmp/ob1x.env --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'no network ob1x_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not take ob1x's networks from an env file naming ob1x (exit $rc)" >&2; exit 1; fi
-          rc=0; ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
-          if [ "$rc" != 2 ] || ! grep -F -- '--project and --network both name the networks' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; exit 1; fi
+          # SMD-2875: the image is the project's, so a run for ob1x (on
+          # open-brain's network, by --network) builds ob1x-tier and leaves the
+          # tag open-brain's runs use where it was. The same Dockerfile builds
+          # the same id from cache, so the tag is first pointed at another
+          # image, which a run that re-tagged it would move; then put back. And
+          # a half joins one network, so a list is refused.
+          OLD_TIER="$(docker image inspect -f '{{.Id}}' open-brain-tier:latest)"
+          docker tag pgvector/pgvector:0.8.6-pg16 open-brain-tier:latest
+          ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          docker image inspect ob1x-tier:latest > /dev/null || { echo "a run for project ob1x built no ob1x-tier image" >&2; exit 1; }
+          [ "$(docker image inspect -f '{{.Id}}' open-brain-tier:latest)" = "$(docker image inspect -f '{{.Id}}' pgvector/pgvector:0.8.6-pg16)" ] || { echo "a run for project ob1x moved open-brain-tier:latest" >&2; exit 1; }
+          docker tag "$OLD_TIER" open-brain-tier:latest
+          docker image rm ob1x-tier:latest > /dev/null
+          rc=0; ./tier.sh --network open-brain_data,open-brain_egress --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--network takes one network name' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not refuse a list of networks (exit $rc)" >&2; exit 1; fi
           rc=0; ./tier.sh --env-file /tmp/ob1x.env --project ob1y --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'no network ob1y_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "--project did not name the networks over the env file's project" >&2; exit 1; fi
           rm -f /tmp/ob1x.env
@@ -2287,12 +2311,18 @@ jobs:
       # canary.sh runs compose.yaml again as the project open-brain-canary,
       # behind a proxy of its own on a loopback port: its Postgres, a refresh
       # from this stack's through tier.sh on both projects' database networks,
-      # its server and REST core built from this checkout, then the smoke.
+      # its server and REST core built from this checkout, then the smoke. The
+      # refresh's two halves each run on one brain's data network with that
+      # brain's password (SMD-2875): sampled through the first up, no container
+      # is on both networks, and neither half holds the other side's password.
       # - The first `up --port 8011 --connect` runs over a stable carrying the
       #   protective mark `stable` (not a refresh's). It stamps stable,
       #   registers the connector at 127.0.0.1:8011/mcp, and reports tier
       #   canary with OAuth not configured. Every canary container is on the
       #   canary's own networks alone, and stable's mesh holds none of them.
+      #   Stable's logged searches, replayed on both over HTTP (tier.ts --diff,
+      #   SMD-2875), move nothing, and a window after them compares nothing
+      #   (exit 3).
       #   Its vector probe must pass on the thought whose text holds literals
       #   (SMD key, path), searched for without them.
       #   It runs over a canary Postgres made the old way, on stable's env
@@ -2366,8 +2396,38 @@ jobs:
           # SMD-1849 PR 3a: the observability profile's Grafana password too,
           # a dummy (nothing here runs the profile).
           printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
+          # SMD-2875: through the first up's refresh, every 0.2 s, the tier
+          # halves' containers, found by the label tier.sh gives each (both are
+          # made before either runs; the source's lasts until its hand-off has
+          # passed, the target's until tier.sh exits, so the sampling sees both
+          # however short a half runs). None may be
+          # on both brains' data networks, and each half's environment is kept
+          # (mode 700 directory), to be searched below for the other side's
+          # password.
+          mkdir -m 700 /tmp/tier-sample
+          sample_nets() {
+            while :; do
+              for n in $(docker ps -aq --filter label=ob1.tier-half 2>/dev/null); do
+                nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$n" 2>/dev/null)" || continue
+                side=""
+                case " $nets " in *" open-brain_data "*) side=stable ;; esac
+                case " $nets " in *" open-brain-canary_data "*) [ -z "$side" ] || echo "$n: $nets" >> /tmp/tier-sample/both; side=canary ;; esac
+                # Written only from an inspect that answered: tier.sh may remove
+                # the container between the two (review pass 1).
+                [ -z "$side" ] || { env_now="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$n" 2>/dev/null)" && printf '%s\n' "$env_now" > "/tmp/tier-sample/$side.$n"; } || true
+              done
+              sleep 0.2
+            done
+          }
+          # Off the step's output, and stopped however the step ends: a background
+          # loop holding the step's pipes keeps the step waiting (review pass 1).
+          sample_nets > /dev/null 2>&1 < /dev/null & SAMPLER=$!
+          trap 'kill "$SAMPLER" 2>/dev/null || true' EXIT
           ./canary.sh --port 8011 up --connect 2>&1 | tee /tmp/canary-up.out
+          kill "$SAMPLER"
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
+          if [ -s /tmp/tier-sample/both ]; then echo "a container was on both brains' data networks: $(sort -u /tmp/tier-sample/both | tr '\n' ' ')" >&2; exit 1; fi
+          if ! compgen -G '/tmp/tier-sample/stable.*' > /dev/null || ! compgen -G '/tmp/tier-sample/canary.*' > /dev/null; then ls -la /tmp/tier-sample >&2; echo "the sampler saw no tier half on one side of the refresh" >&2; exit 1; fi
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
           # SMD-2583: the canary's own env file, made from stable's: mode 600,
           # every setting of stable's but its database password, which is a
@@ -2386,6 +2446,13 @@ jobs:
           PG_STABLE="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tr -d '"')" PG_CANARY="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env.canary.local | tr -d '"')"
           export PG_STABLE PG_CANARY
           if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
+          # SMD-2875: each tier half held its own side's password and not the
+          # other's (patterns from a file, so neither is on a command line).
+          grep -qFf <(printf '%s\n' "$PG_STABLE") /tmp/tier-sample/stable.* || { echo "stable's tier half held no stable password: the sample is not of the refresh" >&2; exit 1; }
+          grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/tier-sample/canary.* || { echo "the canary's tier half held no canary password: the sample is not of the refresh" >&2; exit 1; }
+          if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/tier-sample/stable.*; then echo "stable's tier half held the canary's database password" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_STABLE") /tmp/tier-sample/canary.*; then echo "the canary's tier half held stable's database password" >&2; exit 1; fi
+          rm -rf /tmp/tier-sample
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
@@ -2429,6 +2496,17 @@ jobs:
           jq -e '.tier != "canary"' <<<"$(health 8010/mcp)" > /dev/null || { echo "stable's /mcp answered as the canary" >&2; exit 1; }
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
+          # SMD-2875: the diff over HTTP. Stable's logged searches (the tier
+          # step's keyword search and smoke.sh's, both keyword: the hybrid and
+          # current arms are held by test-brain-compare.ts) replayed on stable
+          # at /mcp and on the canary at its own port's /mcp, each with the smoke key,
+          # which the canary takes: a canary just refreshed from stable answers
+          # as stable does. A window after every search compared nothing, exit 3.
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp > /tmp/tier-diff.out 2>&1 || rc=$?
+          if [ "$rc" != 0 ] || ! grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-diff.out || ! grep -F 'what moved: nothing' /tmp/tier-diff.out; then cat /tmp/tier-diff.out >&2; echo "the --diff of a canary just refreshed from stable did not pass (exit $rc)" >&2; exit 1; fi
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
+          if [ "$rc" != 3 ] || ! grep -F 'logged no searches in the window' /tmp/tier-empty.out; then cat /tmp/tier-empty.out >&2; echo "a --diff that compared nothing exited $rc, not 3" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
@@ -2545,10 +2623,11 @@ jobs:
       #   good second before the result. A buffering proxy delivers both
       #   together.
       # After the tier and canary steps: its search_thoughts is a semantic
-      # search the query log keeps, and the tier step's --replay re-embeds
-      # every logged query from tier.sh's container, which has no
+      # search the query log keeps, and until SMD-2875 the tier step's --replay
+      # re-embedded every logged query from tier.sh's container, which had no
       # host.docker.internal to reach the stub by (the first CI run, caught:
-      # getaddrinfo ENOTFOUND host.docker.internal).
+      # getaddrinfo ENOTFOUND host.docker.internal). The canary step's --diff,
+      # over HTTP since then, runs before this step's search is logged.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |

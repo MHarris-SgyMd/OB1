@@ -109,13 +109,15 @@ const child = (code: string, env: Record<string, string> = {}) => spawn(["-e", c
   const given = child(`import { mayReset } from "./connect.ts"; console.log(mayReset("postgres://u@db.example.com/x", {}), mayReset("postgres://u@db.example.com/x"), mayReset("postgres://u@localhost/x", {}), mayReset("postgres://u@localhost/x"));`, { OB1_ALLOW_REMOTE_DB: "1" });
   ok(given.out.trim() === "false true true true", `an explicit environment is the one read; the default is process.env (${given.out.trim()})`);
 
-  // deploy/tier.sh hands tier.ts every OB1_* variable of the stack's env file
-  // except the ones it decides itself — the override among them, set only for
-  // a short-form --to. The name the rule reads must be one it strips.
+  // deploy/tier.sh strips the ones it decides itself — the override among
+  // them, set only for a short-form --to — and hands tier.ts only the OB1_*
+  // names it lists (SMD-2875). The name the rule reads must be one it strips,
+  // and no override's name may be on its list.
   const tierSh = readFileSync(join(HERE, "..", "deploy", "tier.sh"), "utf8");
   const stripped = tierSh.match(/^\s*([A-Z0-9_|]+)\) continue ;;$/m)?.[1].split("|") ?? [];
   ok(stripped.includes(REMOTE_DB_FLAG), `deploy/tier.sh strips ${REMOTE_DB_FLAG} from what it passes on, and sets it itself (stripped: ${stripped.join(", ") || "none found"})`);
-  ok(/OB1_\*\|/.test(tierSh), "…while it passes every other OB1_* variable on — why a second override name would pass it");
+  const handed = tierSh.match(/^\s*((?:OB1_[A-Z0-9_]+\*?\|)+POSTGRES_PASSWORD)\) ;;$/m)?.[1].split("|") ?? [];
+  ok(handed.length > 1 && !handed.some((n) => /ALLOW_REMOTE|^OB1_\*$|^OB1_EVAL/.test(n)), `…and hands on a list of names, no override among them and no OB1_* wildcard (${handed.join(", ") || "no list found"})`);
   ok([...LOOPBACK_HOSTS].sort().join() === ["0.0.0.0", "127.0.0.1", "[::1]", "localhost"].join(), "the loopback set is the four named hosts, nothing more");
   ok(hostOf("postgres:///db") === "" && hostOf("not a url") === null && hostOf("postgres://Db.Example.COM/x") === "db.example.com", "hostOf: empty host \"\", unparseable null, lowercased");
 }
@@ -680,7 +682,8 @@ function callText(text: string, from: number): string {
   ok([...`await assertThrowawayDatabase(URL_);`.matchAll(UNAWAITED)].length === 0, "…and not an awaited call");
 
   const onDoor = sources.filter((f) => f !== "connect.ts" && /closeThenExit\(/.test(read(f)));
-  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "tier.ts", "migrate.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
+  // tier.ts left the list when its --replay/--diff, the verbs that exited inside a pool, moved onto HTTP (SMD-2875).
+  for (const must of ["hnsw-graph.ts", "graph-centrality.ts", "migrate.ts"]) ok(onDoor.includes(must), `${must} exits through the door`);
   const EXITS = /\bexit\s*\(|process\s*\[\s*["'`]exit["'`]\s*\]|=\s*process\.exit\b/;
   const CLOSES = /\.\s*(close|end)\s*\(/;
   /**
