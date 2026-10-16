@@ -11916,7 +11916,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   }
 }
 
-console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694)");
+console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
 {
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -11928,8 +11928,15 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   // pass's start would refuse: set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
-  /** Each extraction call's window ("whole" for a one-window thought) and the text's marker; each judgement's time. */
-  const extracts: { marker: string; part: string }[] = [];
+  /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
+  const extracts: { marker: string; part: string; at: number }[] = [];
+  /** Run as each extraction call begins, before its answer: a write the test makes mid-sleep at a known point (SMD-3008). */
+  let onExtract: ((marker: string) => Promise<void>) | null = null;
+  /** A judge on its own model (OB1_JUDGE_MODEL), its probes answering 500 while `judgeProbeDown` and its judgements 404 "not found" while `judgeMissing` (SMD-3008). */
+  const JUDGE = "stub-judge";
+  let judgeProbeDown = false, judgeMissing = false;
+  /** Run as each judgement arrives, before its answer. */
+  let onJudge: (() => void) | null = null;
   const judged: number[] = [];
   /** When each judgement's answer went back, and when each call for the stuck window began: the slot's order (review pass 5). */
   const judgedEnd: number[] = [];
@@ -11952,18 +11959,24 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
-      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/<thought_a>/.test(prompt)) {
+        onJudge?.();
+        if (body.model === JUDGE && judgeMissing) return Response.json({ error: { message: `model "${JUDGE}" not found, try pulling it first` } }, { status: 404 });
         judged.push(Date.now());
         await Bun.sleep(judgeHold38b);
         judgedEnd.push(Date.now());
         return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
       }
-      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : "short";
-      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole" });
+      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : /midnote-one/.test(prompt) ? "mid1" : /midnote-two/.test(prompt) ? "mid2" : /judgenote/.test(prompt) ? "judgenote" : /We bill/.test(prompt) ? "pair" : "short";
+      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole", at: Date.now() });
+      await onExtract?.(marker);
       if (marker === "stuck") stuckStarts.push(Date.now());
       if (marker === "stuck") {
         // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
@@ -11973,8 +11986,9 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
       }
       if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
-      // A window of the long document takes a second (the stuck thought's one window eight, above); the rest are quick.
-      await Bun.sleep(marker === "long" ? 1000 : 100);
+      // A window of the long document takes a second (the stuck thought's one window eight, above), a judgenote's
+      // longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2); the rest are quick.
+      await Bun.sleep(marker === "long" ? 1000 : marker === "judgenote" ? 1500 : 100);
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -12170,13 +12184,166 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
     assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
 
+    // Work that lands during a sleep — a sync's capture, which wakes nothing —
+    // goes ahead of a stalled thought (SMD-3008). One written before it is
+    // claimed is dated ahead of it, the stalled thought dated forward as the
+    // sleep began; one pending beside it in hand restarts extraction, the
+    // stalled thought moved behind it, and consolidation still joins past it
+    // in the same sleep. With neither, a capture waited behind it, the pool
+    // was never all stalled, and the join waited out the window too.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    extracts.length = 0;
+    judged.length = 0;
+    stuckCalls.length = 0;
+    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
+    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
+    const held3 = await capture("The stuckdoc note, held: one window the model takes eight seconds over.", 0, 15);
+    const [{ fp3 }] = await sql`SELECT content_fingerprint AS fp3 FROM thoughts WHERE id = ${held3}::uuid`;
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${held3}::uuid, ${EX}, ${fp3}, ${sig}, 3, 3)`;
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    const syncNote = async (text: string, axis: number) =>
+      ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    // Both notes as the pair's first call begins. The second stands for one
+    // that lands between the stalled thought's claim and the next poll, held
+    // there: dated just behind it — as a thought reclaimed from a lapsed lease
+    // with its old date would be — it is pending beside the thought in hand at
+    // every poll until a restart moves the thought behind it. Written as the
+    // stalled call began, it raced the join's poll (review pass 1).
+    let mid1 = "", mid2 = "";
+    onExtract = async (marker) => {
+      if (marker !== "pair" || mid1) return;
+      mid1 = await syncNote("The midnote-one, written by a sync during the sleep.", 16);
+      mid2 = await syncNote("The midnote-two, written by a sync during the sleep and queued behind the stalled thought.", 17);
+      await sql`UPDATE thought_work_claims SET enqueued_at = (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${held3}::uuid AND work_type = ${EX}) + interval '1 microsecond'
+                 WHERE thought_id = ${mid2}::uuid AND work_type = ${EX}`;
+    };
+    const midLines: { l: string; at: number }[] = [];
+    let stopMid: PassStop | null = null;
+    wakeReads.length = 0;
+    const midRun = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
+    let held3At: string | undefined;
+    const midJoined = await pollUntil(async () => {
+      if (judged.length === 0 || !midLines.some((x) => /consolidating first/.test(x.l))) return false;
+      held3At = await status(held3);
+      return true;
+    }, 45_000);
+    // Stopped hard: a soft stop would let the stalled thought in hand finish.
+    (stopMid as PassStop | null)?.();
+    await (stopMid as PassStop | null)?.();
+    await Promise.race([midRun, Bun.sleep(15_000)]);
+    onExtract = null;
+    const [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number } | undefined)[];
+    const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
+    // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
+    const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
+    const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
+    const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
+    const restartAt = midLines.find((x) => /extraction restarts, the stalled thought\(s\) after them/.test(x.l))?.at ?? Infinity;
+    const joinAtMid = midLines.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
+    assert(mid1 !== "" && firstAt("mid1") < firstAt("stuck"),
+      `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
+    // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
+    const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+      `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
+    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
+      `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+
+    // While consolidation waits for a judge that does not answer, extraction
+    // takes the newer work and leaves the stalled thought to wait for it: the
+    // judge's pool never drained, and parked extraction got nothing for the
+    // sleep (SMD-3008). The judge on its own model, as a judge that will not
+    // load beside a serving extraction model is; at its start (a probe
+    // answering 500) and mid-pass (judgements answering "not found", a missing
+    // model, which a follower waits out at once rather than after its pauses).
+    const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
+    const COJ = consolidateKey(JUDGE);
+    const judgeCase = async (mid: boolean) => {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${COJ})`;
+      extracts.length = 0;
+      judged.length = 0;
+      stuckStarts.length = 0;
+      stuckCalls.length = 0;
+      const stalledJ = await capture("The stuckdoc note, behind a judge that does not answer.", 0, 18);
+      const [{ fpj }] = await sql`SELECT content_fingerprint AS fpj FROM thoughts WHERE id = ${stalledJ}::uuid`;
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
+      await capture("We bill monthly, decided in March.", 3, 0);
+      await capture("We bill annually now.", 0, 0);
+      // At its start, beside a lease a scheduler gone left on a stalled thought
+      // of its own — not this process's, so it neither sets the let-out
+      // aside nor is claimed (a day left on it) — and with two workers, the
+      // let-out's one worker not claiming the stalled thought beside the
+      // note (review pass 2).
+      if (!mid) {
+        const foreign = await capture("The stuckdoc note another host's scheduler left a lease on.", 0, 21);
+        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'extract-otherhost-1-0-deadbeef', claimed_at = now(), ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                   WHERE thought_id = ${foreign}::uuid AND work_type = ${EX}`;
+        const [{ fpf }] = await sql`SELECT content_fingerprint AS fpf FROM thoughts WHERE id = ${foreign}::uuid`;
+        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${foreign}::uuid, ${EX}, ${fpf}, ${sig}, 3, 3)`;
+      }
+      // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
+      judgeProbeDown = !mid;
+      judgeMissing = false;
+      onJudge = mid ? () => { judgeMissing = true; judgeProbeDown = true; onJudge = null; } : null;
+      const jl: { l: string; at: number }[] = [];
+      let stopJ: PassStop | null = null;
+      // Mid-pass, let-outs two seconds apart, so a wait still read once the judge answers would let the second note out (review pass 1).
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
+      // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
+      const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
+      await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
+      if (!mid) await Bun.sleep(1500);
+      const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
+      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // A second note: at its start, while the judge is still down — let out
+      // at most once a minute, it waits for consolidation; mid-pass, once the
+      // judge answers — the wait over, it is not let out (review pass 1).
+      let noteB = "";
+      if (!mid) {
+        noteB = await syncNote("The judgenote, again, while the judge is still down.", 20);
+        await Bun.sleep(2500);
+      }
+      const flipAt = Date.now();
+      judgeProbeDown = false;
+      judgeMissing = false;
+      if (mid && (await pollUntil(async () => seen(/\[consolidate\].*the provider answers again/) < Infinity, 30_000))) {
+        noteB = await syncNote("The judgenote, again, once the judge answers.", 20);
+      }
+      const resumed = await pollUntil(async () => judged.length > 0 && seen(/consolidation drained — extracting beside it/) < Infinity, 60_000);
+      (stopJ as PassStop | null)?.();
+      await (stopJ as PassStop | null)?.();
+      await Promise.race([runJ, Bun.sleep(30_000)]);
+      onJudge = null;
+      const joinJ = seen(/consolidating first/), unparkJ = seen(/consolidation waits for its provider — extracting the 1 newer thought\(s\) meanwhile/);
+      const reparkJ = seen(/set aside again until consolidation drains/), resumeJ = seen(/consolidation drained — extracting beside it/);
+      const noteCall = extracts.find((e) => e.marker === "judgenote")?.at ?? Infinity;
+      const noteBCall = extracts.filter((e) => e.marker === "judgenote")[1]?.at ?? Infinity;
+      const letOuts = jl.filter((x) => /consolidation waits for its provider — extracting/.test(x.l)).length;
+      const rel = (t: number) => (t === Infinity ? "never" : `+${t - joinJ} ms`);
+      // Claimed after the note, by its place, the stalled thought is set aside
+      // at the next poll: its call cut within a poll, and none begun after.
+      const stuckAside = stuckCalls.filter(([a, b]) => a > unparkJ && a < resumeJ && (b - a > 2500 || a > reparkJ || a < noteCall + 1400)).length;
+      assert(noteDone && unparkJ > joinJ && noteCall > unparkJ && noteCall < flipAt && reparkJ > noteCall && reparkJ < flipAt,
+        `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
+      assert(noteB !== "" && letOuts === 1 && noteBCall > resumeJ,
+        `…a second note ${mid ? "written once the judge answers" : "written while the judge is still down"} is not let out — ${mid ? "the wait is over" : "at most once a minute"} — and is extracted once consolidation drains (${letOuts} let-out(s); the note ${rel(noteBCall)}, resumed ${rel(resumeJ)})`);
+      assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
+        `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
+    };
+    await judgeCase(false);
+    await judgeCase(true);
+    judgeProbeDown = false;
+    judgeMissing = false;
+
     // A kept row speaks for the thought only at its text and windowing now:
     // one of other text (an edit since) or another windowing is not counted
     // stalled, nor named — the dry run reads the scheduler's own gate.
     await sql`DELETE FROM thoughts`;
-    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
-    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
-    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
     const planted = await capture("The stuckdoc note, planted.", 0, 8);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted}::uuid])`;
     const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${planted}::uuid`;
@@ -13146,6 +13313,174 @@ console.log("\n[43] Migration 095: the stated-status label's inputs read the hit
   } finally {
     await tsql`DELETE FROM thoughts WHERE metadata->>'issue' LIKE 'ZS-%' AND content LIKE '% — a ticket (label-inputs fixture)'`;
     await tsql.close();
+  }
+}
+
+console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
+{
+  const xsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    const [{ offered, installed }] = (await xsql`SELECT (SELECT count(*)::int FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered, (SELECT count(*)::int FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed`) as { offered: number; installed: number }[];
+    assert(offered === installed, `096 created pg_stat_statements exactly where the server offers it (offered ${offered}, installed ${installed})`);
+    if (installed === 1) {
+      // Readable by pg_monitor alone: PUBLIC's default grant revoked, so the plugins' login role and the servers' reach neither view.
+      const [g] = (await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') AS public_view, has_table_privilege('public', 'pg_stat_statements_info', 'SELECT') AS public_info,
+                                     has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS public_fn,
+                                     has_table_privilege('pg_monitor', 'pg_stat_statements', 'SELECT') AS monitor_view, has_function_privilege('pg_monitor', 'pg_stat_statements(boolean)', 'EXECUTE') AS monitor_fn`) as Record<string, boolean>[];
+      assert(!g.public_view && !g.public_info && !g.public_fn && g.monitor_view && g.monitor_fn, `096 revokes the views and their function from PUBLIC and grants them to pg_monitor (${JSON.stringify(g)})`);
+    }
+    const [{ superuser }] = (await xsql`SELECT rolsuper AS superuser FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean }[];
+    if (installed !== 1 || !superuser) {
+      skip("096 as a migrator that is no superuser, the grants a restore gives back, and login-role.ts --member-of", installed !== 1 ? "the server does not offer pg_stat_statements" : "the connection's role is not a superuser");
+    } else {
+      const publicReads = async () => ((await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS p`) as { p: boolean }[])[0].p;
+      // 096 as a role that is no superuser and owns nothing of the extension's: where it is confined already, PUBLIC holding nothing, its GRANT is an error, not a warning (review pass 2: the run stopped there); where it is not there, an untrusted extension may not be created (review pass 1: the run stopped there too). Both are warnings.
+      await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_nosuper; CREATE ROLE ob1_live_nosuper NOLOGIN`);
+      const file096 = readFileSync(join(HERE, "migrations", "096_pg_stat_statements.sql"), "utf8");
+      const asNosuper = async (): Promise<string | null> => {
+        try {
+          await xsql.begin(async (tx) => { await tx.unsafe("SET LOCAL ROLE ob1_live_nosuper"); await tx.unsafe(file096); });
+          return null;
+        } catch (e) {
+          return (e as Error).message;
+        }
+      };
+      let confinedRun: string | null = "not run", stillConfined = false, leftOutRun: string | null = "not run";
+      try {
+        confinedRun = await asNosuper();
+        stillConfined = !(await publicReads());
+        await xsql.unsafe("DROP EXTENSION pg_stat_statements");
+        leftOutRun = await asNosuper();
+      } finally {
+        await xsql.unsafe("DROP ROLE ob1_live_nosuper");
+      }
+      const [{ left }] = (await xsql`SELECT count(*)::int AS left FROM pg_extension WHERE extname = 'pg_stat_statements'`) as { left: number }[];
+      assert(confinedRun === null && stillConfined, `096 run by a role that neither owns the confined views nor holds a grant on them warns and leaves the grants as they were, not a failure (${confinedRun ?? "applied"}; still confined ${stillConfined})`);
+      assert(leftOutRun === null && left === 0, `096 run by a role that is no superuser leaves pg_stat_statements out with a warning, not a failure (${leftOutRun ?? "applied"}; installed ${left})`);
+      // The run that applies 096 as a role that may not create the extension says it left it out, and what applies it (review pass 2: no suite ran that line).
+      const MIG_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mig:ob1-live-mig-password-0123@");
+      if (MIG_URL === URL_) {
+        skip("a plain run as a role that is no superuser says it left pg_stat_statements out", "DATABASE_URL carries no credentials to swap for the role's");
+      } else {
+        let leftOutNote: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig`);
+          await xsql`DELETE FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`;
+          leftOutNote = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const [{ recorded }] = (await xsql`SELECT count(*)::int AS recorded FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`) as { recorded: number }[];
+        assert(leftOutNote.code === 0 && /096_pg_stat_statements\.sql {2}left pg_stat_statements out: the server offers it, and this role could not create it/.test(leftOutNote.stdout) && /psql -d '[^']+' -v ON_ERROR_STOP=1 -f db\/migrations\/096_pg_stat_statements\.sql/.test(leftOutNote.stdout) && recorded === 1,
+          `a plain run as a role that is no superuser applies 096, says it left pg_stat_statements out and the file to apply as a superuser, exit 0 (exit ${leftOutNote.code}; ${(leftOutNote.stdout.split("\n").find((l) => /left pg_stat_statements out/.test(l)) ?? leftOutNote.stderr.trim().split("\n")[0] ?? "").trim().slice(0, 140)}; recorded ${recorded})`);
+      }
+      // A tier refresh's pg_restore -x creates the extension again with its own grants, PUBLIC's among them, under a ledger that records 096: the next plain run takes them back, and the one after has nothing to do.
+      await xsql.unsafe("CREATE EXTENSION pg_stat_statements");
+      const restored = await publicReads();
+      const healed = await migrate();
+      const after = await publicReads();
+      const quiet = await migrate();
+      assert(restored && healed.code === 0 && /↻ {2}096_pg_stat_statements\.sql {2}ran again: PUBLIC could read pg_stat_statements/.test(healed.stdout) && !after && quiet.code === 0 && !/096_pg_stat_statements\.sql {2}ran again/.test(quiet.stdout),
+        `a plain run takes back the grants a restore gave PUBLIC on pg_stat_statements, says so, and the next run is quiet (restored ${restored}, exit ${healed.code}, after ${after}, quiet exit ${quiet.code}: ${healed.stdout.split("\n").find((l) => /ran again/.test(l)) ?? "no ran-again line"})`);
+      // The function alone given back: the view reads through it, so the run reads the functions' grants too (review pass 2: that half of the read went untested).
+      await xsql.unsafe("GRANT EXECUTE ON FUNCTION pg_stat_statements(boolean) TO PUBLIC");
+      const fnHealed = await migrate();
+      const fnAfter = await publicReads();
+      assert(fnHealed.code === 0 && /ran again: PUBLIC could read pg_stat_statements/.test(fnHealed.stdout) && !fnAfter,
+        `a grant to PUBLIC on the function alone is taken back by the next plain run too (exit ${fnHealed.code}, after ${fnAfter})`);
+      // A plain run as a role that does not own the views, over a grant to PUBLIC: it may not take it back, warns naming the file, and exits 0; the owner's next run does (review pass 3: that branch went untested).
+      if (MIG_URL !== URL_) {
+        let warned: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig; GRANT SELECT ON pg_stat_statements TO PUBLIC`);
+          warned = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const stillPublic = await publicReads();
+        const ownerRun = await migrate();
+        const ownerAfter = await publicReads();
+        assert(warned.code === 0 && /⚠ {2}096_pg_stat_statements\.sql {2}ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can/.test(warned.stderr) && /-f db\/migrations\/096_pg_stat_statements\.sql/.test(warned.stderr) && stillPublic && ownerRun.code === 0 && !ownerAfter,
+          `a run as a role that does not own the views warns, names the file, exits 0 and leaves PUBLIC's grant; the owner's next run takes it (exit ${warned.code}: ${warned.stderr.trim().split("\n")[0]?.slice(0, 120)}; public ${stillPublic} → ${ownerAfter})`);
+      }
+
+      // login-role.ts --member-of pg_monitor on a real server: created, run again, and each membership it would not give refused (review pass 1: no suite ran it).
+      const MROLE = "ob1_live_monitor";
+      const MGR_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mgr:ob1-live-mgr-password-0123@");
+      const dropM = () => xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_monitor_member; DROP ROLE IF EXISTS ${MROLE}; DROP ROLE IF EXISTS ob1_live_monitor_adm; DROP ROLE IF EXISTS ob1_live_monitor_mgd; DROP ROLE IF EXISTS ob1_live_monitor_mgd2; DROP ROLE IF EXISTS ob1_live_mgr`);
+      const loginRoleAs = (url: string, name: string, ...extra: string[]) => {
+        const child = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "login-role.ts"), "--role", name, "--password-env", "OB1_LIVE_MONITOR_PW", "--url", url, ...extra], { cwd: HERE, env: { ...process.env, OB1_ENV_FILES: "off", OB1_LIVE_MONITOR_PW: "ob1-live-monitor-password-0123" } as Record<string, string> });
+        return { code: child.exitCode, out: child.stdout.toString(), err: child.stderr.toString() };
+      };
+      const loginRole = (...extra: string[]) => loginRoleAs(URL_!, MROLE, ...extra);
+      const inherits = async (name: string) => ((await xsql`SELECT pg_has_role(${name}, 'pg_monitor', 'USAGE') AS u`) as { u: boolean }[])[0].u;
+      const membership = async () => ((await xsql`SELECT bool_or(m.admin_option) AS admin, bool_or((to_jsonb(m) ->> 'set_option')::boolean) AS set, count(*)::int AS n FROM pg_auth_members m WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${MROLE}) AND m.roleid = 'pg_monitor'::regrole`) as { admin: boolean | null; set: boolean | null; n: number }[])[0];
+      await dropM();
+      try {
+        const created = loginRole("--member-of", "pg_monitor");
+        const m1 = await membership();
+        // NOINHERIT between the runs, and on Postgres 16 the grant itself WITH INHERIT FALSE (where a role's INHERIT only sets new grants'): a member that inherits nothing holds none of pg_monitor's privileges (review pass 2), and the run puts both back.
+        const [{ pg16 }] = (await xsql`SELECT current_setting('server_version_num')::int >= 160000 AS pg16`) as { pg16: boolean }[];
+        await xsql.unsafe(`ALTER ROLE ${MROLE} NOINHERIT${pg16 ? `; GRANT pg_monitor TO ${MROLE} WITH INHERIT FALSE` : ""}`);
+        const inheritsBefore = await inherits(MROLE);
+        const again = loginRole("--member-of", "pg_monitor");
+        const inheritsAgain = await inherits(MROLE);
+        assert(created.code === 0 && /created .*a member of pg_monitor/.test(created.out) && m1.n > 0 && m1.admin === false && m1.set !== true && !inheritsBefore && again.code === 0 && /updated/.test(again.out) && inheritsAgain,
+          `login-role.ts --member-of pg_monitor creates the role a member of pg_monitor without ADMIN OPTION or (Postgres 16) SET, and run again over a membership that inherits nothing updates it holding pg_monitor's privileges (exit ${created.code}/${again.code}; ${JSON.stringify(m1)}; inherits ${inheritsBefore} → ${inheritsAgain})`);
+        await xsql.unsafe(`GRANT pg_monitor TO ${MROLE} WITH ADMIN OPTION`);
+        const admin = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy: each grantor's row named (review pass 2).
+        const printed = admin.err.match(/REVOKE ADMIN OPTION FOR [^;]*;/g) ?? [];
+        for (const statement of printed) await xsql.unsafe(statement);
+        const afterRemedy = loginRole("--member-of", "pg_monitor");
+        assert(printed.length > 0 && printed.every((st) => / GRANTED BY /.test(st)) && afterRemedy.code === 0,
+          `the WITH ADMIN OPTION refusal prints a REVOKE … GRANTED BY for each grantor, and run as printed the next run passes (${printed.join(" ") || "none printed"}; exit ${afterRemedy.code}: ${afterRemedy.err.trim().slice(0, 120)})`);
+        await xsql.unsafe(`CREATE ROLE ob1_live_monitor_member NOLOGIN; GRANT ${MROLE} TO ob1_live_monitor_member`);
+        const member = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy (review pass 4: a plain REVOKE could fail on a dependent grant).
+        const memberPrinted = member.err.match(/REVOKE "?ob1_live_monitor"? FROM [^;]*;/g) ?? [];
+        for (const statement of memberPrinted) await xsql.unsafe(statement);
+        const afterMemberRemedy = loginRole("--member-of", "pg_monitor");
+        // A superuser migrator is never made a member of what it creates: one made a member by hand is refused, not exempt, or its inheriting members would hold pg_monitor (review pass 4).
+        await xsql.unsafe(`GRANT ${MROLE} TO CURRENT_USER`);
+        const superMember = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE ${MROLE} FROM CURRENT_USER`);
+        const [{ me }] = (await xsql`SELECT current_user AS me`) as { me: string }[];
+        assert(memberPrinted.length > 0 && memberPrinted.every((st) => / GRANTED BY .* CASCADE;$/.test(st)) && afterMemberRemedy.code === 0 && superMember.code === 2 && new RegExp(`${me} is a member of ${MROLE}`).test(superMember.err),
+          `the members refusal prints each row's REVOKE … GRANTED BY … CASCADE, which run as printed lets the next run pass, and a superuser migrator made a member is refused, not exempt (${memberPrinted.join(" ") || "none printed"}; exit ${afterMemberRemedy.code}; ${superMember.code}: ${superMember.err.trim().slice(0, 100)})`);
+        await xsql.unsafe(`DROP ROLE ob1_live_monitor_member; GRANT pg_read_all_data TO ${MROLE}`);
+        const other = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE pg_read_all_data FROM ${MROLE}`);
+        const without = loginRole();
+        assert(admin.code === 2 && /WITH ADMIN OPTION/.test(admin.err) && member.code === 2 && /ob1_live_monitor_member is a member of ob1_live_monitor, and would hold pg_monitor through it/.test(member.err) && other.code === 2 && /is a member of pg_read_all_data/.test(other.err) && without.code === 2 && /is a member of pg_monitor/.test(without.err),
+          `login-role.ts refuses the membership WITH ADMIN OPTION, a role with members, another membership, and pg_monitor's without --member-of, each exit 2 (${[admin, member, other, without].map((r) => `${r.code}: ${r.err.trim().slice(0, 90)}`).join(" | ")})`);
+        // A migrator that is no superuser, with CREATEROLE and pg_monitor WITH ADMIN OPTION (a managed Postgres's shape): on Postgres 16 it is made an ADMIN-only member of each role it creates, which holds nothing through it, and its re-run was refused for that row (review pass 2).
+        if (MGR_URL === URL_) {
+          skip("a CREATEROLE migrator that is no superuser runs login-role.ts --member-of twice", "DATABASE_URL carries no credentials to swap for the role's");
+        } else {
+          await xsql.unsafe(`CREATE ROLE ob1_live_mgr LOGIN CREATEROLE PASSWORD 'ob1-live-mgr-password-0123'; GRANT pg_monitor TO ob1_live_mgr WITH ADMIN OPTION`);
+          const mgd1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgd2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgdInherits = await inherits("ob1_live_monitor_mgd");
+          assert(mgd1.code === 0 && /created/.test(mgd1.out) && mgd2.code === 0 && /updated/.test(mgd2.out) && mgdInherits,
+            `a CREATEROLE migrator that is no superuser creates the role and runs again, its own ADMIN-only row on it no refusal (exit ${mgd1.code}/${mgd2.code}: ${(mgd2.err || mgd2.out).trim().slice(0, 120)}; inherits ${mgdInherits})`);
+          // Another role's ADMIN-only row is not the creator's: it can grant itself the role, and pg_monitor's reads with it (review pass 3: a filter on INHERIT and SET let it through).
+          await xsql.unsafe(`CREATE ROLE ob1_live_monitor_adm NOLOGIN; GRANT ob1_live_monitor_mgd TO ob1_live_monitor_adm WITH ${pg16 ? "ADMIN TRUE, INHERIT FALSE, SET FALSE" : "ADMIN OPTION"}`);
+          const mgdAdm = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          await xsql.unsafe("DROP ROLE ob1_live_monitor_adm");
+          // A creator whose createrole_self_grant makes its own row INHERIT and SET (Postgres 16's setting for the old behaviour) runs again too (review pass 3: refused from the second run on).
+          await xsql.unsafe(`ALTER ROLE ob1_live_mgr SET createrole_self_grant = 'set, inherit'`);
+          const self1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          const self2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          assert(mgdAdm.code === 2 && /ob1_live_monitor_adm is a member of ob1_live_monitor_mgd/.test(mgdAdm.err) && self1.code === 0 && self2.code === 0 && /updated/.test(self2.out),
+            `another role holding ADMIN OPTION on the role is refused, and a creator's own row, under createrole_self_grant too, never is (exit ${mgdAdm.code}: ${mgdAdm.err.trim().slice(0, 100)} | ${self1.code}/${self2.code}: ${(self2.err || self2.out).trim().slice(0, 100)})`);
+        }
+      } finally {
+        await dropM();
+      }
+    }
+  } finally {
+    await xsql.close();
   }
 }
 

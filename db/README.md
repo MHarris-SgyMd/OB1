@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2874 assertions: 2874 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-five (95) migrations applied, and
+`bun test-schema.ts` prints `2878 assertions: 2878 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-six (96) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1566,6 +1566,34 @@ read when only `open` is). It refuses to apply without 068 or 060. test-schema
 [85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
 test-store-sql and test-store-postgrest [17].
 
+Migration 096 creates `pg_stat_statements` where the server offers it
+(SMD-1849 PR 3b): each SQL statement's calls, times, rows and blocks, which
+the observability profile's exporter reads into its collector beside the
+servers' spans (`deploy/README.md`, "The observability profile"). It is
+created in public, as `vector` and `pg_trgm` are, only where
+`pg_available_extensions` lists it, so a managed Postgres without it migrates
+the same; nothing in the schema depends on it. It is not a trusted extension:
+a migrator that is not a superuser leaves it out, the run going on and saying
+so, unlike 001's `vector`. Its two views and their functions, those that exist
+(an extension older than 1.9 has no `pg_stat_statements_info`), are revoked
+from `PUBLIC` and granted to `pg_monitor` alone, so the plugins' login role
+and the roles `--grant` gives the servers reach none of them, as preflight's
+"plugin tables" row would say; a superuser reads them, as compose's servers
+connect. A restore without privileges — a tier refresh's — creates the
+extension again with `PUBLIC`'s grants under a ledger that already records
+096, so every plain `migrate.ts` run reads those grants and runs 096 again
+where `PUBLIC` holds one, saying so; a role that may not change them (not
+their owner) leaves them as they were with a warning, and the run says that
+instead, with the file to apply as their owner. Its view needs the library
+loaded at the server's start: `deploy/compose.yaml`'s `postgres` and each
+tier's start with
+`shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-pg_stat_statements}`,
+`track_utility` off, so a utility statement (`ALTER ROLE … PASSWORD`) is never
+recorded with its text, and `track_io_timing` on. Elsewhere a read of the view
+says the library is not loaded, and the brain never reads it. test-schema
+[86], test-live [44], test-upgrade [23]; CI's "Postgres counts the brain's
+statements in pg_stat_statements" and the tier refresh's copy.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -1626,14 +1654,20 @@ the scheduler after either, since it reads the privilege once at its start.
 Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
-a member of no role, its settings in every database cleared; refused if one
-survives, as a setting only a superuser may reset does a migrator that is not),
+a member of no role but the one `--member-of` names — `pg_monitor`, the one
+it takes, for the observability profile's `ob1_monitor` (SMD-1849), granted
+without ADMIN OPTION and inherited — its settings in every database cleared;
+refused if one survives, as a setting only a superuser may reset does a migrator that is not),
 its password sent as a SCRAM verifier, for a compose service that connects as
 a role of its own: the orchestration runner's `ob1_orchestration_runner`
 holds capture, worker, structure and extraction, what its ingester
 and reembed run (measured), and not the server group, whose writes to
 `ob1_agent_keys` could clear a key's revocation. `login-role.ts` refuses a
-role that is a superuser, a member of another role or the owner of anything,
+role that is a superuser, a member of another role (of `--member-of`'s WITH
+ADMIN OPTION too, each grantor's REVOKE printed, and, with `--member-of`, one
+with members of its own, WITH ADMIN OPTION alone too, each row's REVOKE
+printed — but for the migrator's own rows when it is no superuser, which
+Postgres 16 gives such a creator on each role it creates) or the owner of anything,
 or whose name a schema here bears (first on its search_path), and `--exact` one still holding a privilege it cannot revoke (a default
 privilege naming it, a grant in another database). Under that role the `ANALYZE
 thought_work_claims` that reembed and 015's `enqueue_thoughts` run (the
@@ -3093,19 +3127,37 @@ meanwhile misses its pair with such a thought, which consolidation reaches
 from its newer side only and does not revisit. Once taken, the decision
 holds for the rest of the sleep. Stalled thoughts go last: as each sleep
 begins, every thought a stop has taken moves behind new captures, the least
-stalled first, so the awake period's captures are extracted first (a wake dated it at the wake, and
-they waited behind it all day); and when consolidation joins past, extraction
-is set aside — stopped, if in hand with a stalled thought — until
-consolidation's pool drains, then resumes, so on a one-slot model the judge
-does not wait behind the window, and a night still reaches the thought. It is
-tried in every sleep once consolidation's pool drains, and finished by the
-first sleep long enough for both. Limits stand: sleeps of about a minute,
-each under the stall floor, neither stall a slow window nor let it finish,
-and consolidation waits on it until a longer sleep; a capture made during a
-sleep (a sync write, which does not wake the brain) while a stalled thought is
-in hand queues behind it, and with one worker holds the join back for that
-sleep; and while the judge's provider is down consolidation does not drain,
-so extraction stays set aside for the sleep (SMD-3008).
+stalled first, so the awake period's captures are extracted first (a wake
+dated it at the wake, and they waited behind it all day). They are dated 30
+days ahead, so a capture made during the sleep — a sync write's, which does
+not wake the brain — goes ahead of them too; claims are taken in that order,
+which reads no clock (SMD-3008). One that lands while extraction has a
+stalled thought in hand, before consolidation joins, restarts extraction —
+two polls reading only stalled thoughts in hand and newer work behind them,
+at most once a minute — so the capture is extracted and the join follows in
+the same sleep, where with one worker both waited out the window. When
+consolidation joins past, extraction is set aside — stopped, if in hand with
+a stalled thought — until consolidation's pool drains, then resumes, so on a
+one-slot model the judge does not wait behind the window, and a night still
+reaches the thought. It is tried in every sleep once consolidation's pool
+drains, and finished by the first sleep long enough for both. Limits stand:
+sleeps of about a minute, each under the stall floor, neither stall a slow
+window nor let it finish, and consolidation waits on it until a longer
+sleep; and once consolidation has joined, a stalled thought in hand keeps
+its turn, and a capture made then waits for the next sleep, where it goes
+first, as one behind a thought still gaining windows, or a stall or two
+short of the join, waits for its window. While consolidation waits for its
+provider — at its start, or mid-pass past its workers' pauses — its pool
+cannot drain: extraction is let out for the newer work meanwhile, at most
+once a minute, and set aside again once it reaches the stalled thought(s),
+which wait for consolidation, so the judge, on the same chat endpoint, does
+not queue behind their window when it answers (SMD-3008); the let-out runs
+one worker, its claims read by this process's worker ids so a lease another
+left does not count, and each stalled thought it reaches is stopped, a stop
+counted on it. If the judge answers and consolidation drains while it is
+out, it goes on with one worker under `--workers 1`, and with more it is
+set aside once it holds nothing, so the drain's resume starts them all. Mid-pass, a judge answering 5xx is waited for only past those
+pauses, a minute and more.
 A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
@@ -4060,11 +4112,12 @@ claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working
   --header "x-brain-key: <key>"
 ```
 
-A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
-same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
+A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers at
+`/mcp` on a loopback port of its own (SMD-2874; "A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
-key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`:
-`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
+key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`
+(one key opens both: the canary takes stable's keys):
+`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as
 Basic beside the key, on any Bun, and are in neither the label nor the
@@ -4541,8 +4594,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2874 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1352 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2878 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1375 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

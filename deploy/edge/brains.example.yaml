@@ -12,8 +12,8 @@
 #              loopback alone;
 # brains       each brain by name — lower-case letters, digits and hyphens,
 #              starting with a letter — and the port it is published on, on
-#              127.0.0.1: SERVER_PORT in its env file (8000 unset), or a
-#              canary's `canary.sh up --port N`.
+#              127.0.0.1: SERVER_PORT in its env file (8000 unset; a
+#              canary's is the --port canary.sh was first given).
 #
 # With this file — stable on 8010, a canary stood up with --port 8011 — stable
 # is http://stable.localhost:8090/mcp and the canary
