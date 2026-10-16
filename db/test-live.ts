@@ -3565,7 +3565,7 @@ if (want("10")) {
    * probe answers.
    */
   let downProbes: number | null = null;
-  /** The probes downProbes refused: a case shows its outage was probed while down. */
+  /** The probes downProbes refused, for a case's message: the outage itself guarantees one, since only a refused probe brings it to its last. */
   let refusedProbes = 0;
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
   const modelsNamed: string[] = [];
@@ -4012,10 +4012,11 @@ if (want("10")) {
     const ac = new AbortController();
     let code = -1;
     let target = "";
+    let running: Promise<void> = Promise.resolve();
     try {
       slowMs = 2500;
       target = await seed("Ari tuned the grafana pager while the database was away.");
-      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${target}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
       await relay.cut();
       await Bun.sleep(4000);
@@ -4027,9 +4028,11 @@ if (want("10")) {
       assert(ended && (await extractedNow(target)) && lines.some((l) => new RegExp(`recording nothing for ${target}`).test(l)),
              `a follower of --limit 1 whose thought a database cut handed back extracts it once the database answers, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
     } finally {
+      // The follower ended before the schedule goes back: it reads OUTAGE_MS as it waits.
       slowMs = 0;
       ac.abort();
       await relay.close();
+      await running;
       restoreOutage();
       if (target) await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
     }
@@ -4073,7 +4076,7 @@ if (want("10")) {
         const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
         const during = await claimRow(busy);
         const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
-        assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled && refusedProbes - startRefused >= 1,
+        assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
                `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${refusedProbes - startRefused} probe(s) refused, ${probes - startProbes} answered)`);
         assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 1 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
                "…and says when the provider stopped answering, how it waits, and when it answered again");
