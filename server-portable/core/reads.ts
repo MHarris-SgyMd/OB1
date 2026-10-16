@@ -148,8 +148,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
-      // Status types only, as the reply: an MCP server older than this REST core passes the field through to ChatGPT as it stands (review pass 5).
-      ...(moved[t.id]?.moved.length ? { moved: typesOf(moved[t.id].moved), ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
+      ...resultLabel(moved[t.id]),
     })),
   });
 }
@@ -215,6 +214,18 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
  * brain before 095, or a role without ob1_config, labels nothing and the
  * search goes on.
  */
+/** A search_thoughts hit's label fields: `[]` when it names no ticket, null when its tickets were not checked, the unread keys counted. */
+export const hitLabel = (content: string, checked: MovedHit | undefined): { moved: Moved[] | null; movedNotRead: number } =>
+  ({ moved: ticketsNamed(content).length === 0 ? [] : (checked?.moved ?? null), movedNotRead: checked?.notRead ?? 0 });
+
+/**
+ * A compat result's label fields, only where a ticket moved, in status types:
+ * an MCP server older than this REST core passes them through to ChatGPT as
+ * they stand (review pass 5), so no board name and no empty field.
+ */
+export const resultLabel = (checked: MovedHit | undefined): { moved?: MovedType[]; movedNotRead?: number } =>
+  checked?.moved.length ? { moved: typesOf(checked.moved), ...(checked.notRead > 0 ? { movedNotRead: checked.notRead } : {}) } : {};
+
 export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, MovedHit>> {
   const naming = hits.filter((h) => ticketsNamed(h.content).length > 0);
   if (naming.length === 0) return {};
@@ -267,7 +278,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, moved: ticketsNamed(t.content).length === 0 ? [] : (moved[t.id]?.moved ?? null), movedNotRead: moved[t.id]?.notRead ?? 0,
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]),
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,
