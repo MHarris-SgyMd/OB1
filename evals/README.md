@@ -3791,6 +3791,113 @@ Caveats:
   two accepted proposals. Recall on supersessions other writers would set is
   not measured here.
 
+## Settling the judge's easy pairs with decider-4b: declined (SMD-3058)
+
+`eval-judge-decide.ts`. Every candidate pair costs the consolidation judge one
+LLM call with both thoughts' text, and nearly every pair ends unrelated,
+related, evolves or duplicate. The spike asked whether the typed-decision tier
+(decider-4b behind `ob1-jev/1`, SMD-2050) could settle those pairs cheaply and
+send only the uncertain ones, and every possible `outdates`, to the LLM judge.
+It asks three decisions of every pair in `eval-judge.ts`'s export, read as
+prompt 4 renders the two thoughts, so both framings score from one run:
+
+* **S**, binary: "THOUGHT A and THOUGHT B are about the same subject";
+* **T**, a choice among related, evolves, duplicate and outdates: the
+  two-pass framing's second question, used where S says same subject;
+* **C**, a choice among all five verdicts: the one-pass framing.
+
+The options carry prompt 4's verdict definitions. The decider never settles
+`outdates`, since a proposal needs the judge's direction and quote, so a
+cascade loses a supersession only by settling it as something else.
+
+```bash
+JEV_PORT=8021 <venv>/bin/python ../jev/decider/serve.py      # decider-4b by hand: jev/decider/README.md (SMD-2265 deploys it)
+OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
+  bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/decider.jsonl
+OB1_JUDGE_MODEL=qwen2.5:7b bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/answers-7b.jsonl --concurrency 1 --logprobs 10
+bun eval-judge-decide.ts --pairs … --decider /private/tmp/decider.jsonl --judge 7b=/private/tmp/answers-7b.jsonl --judge 27b=…
+```
+
+**The set** (dogfood stable, 2026-10-16): 127 rejected and 2 accepted
+proposals, 135 linked ticket pairs (16 duplicate_of, 40 child_of, 40 blocks,
+39 relates_to), 60 pointer pairs and 120 candidates: 444 pairs, 62 of them
+true supersessions. Each judge ran one pair at a time on this Mac (Ollama,
+temperature 0), and decider-4b on PyTorch over the GPU.
+
+**What the decider says**, by its one-pass verdict:
+
+| label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
+|---|---|---|---|---|---|---|---|
+| candidates | 120 | 86 | 4 | 17 | 0 | 13 | 0.05 |
+| pointer pairs (true supersessions) | 60 | 0 | 10 | 2 | 37 | 11 | 0.99 |
+| accepted proposals | 2 | 0 | 0 | 0 | 0 | 2 | 0.93 |
+| rejected proposals | 127 | 14 | 5 | 86 | 0 | 22 | 0.69 |
+| linked: relates_to | 39 | 27 | 3 | 9 | 0 | 0 | 0.04 |
+| linked: blocks, child_of, duplicate_of | 96 | 14 | 16 | 64 | 0 | 2 | 0.52–0.79 |
+
+**The cascade.** Each band is picked from the data: no supersession the judge
+caught is lost, and the most candidates are settled.
+
+| judge, framing and band | settled: candidates / all | true supersessions caught | false proposals | judge calls | model s per pair |
+|---|---|---|---|---|---|
+| 7B alone | — | 2 of 62 | 3 | 444 | 3.6 |
+| 7B, one-pass: top ≥ 0.6, outdates ≤ 0.3 | 66% / 46% | 2 of 62 | 2 | 241 | 4.4 |
+| 7B, two-pass: same ≤ 0.3 unrelated; ≥ 0.6, then top ≥ 0.5, outdates ≤ 0.2 | 83% / 65% | 2 of 62 | 2 | 157 | 4.7 |
+| 27B alone | — | 23 of 62 | 17 | 444 | 13.0 |
+| 27B, one-pass: top ≥ 0.7, outdates ≤ 0.3 | 58% / 32% | 23 of 62 | 17 | 303 | 11.4 |
+| 27B, two-pass: same ≤ 0.3 unrelated; ≥ 0.6, then top ≥ 0.6, outdates ≤ 0.2 | 81% / 54% | 23 of 62 | 17 | 204 | 9.4 |
+
+Picked on one half of the pairs and scored on the other, every band loses at
+most one supersession.
+
+**Why it is declined.**
+
+* **It isn't cheap here.** A decision costs a median 2.2 s on a 2,200-token
+  pair, about 1 ms a token, which is 60% of a 7B judge call (3.6 s). Behind the
+  7B, the default judge, every cascade costs more model time than the judge
+  alone: 4.4–4.7 s a pair against 3.6 s, though it calls the 7B half as often.
+* **It changes what the pass writes.** Its confident verdicts are mostly
+  "unrelated" (86 of 120 candidates), where both judges see related or evolving
+  pairs.
+  * On the candidates it settles, it gives the 7B's own verdict 71–81% of the
+    time and the 27B's 38–49%. The difference is relations dropped: 14–28 of
+    the 7B's per 120 candidates, and 36–59 of the 27B's.
+  * The labels side with the judges. On pairs the board links, the 27B is
+    right on 124 of 135 and the 7B on 113, while the decider calls 27 of the 39
+    relates_to pairs unrelated (median P(same subject) 0.04).
+  * On the labelled pairs it settles, it is right 51–60% of the time.
+* **Behind the 27B it saves 12–28% of model time** without losing a
+  supersession, at that cost to the relations.
+* **Its "evolves" is reliable:** it is right on every labelled pair it settles
+  as evolves. Its "duplicate" lands on true supersessions, pointer pairs the
+  7B misses too.
+
+**What would reopen it:** a runtime serving decider-4b at a fraction of a
+judge call (MLX or llama.cpp rather than PyTorch), and a framing of "same
+subject" that reads it as the judge does. The decider's strict reading of it
+is the error, not its calibration.
+
+**Found on the way.** The decider adapter (`jev/decider/serve.py`) cut every
+context to its first 1,536 tokens, the default of decider's `decide()`, while
+it advertised 32,768 tokens and reported `truncated: false`. 354 of these 444
+pairs (80%) are longer than that. A 2,730-token check whose one decisive
+sentence came last answered "insufficient evidence" (p 0.985) before the fix
+and the right answer (p 0.997) after. The adapter now passes its window and
+reports the real token count.
+
+Caveats:
+
+* The labels are SMD-1873's: most rejected proposals are two tickets, and 44
+  proposal pairs have a side edited since they were judged.
+* The candidates have no label, so agreeing with a judge is not being right;
+  only the linked pairs say which reading holds.
+* The bands are picked on the same 444 pairs; the held-out halves are the
+  guard.
+* The 27B's timings include a few minutes of stable's sleep working four new
+  captures on the same model server.
+* Only decider-4b, these three questions and these option descriptions were
+  measured.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

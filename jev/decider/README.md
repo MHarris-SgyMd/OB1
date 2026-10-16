@@ -33,8 +33,11 @@ alone.
   not expose raw pre-temperature logits, so the adapter reports `logits = ln(p)`
   with `temperature = 1.0` (still recalibratable: divide by a new T, softmax).
 - `weights_sha256` pins the safetensors **index** (multi-file model), not one file.
-- `tokens` is reported `0` / `truncated=false`; the contract's ≤20,000-char fields
-  never approach decider's 32k-token window, so truncation does not arise here.
+- `tokens` is the context's token count as decider encodes it, and `truncated` says
+  whether it passed the 32,768-token window. The adapter passes that window on every
+  call: decider's `decide()` reads only the first 1,536 tokens of a context unless told
+  otherwise, and until SMD-3058 the adapter did not tell it, so a longer context (two
+  thoughts side by side) lost its end without a word.
 
 ## Comparison — decider-4b vs Verdict through `ob1-jev/1`
 

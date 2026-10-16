@@ -26,7 +26,7 @@ CONTRACT = "ob1-jev/1"
 INSUFFICIENT = "__insufficient_evidence__"
 INSUFFICIENT_LABEL = "insufficient evidence"
 MAX_OPTIONS, MAX_BATCH, MAX_TEXT, MAX_BODY = 24, 64, 20_000, 8 * 2 ** 20
-MAX_TOKENS = 32_768  # decider's state limit; our fields (<=20k chars) never truncate
+MAX_TOKENS = 32_768  # decider's state limit (decider_config.json max_state_tokens); passed on every call, since decide()'s own default cuts the context at 1,536 (SMD-3058)
 MODEL_NAME = "decider-4b"
 REPO = os.environ.get("DECIDER_MODEL", "Mapika/decider-4b")
 
@@ -139,8 +139,14 @@ async def decide(req: Request):
     try:
         for dd in body["decisions"]:
             labels, ids = labels_ids(dd)
-            r = d.decide(dd["context"], [{"question": dd.get("proposition") or dd["question"], "options": labels}])
-            results.append(result_from(dd, ids, r[0]["probs_list"]))
+            # The context's own token count, as decider's prompt builder encodes it ("Context:\n" + context), so a
+            # result says how much the model read; MAX_TOKENS is passed because decide() otherwise reads the first
+            # 1,536 tokens alone and says nothing (SMD-3058).
+            n = len(d.m.tok.encode("Context:\n" + dd["context"], add_special_tokens=False))
+            r = d.decide(dd["context"], [{"question": dd.get("proposition") or dd["question"], "options": labels}], max_ctx_tokens=MAX_TOKENS)
+            res = result_from(dd, ids, r[0]["probs_list"])
+            res["tokens"], res["truncated"] = min(n, MAX_TOKENS), n > MAX_TOKENS
+            results.append(res)
     except Exception as e:
         # the contract's 500 shape ({error}), as jev/serve.ts returns on a model failure
         return JSONResponse({"error": f"the model failed: {str(e)[:200]}"}, status_code=500)
