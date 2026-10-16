@@ -7,7 +7,7 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
-import { keysInOrder, MOVED_READ, movedAmong, ticketsNamed, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
+import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -216,7 +216,7 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
  */
 /** A search_thoughts hit's label fields: `[]` when it names no ticket, null when its tickets were not checked, the unread keys counted. */
 export const hitLabel = (content: string, checked: MovedHit | undefined): { moved: Moved[] | null; movedNotRead: number } =>
-  ({ moved: ticketsNamed(content).length === 0 ? [] : (checked?.moved ?? null), movedNotRead: checked?.notRead ?? 0 });
+  ({ moved: keysInOrder(content).length === 0 ? [] : (checked?.moved ?? null), movedNotRead: checked?.notRead ?? 0 });
 
 /**
  * A compat result's label fields, only where a ticket moved, in status types:
@@ -228,7 +228,7 @@ export const resultLabel = (checked: MovedHit | undefined): { moved?: MovedType[
 
 export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, MovedHit>> {
   // A ticket row tells its own status and is never labelled (movedAmong): its keys are not sent.
-  const naming = hits.filter((h) => h.metadata?.issue === undefined && ticketsNamed(h.content).length > 0);
+  const naming = hits.filter((h) => h.metadata?.issue === undefined && keysInOrder(h.content).length > 0);
   if (naming.length === 0) return {};
   // Each hit's first MOVED_READ keys mentioned (stated-status.ts): 095's call grows with the keys sent.
   const keysOf = (rows: typeof naming) => [...new Set(rows.flatMap((h) => keysInOrder(h.content).slice(0, MOVED_READ)))];

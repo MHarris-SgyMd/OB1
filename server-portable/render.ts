@@ -131,10 +131,13 @@ const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^r
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
 const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[number] | null => oneOf(TRUST, m?.trust);
 
-/** A hit's moved tickets for the words: none when not checked, or from a REST core older than the MCP server rendering its answer. */
-const movedIn = (moved: readonly Moved[] | null | undefined): readonly Moved[] => moved ?? [];
-/** The same as a typed field: the key and the status type then and now — each one token (095 reads only known lifecycle types). */
-const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(movedIn(moved));
+/**
+ * A hit's moved tickets as a typed field, and the words' input: the key and
+ * the status type then and now — each one token (095 reads only known
+ * lifecycle types); none when not checked, or from a REST core older than the
+ * MCP server rendering its answer.
+ */
+const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved ?? []);
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
