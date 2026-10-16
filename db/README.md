@@ -4098,8 +4098,10 @@ A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers at
 `/mcp` on a loopback port of its own (SMD-2874; "A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
 key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`
-(one key opens both: the canary takes stable's keys):
-`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp`,
+(no key opens both: the canary's is its own, `OB1_CANARY_KEY` in its env
+file; SMD-2874):
+`bun db/tier.ts --compare open-brain open-brain-canary`, each connector's own key off the command line,
+or `--compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp` with `--a-key`/`--b-key`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as
 Basic beside the key, on any Bun, and are in neither the label nor the
