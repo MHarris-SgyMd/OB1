@@ -45,14 +45,16 @@ const calls = createCallCount();
  * The REST app over this core: its request lines to `log` where given, else
  * the request log (telemetry.ts). mcp-server/stack.ts gives one, so in a
  * suite the REST core's lines are apart from the MCP server's in front of it,
- * as two processes' are (SMD-2287 PR 4b).
+ * as two processes' are (SMD-2287 PR 4b). `tokenCheck` stands in for the
+ * authorization server's key set on the mesh, for a suite that signs its own
+ * tokens (test-rest-sql.ts, SMD-2286); a deploy gives none.
  */
-export function restApp(log?: (line: string) => void) {
+export function restApp(log?: (line: string) => void, tokenCheck?: () => TokenCheck | null) {
   return createRestApp({
     core,
     init: () => initEnv(),
     keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
-    tokens,
+    tokens: tokenCheck ?? tokens,
     resolve: (principal) => agents().resolve(db(), principal),
     track: calls.track,
     plugins,

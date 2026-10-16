@@ -863,6 +863,52 @@ async function audiences(c: Ctx, mcpToken: string | undefined, guiToken: string 
   row("A8 every token issued with no brain scope is refused where it is presented", a8, `${results.join("; ")}; issued ${issuedKeys.join(", ") || "none"} (this candidate: ${wantIssued.join(", ")})`);
 }
 
+/**
+ * The deploy's own rules (SMD-2286), the winner's alone, not criteria of the
+ * comparison: refresh rotation is the server's setting, not the library's
+ * default (a confidential client, which the library would leave unrotated,
+ * rotates); scopes no access key holds together are refused at the
+ * authorization request, before any page, and at the exchange.
+ */
+async function policy(c: Ctx, cimd: SdkRun | undefined) {
+  const { L, meta, env } = c;
+  const P1 = "P1 rotation is the deploy's: a confidential client's refresh token rotates too (the library's default would keep it)";
+  try {
+    const reg = await registerRaw(meta, { client_name: "POC confidential client", redirect_uris: [NATIVE_REDIRECT], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "client_secret_basic", application_type: "native" });
+    if (reg.status !== 201 || !reg.body.client_id || !reg.body.client_secret) throw new Error(`registration failed: HTTP ${reg.status} ${errOf(reg)}`);
+    const client = { id: String(reg.body.client_id), secret: String(reg.body.client_secret) };
+    const pk = pkce();
+    const back = await new Browser(env.OB1_AUTH_OPERATOR_PASSWORD).authorize(authorizeUrl(meta, { client_id: client.id, response_type: "code", redirect_uri: NATIVE_REDIRECT, scope: "brain:read offline_access", resource: L.mcp(""), prompt: "consent", code_challenge: pk.challenge, code_challenge_method: "S256", state: "p1" }), NATIVE_REDIRECT);
+    const first = await tokenRequest(meta.token_endpoint, { grant_type: "authorization_code", code: back.get("code") ?? "", redirect_uri: NATIVE_REDIRECT, code_verifier: pk.verifier, resource: L.mcp("") }, client);
+    const again = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: String(first.body.refresh_token ?? "") }, client);
+    const ok = first.status === 200 && Boolean(first.body.refresh_token) && again.status === 200 && Boolean(again.body.refresh_token) && again.body.refresh_token !== first.body.refresh_token;
+    row(P1, ok, `code ${errOf(first)} refresh_token ${first.body.refresh_token ? "issued" : "none"}; refreshed ${errOf(again)} ${again.body.refresh_token ? (again.body.refresh_token !== first.body.refresh_token ? "to a new refresh token" : "to the same refresh token") : "with none"}`);
+  } catch (e) {
+    row(P1, false, (e as Error).message);
+  }
+  const P2 = "P2 brain:read with brain:capture, which no access key holds, is refused at the authorization request before any page";
+  try {
+    const id = await register(meta);
+    const pk = pkce();
+    const b = new Browser(env.OB1_AUTH_OPERATOR_PASSWORD);
+    const back = await b.authorize(authorizeUrl(meta, { client_id: id, response_type: "code", redirect_uri: NATIVE_REDIRECT, scope: "brain:read brain:capture", resource: L.mcp(""), code_challenge: pk.challenge, code_challenge_method: "S256", state: "p2" }), NATIVE_REDIRECT);
+    const ok = back.get("error") === "invalid_scope" && !back.get("code") && b.prompts.length === 0;
+    row(P2, ok, `back with ${back.get("error") ?? "no error"}${back.get("code") ? " and a code" : ""} after ${b.prompts.length ? b.prompts.join(", ") : "no page"}`);
+  } catch (e) {
+    row(P2, false, (e as Error).message);
+  }
+  const P3 = "P3 the exchange refuses a narrowing to brain:read with brain:capture";
+  const subject = cimd?.accessToken;
+  if (!subject) {
+    row(P3, false, "no /mcp token: R1 failed");
+    return;
+  }
+  const held = String(claimsOf(subject).scope ?? "");
+  const x = await tokenRequest(meta.token_endpoint, { grant_type: TOKEN_EXCHANGE, subject_token: subject, subject_token_type: ACCESS_TOKEN_TYPE, resource: L.api(""), scope: "brain:read brain:capture" }, { id: "mcp", secret: env.OB1_AUTH_SECRET_MCP });
+  const ok = held.includes("brain:read") && held.includes("brain:capture") && x.status === 400 && x.body.error === "invalid_scope" && /names no access key's scope/.test(String(x.body.error_description ?? ""));
+  row(P3, ok, `the subject token holds "${held}"; narrowed to brain:read brain:capture: ${errOf(x)} ${String(x.body.error_description ?? "")}`);
+}
+
 async function exchange(c: Ctx, cimd: SdkRun | undefined, guiToken: string | undefined) {
   const { L, meta, env } = c;
   const seen = cimd ? toolSeen(cimd) : {};
@@ -936,6 +982,7 @@ async function verify(candidate: Candidate, json: boolean): Promise<number> {
   const { gui } = await grants(c);
   await audiences(c, cimd?.accessToken, gui);
   await exchange(c, cimd, gui);
+  if (candidate === "oidc-provider") await policy(c, cimd);
   row("M1 claude.ai connector", "manual", `needs a public origin (claude.ai refuses private and CGNAT hosts): add ${L.mcp("")} as a custom connector and sign in`);
   row("M2 Claude Code 2.1.275 on the bare metadata path", "manual", `claude mcp add --transport http poc ${L.mcp("")}, then /mcp: it reads ${L.discovery[3]}, whose issuer is ${L.issuer}`);
 

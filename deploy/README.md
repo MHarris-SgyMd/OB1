@@ -692,7 +692,7 @@ a stack with the `auth` profile also carries the authorization server's tokens:
 "Tokens at the REST core", SMD-2286), never from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
 carrier (SMD-2284) is named only from inside the stack, where the MCP server
-will name itself once it forwards (SMD-2286). Its writes record their door as
+names itself when it forwards a key (SMD-2287's `mcp-server/`). Its writes record their door as
 `open-brain-api`
 (`thought_audit.origin`) beside the MCP server's `open-brain`, and the jobs it
 starts are its own (migration 078): either server's start marks only its own
@@ -1047,8 +1047,8 @@ with a key it does not show that record to, the pass line says this could not
 be judged. A URL spelled otherwise than the server's origin (`:443`, upper
 case), or a document naming another origin (`http` in front of an `https`
 tunnel), fails with the URL to use instead. A URL under another
-path (a tier at `/canary/mcp`, reached with keys until SMD-2286 gives tiers
-OAuth) is asked at its own path form and
+path (a tier at `/canary/mcp`, reached with keys: the tiers stack runs no
+authorization server) is asked at its own path form and
 the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
 
@@ -3168,7 +3168,9 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   fixed, so no new sign-in escapes it: every token of it is refused 401
   `REVOKED` (`credential: "token"`), and there is no function to undo it. (The
   digest is of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives the
-  subject a new one, and lifts the ban with it.)
+  subject a new one, and lifts the ban with it.) To ban one on purpose, by
+  its label: `SELECT revoke_agent_key(k.key_hash, 'why') FROM ob1_agent_keys k
+  JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The
