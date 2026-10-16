@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-3045).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 099 SMD-3045).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1624,7 +1624,7 @@ Outside raw cycles nothing cleared below the bound changes. The walk reads
 one snapshot and re-reads each cleared row, not the path below it: a link
 moved out from under the event's row between the two still has the pointers
 above it cleared, and one moved in misses its own. Under an accept no
-write function moves one out since 098: every pointer write through
+write function moves one out since 099: every pointer write through
 `update_thought`, an unlink included, and every delete waits on the review
 lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
@@ -1640,7 +1640,7 @@ after an older tree's `--reapply` over a 097 brain run this tree's
 raw cycle), test-upgrade [20aq]; the behaviour cells of the trigger's [72]
 and [82] and the read's [84] unchanged.
 
-Migration 098 has an unlink take the review lock (SMD-3045). 088's
+Migration 099 has an unlink take the review lock (SMD-3045). 088's
 `update_thought` took `ob1:supersession-review` only for a pointer onto a
 thought, so `{"supersedes": null}` ran straight through an accept, which
 holds that lock while its lapse reads the tree above the accepted row and
@@ -1656,7 +1656,7 @@ that holds a row and then takes the review lock by any call (a pointer
 write, a clear now too, a delete, a citation, `rebuild_derived`, an
 accept) deadlocks against a holder of the lock that waits on something it
 holds — a row, or an advisory lock taken after the review lock, such as a
-fingerprint lock or a node-state bucket — and since 098 that holder can be
+fingerprint lock or a node-state bucket — and since 099 that holder can be
 a single-call unlink (no shipped caller makes such a transaction; take the
 lock first). And an unlink, like a re-point or a
 delete, holds the brain's one supersession lock until its transaction
@@ -1665,13 +1665,13 @@ caller that wraps one in a transaction commits before slow work.
 097's header still says only an unlink moves a link under an accept —
 migrations are append-only — and the paragraph above says what holds. 088's
 body otherwise verbatim, under its signature; it refuses to apply without
-073; 088 (or 061, 073) re-applied puts the old gate back and 098 after it
+073; 088 (or 061, 073) re-applied puts the old gate back and 099 after it
 the lock — `update_thought` alone, the rest is `--reapply`'s. Preflight
-does not read the gate, so an 088 re-applied by hand over 098 passes its
+does not read the gate, so an 088 re-applied by hand over 099 passes its
 edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back.
-test-schema [88] (the gate, 088's DDL verbatim, the lock held
+test-schema [89] (the gate, 088's DDL verbatim, the lock held
 by each call that names `supersedes`), test-live [6j] (each order, the other
-side waiting), test-upgrade [20ar].
+side waiting), test-upgrade [20as].
 
 ## What changed relative to the guide
 

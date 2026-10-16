@@ -1911,7 +1911,7 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review lock the accept holds, so either waits for the other's transaction — the lapse never reads a link an unlink has moved out from under it — and neither order deadlocks (migration 098, SMD-3045)");
+console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review lock the accept holds, so either waits for the other's transaction — the lapse never reads a link an unlink has moved out from under it — and neither order deadlocks (migration 099, SMD-3045)");
 {
   await sql`DELETE FROM thoughts`;
   // W is the operator's; S the hook's, proposed to stand over W; X the hook's

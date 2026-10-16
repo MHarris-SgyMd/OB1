@@ -537,7 +537,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // extraction windows kept, SMD-2694), 094 (a proposal's listing names
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
-  // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035) and 098 (an
+  // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035) and 099 (an
   // unlink takes the review lock, SMD-3045)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
@@ -663,8 +663,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // by name without 068 or 060 ([20ap]); 096 creates pg_stat_statements
   // where the server offers it, needing nothing; 097 adds the lapse's walk
   // and redefines 092's lapse and 094's read as calls of it, refusing by
-  // name without 092 or 094 ([20aq]); 098 redefines 088's update_thought,
-  // refusing by name without 073 ([20ar]) — all
+  // name without 092 or 094 ([20aq]); 099 redefines 088's update_thought,
+  // refusing by name without 073 ([20as]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -4256,14 +4256,14 @@ console.log("\n[20aq] Migration 097: refused by name without 092 or 094; onto a 
   await sql.close();
 }
 
-console.log("\n[20ar] Migration 098: refused by name without 073; onto a populated brain at the file before it — an unlink there holds no review lock, after it holds one, and an edit answers as it did; no row and no audit row moved by the file; a re-apply a no-op (SMD-3045)");
+console.log("\n[20as] Migration 099: refused by name without 073; onto a populated brain at the file before it — an unlink there holds no review lock, after it holds one, and an edit answers as it did; no row and no audit row moved by the file; a re-apply a no-op (SMD-3045)");
 {
   const the098 = MIGRATIONS.find((f) => f.endsWith("_unlink_takes_review_lock.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "073" });
   const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 098 needs 073 (ob1_declared_trust, ob1_actor_stamp); this schema lacks it",
-    `098 on a schema stopped before 073 is refused up front, naming what it needs (${refused})`);
+  assert(refused === "migration 099 needs 073 (ob1_declared_trust, ob1_actor_stamp); this schema lacks it",
+    `099 on a schema stopped before 073 is refused up front, naming what it needs (${refused})`);
 
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the098 });
@@ -4272,7 +4272,7 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   await sql`SELECT set_agent_kind('lap-key', 'agent')`;
   const LAP = { name: "lap-key", via: "open-brain" };
   const made = async (content: string, axis: number) => ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor: LAP }}::jsonb, ${vec(axis)}::vector) AS r`)[0].r as { id: string }).id;
-  const older = await made("upgrade 098: the older note", 1), newer = await made("upgrade 098: the newer note", 2), third = await made("upgrade 098: a third note", 3);
+  const older = await made("upgrade 099: the older note", 1), newer = await made("upgrade 099: the newer note", 2), third = await made("upgrade 099: a third note", 3);
   await sql`SELECT update_thought(p_id := ${newer}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
   await sql`SELECT update_thought(p_id := ${third}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
   // Whether a call's transaction holds the review lock, exclusive, once the
@@ -4292,11 +4292,11 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beforeLock = await holdsReviewLock(third);
-  assert(beforeLock.n === 0 && beforeLock.after === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock.n}/${beforeLock.after})`);
+  assert(beforeLock.n === 0 && beforeLock.after === 0, `[20as] setup: at 099 an unlink holds no review lock (${beforeLock.n}/${beforeLock.after})`);
   const before = await rows(), auditBefore = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
   const [fn] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'update_thought'`;
-  assert(fn?.fns === 1 && /ob1:pointer-write-takes-review-lock/.test(String(fn.body)) && /ob1:patch-merged-beside-the-stamp/.test(String(fn.body)), `one update_thought, 098's gate on 088's body (${fn?.fns})`);
+  assert(fn?.fns === 1 && /ob1:pointer-write-takes-review-lock/.test(String(fn.body)) && /ob1:patch-merged-beside-the-stamp/.test(String(fn.body)), `one update_thought, 099's gate on 088's body (${fn?.fns})`);
   assert((await rows()) === before && (await audits()) === auditBefore, "…no row and no audit row moved");
   const afterLock = await holdsReviewLock(newer);
   const edit = (await sql`SELECT update_thought(p_id := ${older}::uuid, p_metadata_patch := ${{ topic: "after" }}::jsonb, p_actor := ${LAP}::jsonb) AS r`)[0].r as { ok: boolean; stamp?: Record<string, unknown>; same_text?: boolean; metadata_merged?: boolean };
@@ -4306,7 +4306,7 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   // A re-apply moves nothing.
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
-  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 098 is a no-op: no row or audit row moved");
+  assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 099 is a no-op: no row or audit row moved");
   await sql.close();
 }
 
