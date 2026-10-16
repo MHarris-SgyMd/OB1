@@ -2762,7 +2762,7 @@ console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id re
 console.log("\n[19] A key on the old root URL is logged once, by name, only when the proxy's legacy route marked the request (SMD-2306)");
 {
   // The proxy's legacy route sets the marker and its /mcp route deletes it
-  // (deploy/compose.yaml); CI's deploy-stack job holds that half. Here: the
+  // (deploy/compose.yaml); CI's deploy-stack-auth job holds that half. Here: the
   // server logs a marked request's key name once, after the key check, and
   // never an unmarked one, which a server with no proxy in front only gets —
   // from the MCP endpoint and from a keyed REST route alike (review pass 1:

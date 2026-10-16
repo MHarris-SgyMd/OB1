@@ -132,14 +132,15 @@ jobs:
       # One env file is one brain (SMD-2873): deploy/instance.ts check reads
       # each published port's setting from the house form, compose's render
       # and a container list, and names who holds a port. Its parts on fixtures,
-      # and check() itself against stub runtimes; the deploy-stack job runs it
-      # beside a stack and a second brain.
+      # and check() itself against stub runtimes; the deploy-stack-brains job
+      # runs it beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
       # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
       # side's password per half, the target's settings by name, the source
       # container gone before the target starts, each refusal it tries
-      # before anything is made. The deploy-stack job runs it against a stack.
+      # before anything is made. The deploy-stack-brains job runs it against a
+      # stack.
       - name: tier.sh's two halves against a stub runtime
         run: bun deploy/test-tier-sh.ts
 
@@ -454,8 +455,8 @@ jobs:
       # response handler logged with the process kept, and each function
       # server.ts and the files it imports hand on, in the spellings a walk
       # with the TypeScript checker reads, wrapped, run at once, chained or
-      # exempt by a pinned key with a reason). The full-stack job runs the
-      # service.
+      # exempt by a pinned key with a reason). The deploy-stack-auth job runs
+      # the service.
       - name: Install the authorization server's pinned packages
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
@@ -1103,64 +1104,6 @@ jobs:
           ) > "$out/runner.log" 2>&1 < /dev/null &
           echo "$!" > "$out/pid"
 
-      # The other container this repository ships (SMD-1800): kubernetes-deployment's
-      # image, Bun's base with its pinned install, built from integrations/ so the
-      # shared auth module is in the context. Built, and run only to be stopped
-      # (the step after) — its database is its own (k8s/init.sql) and
-      # extensions/test-auth.ts starts the server itself.
-      # First, before the compose stack: a bring-up or smoke failure below must not
-      # hide whether this image builds.
-      - name: The Kubernetes image builds
-        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
-
-      # Run for this alone (SMD-2250): the server is the container's PID 1, which
-      # ignores a signal it has no handler for, so before its handler every
-      # `docker stop` and pod deletion waited out the grace period and was
-      # killed (exit 137). A search is in flight when the stop lands: its
-      # embedding endpoint is a stub that answers 503 after 2 s, so the call
-      # ends with the tool's error and never reaches the database, which is
-      # never dialled. The stop has to wait for it and count it — an idle stop
-      # passed a handler that exits at once, or that never got the server
-      # (review pass 1). The stub runs from the image just built, which has
-      # Bun, so nothing is pulled. The stop lands once the stub logs the
-      # server's request, so the call is in flight however loaded the runner
-      # is (the dashboards build beside this step, SMD-2251). The verdict is the
-      # exit code under docker's 10 s grace, the answered call (the proof the
-      # stop waited for it) and the server's own `stopped in N s` line, N under
-      # 5 — not `docker stop`'s return, which is printed: on 18 of 221 attempts
-      # from 2026-09-27 to 10-02 it came back 5.0–10.6 s after a stop the
-      # server logged at 1.9 s, exit 0 (about 2 s on a passing run), and a
-      # 1–5 s window on it failed every one (SMD-2316).
-      - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
-        run: |
-          KEY=$(openssl rand -hex 32)
-          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
-          docker network create ob1-k8s-stop > /dev/null
-          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { console.log("embedding request"); await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
-          docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
-          up=""
-          for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
-          curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
-          seen=""
-          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && { seen=1; break; }; sleep 0.1; done
-          t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
-          wait
-          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
-          fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' ob1-k8s-stop)" +%s%3N 2> /dev/null) || fin=""
-          log=$(docker logs ob1-k8s-stop 2>&1)
-          docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
-          docker network rm ob1-k8s-stop > /dev/null
-          echo "$log"
-          echo "docker stop: returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
-          [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
-          [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
-          [ "$code" = 0 ] || { echo "expected exit 0 once the call in flight answered (137 is the 10 s grace period's kill, 1 a stop cut off at the drain bound)" >&2; exit 1; }
-          grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
-          grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
-          stopped=$(grep '^SIGTERM: stopped in ' <<< "$log" || true)
-          if ! [[ "$stopped" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "expected the server's own line, stopped in under 5 s; exit 0 — it was: ${stopped:-none}" >&2; exit 1; fi
-
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
@@ -1674,6 +1617,500 @@ jobs:
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
 
+      # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
+      # commit the build arg above baked in, beside the version it asserts.
+      # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
+      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
+      # the URL every client configured before the proxy holds: the legacy
+      # router must answer it as the server did, the SDK's `GET /` probe's 405
+      # included (review pass 1: the proxy's 404 there made SDK clients report
+      # an error on every connect).
+      - name: Smoke-test it over MCP
+        working-directory: deploy
+        run: |
+          ./smoke.sh
+          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
+        env:
+          OB1_SMOKE_COMMIT: ${{ github.sha }}
+
+      # SMD-2284: the REST core is internal by default — it answers on the mesh
+      # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
+      # names compose.api-public.yaml, when /api reaches it with the prefix
+      # stripped and its links carrying it; dropping the file closes it again.
+      # Its log carries no key, query or content, and the proxy's no key.
+      - name: The REST core answers on the mesh, and at /api only by the overlay
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/api-body -w '%{http_code}' --max-time 15 "$@"; }
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          [ "$c" = 404 ] || { echo "/api with the public route off answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
+          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"content":"ci: never captured"}' "$B/api/v1/thoughts")
+          [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
+          jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
+          # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
+          carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
+          jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
+          # From outside, the proxy deletes the forwarder slot: no act, however sound the forwarder key.
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" -H "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" "$B/api/v1/whoami")
+          if ! { [ "$c" = 200 ] && jq -e 'has("act") | not' /tmp/api-body >/dev/null; }; then echo "a forwarder through /api reached the REST core ($c): $(head -c 160 /tmp/api-body)" >&2; exit 1; fi
+          c=$(code "$B/api/v1/whoami?key=$OB1_SMOKE_KEY")
+          [ "$c" = 401 ] || { echo "a key in /api's query string was taken ($c): the REST core reads header keys only" >&2; exit 1; }
+          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
+          if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
+          [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
+          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
+          [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
+          sleep 1
+          LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
+          if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
+          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
+
+      # SMD-2310: a plugin's webhook reaches the REST core only through the
+      # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
+      # plugin is turned on for this step alone — the migrator, recreated with
+      # the REST core, applies its table as ob1_plugins, and the REST core's
+      # preflight finds it in place; the proxy is recreated with --no-deps, so
+      # the MCP server, whose environment the knobs change too, is left as it
+      # was — then off again, so every other step sees
+      # the plugin-free stack it expects (smoke.sh holds tools/list to the
+      # manifest). With the overlay off /hooks is the proxy's 404; on, a
+      # delivery signed with another secret is the plugin's 401 and a signed
+      # one captures through the core as the hook's own caller, read back on
+      # the mesh; a plugin it does not serve is the REST core's 404. SMD-2755:
+      # each delivery signs its time with its body — one signed ten minutes
+      # ago, as a recorded one resent would be, is 401 STALE_DELIVERY, and the
+      # captured one resent with its id is 200, the same thought, run once.
+      - name: A plugin's webhook reaches the REST core only by the overlay, and captures as its hook
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
+          SECRET=$(openssl rand -hex 16)
+          PLUGIN_PW=$(openssl rand -hex 16)
+          export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }
+          BODY="{\"id\":\"ci-$(openssl rand -hex 8)\",\"text\":\"ci: a capture through the example webhook\"}"
+          post() { code -X POST -H 'content-type: application/json' "$@"; }
+          # deliver BODY [TIMESTAMP [SECRET]]: signed as the example's sender signs, the HMAC of "<timestamp>.<body>".
+          deliver() {
+            local ts
+            ts="${2:-$(date +%s)}"
+            post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
+          }
+          c=$(deliver "$BODY")
+          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(deliver "$BODY" "" other)
+          [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY" "$(( $(date +%s) - 600 ))")
+          { [ "$c" = 401 ] && [ "$(jq -r '.code // empty' /tmp/hook-body 2>/dev/null)" = STALE_DELIVERY ]; } || { echo "a delivery signed ten minutes ago answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
+          id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
+          { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          c=$(deliver "$BODY")
+          { [ "$c" = 200 ] && [ "$(jq -c '[.id, .duplicate]' /tmp/hook-body 2>/dev/null)" = "[\"$id\",true]" ]; } || { echo "the same delivery resent answered $c, not 200 and the same thought: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
+          fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
+          grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
+          c=$(post -d '{}' "$B/hooks/nothing/here")
+          [ "$c" = 404 ] || { echo "a plugin the REST core does not serve answered $c through /hooks" >&2; exit 1; }
+          c=$(code "$B/hooks/example/capture")
+          [ "$c" = 405 ] || { echo "a GET of the webhook answered $c, not 405" >&2; exit 1; }
+          unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          c=$(deliver "$BODY")
+          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
+
+      # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
+      # compose.grafana-public.yaml is named — never the legacy route and the
+      # MCP server, a keyed POST included — and with the overlay named while
+      # the observability profile is off (CI pulls no Grafana image), Traefik's
+      # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
+      # Check 28 holds both tables byte for byte; this holds what Traefik does
+      # with them.
+      - name: /grafana is a 404 unless its overlay is named, and with no Grafana behind it
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -s -o /tmp/grafana-body -w '%{http_code}' --max-time 15 "$@"; }
+          answers404() {
+            local p c
+            for p in /grafana /grafana/ /grafana/login /grafana/api/search; do
+              c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B$p")
+              [ "$c" = 404 ] || { echo "$1: GET $p answered $c: $(head -c 120 /tmp/grafana-body)" >&2; exit 1; }
+            done
+            c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$B/grafana/")
+            [ "$c" = 404 ] || { echo "$1: a keyed POST to /grafana/ answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          }
+          # Which router answered each, from the proxy's JSON access log: the
+          # overlay's grafana-public, whose 404 is grafana-absent's for the
+          # Grafana it cannot reach; the base's grafana-off answers through
+          # noop@internal, which Traefik does not log, so none — a 404 alone is
+          # also every route's absence, so /mcp/health answering after each
+          # recreate shows the tables loaded.
+          routers() {
+            sleep 1
+            docker compose -f compose.yaml logs --no-color --no-log-prefix --since "$1" proxy \
+              | jq -Rr 'fromjson? | objects | select((.RequestPath // "") as $p | $p == "/grafana" or ($p | startswith("/grafana/"))) | "\(.RouterName) \(.DownstreamStatus)"' | sort -u
+          }
+          loaded() { [ "$(code "$B/mcp/health")" = 200 ] || { echo "$1: /mcp/health did not answer, so the proxy's tables are not loaded" >&2; exit 1; }; }
+          loaded "with the overlay off"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay off"
+          seen=$(routers "$since")
+          [ -z "$seen" ] || { echo "with the overlay off, /grafana reached a router the access log names (grafana-off's noop@internal is not logged): $seen" >&2; exit 1; }
+          docker compose -f compose.yaml -f compose.grafana-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test -f /etc/traefik/dynamic/grafana.yaml || { echo "the overlay's route file is not on the proxy" >&2; exit 1; }
+          loaded "with the overlay on"
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          answers404 "with the overlay on and no Grafana behind it"
+          seen=$(routers "$since")
+          [ "$seen" = "grafana-public@file 404" ] || { echo "with the overlay on, /grafana was answered by: ${seen:-nothing logged}" >&2; exit 1; }
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
+          loaded "with the overlay dropped"
+          answers404 "with the overlay dropped"
+
+      # SMD-1849 PR 3b: the stack's Postgres loads pg_stat_statements at its
+      # start, with utility statements untracked and I/O timed (compose.yaml's
+      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 096 created
+      # the extension out of PUBLIC's reach, so the view answers and counts the
+      # brain's own statements by now — the server's calls of thought_stats'
+      # and keyword search's functions for smoke.sh above, in the brain's
+      # database, which no migration calls — and
+      # holds no role statement, whose text an ALTER ROLE … PASSWORD would
+      # carry. The exporter that reads it runs under the observability
+      # profile, which CI does not start.
+      - name: Postgres counts the brain's statements in pg_stat_statements
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -Atc "$1"; }
+          [ "$(q "SHOW shared_preload_libraries")" = pg_stat_statements ] || { echo "Postgres did not start with pg_stat_statements preloaded" >&2; exit 1; }
+          [ "$(q "SHOW pg_stat_statements.track_utility")" = off ] || { echo "Postgres tracks utility statements, whose text a role's password would be in" >&2; exit 1; }
+          [ "$(q "SHOW track_io_timing")" = on ] || { echo "Postgres does not time I/O: pg_stat_statements' block times read 0" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "096 did not create pg_stat_statements" >&2; exit 1; }
+          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 096's revoke did not hold" >&2; exit 1; }
+          n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
+          [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }
+
+      # SMD-2294: a canary or working tier of its own compose project joins
+      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
+      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
+      # bodiless 404, and so is every other path starting with either word,
+      # in any case and whatever follows (an escaped slash, a `;`, a pasted
+      # zero-width space), which never falls to the legacy route. A stand-in per tier on
+      # the mesh, under its tier's name and under `server` as a tier's
+      # container is, answers its own route: the client's Host passed, the
+      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
+      # (only a 502 is the proxy's 404). From the mesh, `server` then names
+      # more than one container: the collision the route table's mesh names
+      # avoid while no tier claims stable's own names, which check 28's
+      # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
+      # each is a 404, and the proxy logged no route-table error.
+      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
+        working-directory: deploy
+        run: |
+          B=http://127.0.0.1:8010
+          code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
+          bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
+          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
+          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
+          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
+          offprefix() {
+            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
+              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
+            done
+          }
+          offprefix ""
+          trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          # Each answers /…/status/NNN with that status, its body and an
+          # x-tier header, and anything else with the path, the Host and the
+          # legacy marker it was sent.
+          for tier in canary working; do
+            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
+              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
+          done
+          H="${B#http://}"
+          for tier in canary working; do
+            want="$tier /$tier/mcp/health host=$H legacy=-"
+            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
+            got=$(curl -sS --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || got="no answer (curl exit $?)"
+            [ "$got" = "$want" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in with the client's Host and no legacy marker: '$got'" >&2; exit 1; }
+            got=$(curl -sS --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
+            [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
+            for s in 401 404 429 500 503 504; do
+              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
+              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header: only a 502 is the proxy's" >&2; exit 1; fi
+            done
+            bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
+          done
+          offprefix " beside both tiers"
+          holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
+          [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
+          docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
+          for tier in canary working; do
+            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
+            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
+          done
+          # A router whose rule does not compile is dropped, its paths to the
+          # next router (legacy), and a route file Traefik cannot read takes
+          # every route with it, with nothing but this line to say so. Traefik
+          # colours the level whatever --no-color asks, hence ERR.* and no space.
+          # An errors middleware's line about a Host it cannot parse is the
+          # client's, not the table's.
+          PLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
+          if grep -E 'ERR.*(building configuration|routerName=|middlewareName=|serviceName=)' <<<"$PLOG" | grep -v 'Unable to create error page request'; then echo "the proxy logged a route-table error (above): the router it names was dropped" >&2; exit 1; fi
+
+      - name: Confirm no Supabase CLI anywhere in the stack
+        working-directory: deploy
+        run: |
+          if docker compose -f compose.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+            echo "A supabase binary is present in the server image." >&2
+            exit 1
+          fi
+          echo "No supabase binary in the running stack."
+
+      # SMD-1801. The three dashboards build from their pinned installs, with no
+      # Supabase package among them (check 22 holds the imports; this holds the
+      # builds). The two Next dashboards are built, not run: they speak to the
+      # open-brain-rest gateway, which SMD-1931 retired; they retire with
+      # SMD-2280's harvest. The SvelteKit one speaks MCP to
+      # the server this stack serves, so it is driven too, below.
+      # They build in the background from the job's start (SMD-2251); this step
+      # waits for that and reports it — each dashboard's log folded when it
+      # passed and open under an error when it failed, and a line per dashboard
+      # of exit code and seconds. It runs when a stack step failed too, so a
+      # broken build is never hidden behind one. The wait ends when the
+      # background shell writes its done mark or dies without it, or at a cap
+      # a minute past the three limits and their kill-after grace. A dead shell
+      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
+      # its state is read instead (review pass 1). timeout TERMs a build's
+      # process group, and its child, the `sh -c` running the chain, dies on
+      # it (dash does not exec the last command of an && list), so a hang is
+      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
+      # from outside.
+      - name: The three dashboards build
+        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
+        run: |
+          out="$RUNNER_TEMP/dashboards"
+          pid=$(cat "$out/pid")
+          limit_s=$(cat "$out/limit")
+          cap=$((3 * (limit_s + 10) + 60))
+          running() {
+            local state
+            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
+          }
+          start=$SECONDS
+          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
+          echo "waited $((SECONDS - start)) s for the background build"
+          if [ ! -e "$out/done" ]; then
+            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
+            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
+            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
+            exit 1
+          fi
+          failed=0
+          summaries=""
+          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
+            read -r rc secs < "$out/$d.rc"
+            why=$rc
+            case $rc in
+              124) why="124, over the $limit_s s limit" ;;
+              137) why="137, killed from outside, most likely out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$d — built"
+              cat "$out/$d.log"
+              echo "::endgroup::"
+            else
+              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
+              cat "$out/$d.log"
+              failed=1
+            fi
+            summaries+="  $d: exit $rc in $secs s"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
+
+      # The SvelteKit dashboard as a browser uses it, against the stack that is
+      # up: a wrong key refused at /signin, the write key signed in and the JSON
+      # its first page loads (thought_stats through its proxy) reaching the
+      # database, the read key signed in and refused capture — 403 from the
+      # proxy, before the server is asked — and the capture-only key refused at
+      # sign-in. deploy/.env holds hashes; the raw keys minted above ride in the
+      # three OB1_SMOKE_* variables.
+      - name: The SvelteKit dashboard, driven against the stack
+        working-directory: dashboards/open-brain-dashboard
+        env:
+          MCP_URL: http://127.0.0.1:8010/mcp
+        run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
+
+      # SMD-2760. What comes back after a reboot is each container's restart
+      # policy. Postgres had none, so on Docker a reboot would bring the
+      # servers back without their database (on podman, with its restart unit
+      # disabled, nothing came back: the dogfood stack stayed down 47
+      # minutes). This is the Docker half of the ticket's Verify, on every
+      # run: the daemon restarts, and with nothing started by hand Postgres,
+      # the server, the REST core, the proxy and the forwarder in front of it
+      # (SMD-2583) each come back on its policy,
+      # started after the restart (so a daemon that kept them running proves
+      # nothing) and healthy by its own healthcheck, not merely `Running`,
+      # which Docker also reports for a container in restart backoff (review
+      # pass 1); and a keyed call is answered from the database. The daemon's
+      # stop leaves the server's own `SIGTERM: stopped` line in its log, so
+      # the SIGTERM step below counts the line its own stop adds (review pass
+      # 2). The boot restart does not wait on depends_on, so the server may
+      # start first and loop in preflight until Postgres answers: the wait
+      # covers that.
+      # Before the SIGTERM step, which leaves the server stopped by hand, and
+      # a container stopped by hand is not restarted.
+      - name: The stack comes back after the Docker daemon restarts
+        working-directory: deploy
+        run: |
+          t0=$(date -u +%s)
+          sudo systemctl restart docker
+          # A service's status, health (none: no healthcheck declared), policy and start time.
+          state() {
+            local id
+            id=$(docker compose -f compose.yaml ps -aq "$1" 2> /dev/null || true)
+            if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
+            docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
+          }
+          # Running and healthy: each of the five declares a healthcheck (the
+          # server's is its image's, server-portable/Dockerfile).
+          back() {
+            local status health
+            read -r status health _ <<<"$(state "$1")"
+            [ "$status" = running ] && [ "$health" = healthy ]
+          }
+          while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
+            if back postgres && back server && back api && back proxy && back forwarder; then break; fi
+            sleep 2
+          done
+          for s in postgres server api proxy forwarder; do
+            read -r status health policy started <<<"$(state "$s")"
+            at=$(date -d "$started" +%s)
+            echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
+            why=""
+            if [ "$status" = absent ]; then why="compose finds no container for it"; else
+              back "$s" || why="not running and healthy within 2 minutes"
+              [ "$policy" = unless-stopped ] || why="${why:+$why; }its restart policy is $policy, not unless-stopped"
+              if [ "$status" = running ] && [ "$at" -lt "$t0" ]; then why="${why:+$why; }it started before the restart, so the daemon kept it running"; fi
+            fi
+            if [ -n "$why" ]; then
+              docker compose -f compose.yaml ps -a || true
+              docker compose -f compose.yaml logs --tail 20 "$s" || true
+              docker inspect -f '{{json .State.Health}}' "$(docker compose -f compose.yaml ps -aq "$s" 2> /dev/null || true)" 2> /dev/null || true
+              echo "$s did not come back on its own after the daemon restarted: $why" >&2; exit 1
+            fi
+          done
+          answer=$(curl -s --max-time 20 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp || true)
+          if ! grep -q '"result"' <<<"$answer" || grep -q '"isError":true' <<<"$answer"; then
+            echo "a keyed thought_stats after the restart did not answer from the database: ${answer:0:300}" >&2; exit 1
+          fi
+
+      # SMD-2250. The server stops on SIGTERM once what is in flight is
+      # answered (server-portable/shutdown.ts), and a stop during preflight
+      # ends the container (the Dockerfile's traps): before, each waited out
+      # the 10 s grace period and was killed, exit 137 — about 30 s of this
+      # job, over the canary's stops and the teardown. Last of the steps that
+      # use the server: it is left stopped. The serving stop is judged by its
+      # exit code under the 10 s grace and by its own `stopped in N s` line, N
+      # under 5 — not by `docker compose stop`'s return, which is printed: it
+      # took 2,476 ms on the PR's first run, and 5.1–7.9 s four times on
+      # 2026-09-27 after a server that logged `stopped in 0.0 s` (SMD-2316).
+      # The second stop lands inside preflight because the stub holds GET
+      # /models 2 s, and must end inside 1 s: the traps alone, with preflight
+      # in the foreground, end it only when the 2 s hold does (review pass 1).
+      # Preflight logs no time of its own, so that deadline is docker's kill
+      # timer, `stop -t 1`: a stop that ends in time exits 143 by itself, one
+      # that does not is killed, 137. The log is read once, into a variable:
+      # `grep -q` on a pipe closes it early, which pipefail fails.
+      - name: The server stops on SIGTERM, serving and in preflight
+        working-directory: deploy
+        run: |
+          stop() {
+            if [ -n "${3:-}" ]; then t=(-t "$3"); else t=(); fi
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            id=$(docker compose -f compose.yaml ps -aq server)
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
+            fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$id")" +%s%3N 2> /dev/null) || fin=""
+            echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
+            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
+          }
+          # A keyed call first, so the pool this stop closes — open since the
+          # server's start (SMD-2284) — has served this step, whatever ran
+          # before it (review pass 2).
+          curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
+          # The daemon restart above (SMD-2760) left a line of its own: this
+          # stop must add one.
+          stops() { docker compose -f compose.yaml logs --no-log-prefix server | grep -c '^SIGTERM: stopped' || true; }
+          before=$(stops)
+          stop serving 0
+          after=$(stops)
+          if [ "$after" -ne $((before + 1)) ]; then echo "the stop added $((after - before)) 'SIGTERM: stopped' lines to the server's log, not one" >&2; exit 1; fi
+          # With the server stopped, the document's router turns Traefik's 502
+          # into the proxy's bodiless 404 (auth-absent, SMD-2382): a connector
+          # still reads "no OAuth here", never an error it could take for OAuth.
+          doc=$(curl -s --max-time 10 -o /tmp/doc-body -w '%{http_code}' http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
+          if ! { [ "$doc" = 404 ] && [ ! -s /tmp/doc-body ]; }; then echo "the document with the server stopped answered $doc '$(head -c 80 /tmp/doc-body)', not the proxy's bodiless 404" >&2; exit 1; fi
+          last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
+          echo "$last"
+          if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
+          touch /tmp/provider-stub-slow
+          docker compose -f compose.yaml start server > /dev/null 2>&1
+          sleep 0.5
+          stop "in preflight" 143 1
+          rm -f /tmp/provider-stub-slow
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: |
+          docker compose -f compose.yaml logs --tail 60
+          echo "--- provider stub (the runner's listener on :11434) ---"
+          cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
+
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose -f compose.yaml down -v
+
+  deploy-stack-brains:
+    name: "Full stack: a second brain, the tier refresh and the canary"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Bun on the runner, for this checkout's scripts run there: deploy/instance.ts's
+      # check, auth/provision.ts and db/tier.ts --diff.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
+      # serve MCP, with no Supabase CLI installed and no supabase.com account.
+      # The keys (their raw values in $GITHUB_ENV for the steps below), the
+      # provider stub on the runner, deploy/.env and the up are
+      # .github/ci/full-stack-up.sh's, with why each is as it is (SMD-3051).
+      - name: Bring up the compose stack
+        run: .github/ci/full-stack-up.sh
+
       # SMD-2873. A second brain beside the stack, from its own env file: the
       # host-port check refuses to run where Bun would load deploy/.env into
       # it; says the stack's port is its own (the stack came up with no
@@ -1738,294 +2175,21 @@ jobs:
           if grep -v '^open-brain_' <<<"$stack_nets"; then echo "a stack container is on a network not the stack's" >&2; exit 1; fi
           bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder"
 
-      # SMD-2212: the import runner's image copies the ingestion pipeline's
-      # import graph file by file, and its build resolves every import. So a
-      # module the pipeline gains that the Dockerfile does not copy fails
-      # here, not at an operator's first import.
-      - name: The import runner's image builds
-        working-directory: deploy
-        run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
-
-      # SMD-2289: the runner's database role, as compose makes it. The
-      # one-shot runs; the role is given, by hand, what it should not keep (an
-      # UPDATE on ob1_agent_keys, a column's SELECT on a table no group has,
-      # the sequences' USAGE, CREATE on public and on the database, a
-      # procedure's EXECUTE) and a CONNECT it should; the one-shot runs again, as a rotated password
-      # would. Then, as the superuser, the role's privileges must be exactly
-      # the four groups' as config.mjs lists them, with CONNECT kept and
-      # nothing else. Then it is asked over the compose network, as the runner
-      # connects (localhost inside the postgres container is trusted): itself,
-      # not a superuser, a member of no role, cannot create a table; a wrong
-      # password refused as that. Then login-role.ts refuses a superuser, a
-      # member, an owner and a role with a schema of its name, --grant --exact
-      # a default privilege's grantee (a dry run too) and a member, and the
-      # two together clear a role's leftover privilege and
-      # per-database setting (review passes 1-5). The probe roles go at the
-      # end. Each check is an `if` or an `||`: bash -e does not stop on a
-      # failure inside an `&&` list.
-      - name: The import runner's database role is made and granted
-        working-directory: deploy
-        env:
-          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
-        run: |
-          # run's own flags, then the service, then a command in its image.
-          oneshot() { docker compose -f compose.yaml --profile orchestration run --rm --no-deps "$@"; }
-          superuser() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc "$1"; }
-          oneshot orchestration-runner-role
-          superuser "GRANT UPDATE ON ob1_agent_keys TO ob1_orchestration_runner; CREATE SCHEMA ci_cols; CREATE TABLE ci_cols.t (a int); GRANT SELECT (a) ON ci_cols.t TO ob1_orchestration_runner; GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ob1_orchestration_runner; GRANT CREATE ON SCHEMA public TO ob1_orchestration_runner; GRANT CONNECT, CREATE ON DATABASE openbrain TO ob1_orchestration_runner; CREATE PROCEDURE ci_proc() LANGUAGE sql AS 'SELECT 1'; GRANT EXECUTE ON PROCEDURE ci_proc() TO ob1_orchestration_runner;"
-          oneshot orchestration-runner-role | tee /tmp/role-again.log
-          grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
-          # shellcheck disable=SC2016 # JavaScript, whose template literals stay unexpanded
-          exactly='import { grantedObjects, grantPresenceSql, mergedGrants } from "./config.mjs"; const s = new Bun.SQL(process.env.DATABASE_URL, { max: 1 }); const role = "ob1_orchestration_runner"; const groups = ["capture", "worker", "structure", "extraction"]; const present = new Set((await s.unsafe(grantPresenceSql(grantedObjects(groups)))).filter((r) => r.present).map((r) => r.name)); const want = mergedGrants(groups, present).flatMap((g) => g.privileges.map((p) => `${g.name} ${p}`)).sort(); const rel = (await s`SELECT c.relname AS n, a.privilege_type AS p FROM pg_class c, aclexplode(c.relacl) a WHERE a.grantee = ${role}::regrole`).map((r) => `${r.n} ${r.p}`).sort(); const other = (await s`SELECT format(${"routine %s %s"}, p.oid::regprocedure, a.privilege_type) AS x FROM pg_proc p, aclexplode(p.proacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"column %s.%s %s"}, t.attrelid::regclass, t.attname, a.privilege_type) FROM pg_attribute t, aclexplode(t.attacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"schema %s %s"}, n.nspname, a.privilege_type) FROM pg_namespace n, aclexplode(n.nspacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"database %s"}, a.privilege_type) FROM pg_database d, aclexplode(d.datacl) a WHERE d.datname = current_database() AND a.grantee = ${role}::regrole`).map((r) => r.x).sort(); await s.close(); const ok = JSON.stringify(rel) === JSON.stringify(want) && JSON.stringify(other) === JSON.stringify(["database CONNECT", "schema public USAGE"]); console.log(ok ? `exactly the ${want.length} privileges of the four groups, CONNECT kept` : JSON.stringify({ missing: want.filter((x) => !rel.includes(x)), extra: rel.filter((x) => !want.includes(x)), other })); process.exit(ok ? 0 : 1);'
-          oneshot orchestration-runner-role bun -e "$exactly"
-          good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
-          # shellcheck disable=SC2016 # JavaScript, as above
-          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles x ON x.oid = m.member WHERE x.rolname = current_user) AS memberships, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && r.memberships === 0 && !created ? 0 : 1);'
-          oneshot -e ROLE_URL="$good" orchestration-runner-role bun -e "$ask"
-          # shellcheck disable=SC2016 # JavaScript, as above
-          if wrong=$(oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;' 2>&1); then
-            echo "a wrong password was accepted"; exit 1
-          fi
-          grep -q "password authentication failed" <<<"$wrong" || { echo "a wrong password failed, but not as a refused password: $wrong"; exit 1; }
-          superuser "CREATE ROLE ci_super SUPERUSER; CREATE ROLE ci_member; GRANT pg_read_all_data TO ci_member; CREATE ROLE ci_owner; CREATE SCHEMA ci_owned AUTHORIZATION ci_owner; CREATE ROLE ci_defacl; ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO ci_defacl; CREATE SCHEMA ci_plant; CREATE ROLE ci_prior; GRANT UPDATE ON ob1_agent_keys TO ci_prior; ALTER ROLE ci_prior IN DATABASE openbrain SET search_path = ci_owned, public;"
-          refused() {  # refused <expected text> <command…>: exit 2, and the text in what it said
-            local want=$1 out code; shift
-            set +e
-            out=$(oneshot orchestration-runner-role "$@" 2>&1)
-            code=$?
-            set -e
-            echo "$out" | tail -1
-            { [ "$code" = 2 ] && grep -q "$want" <<<"$out"; } || { echo "not refused as \"$want\" (exit $code)"; exit 1; }
-          }
-          for probe in "ci_super is a superuser" "ci_member is a member of pg_read_all_data" "ci_owner owns"; do
-            refused "$probe" bun login-role.ts --role "${probe%% *}" --password-env OB1_RUNNER_DB_PASSWORD
-          done
-          refused "ci_defacl still holds" bun migrate.ts --grant ci_defacl --groups capture --exact
-          refused "ci_defacl still holds" bun migrate.ts --grant ci_defacl --groups capture --exact --dry-run
-          refused "ci_member is a member of pg_read_all_data" bun migrate.ts --grant ci_member --groups capture --exact
-          refused "a schema named ci_plant" bun login-role.ts --role ci_plant --password-env OB1_RUNNER_DB_PASSWORD
-          oneshot orchestration-runner-role sh -c "bun login-role.ts --role ci_prior --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ci_prior --groups capture --exact"
-          [ "$(superuser "SELECT has_table_privilege('ci_prior', 'ob1_agent_keys', 'UPDATE') OR EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'ci_prior')")" = "f" ] || { echo "ci_prior kept a privilege or a setting"; exit 1; }
-          superuser "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM ci_defacl; DROP SCHEMA ci_owned; DROP SCHEMA ci_plant; DROP SCHEMA ci_cols CASCADE; DROP OWNED BY ci_prior; DROP ROLE ci_super, ci_member, ci_owner, ci_defacl, ci_prior; DROP PROCEDURE ci_proc();"
-
-      # SMD-2289: the image's own start, as compose runs the service but
-      # without its dependencies (starting opens no database connection).
-      # `--egress` gives a real nft its rules, setpriv drops NET_ADMIN and
-      # SETPCAP, and the runner listens only once its probe as an emitter uid
-      # is refused. Then, as an emitter uid, the internet and the runner's own
-      # port are refused, and the runner holds KILL, SETGID and SETUID alone.
-      # The self-check reads the rules' text; this is the kernel's answer, on
-      # Docker, where the eval kit runs podman (review pass 5). Each probe is
-      # an `if`: bash -e does not stop on a failed `!` command.
-      - name: The import runner starts with its egress rules
-        working-directory: deploy
-        env:
-          OB1_RUNNER_KEY: ci-stand-in-runner-key-not-a-secret-0123456789
-          # In the image the runner refuses a DATABASE_URL with no password (SMD-2289).
-          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
-        run: |
-          docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
-          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done
-          docker logs ob1-runner-egress 2>&1
-          docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"
-          pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ] && basename "$p"; done' | head -1)
-          eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
-          echo "runner pid $pid CapEff $eff"
-          [ "$eff" = "00000000000000e0" ]
-          for target in "1.1.1.1 443" "127.0.0.1 8090"; do
-            # shellcheck disable=SC2086
-            if docker exec ob1-runner-egress su-exec 20001:20001 python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3)" $target; then
-              echo "an emitter uid reached $target"; exit 1
-            fi
-          done
-          docker rm -f ob1-runner-egress
-
-      # SMD-2285: the authorization server as compose runs it. Its secrets are
-      # --init's, into this job's deploy/.env. First, with one setting blanked
-      # and the origin given a path, it refuses to start, exit 2, naming both
-      # at once. Then it comes up healthy, and a client registered by DCR is
-      # read back with its registration token after a restart (the log shows
-      # the second start) and again after a recreate, as an upgrade does: the
-      # SQLite store is in its volume, and the memory adapter forgot both.
-      # The store's directory is the server's user's alone; an interaction
-      # with no session is the library's 400, and a write to a store another
-      # connection holds locked answers 500 and is logged; with the cap set to
-      # 3, a fourth registration is refused 503 for now, however the path is
-      # spelled; with the trusted proxy named as the container's own loopback,
-      # so the per-address limits are on, a 21st bad secret for one client
-      # from one forwarded address is refused 429, and that client from
-      # another address, another client, a client that does not exist or a
-      # public one, is not (SMD-2309); an absolute-form target is 400 and
-      # `//x/healthz` a 404, with the process never restarted (SMD-2615); and a stop is
-      # the server's own (exit 0 inside 5 s, its line in the log), not the
-      # grace period's SIGKILL. The container goes at the end; the volume, the
-      # networks and the auth lines in .env stay to the job's end (tier.sh
-      # hands tier.ts no OB1_AUTH_* line).
-      # Through the proxy (SMD-1846 PR 2), its auth router: before the server
-      # starts and after it stops, the bare discovery path is a bodiless 404,
-      # not Traefik's 502 for a name that does not resolve; while it runs, the
-      # bare path and RFC 8414's under the issuer answer its document, issuer
-      # and all; and at the cap the proxy hands on its 503 and Retry-After,
-      # which a rewrite of every 5xx would have turned into a 404. The proxy
-      # has no DNS search domains, a configured-off start (COMPOSE_PROFILES
-      # without auth) is refused, and a sign-in's session cookie is Path=/auth
-      # (review pass 1).
-      - name: The authorization server starts, refuses a bad setting, and keeps its state across a restart
+      # What a stack configured for the authorization server holds in
+      # deploy/.env, as the authorization server's step in the auth job leaves
+      # it (SMD-3051 put that step in a job of its own): the four settings that
+      # configure it, COMPOSE_PROFILES=auth among them, and the secrets --init
+      # writes. The canary step below holds canary.sh to leaving every
+      # OB1_AUTH_ line out of the canary's env file and the canary unconfigured
+      # for OAuth, so stable's file must carry them. Nothing starts the
+      # authorization server or recreates stable's server, and every compose
+      # call after this names its services, as each did after the auth step.
+      - name: deploy/.env carries the authorization server's settings and secrets
         working-directory: deploy
         run: |
-          auth() { docker compose -f compose.yaml --profile auth "$@"; }
-          # The proxy's answer for a path: "<status> <issuer or the body's first 40 bytes>".
-          via_proxy() {
-            local code
-            code=$(curl -s --max-time 10 -o /tmp/auth-via-proxy -w '%{http_code}' -D /tmp/auth-via-proxy.h "$@")
-            printf '%s %s' "$code" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("issuer") or "-")' /tmp/auth-via-proxy 2> /dev/null || head -c 40 /tmp/auth-via-proxy)"
-          }
-          absent() { [ "$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)" = "404 " ] || { echo "$1: the bare discovery path through the proxy answered \"$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)\", not an empty 404"; exit 1; }; }
-          absent "before the authorization server starts"
-          # No search domains in the proxy: an absent server's name is never
-          # tried again under the runner's (where a resolver that answered would
-          # be sent /auth traffic).
-          # Read once, and it must name a resolver, so an empty read cannot pass.
-          resolv=$(docker compose -f compose.yaml exec -T proxy cat /etc/resolv.conf)
-          grep -q '^nameserver ' <<<"$resolv" || { echo "the proxy's resolv.conf names no resolver: \"$resolv\""; exit 1; }
-          if grep -E '^search' <<<"$resolv" | grep -qv -E '^search[[:space:]]+\.?[[:space:]]*$'; then
-            echo "the proxy resolves under search domains:"; echo "$resolv"; exit 1
-          fi
-          # COMPOSE_PROFILES=auth: the stack configured (ADR decision 16), which
-          # the server refuses to start without (SMD-1846 PR 2). It stays in
-          # .env to the job's end: every later compose call names its services
-          # but two that harm nothing (the failure log, and the teardown's
-          # `down -v`, which removes auth-data too), and canary.sh sets its own.
-          # The refusal below waits 30 s before its exit 2 (no hot restart
-          # loop), so this step takes that much longer.
           printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
           bun auth/provision.ts --init
           bun auth/provision.ts
-          set +e
-          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth 2>&1)
-          code=$?
-          set -e
-          echo "$out" | tail -5
-          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
-          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
-            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
-          done
-          auth up -d --build --wait --wait-timeout 120 --no-deps auth
-          for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
-            got=$(via_proxy "http://127.0.0.1:8010$path")
-            [ "$got" = "200 https://brain.example.test/auth" ] || { echo "GET $path through the proxy answered \"$got\", not the server's document"; exit 1; }
-          done
-          # SMD-2382: the MCP server, recreated so it reads the configured .env,
-          # advertises at the origin's Host alone, while the authorization server
-          # answers its probe on the mesh: the document through the proxy, the
-          # challenge on a keyless /mcp; a wrong key and loopback keep their
-          # answers, and the fallback sign-in paths are the proxy's 404. Each
-          # helper's curl may fail without ending the step, so the check after
-          # it says what came back.
-          auth up -d --wait --wait-timeout 120 --no-deps server
-          O=(-H 'Host: brain.example.test')
-          # "<status> <WWW-Authenticate or ->" for an initialize POSTed to /mcp with these curl arguments.
-          at_mcp() { { curl -s --max-time 10 -o /dev/null -D - -H 'content-type: application/json' "$@" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' http://127.0.0.1:8010/mcp || true; } | tr -d '\r' | awk 'NR == 1 { c = $2 } tolower($0) ~ /^www-authenticate:/ { sub(/^[^:]*: */, ""); w = $0 } END { print c, (w == "" ? "-" : w) }'; }
-          code_of() { curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$@" || true; }
-          prm=$(curl -s --max-time 10 "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
-          jq -e '.resource == "https://brain.example.test/mcp" and .authorization_servers == ["https://brain.example.test/auth"]' <<<"$prm" >/dev/null || { echo "the protected-resource document at the origin's Host: ${prm:0:200}"; exit 1; }
-          got=$(at_mcp "${O[@]}")
-          [ "$got" = '401 Bearer resource_metadata="https://brain.example.test/.well-known/oauth-protected-resource/mcp"' ] || { echo "a keyless /mcp at the origin's Host answered \"$got\", not the challenge"; exit 1; }
-          got=$(at_mcp "${O[@]}" -H 'x-brain-key: ci-not-a-key')
-          [ "$got" = "200 -" ] || { echo "a wrong key at the origin's Host answered \"$got\", not today's 200"; exit 1; }
-          got=$(at_mcp)
-          [ "$got" = "200 -" ] || { echo "a keyless /mcp on loopback answered \"$got\", not today's 200"; exit 1; }
-          [ "$(code_of http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document is served at loopback's Host"; exit 1; }
-          for path in /register /authorize /token; do
-            [ "$(code_of "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path")" = 404 ] || { echo "POST $path at the origin root is not the proxy's 404"; exit 1; }
-          done
-          auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
-          auth restart auth
-          auth up -d --wait --wait-timeout 60 --no-deps auth
-          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
-          log=$(auth logs --no-color auth)
-          starts=$(grep -cF "issuer https://brain.example.test/auth" <<<"$log" || true)
-          [ "$starts" = 2 ] || { echo "the log shows $starts starts, not 2: the restart did not restart the server"; exit 1; }
-          auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
-          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
-          # The session cookie a sign-in sets is the issuer's path alone, so on
-          # the shared origin it never rides a request to /mcp or the rest.
-          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
-          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
-          [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
-          [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
-          bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
-          [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
-          # SMD-2615: absolute-form targets, each with an authority the URL parser
-          # refuses, are 400 and `//x/healthz` is not /healthz; the process is
-          # never restarted. Before, the first ended it (an empty 200, exit 1).
-          # A connection the server holds open is cut after 3 s and reads "timeout",
-          # whatever it sent first, so it fails the row rather than hanging the job.
-          # shellcheck disable=SC2016 # JavaScript, run in the container
-          odd=$(auth exec -T auth bun -e 'const { connect } = require("node:net"); const ask = (t) => new Promise((ok) => { let out = ""; const s = connect(3000, "127.0.0.1", () => s.write(`GET ${t} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)); s.on("data", (d) => (out += d)); let held = false; const timer = setTimeout(() => { held = true; s.destroy(); }, 3000); s.on("close", () => { clearTimeout(timer); ok(held ? "timeout" : out.split(" ")[1] || "none"); }); s.on("error", () => ok("refused")); }); const out = []; for (const t of ["http://x:99999/healthz", "http://[::1/auth/token", "//x/healthz"]) out.push(await ask(t)); await Bun.sleep(500); out.push(await fetch("http://127.0.0.1:3000/healthz").then((r) => r.status, () => "refused")); console.log(out.join(" "))')
-          [ "$odd" = "400 400 404 200" ] || { echo "absolute-form targets, //x/healthz, then /healthz answered \"$odd\", not \"400 400 404 200\""; exit 1; }
-          [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$(auth ps -q auth)")" = "true 0" ] || { echo "the authorization server restarted after the odd targets"; exit 1; }
-          # One process holds the store's write lock across the whole request and
-          # lets go only after the answer, so nothing depends on two start-ups'
-          # timing: the server's write waits out its 5 s and answers 500.
-          # shellcheck disable=SC2016 # JavaScript, run in the container
-          locked=$(auth exec -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
-          [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
-          # The cap (3 here): the client registered above and two more fill it, and the next is refused for now.
-          for _ in 1 2; do auth exec -T auth bun restart-check.ts --register > /dev/null; done
-          # Every spelling the library routes to registration (any case, a trailing slash, a query: SMD-2615) is held to it.
-          # shellcheck disable=SC2016 # JavaScript, run in the container
-          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/", "/auth/reg?ob1=1"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
-          want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
-          [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
-          got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
-          if ! { [ "$got" = "503 -" ] && grep -qi '^retry-after: 3600' /tmp/auth-via-proxy.h; }; then echo "a registration past the cap through the proxy answered \"$got\" ($(grep -i '^retry-after' /tmp/auth-via-proxy.h || echo 'no Retry-After')), not the server's 503 with Retry-After 3600"; exit 1; fi
-          # SMD-2309: twenty failed authentications for one client from one forwarded address, then the token endpoint
-          # refuses that client from there for now, and neither another address nor another client from the same one;
-          # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
-          # Every other one carries a query, the 21st among them: the gate reads past it as the library does (SMD-2615).
-          pub=$(bun -e 'console.log(JSON.parse(await Bun.stdin.text()).client_id)' < /tmp/auth-client.json)
-          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from, path = "/auth/token") => (await fetch("http://127.0.0.1:3000" + path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9", i % 2 ? "/auth/token" : "/auth/token?ob1=1")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
-          want="20 429 401 401 21 21"
-          [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
-          grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
-          id=$(auth ps -q auth)
-          SECONDS=0
-          auth stop auth
-          took=$SECONDS
-          [ "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = 0 ] || { echo "the stop did not exit 0"; exit 1; }
-          [ "$took" -lt 5 ] || { echo "the stop took ${took} s: the server did not stop on SIGTERM"; exit 1; }
-          grep -qF "stopped on SIGTERM" <<<"$(docker logs "$id" 2>&1)" || { echo "the server's stop line is missing"; exit 1; }
-          absent "with the authorization server stopped"
-          # SMD-2382: within the MCP server's 30 s probe window the document
-          # goes, a keyless /mcp is today's refusal again, and a token gets the
-          # 503 with Retry-After, not a 401 that would restart its sign-in.
-          for _ in $(seq 1 40); do
-            [ "$(code_of "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] && break
-            sleep 1
-          done
-          [ "$(code_of "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document outlived the authorization server by 40 s"; exit 1; }
-          got=$(at_mcp "${O[@]}")
-          [ "$got" = "200 -" ] || { echo "a keyless /mcp at the origin's Host, the authorization server stopped, answered \"$got\", not today's 200"; exit 1; }
-          got=$({ curl -s --max-time 10 -o /dev/null -D - "${O[@]}" -H 'content-type: application/json' -H 'Authorization: Bearer eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2ln' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' http://127.0.0.1:8010/mcp || true; } | tr -d '\r' | awk 'NR == 1 { c = $2 } tolower($0) ~ /^retry-after:/ { r = $2 } END { print c, r }')
-          [ "$got" = "503 30" ] || { echo "a token with the authorization server stopped answered \"$got\", not 503 with Retry-After 30"; exit 1; }
-          auth rm -sfv auth
-
-      # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
-      # commit the build arg above baked in, beside the version it asserts.
-      # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
-      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
-      # the URL every client configured before the proxy holds: the legacy
-      # router must answer it as the server did, the SDK's `GET /` probe's 405
-      # included (review pass 1: the proxy's 404 there made SDK clients report
-      # an error on every connect).
-      - name: Smoke-test it over MCP
-        working-directory: deploy
-        run: |
-          ./smoke.sh
-          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
-        env:
-          OB1_SMOKE_COMMIT: ${{ github.sha }}
 
       # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
       # pg_restore, which no image in the stack carries together, so the
@@ -2346,7 +2510,7 @@ jobs:
           # SMD-2583: the canary's own env file, made from stable's: mode 600,
           # every setting of stable's but its database password, which is a
           # new one, and the secrets of the profiles the canary never runs (the
-          # auth step left the authorization server's in .env). The old
+          # step before the tier refresh put the authorization server's in .env). The old
           # canary's database took that password: neither stack's password
           # opens the other's database, and the canary's server holds no
           # credential of stable's.
@@ -2367,7 +2531,7 @@ jobs:
           if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/tier-sample/stable.*; then echo "stable's tier half held the canary's database password" >&2; exit 1; fi
           if grep -qFf <(printf '%s\n' "$PG_STABLE") /tmp/tier-sample/canary.*; then echo "the canary's tier half held stable's database password" >&2; exit 1; fi
           rm -rf /tmp/tier-sample
-          grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
+          grep -q '^OB1_AUTH_' .env || { echo "no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
@@ -2512,6 +2676,374 @@ jobs:
           [ "$(q "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%' OR content LIKE '%numbat almanac%' OR content LIKE '%wombat register%'")" = 3 ] || { echo "the brain lost a thought" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8010/health)" = ok ] || { echo "stable's server stopped answering" >&2; exit 1; }
 
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: |
+          docker compose -f compose.yaml logs --tail 60
+          echo "--- canary (deploy/canary.sh's project, if it is still up) ---"
+          docker compose -p open-brain-canary -f compose.yaml logs --tail 60 || true
+          echo "--- provider stub (the runner's listener on :11434) ---"
+          cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
+
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose -f compose.yaml down -v
+
+  deploy-stack-auth:
+    name: "Full stack: the import runner and the authorization server"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Bun on the runner, for this checkout's scripts run there: auth/provision.ts,
+      # and the registered client's id read back.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      # The other container this repository ships (SMD-1800): kubernetes-deployment's
+      # image, Bun's base with its pinned install, built from integrations/ so the
+      # shared auth module is in the context. Built, and run only to be stopped
+      # (the step after) — its database is its own (k8s/init.sql) and
+      # extensions/test-auth.ts starts the server itself.
+      # First, before the compose stack: a bring-up failure below must not hide
+      # whether this image builds.
+      - name: The Kubernetes image builds
+        run: docker build -f integrations/kubernetes-deployment/Dockerfile -t ob1-k8s-mcp:ci integrations
+
+      # Run for this alone (SMD-2250): the server is the container's PID 1, which
+      # ignores a signal it has no handler for, so before its handler every
+      # `docker stop` and pod deletion waited out the grace period and was
+      # killed (exit 137). A search is in flight when the stop lands: its
+      # embedding endpoint is a stub that answers 503 after 2 s, so the call
+      # ends with the tool's error and never reaches the database, which is
+      # never dialled. The stop has to wait for it and count it — an idle stop
+      # passed a handler that exits at once, or that never got the server
+      # (review pass 1). The stub runs from the image just built, which has
+      # Bun, so nothing is pulled. The stop lands once the stub logs the
+      # server's request, so the call is in flight however loaded the runner
+      # is. The verdict is the
+      # exit code under docker's 10 s grace, the answered call (the proof the
+      # stop waited for it) and the server's own `stopped in N s` line, N under
+      # 5 — not `docker stop`'s return, which is printed: on 18 of 221 attempts
+      # from 2026-09-27 to 10-02 it came back 5.0–10.6 s after a stop the
+      # server logged at 1.9 s, exit 0 (about 2 s on a passing run), and a
+      # 1–5 s window on it failed every one (SMD-2316).
+      - name: The Kubernetes image stops on SIGTERM, finishing a call in flight
+        run: |
+          KEY=$(openssl rand -hex 32)
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          docker network create ob1-k8s-stop > /dev/null
+          docker run -d --name ob1-k8s-embed --network ob1-k8s-stop ob1-k8s-mcp:ci bun -e 'Bun.serve({ port: 8080, async fetch() { console.log("embedding request"); await Bun.sleep(2000); return new Response("stub", { status: 503 }); } })' > /dev/null
+          docker run -d --name ob1-k8s-stop --network ob1-k8s-stop -p 127.0.0.1:8099:8000 -e DB_PASSWORD=unused -e EMBEDDING_API_BASE=http://ob1-k8s-embed:8080 -e "MCP_ACCESS_KEYS=ci:read:$HASH" ob1-k8s-mcp:ci > /dev/null
+          up=""
+          for _ in $(seq 1 40); do curl -s -m 2 -o /dev/null -X POST -d '{}' http://127.0.0.1:8099/ && { up=1; break; }; sleep 0.25; done
+          curl -s -N --max-time 10 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $KEY" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_thoughts","arguments":{"query":"stop probe"}}}' http://127.0.0.1:8099/ > /tmp/k8s-call.out &
+          seen=""
+          for _ in $(seq 1 40); do grep -q 'embedding request' <<< "$(docker logs ob1-k8s-embed 2>&1)" && { seen=1; break; }; sleep 0.1; done
+          t0=$(date +%s%3N); docker stop ob1-k8s-stop > /dev/null; ms=$(($(date +%s%3N) - t0))
+          wait
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-k8s-stop)
+          fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' ob1-k8s-stop)" +%s%3N 2> /dev/null) || fin=""
+          log=$(docker logs ob1-k8s-stop 2>&1)
+          docker rm -f ob1-k8s-stop ob1-k8s-embed > /dev/null
+          docker network rm ob1-k8s-stop > /dev/null
+          echo "$log"
+          echo "docker stop: returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code; the call in flight answered: $(head -c 300 /tmp/k8s-call.out)"
+          [ -n "$up" ] || { echo "the Kubernetes image never answered" >&2; exit 1; }
+          [ -n "$seen" ] || { echo "the server never called the embedding stub, so no call was in flight when the stop landed" >&2; exit 1; }
+          [ "$code" = 0 ] || { echo "expected exit 0 once the call in flight answered (137 is the 10 s grace period's kill, 1 a stop cut off at the drain bound)" >&2; exit 1; }
+          grep -q '^SIGTERM: no longer accepting; 1 in flight' <<< "$log" || { echo "the handler did not count the call in flight" >&2; exit 1; }
+          grep -q '"id":1' /tmp/k8s-call.out || { echo "the call in flight got no answer" >&2; exit 1; }
+          stopped=$(grep '^SIGTERM: stopped in ' <<< "$log" || true)
+          if ! [[ "$stopped" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "expected the server's own line, stopped in under 5 s; exit 0 — it was: ${stopped:-none}" >&2; exit 1; fi
+
+      # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
+      # serve MCP, with no Supabase CLI installed and no supabase.com account.
+      # The keys (their raw values in $GITHUB_ENV for the steps below), the
+      # provider stub on the runner, deploy/.env and the up are
+      # .github/ci/full-stack-up.sh's, with why each is as it is (SMD-3051).
+      - name: Bring up the compose stack
+        run: .github/ci/full-stack-up.sh
+
+      # SMD-2212: the import runner's image copies the ingestion pipeline's
+      # import graph file by file, and its build resolves every import. So a
+      # module the pipeline gains that the Dockerfile does not copy fails
+      # here, not at an operator's first import.
+      - name: The import runner's image builds
+        working-directory: deploy
+        run: docker compose -f compose.yaml --profile orchestration build orchestration-runner
+
+      # SMD-2289: the runner's database role, as compose makes it. The
+      # one-shot runs; the role is given, by hand, what it should not keep (an
+      # UPDATE on ob1_agent_keys, a column's SELECT on a table no group has,
+      # the sequences' USAGE, CREATE on public and on the database, a
+      # procedure's EXECUTE) and a CONNECT it should; the one-shot runs again, as a rotated password
+      # would. Then, as the superuser, the role's privileges must be exactly
+      # the four groups' as config.mjs lists them, with CONNECT kept and
+      # nothing else. Then it is asked over the compose network, as the runner
+      # connects (localhost inside the postgres container is trusted): itself,
+      # not a superuser, a member of no role, cannot create a table; a wrong
+      # password refused as that. Then login-role.ts refuses a superuser, a
+      # member, an owner and a role with a schema of its name, --grant --exact
+      # a default privilege's grantee (a dry run too) and a member, and the
+      # two together clear a role's leftover privilege and
+      # per-database setting (review passes 1-5). The probe roles go at the
+      # end. Each check is an `if` or an `||`: bash -e does not stop on a
+      # failure inside an `&&` list.
+      - name: The import runner's database role is made and granted
+        working-directory: deploy
+        env:
+          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
+        run: |
+          # run's own flags, then the service, then a command in its image.
+          oneshot() { docker compose -f compose.yaml --profile orchestration run --rm --no-deps "$@"; }
+          superuser() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc "$1"; }
+          oneshot orchestration-runner-role
+          superuser "GRANT UPDATE ON ob1_agent_keys TO ob1_orchestration_runner; CREATE SCHEMA ci_cols; CREATE TABLE ci_cols.t (a int); GRANT SELECT (a) ON ci_cols.t TO ob1_orchestration_runner; GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ob1_orchestration_runner; GRANT CREATE ON SCHEMA public TO ob1_orchestration_runner; GRANT CONNECT, CREATE ON DATABASE openbrain TO ob1_orchestration_runner; CREATE PROCEDURE ci_proc() LANGUAGE sql AS 'SELECT 1'; GRANT EXECUTE ON PROCEDURE ci_proc() TO ob1_orchestration_runner;"
+          oneshot orchestration-runner-role | tee /tmp/role-again.log
+          grep -q "ob1_orchestration_runner updated" /tmp/role-again.log
+          # shellcheck disable=SC2016 # JavaScript, whose template literals stay unexpanded
+          exactly='import { grantedObjects, grantPresenceSql, mergedGrants } from "./config.mjs"; const s = new Bun.SQL(process.env.DATABASE_URL, { max: 1 }); const role = "ob1_orchestration_runner"; const groups = ["capture", "worker", "structure", "extraction"]; const present = new Set((await s.unsafe(grantPresenceSql(grantedObjects(groups)))).filter((r) => r.present).map((r) => r.name)); const want = mergedGrants(groups, present).flatMap((g) => g.privileges.map((p) => `${g.name} ${p}`)).sort(); const rel = (await s`SELECT c.relname AS n, a.privilege_type AS p FROM pg_class c, aclexplode(c.relacl) a WHERE a.grantee = ${role}::regrole`).map((r) => `${r.n} ${r.p}`).sort(); const other = (await s`SELECT format(${"routine %s %s"}, p.oid::regprocedure, a.privilege_type) AS x FROM pg_proc p, aclexplode(p.proacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"column %s.%s %s"}, t.attrelid::regclass, t.attname, a.privilege_type) FROM pg_attribute t, aclexplode(t.attacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"schema %s %s"}, n.nspname, a.privilege_type) FROM pg_namespace n, aclexplode(n.nspacl) a WHERE a.grantee = ${role}::regrole UNION ALL SELECT format(${"database %s"}, a.privilege_type) FROM pg_database d, aclexplode(d.datacl) a WHERE d.datname = current_database() AND a.grantee = ${role}::regrole`).map((r) => r.x).sort(); await s.close(); const ok = JSON.stringify(rel) === JSON.stringify(want) && JSON.stringify(other) === JSON.stringify(["database CONNECT", "schema public USAGE"]); console.log(ok ? `exactly the ${want.length} privileges of the four groups, CONNECT kept` : JSON.stringify({ missing: want.filter((x) => !rel.includes(x)), extra: rel.filter((x) => !want.includes(x)), other })); process.exit(ok ? 0 : 1);'
+          oneshot orchestration-runner-role bun -e "$exactly"
+          good="postgres://ob1_orchestration_runner:${OB1_RUNNER_DB_PASSWORD}@postgres:5432/openbrain"
+          # shellcheck disable=SC2016 # JavaScript, as above
+          ask='const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); const [r] = await s`SELECT current_user::text AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su, (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles x ON x.oid = m.member WHERE x.rolname = current_user) AS memberships, (SELECT count(*)::int FROM thoughts) AS n`; let created = true; try { await s`CREATE TABLE ob1_runner_role_probe (x int)`; } catch { created = false; } await s.close(); console.log(JSON.stringify({ ...r, created })); process.exit(r.u === "ob1_orchestration_runner" && r.su === false && r.memberships === 0 && !created ? 0 : 1);'
+          oneshot -e ROLE_URL="$good" orchestration-runner-role bun -e "$ask"
+          # shellcheck disable=SC2016 # JavaScript, as above
+          if wrong=$(oneshot -e ROLE_URL="${good/@postgres/x@postgres}" orchestration-runner-role bun -e 'const s = new Bun.SQL(process.env.ROLE_URL, { max: 1 }); await s`SELECT 1`;' 2>&1); then
+            echo "a wrong password was accepted"; exit 1
+          fi
+          grep -q "password authentication failed" <<<"$wrong" || { echo "a wrong password failed, but not as a refused password: $wrong"; exit 1; }
+          superuser "CREATE ROLE ci_super SUPERUSER; CREATE ROLE ci_member; GRANT pg_read_all_data TO ci_member; CREATE ROLE ci_owner; CREATE SCHEMA ci_owned AUTHORIZATION ci_owner; CREATE ROLE ci_defacl; ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO ci_defacl; CREATE SCHEMA ci_plant; CREATE ROLE ci_prior; GRANT UPDATE ON ob1_agent_keys TO ci_prior; ALTER ROLE ci_prior IN DATABASE openbrain SET search_path = ci_owned, public;"
+          refused() {  # refused <expected text> <command…>: exit 2, and the text in what it said
+            local want=$1 out code; shift
+            set +e
+            out=$(oneshot orchestration-runner-role "$@" 2>&1)
+            code=$?
+            set -e
+            echo "$out" | tail -1
+            { [ "$code" = 2 ] && grep -q "$want" <<<"$out"; } || { echo "not refused as \"$want\" (exit $code)"; exit 1; }
+          }
+          for probe in "ci_super is a superuser" "ci_member is a member of pg_read_all_data" "ci_owner owns"; do
+            refused "$probe" bun login-role.ts --role "${probe%% *}" --password-env OB1_RUNNER_DB_PASSWORD
+          done
+          refused "ci_defacl still holds" bun migrate.ts --grant ci_defacl --groups capture --exact
+          refused "ci_defacl still holds" bun migrate.ts --grant ci_defacl --groups capture --exact --dry-run
+          refused "ci_member is a member of pg_read_all_data" bun migrate.ts --grant ci_member --groups capture --exact
+          refused "a schema named ci_plant" bun login-role.ts --role ci_plant --password-env OB1_RUNNER_DB_PASSWORD
+          oneshot orchestration-runner-role sh -c "bun login-role.ts --role ci_prior --password-env OB1_RUNNER_DB_PASSWORD && bun migrate.ts --grant ci_prior --groups capture --exact"
+          [ "$(superuser "SELECT has_table_privilege('ci_prior', 'ob1_agent_keys', 'UPDATE') OR EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'ci_prior')")" = "f" ] || { echo "ci_prior kept a privilege or a setting"; exit 1; }
+          superuser "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM ci_defacl; DROP SCHEMA ci_owned; DROP SCHEMA ci_plant; DROP SCHEMA ci_cols CASCADE; DROP OWNED BY ci_prior; DROP ROLE ci_super, ci_member, ci_owner, ci_defacl, ci_prior; DROP PROCEDURE ci_proc();"
+
+      # SMD-2289: the image's own start, as compose runs the service but
+      # without its dependencies (starting opens no database connection).
+      # `--egress` gives a real nft its rules, setpriv drops NET_ADMIN and
+      # SETPCAP, and the runner listens only once its probe as an emitter uid
+      # is refused. Then, as an emitter uid, the internet and the runner's own
+      # port are refused, and the runner holds KILL, SETGID and SETUID alone.
+      # The self-check reads the rules' text; this is the kernel's answer, on
+      # Docker, where the eval kit runs podman (review pass 5). Each probe is
+      # an `if`: bash -e does not stop on a failed `!` command.
+      - name: The import runner starts with its egress rules
+        working-directory: deploy
+        env:
+          OB1_RUNNER_KEY: ci-stand-in-runner-key-not-a-secret-0123456789
+          # In the image the runner refuses a DATABASE_URL with no password (SMD-2289).
+          OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
+        run: |
+          docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
+          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done
+          docker logs ob1-runner-egress 2>&1
+          docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"
+          pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ] && basename "$p"; done' | head -1)
+          eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
+          echo "runner pid $pid CapEff $eff"
+          [ "$eff" = "00000000000000e0" ]
+          for target in "1.1.1.1 443" "127.0.0.1 8090"; do
+            # shellcheck disable=SC2086
+            if docker exec ob1-runner-egress su-exec 20001:20001 python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3)" $target; then
+              echo "an emitter uid reached $target"; exit 1
+            fi
+          done
+          docker rm -f ob1-runner-egress
+
+      # SMD-2285: the authorization server as compose runs it. Its secrets are
+      # --init's, into this job's deploy/.env. First, with one setting blanked
+      # and the origin given a path, it refuses to start, exit 2, naming both
+      # at once. Then it comes up healthy, and a client registered by DCR is
+      # read back with its registration token after a restart (the log shows
+      # the second start) and again after a recreate, as an upgrade does: the
+      # SQLite store is in its volume, and the memory adapter forgot both.
+      # The store's directory is the server's user's alone; an interaction
+      # with no session is the library's 400, and a write to a store another
+      # connection holds locked answers 500 and is logged; with the cap set to
+      # 3, a fourth registration is refused 503 for now, however the path is
+      # spelled; with the trusted proxy named as the container's own loopback,
+      # so the per-address limits are on, a 21st bad secret for one client
+      # from one forwarded address is refused 429, and that client from
+      # another address, another client, a client that does not exist or a
+      # public one, is not (SMD-2309); an absolute-form target is 400 and
+      # `//x/healthz` a 404, with the process never restarted (SMD-2615); and a stop is
+      # the server's own (exit 0 inside 5 s, its line in the log), not the
+      # grace period's SIGKILL. The container goes at the end; the volume, the
+      # networks and the auth lines in .env stay to the job's end, and the MCP
+      # server keeps the configured origin for the proxy's step after this.
+      # Through the proxy (SMD-1846 PR 2), its auth router: before the server
+      # starts and after it stops, the bare discovery path is a bodiless 404,
+      # not Traefik's 502 for a name that does not resolve; while it runs, the
+      # bare path and RFC 8414's under the issuer answer its document, issuer
+      # and all; and at the cap the proxy hands on its 503 and Retry-After,
+      # which a rewrite of every 5xx would have turned into a 404. The proxy
+      # has no DNS search domains, a configured-off start (COMPOSE_PROFILES
+      # without auth) is refused, and a sign-in's session cookie is Path=/auth
+      # (review pass 1).
+      - name: The authorization server starts, refuses a bad setting, and keeps its state across a restart
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          # The proxy's answer for a path: "<status> <issuer or the body's first 40 bytes>".
+          via_proxy() {
+            local code
+            code=$(curl -s --max-time 10 -o /tmp/auth-via-proxy -w '%{http_code}' -D /tmp/auth-via-proxy.h "$@")
+            printf '%s %s' "$code" "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("issuer") or "-")' /tmp/auth-via-proxy 2> /dev/null || head -c 40 /tmp/auth-via-proxy)"
+          }
+          absent() { [ "$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)" = "404 " ] || { echo "$1: the bare discovery path through the proxy answered \"$(via_proxy http://127.0.0.1:8010/.well-known/oauth-authorization-server)\", not an empty 404"; exit 1; }; }
+          absent "before the authorization server starts"
+          # No search domains in the proxy: an absent server's name is never
+          # tried again under the runner's (where a resolver that answered would
+          # be sent /auth traffic).
+          # Read once, and it must name a resolver, so an empty read cannot pass.
+          resolv=$(docker compose -f compose.yaml exec -T proxy cat /etc/resolv.conf)
+          grep -q '^nameserver ' <<<"$resolv" || { echo "the proxy's resolv.conf names no resolver: \"$resolv\""; exit 1; }
+          if grep -E '^search' <<<"$resolv" | grep -qv -E '^search[[:space:]]+\.?[[:space:]]*$'; then
+            echo "the proxy resolves under search domains:"; echo "$resolv"; exit 1
+          fi
+          # COMPOSE_PROFILES=auth: the stack configured (ADR decision 16), which
+          # the server refuses to start without (SMD-1846 PR 2). It stays in
+          # .env to the job's end: every later compose call names its services
+          # but two that harm nothing (the failure log, and the teardown's
+          # `down -v`, which removes auth-data too).
+          # The refusal below waits 30 s before its exit 2 (no hot restart
+          # loop), so this step takes that much longer.
+          printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
+          bun auth/provision.ts --init
+          bun auth/provision.ts
+          set +e
+          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth 2>&1)
+          code=$?
+          set -e
+          echo "$out" | tail -5
+          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
+            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
+          done
+          auth up -d --build --wait --wait-timeout 120 --no-deps auth
+          for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
+            got=$(via_proxy "http://127.0.0.1:8010$path")
+            [ "$got" = "200 https://brain.example.test/auth" ] || { echo "GET $path through the proxy answered \"$got\", not the server's document"; exit 1; }
+          done
+          # SMD-2382: the MCP server, recreated so it reads the configured .env,
+          # advertises at the origin's Host alone, while the authorization server
+          # answers its probe on the mesh: the document through the proxy, the
+          # challenge on a keyless /mcp; a wrong key and loopback keep their
+          # answers, and the fallback sign-in paths are the proxy's 404. Each
+          # helper's curl may fail without ending the step, so the check after
+          # it says what came back.
+          auth up -d --wait --wait-timeout 120 --no-deps server
+          O=(-H 'Host: brain.example.test')
+          # "<status> <WWW-Authenticate or ->" for an initialize POSTed to /mcp with these curl arguments.
+          at_mcp() { { curl -s --max-time 10 -o /dev/null -D - -H 'content-type: application/json' "$@" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' http://127.0.0.1:8010/mcp || true; } | tr -d '\r' | awk 'NR == 1 { c = $2 } tolower($0) ~ /^www-authenticate:/ { sub(/^[^:]*: */, ""); w = $0 } END { print c, (w == "" ? "-" : w) }'; }
+          code_of() { curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$@" || true; }
+          prm=$(curl -s --max-time 10 "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
+          jq -e '.resource == "https://brain.example.test/mcp" and .authorization_servers == ["https://brain.example.test/auth"]' <<<"$prm" >/dev/null || { echo "the protected-resource document at the origin's Host: ${prm:0:200}"; exit 1; }
+          got=$(at_mcp "${O[@]}")
+          [ "$got" = '401 Bearer resource_metadata="https://brain.example.test/.well-known/oauth-protected-resource/mcp"' ] || { echo "a keyless /mcp at the origin's Host answered \"$got\", not the challenge"; exit 1; }
+          got=$(at_mcp "${O[@]}" -H 'x-brain-key: ci-not-a-key')
+          [ "$got" = "200 -" ] || { echo "a wrong key at the origin's Host answered \"$got\", not today's 200"; exit 1; }
+          got=$(at_mcp)
+          [ "$got" = "200 -" ] || { echo "a keyless /mcp on loopback answered \"$got\", not today's 200"; exit 1; }
+          [ "$(code_of http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document is served at loopback's Host"; exit 1; }
+          for path in /register /authorize /token; do
+            [ "$(code_of "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path")" = 404 ] || { echo "POST $path at the origin root is not the proxy's 404"; exit 1; }
+          done
+          auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
+          auth restart auth
+          auth up -d --wait --wait-timeout 60 --no-deps auth
+          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          log=$(auth logs --no-color auth)
+          starts=$(grep -cF "issuer https://brain.example.test/auth" <<<"$log" || true)
+          [ "$starts" = 2 ] || { echo "the log shows $starts starts, not 2: the restart did not restart the server"; exit 1; }
+          auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
+          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          # The session cookie a sign-in sets is the issuer's path alone, so on
+          # the shared origin it never rides a request to /mcp or the rest.
+          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
+          [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
+          [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
+          bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
+          [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
+          # SMD-2615: absolute-form targets, each with an authority the URL parser
+          # refuses, are 400 and `//x/healthz` is not /healthz; the process is
+          # never restarted. Before, the first ended it (an empty 200, exit 1).
+          # A connection the server holds open is cut after 3 s and reads "timeout",
+          # whatever it sent first, so it fails the row rather than hanging the job.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          odd=$(auth exec -T auth bun -e 'const { connect } = require("node:net"); const ask = (t) => new Promise((ok) => { let out = ""; const s = connect(3000, "127.0.0.1", () => s.write(`GET ${t} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)); s.on("data", (d) => (out += d)); let held = false; const timer = setTimeout(() => { held = true; s.destroy(); }, 3000); s.on("close", () => { clearTimeout(timer); ok(held ? "timeout" : out.split(" ")[1] || "none"); }); s.on("error", () => ok("refused")); }); const out = []; for (const t of ["http://x:99999/healthz", "http://[::1/auth/token", "//x/healthz"]) out.push(await ask(t)); await Bun.sleep(500); out.push(await fetch("http://127.0.0.1:3000/healthz").then((r) => r.status, () => "refused")); console.log(out.join(" "))')
+          [ "$odd" = "400 400 404 200" ] || { echo "absolute-form targets, //x/healthz, then /healthz answered \"$odd\", not \"400 400 404 200\""; exit 1; }
+          [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$(auth ps -q auth)")" = "true 0" ] || { echo "the authorization server restarted after the odd targets"; exit 1; }
+          # One process holds the store's write lock across the whole request and
+          # lets go only after the answer, so nothing depends on two start-ups'
+          # timing: the server's write waits out its 5 s and answers 500.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          locked=$(auth exec -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
+          [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
+          # The cap (3 here): the client registered above and two more fill it, and the next is refused for now.
+          for _ in 1 2; do auth exec -T auth bun restart-check.ts --register > /dev/null; done
+          # Every spelling the library routes to registration (any case, a trailing slash, a query: SMD-2615) is held to it.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/", "/auth/reg?ob1=1"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
+          want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
+          [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
+          got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
+          if ! { [ "$got" = "503 -" ] && grep -qi '^retry-after: 3600' /tmp/auth-via-proxy.h; }; then echo "a registration past the cap through the proxy answered \"$got\" ($(grep -i '^retry-after' /tmp/auth-via-proxy.h || echo 'no Retry-After')), not the server's 503 with Retry-After 3600"; exit 1; fi
+          # SMD-2309: twenty failed authentications for one client from one forwarded address, then the token endpoint
+          # refuses that client from there for now, and neither another address nor another client from the same one;
+          # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
+          # Every other one carries a query, the 21st among them: the gate reads past it as the library does (SMD-2615).
+          pub=$(bun -e 'console.log(JSON.parse(await Bun.stdin.text()).client_id)' < /tmp/auth-client.json)
+          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from, path = "/auth/token") => (await fetch("http://127.0.0.1:3000" + path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9", i % 2 ? "/auth/token" : "/auth/token?ob1=1")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
+          want="20 429 401 401 21 21"
+          [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
+          grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
+          id=$(auth ps -q auth)
+          SECONDS=0
+          auth stop auth
+          took=$SECONDS
+          [ "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = 0 ] || { echo "the stop did not exit 0"; exit 1; }
+          [ "$took" -lt 5 ] || { echo "the stop took ${took} s: the server did not stop on SIGTERM"; exit 1; }
+          grep -qF "stopped on SIGTERM" <<<"$(docker logs "$id" 2>&1)" || { echo "the server's stop line is missing"; exit 1; }
+          absent "with the authorization server stopped"
+          # SMD-2382: within the MCP server's 30 s probe window the document
+          # goes, a keyless /mcp is today's refusal again, and a token gets the
+          # 503 with Retry-After, not a 401 that would restart its sign-in.
+          for _ in $(seq 1 40); do
+            [ "$(code_of "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] && break
+            sleep 1
+          done
+          [ "$(code_of "${O[@]}" http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document outlived the authorization server by 40 s"; exit 1; }
+          got=$(at_mcp "${O[@]}")
+          [ "$got" = "200 -" ] || { echo "a keyless /mcp at the origin's Host, the authorization server stopped, answered \"$got\", not today's 200"; exit 1; }
+          got=$({ curl -s --max-time 10 -o /dev/null -D - "${O[@]}" -H 'content-type: application/json' -H 'Authorization: Bearer eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2ln' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' http://127.0.0.1:8010/mcp || true; } | tr -d '\r' | awk 'NR == 1 { c = $2 } tolower($0) ~ /^retry-after:/ { r = $2 } END { print c, r }')
+          [ "$got" = "503 30" ] || { echo "a token with the authorization server stopped answered \"$got\", not 503 with Retry-After 30"; exit 1; }
+          auth rm -sfv auth
+
       # SMD-1846. What the proxy itself owes, beside the smoke:
       # - /.well-known, bare and under it, is answered by the proxy, not the
       #   server — Traefik's 404 body, where the server's would be "Not
@@ -2523,8 +3055,8 @@ jobs:
       #   header (smoke.sh check 11 holds the POST's), and no /mcp, /health
       #   or OPTIONS /health answer does; the server named the capture key
       #   for its `POST /?key=` here, the query form, under a name nothing
-      #   before this step has used (the smoke at the root already named
-      #   `ci`, and the server says a name once: review pass 2), and never
+      #   before this step has used (the server says a name once, so a key an
+      #   earlier call had named would log nothing: review pass 2), and never
       #   the read key, whose marker it set itself on /mcp and /health, which
       #   the proxy deletes;
       # - the access log never holds a query string or userinfo: after calls
@@ -2537,12 +3069,12 @@ jobs:
       #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
       #   good second before the result. A buffering proxy delivers both
       #   together.
-      # After the tier and canary steps: its search_thoughts is a semantic
-      # search the query log keeps, and until SMD-2875 the tier step's --replay
-      # re-embedded every logged query from tier.sh's container, which had no
-      # host.docker.internal to reach the stub by (the first CI run, caught:
-      # getaddrinfo ENOTFOUND host.docker.internal). The canary step's --diff,
-      # over HTTP since then, runs before this step's search is logged.
+      # After the authorization server's step, in its job (SMD-3051): the MCP
+      # server that step recreated serves the configured origin, so the
+      # document at loopback's Host is the MCP server's own 404, and the
+      # callback reaches the auth router with the authorization server gone.
+      # Its search_thoughts is a semantic search the query log keeps, in a
+      # job whose stack no tier step replays.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |
@@ -2626,456 +3158,11 @@ jobs:
           if result - keepalive < 0.5: sys.exit("the keepalive frame arrived with the result: the proxy buffered the stream")
           PY
 
-      # SMD-2284: the REST core is internal by default — it answers on the mesh
-      # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
-      # names compose.api-public.yaml, when /api reaches it with the prefix
-      # stripped and its links carrying it; dropping the file closes it again.
-      # Its log carries no key, query or content, and the proxy's no key.
-      - name: The REST core answers on the mesh, and at /api only by the overlay
-        working-directory: deploy
-        run: |
-          B=http://127.0.0.1:8010
-          code() { curl -s -o /tmp/api-body -w '%{http_code}' --max-time 15 "$@"; }
-          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          [ "$c" = 404 ] || { echo "/api with the public route off answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
-          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"content":"ci: never captured"}' "$B/api/v1/thoughts")
-          [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
-          inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
-          jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
-          # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
-          carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
-          jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
-          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
-          # From outside, the proxy deletes the forwarder slot: no act, however sound the forwarder key.
-          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" -H "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" "$B/api/v1/whoami")
-          if ! { [ "$c" = 200 ] && jq -e 'has("act") | not' /tmp/api-body >/dev/null; }; then echo "a forwarder through /api reached the REST core ($c): $(head -c 160 /tmp/api-body)" >&2; exit 1; fi
-          c=$(code "$B/api/v1/whoami?key=$OB1_SMOKE_KEY")
-          [ "$c" = 401 ] || { echo "a key in /api's query string was taken ($c): the REST core reads header keys only" >&2; exit 1; }
-          c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
-          if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
-          [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
-          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
-          c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
-          sleep 1
-          LOG="$(docker compose -f compose.yaml logs --no-color api proxy)"
-          if grep -qF -e "$OB1_SMOKE_KEY" -e "$OB1_SMOKE_FORWARD_KEY" <<<"$LOG"; then echo "the REST core's or the proxy's log holds the smoke key or the forwarder's" >&2; exit 1; fi
-          grep -qE '\{"ts":"[^"]+","door":"api","method":"GET","route":"/v1/whoami","agent":"[^"]+","status":200,"outcome":"ok","ms":[0-9]+(,"trace":"[0-9a-f]{32}")?\}$' <<<"$LOG" || { echo "no REST core log line for the whoami, so the absence of the key proves nothing" >&2; exit 1; }
-
-      # SMD-2310: a plugin's webhook reaches the REST core only through the
-      # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
-      # plugin is turned on for this step alone — the migrator, recreated with
-      # the REST core, applies its table as ob1_plugins, and the REST core's
-      # preflight finds it in place; the proxy is recreated with --no-deps, so
-      # the MCP server, whose environment the knobs change too, is left as it
-      # was — then off again, so every other step sees
-      # the plugin-free stack it expects (smoke.sh holds tools/list to the
-      # manifest). With the overlay off /hooks is the proxy's 404; on, a
-      # delivery signed with another secret is the plugin's 401 and a signed
-      # one captures through the core as the hook's own caller, read back on
-      # the mesh; a plugin it does not serve is the REST core's 404. SMD-2755:
-      # each delivery signs its time with its body — one signed ten minutes
-      # ago, as a recorded one resent would be, is 401 STALE_DELIVERY, and the
-      # captured one resent with its id is 200, the same thought, run once.
-      - name: A plugin's webhook reaches the REST core only by the overlay, and captures as its hook
-        working-directory: deploy
-        run: |
-          B=http://127.0.0.1:8010
-          code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
-          SECRET=$(openssl rand -hex 16)
-          PLUGIN_PW=$(openssl rand -hex 16)
-          export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
-          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
-          docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }
-          BODY="{\"id\":\"ci-$(openssl rand -hex 8)\",\"text\":\"ci: a capture through the example webhook\"}"
-          post() { code -X POST -H 'content-type: application/json' "$@"; }
-          # deliver BODY [TIMESTAMP [SECRET]]: signed as the example's sender signs, the HMAC of "<timestamp>.<body>".
-          deliver() {
-            local ts
-            ts="${2:-$(date +%s)}"
-            post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
-          }
-          c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          c=$(deliver "$BODY" "" other)
-          [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
-          c=$(deliver "$BODY" "$(( $(date +%s) - 600 ))")
-          { [ "$c" = 401 ] && [ "$(jq -r '.code // empty' /tmp/hook-body 2>/dev/null)" = STALE_DELIVERY ]; } || { echo "a delivery signed ten minutes ago answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
-          c=$(deliver "$BODY")
-          id=$(jq -r '.id // empty' /tmp/hook-body 2>/dev/null || true)
-          { [ "$c" = 202 ] && [ -n "$id" ]; } || { echo "a signed delivery answered $c: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
-          c=$(deliver "$BODY")
-          { [ "$c" = 200 ] && [ "$(jq -c '[.id, .duplicate]' /tmp/hook-body 2>/dev/null)" = "[\"$id\",true]" ]; } || { echo "the same delivery resent answered $c, not 200 and the same thought: $(head -c 160 /tmp/hook-body)" >&2; exit 1; }
-          fetched=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" "http://api.ob1.internal.:8000/v1/thoughts/$id")
-          grep -qF 'a capture through the example webhook' <<<"$fetched" || { echo "the hook's thought is not on the brain: ${fetched:0:200}" >&2; exit 1; }
-          c=$(post -d '{}' "$B/hooks/nothing/here")
-          [ "$c" = 404 ] || { echo "a plugin the REST core does not serve answered $c through /hooks" >&2; exit 1; }
-          c=$(code "$B/hooks/example/capture")
-          [ "$c" = 405 ] || { echo "a GET of the webhook answered $c, not 405" >&2; exit 1; }
-          unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD OB1_HOOKS OB1_HOOK_SECRETS
-          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
-
-      # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
-      # compose.grafana-public.yaml is named — never the legacy route and the
-      # MCP server, a keyed POST included — and with the overlay named while
-      # the observability profile is off (CI pulls no Grafana image), Traefik's
-      # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
-      # Check 28 holds both tables byte for byte; this holds what Traefik does
-      # with them.
-      - name: /grafana is a 404 unless its overlay is named, and with no Grafana behind it
-        working-directory: deploy
-        run: |
-          B=http://127.0.0.1:8010
-          code() { curl -s -o /tmp/grafana-body -w '%{http_code}' --max-time 15 "$@"; }
-          answers404() {
-            local p c
-            for p in /grafana /grafana/ /grafana/login /grafana/api/search; do
-              c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B$p")
-              [ "$c" = 404 ] || { echo "$1: GET $p answered $c: $(head -c 120 /tmp/grafana-body)" >&2; exit 1; }
-            done
-            c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$B/grafana/")
-            [ "$c" = 404 ] || { echo "$1: a keyed POST to /grafana/ answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
-          }
-          # Which router answered each, from the proxy's JSON access log: the
-          # overlay's grafana-public, whose 404 is grafana-absent's for the
-          # Grafana it cannot reach; the base's grafana-off answers through
-          # noop@internal, which Traefik does not log, so none — a 404 alone is
-          # also every route's absence, so /mcp/health answering after each
-          # recreate shows the tables loaded.
-          routers() {
-            sleep 1
-            docker compose -f compose.yaml logs --no-color --no-log-prefix --since "$1" proxy \
-              | jq -Rr 'fromjson? | objects | select((.RequestPath // "") as $p | $p == "/grafana" or ($p | startswith("/grafana/"))) | "\(.RouterName) \(.DownstreamStatus)"' | sort -u
-          }
-          loaded() { [ "$(code "$B/mcp/health")" = 200 ] || { echo "$1: /mcp/health did not answer, so the proxy's tables are not loaded" >&2; exit 1; }; }
-          loaded "with the overlay off"
-          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          answers404 "with the overlay off"
-          seen=$(routers "$since")
-          [ -z "$seen" ] || { echo "with the overlay off, /grafana reached a router the access log names (grafana-off's noop@internal is not logged): $seen" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.grafana-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          docker compose -f compose.yaml exec -T proxy test -f /etc/traefik/dynamic/grafana.yaml || { echo "the overlay's route file is not on the proxy" >&2; exit 1; }
-          loaded "with the overlay on"
-          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          answers404 "with the overlay on and no Grafana behind it"
-          seen=$(routers "$since")
-          [ "$seen" = "grafana-public@file 404" ] || { echo "with the overlay on, /grafana was answered by: ${seen:-nothing logged}" >&2; exit 1; }
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
-          docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
-          loaded "with the overlay dropped"
-          answers404 "with the overlay dropped"
-
-      # SMD-1849 PR 3b: the stack's Postgres loads pg_stat_statements at its
-      # start, with utility statements untracked and I/O timed (compose.yaml's
-      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 096 created
-      # the extension out of PUBLIC's reach, so the view answers and counts the
-      # brain's own statements by now — the server's calls of thought_stats'
-      # and keyword search's functions above, in the brain's database (the
-      # tier step's replay calls one in its copy), which no migration calls — and
-      # holds no role statement, whose text an ALTER ROLE … PASSWORD would
-      # carry. The exporter that reads it runs under the observability
-      # profile, which CI does not start.
-      - name: Postgres counts the brain's statements in pg_stat_statements
-        working-directory: deploy
-        run: |
-          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -Atc "$1"; }
-          [ "$(q "SHOW shared_preload_libraries")" = pg_stat_statements ] || { echo "Postgres did not start with pg_stat_statements preloaded" >&2; exit 1; }
-          [ "$(q "SHOW pg_stat_statements.track_utility")" = off ] || { echo "Postgres tracks utility statements, whose text a role's password would be in" >&2; exit 1; }
-          [ "$(q "SHOW track_io_timing")" = on ] || { echo "Postgres does not time I/O: pg_stat_statements' block times read 0" >&2; exit 1; }
-          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "096 did not create pg_stat_statements" >&2; exit 1; }
-          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 096's revoke did not hold" >&2; exit 1; }
-          n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
-          [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
-          [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }
-
-      # SMD-2294: a canary or working tier of its own compose project joins
-      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
-      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
-      # bodiless 404, and so is every other path starting with either word,
-      # in any case and whatever follows (an escaped slash, a `;`, a pasted
-      # zero-width space), which never falls to the legacy route. A stand-in per tier on
-      # the mesh, under its tier's name and under `server` as a tier's
-      # container is, answers its own route: the client's Host passed, the
-      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
-      # (only a 502 is the proxy's 404). From the mesh, `server` then names
-      # more than one container: the collision the route table's mesh names
-      # avoid while no tier claims stable's own names, which check 28's
-      # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
-      # each is a 404, and the proxy logged no route-table error.
-      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
-        working-directory: deploy
-        run: |
-          B=http://127.0.0.1:8010
-          code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
-          bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
-          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
-          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
-          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
-          offprefix() {
-            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
-              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
-            done
-          }
-          offprefix ""
-          trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
-          # Each answers /…/status/NNN with that status, its body and an
-          # x-tier header, and anything else with the path, the Host and the
-          # legacy marker it was sent.
-          for tier in canary working; do
-            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
-              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
-          done
-          H="${B#http://}"
-          for tier in canary working; do
-            want="$tier /$tier/mcp/health host=$H legacy=-"
-            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
-            got=$(curl -sS --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || got="no answer (curl exit $?)"
-            [ "$got" = "$want" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in with the client's Host and no legacy marker: '$got'" >&2; exit 1; }
-            got=$(curl -sS --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
-            [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
-            for s in 401 404 429 500 503 504; do
-              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
-              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header: only a 502 is the proxy's" >&2; exit 1; fi
-            done
-            bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
-          done
-          offprefix " beside both tiers"
-          holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
-          [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
-          [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
-          docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
-          for tier in canary working; do
-            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
-            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
-          done
-          # A router whose rule does not compile is dropped, its paths to the
-          # next router (legacy), and a route file Traefik cannot read takes
-          # every route with it, with nothing but this line to say so. Traefik
-          # colours the level whatever --no-color asks, hence ERR.* and no space.
-          # An errors middleware's line about a Host it cannot parse is the
-          # client's, not the table's.
-          PLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix proxy)"
-          if grep -E 'ERR.*(building configuration|routerName=|middlewareName=|serviceName=)' <<<"$PLOG" | grep -v 'Unable to create error page request'; then echo "the proxy logged a route-table error (above): the router it names was dropped" >&2; exit 1; fi
-
-      - name: Confirm no Supabase CLI anywhere in the stack
-        working-directory: deploy
-        run: |
-          if docker compose -f compose.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
-            echo "A supabase binary is present in the server image." >&2
-            exit 1
-          fi
-          echo "No supabase binary in the running stack."
-
-      # SMD-1801. The three dashboards build from their pinned installs, with no
-      # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which SMD-1931 retired; they retire with
-      # SMD-2280's harvest. The SvelteKit one speaks MCP to
-      # the server this stack serves, so it is driven too, below.
-      # They build in the background from the job's start (SMD-2251); this step
-      # waits for that and reports it — each dashboard's log folded when it
-      # passed and open under an error when it failed, and a line per dashboard
-      # of exit code and seconds. It runs when a stack step failed too, so a
-      # broken build is never hidden behind one. The wait ends when the
-      # background shell writes its done mark or dies without it, or at a cap
-      # a minute past the three limits and their kill-after grace. A dead shell
-      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
-      # its state is read instead (review pass 1). timeout TERMs a build's
-      # process group, and its child, the `sh -c` running the chain, dies on
-      # it (dash does not exec the last command of an && list), so a hang is
-      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
-      # from outside.
-      - name: The three dashboards build
-        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
-        run: |
-          out="$RUNNER_TEMP/dashboards"
-          pid=$(cat "$out/pid")
-          limit_s=$(cat "$out/limit")
-          cap=$((3 * (limit_s + 10) + 60))
-          running() {
-            local state
-            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
-          }
-          start=$SECONDS
-          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
-          echo "waited $((SECONDS - start)) s for the background build"
-          if [ ! -e "$out/done" ]; then
-            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
-            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
-            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
-            exit 1
-          fi
-          failed=0
-          summaries=""
-          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            read -r rc secs < "$out/$d.rc"
-            why=$rc
-            case $rc in
-              124) why="124, over the $limit_s s limit" ;;
-              137) why="137, killed from outside, most likely out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$d — built"
-              cat "$out/$d.log"
-              echo "::endgroup::"
-            else
-              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
-              cat "$out/$d.log"
-              failed=1
-            fi
-            summaries+="  $d: exit $rc in $secs s"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$failed" = 0 ]
-
-      # The SvelteKit dashboard as a browser uses it, against the stack that is
-      # up: a wrong key refused at /signin, the write key signed in and the JSON
-      # its first page loads (thought_stats through its proxy) reaching the
-      # database, the read key signed in and refused capture — 403 from the
-      # proxy, before the server is asked — and the capture-only key refused at
-      # sign-in. deploy/.env holds hashes; the raw keys minted above ride in the
-      # three OB1_SMOKE_* variables.
-      - name: The SvelteKit dashboard, driven against the stack
-        working-directory: dashboards/open-brain-dashboard
-        env:
-          MCP_URL: http://127.0.0.1:8010/mcp
-        run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
-
-      # SMD-2760. What comes back after a reboot is each container's restart
-      # policy. Postgres had none, so on Docker a reboot would bring the
-      # servers back without their database (on podman, with its restart unit
-      # disabled, nothing came back: the dogfood stack stayed down 47
-      # minutes). This is the Docker half of the ticket's Verify, on every
-      # run: the daemon restarts, and with nothing started by hand Postgres,
-      # the server, the REST core, the proxy and the forwarder in front of it
-      # (SMD-2583) each come back on its policy,
-      # started after the restart (so a daemon that kept them running proves
-      # nothing) and healthy by its own healthcheck, not merely `Running`,
-      # which Docker also reports for a container in restart backoff (review
-      # pass 1); and a keyed call is answered from the database. The daemon's
-      # stop leaves the server's own `SIGTERM: stopped` line in its log, so
-      # the SIGTERM step below counts the line its own stop adds (review pass
-      # 2). The boot restart does not wait on depends_on, so the server may
-      # start first and loop in preflight until Postgres answers: the wait
-      # covers that.
-      # Before the SIGTERM step, which leaves the server stopped by hand, and
-      # a container stopped by hand is not restarted.
-      - name: The stack comes back after the Docker daemon restarts
-        working-directory: deploy
-        run: |
-          t0=$(date -u +%s)
-          sudo systemctl restart docker
-          # A service's status, health (none: no healthcheck declared), policy and start time.
-          state() {
-            local id
-            id=$(docker compose -f compose.yaml ps -aq "$1" 2> /dev/null || true)
-            if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
-            docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
-          }
-          # Running and healthy: each of the five declares a healthcheck (the
-          # server's is its image's, server-portable/Dockerfile).
-          back() {
-            local status health
-            read -r status health _ <<<"$(state "$1")"
-            [ "$status" = running ] && [ "$health" = healthy ]
-          }
-          while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back proxy && back forwarder; then break; fi
-            sleep 2
-          done
-          for s in postgres server api proxy forwarder; do
-            read -r status health policy started <<<"$(state "$s")"
-            at=$(date -d "$started" +%s)
-            echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
-            why=""
-            if [ "$status" = absent ]; then why="compose finds no container for it"; else
-              back "$s" || why="not running and healthy within 2 minutes"
-              [ "$policy" = unless-stopped ] || why="${why:+$why; }its restart policy is $policy, not unless-stopped"
-              if [ "$status" = running ] && [ "$at" -lt "$t0" ]; then why="${why:+$why; }it started before the restart, so the daemon kept it running"; fi
-            fi
-            if [ -n "$why" ]; then
-              docker compose -f compose.yaml ps -a || true
-              docker compose -f compose.yaml logs --tail 20 "$s" || true
-              docker inspect -f '{{json .State.Health}}' "$(docker compose -f compose.yaml ps -aq "$s" 2> /dev/null || true)" 2> /dev/null || true
-              echo "$s did not come back on its own after the daemon restarted: $why" >&2; exit 1
-            fi
-          done
-          answer=$(curl -s --max-time 20 -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp || true)
-          if ! grep -q '"result"' <<<"$answer" || grep -q '"isError":true' <<<"$answer"; then
-            echo "a keyed thought_stats after the restart did not answer from the database: ${answer:0:300}" >&2; exit 1
-          fi
-
-      # SMD-2250. The server stops on SIGTERM once what is in flight is
-      # answered (server-portable/shutdown.ts), and a stop during preflight
-      # ends the container (the Dockerfile's traps): before, each waited out
-      # the 10 s grace period and was killed, exit 137 — about 30 s of this
-      # job, over the canary's stops and the teardown. Last of the steps that
-      # use the server: it is left stopped. The serving stop is judged by its
-      # exit code under the 10 s grace and by its own `stopped in N s` line, N
-      # under 5 — not by `docker compose stop`'s return, which is printed: it
-      # took 2,476 ms on the PR's first run, and 5.1–7.9 s four times on
-      # 2026-09-27 after a server that logged `stopped in 0.0 s` (SMD-2316).
-      # The second stop lands inside preflight because the stub holds GET
-      # /models 2 s, and must end inside 1 s: the traps alone, with preflight
-      # in the foreground, end it only when the 2 s hold does (review pass 1).
-      # Preflight logs no time of its own, so that deadline is docker's kill
-      # timer, `stop -t 1`: a stop that ends in time exits 143 by itself, one
-      # that does not is killed, 137. The log is read once, into a variable:
-      # `grep -q` on a pipe closes it early, which pipefail fails.
-      - name: The server stops on SIGTERM, serving and in preflight
-        working-directory: deploy
-        run: |
-          stop() {
-            if [ -n "${3:-}" ]; then t=(-t "$3"); else t=(); fi
-            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
-            id=$(docker compose -f compose.yaml ps -aq server)
-            code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
-            fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$id")" +%s%3N 2> /dev/null) || fin=""
-            echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
-            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
-          }
-          # A keyed call first, so the pool this stop closes — open since the
-          # server's start (SMD-2284) — has served this step, whatever ran
-          # before it (review pass 2).
-          curl -s --max-time 10 -o /dev/null -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' http://127.0.0.1:8010/mcp
-          # The daemon restart above (SMD-2760) left a line of its own: this
-          # stop must add one.
-          stops() { docker compose -f compose.yaml logs --no-log-prefix server | grep -c '^SIGTERM: stopped' || true; }
-          before=$(stops)
-          stop serving 0
-          after=$(stops)
-          if [ "$after" -ne $((before + 1)) ]; then echo "the stop added $((after - before)) 'SIGTERM: stopped' lines to the server's log, not one" >&2; exit 1; fi
-          # With the server stopped, the document's router turns Traefik's 502
-          # into the proxy's bodiless 404 (auth-absent, SMD-2382): a connector
-          # still reads "no OAuth here", never an error it could take for OAuth.
-          doc=$(curl -s --max-time 10 -o /tmp/doc-body -w '%{http_code}' http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
-          if ! { [ "$doc" = 404 ] && [ ! -s /tmp/doc-body ]; }; then echo "the document with the server stopped answered $doc '$(head -c 80 /tmp/doc-body)', not the proxy's bodiless 404" >&2; exit 1; fi
-          last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
-          echo "$last"
-          if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
-          touch /tmp/provider-stub-slow
-          docker compose -f compose.yaml start server > /dev/null 2>&1
-          sleep 0.5
-          stop "in preflight" 143 1
-          rm -f /tmp/provider-stub-slow
-
       - name: Logs on failure
         if: failure()
         working-directory: deploy
         run: |
           docker compose -f compose.yaml logs --tail 60
-          echo "--- canary (deploy/canary.sh's project, if it is still up) ---"
-          docker compose -p open-brain-canary -f compose.yaml logs --tail 60 || true
           echo "--- provider stub (the runner's listener on :11434) ---"
           cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
