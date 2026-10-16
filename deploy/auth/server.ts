@@ -30,7 +30,7 @@
  * - sign-in and consent pages. The operator signs in by password, checked
  *   against an argon2id hash from the environment (decision 15's fallback);
  *   passkeys wait for the public origin (SMD-2382), and the loopback
- *   break-glass is the GUI's (SMD-2286).
+ *   break-glass is the GUI's (SMD-2280).
  *   Consent is asked of every client, first-party ones included, and names
  *   what the server has checked, not what the client calls itself: the
  *   `client_id` (for a metadata document, its host); where the code goes (an
@@ -188,8 +188,10 @@ const provider = new Provider(L.issuer, {
   },
   // Every refresh spends the token and issues a new one (OAuth 2.1 §4.3.1 for a
   // client whose tokens are not sender-bound, which none here are: DPoP is off).
-  // A spent one presented again is a replay, and the library then revokes the
-  // whole grant, the new token with it.
+  // A spent one presented again within 60 s rotates once more, since the MCP
+  // SDK refreshes without a lock (store.ts, layout.ts REFRESH_REUSE_GRACE_S);
+  // later, it is a replay, and the library revokes the whole grant, the new
+  // tokens with it.
   rotateRefreshToken: true,
   // The one signing key is P-256, so a registered client's ID token defaults to ES256 (the library's default is RS256).
   clientDefaults: { id_token_signed_response_alg: "ES256" },
@@ -387,9 +389,11 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   };
   const base = `/auth/interaction/${encodeURIComponent(uid)}`;
   // Scopes no access key holds together (brain:read with brain:capture, no
-  // brain:write) are refused before a sign-in or a consent, so no grant ever
-  // holds them: the REST core would refuse every token they made (layout.ts
-  // keyScopeOf, SMD-2286 step 5). The client is sent back with invalid_scope.
+  // brain:write) are refused before a sign-in or a consent: the REST core would
+  // refuse every token they made (layout.ts keyScopeOf, SMD-2286 step 5). The
+  // client is sent back with invalid_scope. (A request the library answers
+  // with no interaction, its scopes already granted, is not seen here;
+  // layout.ts says what reaches the REST core that way.)
   if (noKeysScope(asking.scope.split(" ").filter(Boolean))) {
     return provider.interactionFinished(req, res, { error: "invalid_scope", error_description: "brain:read with brain:capture names no access key's scope: ask for brain:write, which reads and captures, or for one of them" }, { mergeWithLastSubmission: false });
   }

@@ -403,7 +403,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // No key matched: a bearer of a JWT's shape is the authorization server's
     // token, checked where the stack is configured (oauth-token.ts). A token
     // that is not one this server accepts is refused as a token
-    // (`credential: "token"`, RFC 6750's invalid_token); with no keys to check
+    // (`credential: "token"`, RFC 6750's invalid_token, or insufficient_scope
+    // for a valid one whose scopes name no key scope); with no keys to check
     // it against, it is answered as the MCP server answers a token while the
     // authorization server is down: 503, retry in 30 s. Unconfigured, it is an
     // unknown key, as before.
@@ -413,6 +414,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       const checked = await check(bearer!);
       if (checked.status === "unavailable") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "token" }, { "Retry-After": String(UNREACHABLE_RETRY_AFTER_SECONDS) });
       if (checked.status === "invalid") return refuse(c, 401, { code: "UNAUTHORIZED", credential: "token" }, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
+      // A valid token whose scopes name no key scope (none of the brain's, or read with capture and no write) reaches no operation: RFC 6750's insufficient_scope.
+      if (checked.status === "scope") return refuse(c, 403, { code: "FORBIDDEN", credential: "token" }, { "WWW-Authenticate": 'Bearer error="insufficient_scope"' });
       principal = checked.principal;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });

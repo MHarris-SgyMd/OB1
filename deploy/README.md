@@ -3123,28 +3123,38 @@ client named in `OB1_AUTH_SERVICES` needs its secret's line added to the
 pass a variable it does not name: `provision.ts` says which line. A service's
 id may not be `operator`, the account every sign-in's token names, and its
 scopes must be one access key's: `brain:read+brain:capture` without
-`brain:write` is refused, as `brain:write` already reads and captures.
+`brain:write` is refused, as `brain:write` already reads and captures. A
+service names its scope in each token request (`scope=brain:capture`): a
+request without one gets a token with no scope, which the REST core refuses.
 
 **Tokens at the REST core** (SMD-2286). On a configured stack the REST core
 accepts a bearer token this server issued for it: issuer `<origin>/auth`,
 audience exactly `<origin>/api`, ES256, unexpired. A token for `/mcp` is
 refused there; it reaches the REST core only exchanged by the MCP server.
 - **Scopes:** `brain:write` acts as a write key, `brain:read` as a read
-  key, `brain:capture` as a capture key. The consent page words them so.
+  key, `brain:capture` as a capture key; the consent page words them so. A
+  token holding none of them, or `brain:read` with `brain:capture` and no
+  `brain:write`, is answered 403 `insufficient_scope`.
 - **The caller** is `oauth:operator` for a sign-in, `oauth:<id>` for a
   service. Use that name in `actor:` egress terms (`actor:oauth:operator`)
   and the search tools' actor filter; an exchanged token's audit row names
-  the MCP service as `act`.
+  the MCP service as `act`. Classify it in the registry as you would a key
+  (`set_agent_kind`): until then its writes carry no kind, so a `said_by`
+  filter does not find them. Every client signed in as the operator shares
+  this one name for now (SMD-3064).
 - **The keys:** it reads this server's signing keys on the mesh and keeps
-  them ten minutes, the tokens' lifetime. A token issued before an outage
-  works to its end; one it has no keys for gets 503 with `Retry-After: 30`.
-  Not configured, a token is an unknown key.
+  them ten minutes, the tokens' lifetime, reading again after that or for a
+  key it lacks. When a read fails, the keys it read last go on serving for
+  ten minutes from that failure, so a token issued before an outage works to
+  its end, and it tries again every 30 s. With no keys at all, a token gets
+  503 with `Retry-After: 30`. Not configured, a token is an unknown key.
 - **Lifetimes:** an access token lasts 600 s. A client that asked for
   `offline_access` gets a refresh token that lasts 14 days unused. Each use
   replaces it with a new one, and no chain outlives the 30-day grant behind
   it, so a connector signs in again at least monthly. A replaced token used
-  again is taken as stolen: the grant is revoked, and the client signs in
-  again.
+  again within 60 s is honoured once more, since MCP clients may refresh
+  twice at once; used again later, it is taken as stolen: the grant is
+  revoked, and the client signs in again.
 
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps

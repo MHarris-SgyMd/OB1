@@ -3076,7 +3076,8 @@ jobs:
       # the server's own (exit 0 inside 5 s, its line in the log), not the
       # grace period's SIGKILL. The container goes at the end; the volume, the
       # networks and the auth lines in .env stay to the job's end, and the MCP
-      # server keeps the configured origin for the proxy's step after this.
+      # server keeps the configured origin for the steps after this (the REST
+      # core's tokens, then the proxy's).
       # Through the proxy (SMD-1846 PR 2), its auth router: before the server
       # starts and after it stops, the bare discovery path is a bodiless 404,
       # not Traefik's 502 for a name that does not resolve; while it runs, the
@@ -3249,12 +3250,14 @@ jobs:
           # (the shell's value is compose's over .env's).
           OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
           auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
-          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
-          read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --tokens brain:read)
-          write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --tokens brain:write)
-          # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer.
-          # shellcheck disable=SC2016 # JavaScript, run in the container
-          at_api() { auth exec -T -e P="$1" -e T="$2" -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
+          # The password and the tokens go by name (-e NAME, from this shell's
+          # environment), never on a command line the runner's process list shows.
+          OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          export OB1_AUTH_OPERATOR_PASSWORD
+          read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:read)
+          write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
+          # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer, cut at 15 s.
+          at_api() { T="$2" auth exec -T -e P="$1" -e T -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined, signal: AbortSignal.timeout(15000) }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
           check() { local got="$1" want="$2" filter="$3" what="$4"; if ! { [ "${got%% *}" = "$want" ] && jq -e "$filter" <<<"$(cut -d' ' -f3- <<<"$got")" > /dev/null; }; then echo "$what answered \"${got:0:300}\""; exit 1; fi; }
           api_w=$(jq -r .api <<<"$write_t")
           check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator" and .scope == "write" and .act == {"name": "oauth:mcp"}' "whoami with an exchanged write token"
@@ -3263,7 +3266,7 @@ jobs:
           got=$(at_api /v1/thoughts "$api_w" POST '{"content":"SMD-2286: captured with an exchanged token"}')
           check "$got" 201 '.id | type == "string"' "a capture with an exchanged write token"
           id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
-          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture' ORDER BY id DESC LIMIT 1")
+          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
           [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
           auth stop auth
           check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator"' "whoami, the authorization server stopped and its keys already read,"

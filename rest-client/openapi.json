@@ -64,7 +64,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -215,7 +215,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -401,7 +401,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -559,7 +559,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -792,7 +792,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1019,7 +1019,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1246,7 +1246,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1444,7 +1444,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1608,7 +1608,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1772,7 +1772,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1951,7 +1951,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2092,7 +2092,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2292,7 +2292,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2433,7 +2433,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2574,7 +2574,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2725,7 +2725,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2885,7 +2885,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3048,7 +3048,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3209,7 +3209,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3375,7 +3375,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3546,7 +3546,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3677,6 +3677,16 @@
           },
           "401": {
             "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core with one key scope's worth of `brain:` scopes (SMD-2286).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A bearer token whose scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3828,6 +3838,16 @@
               }
             }
           },
+          "403": {
+            "description": "A bearer token whose scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
           "405": {
             "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
             "content": {
@@ -3925,7 +3945,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR.",
             "content": {
               "application/json": {
                 "schema": {

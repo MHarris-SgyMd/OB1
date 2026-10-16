@@ -41,8 +41,13 @@ export const SCOPES = ["brain:read", "brain:write", "brain:capture"] as const;
  * key's, and none of the three is none. Scopes that are not the brain's
  * (`openid`, `offline_access`) are ignored. The REST core reads a token by the
  * same rule (server-portable/oauth-token.ts keyScopeOf) and refuses a token it
- * gives null for, so the server never issues a combination with no key's
- * meaning; server-portable/test-rest.ts holds the two rules together.
+ * gives null for (403 insufficient_scope); server-portable/test-rest.ts holds
+ * the two rules together. The server refuses such a set where a request names
+ * it afresh: at the authorization request's interaction, at the exchange and
+ * in OB1_AUTH_SERVICES. The library can still issue one by narrowing what a
+ * client already holds (a refresh, client credentials within a service's
+ * scopes, or a grant built up over two consents), and the REST core refuses
+ * that token: no privilege comes of it.
  */
 export function keyScopeOf(scopes: readonly string[]): "write" | "read" | "capture" | null {
   const held = new Set(scopes.filter((s) => (SCOPES as readonly string[]).includes(s)));
@@ -61,6 +66,16 @@ export const OPERATOR = "operator";
 export const GRANT_TTL_S = 30 * 86_400;
 /** How long a refresh token lasts unused: each refresh rotates it, and the new one has this long again, within the grant's life. */
 export const REFRESH_IDLE_S = 14 * 86_400;
+
+/**
+ * How long a spent refresh token is still honoured (SMD-2286, the maintainer's
+ * choice): the MCP SDK refreshes without a lock, so two calls meeting an
+ * expired access token both refresh with the same token, and a replay read
+ * strictly revokes the grant, signing the user out (measured, 10 of 10 runs).
+ * Within 60 s of its first spend a token rotates again (store.ts find); after
+ * it, a replay revokes the grant.
+ */
+export const REFRESH_REUSE_GRACE_S = 60;
 
 /**
  * A refresh token's lifetime (SMD-2286, the maintainer's choice: rotate, 14

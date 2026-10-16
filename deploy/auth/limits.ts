@@ -14,7 +14,7 @@
  *   check as it refills, and the right password is refused while the flood
  *   lasts (measured: none or one of twenty got in). It leaves nothing behind
  *   when the flood stops; the loopback sign-in that answers a flood is
- *   SMD-2286's.
+ *   SMD-2280's.
  *   With a trusted proxy, an address that wins checks is locked out after six
  *   (below), so one address cannot hold the bucket long.
  * - **A sign-in flow** (one interaction) takes `TRIES_PER_SIGN_IN` wrong

@@ -18,6 +18,12 @@
  * - `upsert` replaces a row whole, expiry included;
  * - `consume` stamps the payload's `consumed` with the time, which is how the
  *   library spots a replayed code or rotated refresh token;
+ *
+ * and departs from it once (SMD-2286): a refresh token spent less than
+ * REFRESH_REUSE_GRACE_S (60 s) ago is found unspent, so the library rotates it
+ * again rather than revoking its grant, and a second consume keeps the first
+ * time, so the grace runs from the first spend and never extends. Past it, a
+ * replay revokes the grant as the library intends;
  * - `revokeByGrantId` removes every grantable row of the grant, whichever
  *   model's adapter is asked (the library asks each in turn);
  * - `find`, `findByUid` and `findByUserCode` return a payload or `undefined`.
@@ -40,6 +46,7 @@
  *   bun deploy/auth/store.ts --self-check   # the adapter's rules, on a scratch file (CI)
  */
 import { Database } from "bun:sqlite";
+import { REFRESH_REUSE_GRACE_S } from "./layout.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,7 +109,8 @@ function prepare(db: Database) {
     find: db.query<{ payload: string }, { model: string; id: string; now: number }>(`SELECT payload FROM oidc WHERE model = $model AND id = $id AND ${live}`),
     byUid: db.query<{ payload: string }, { model: string; uid: string; now: number }>(`SELECT payload FROM oidc WHERE model = $model AND uid = $uid AND ${live}`),
     byCode: db.query<{ payload: string }, { model: string; code: string; now: number }>(`SELECT payload FROM oidc WHERE model = $model AND user_code = $code AND ${live}`),
-    consume: db.query(`UPDATE oidc SET payload = json_set(payload, '$.consumed', $at) WHERE model = $model AND id = $id`),
+    // The first time it was spent stands: a second consume (a refresh token honoured in its reuse grace, find below) keeps it, so the grace never extends.
+    consume: db.query(`UPDATE oidc SET payload = json_set(payload, '$.consumed', coalesce(json_extract(payload, '$.consumed'), $at)) WHERE model = $model AND id = $id`),
     destroy: db.query(`DELETE FROM oidc WHERE model = $model AND id = $id`),
     revoke: db.query(`DELETE FROM oidc WHERE grant_id = $grant AND model IN (${GRANTABLE.map((m) => `'${m}'`).join(", ")})`),
     countClients: db.query<{ n: number }, []>(`SELECT count(*) AS n FROM oidc WHERE model = 'Client'`),
@@ -171,7 +179,11 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
       });
     },
     async find(id: string) {
-      return parsed(q.find.get({ model, id, now: clock() }));
+      const found = parsed(q.find.get({ model, id, now: clock() }));
+      // A refresh token spent less than REFRESH_REUSE_GRACE_S ago reads as unspent, so the library rotates it once more
+      // instead of revoking the grant: a client refreshing twice at once (the MCP SDK has no lock) is not signed out.
+      if (model === "RefreshToken" && typeof found?.consumed === "number" && clock() - found.consumed < REFRESH_REUSE_GRACE_S) delete found.consumed;
+      return found;
     },
     async findByUid(uid: string) {
       return parsed(q.byUid.get({ model, uid, now: clock() }));
@@ -285,6 +297,19 @@ async function selfCheck(): Promise<number> {
 
     await code.upsert("same", { accountId: "code" }, 60);
     await refresh.upsert("same", { accountId: "refresh" }, 60);
+    // A refresh token's reuse grace (SMD-2286): unspent to find for 60 s after its first spend, a second spend keeping the first time.
+    await refresh.upsert("rg", { grantId: "g4" }, 3600);
+    await refresh.consume("rg");
+    const spentAt = t;
+    t += REFRESH_REUSE_GRACE_S - 1;
+    expect("a refresh token spent 59 s ago reads as unspent (the reuse grace)", (await refresh.find("rg"))?.consumed === undefined);
+    await refresh.consume("rg");
+    t += 1;
+    const late = await refresh.find("rg");
+    expect("at 60 s it reads as spent, stamped with its first spend, which a second consume kept", late?.consumed === spentAt, JSON.stringify(late));
+    await code.upsert("kg", { grantId: "g4" }, 60);
+    await code.consume("kg");
+    expect("a code spent a second ago reads as spent: the grace is a refresh token's alone", (await code.find("kg"))?.consumed === t);
     await code.consume("same");
     await code.destroy("same");
     const other = await refresh.find("same");

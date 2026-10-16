@@ -24,7 +24,7 @@ import { openApiDocument } from "./rest/openapi.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
 import { OAUTH_SCOPES } from "./oauth-edge.ts";
-import { AUTH_JWKS_URL, checkerOver, JWKS_CACHE_MAX_AGE_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
+import { AUTH_JWKS_URL, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -378,7 +378,7 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   const mint = (claims: Claims = {}, opt: { key?: CryptoKey; kid?: string; typ?: string; exp?: string | number } = {}) =>
     new SignJWT({ scope: "brain:write", ...claims })
       .setProtectedHeader({ alg: "ES256", typ: opt.typ ?? "at+jwt", kid: opt.kid ?? kid })
-      .setIssuer(String(claims.iss ?? settings.issuer)).setAudience((claims.aud as string) ?? settings.audience)
+      .setIssuer(String(claims.iss ?? settings.issuer)).setAudience((claims.aud as string | string[]) ?? settings.audience)
       .setSubject(String(claims.sub ?? "operator")).setIssuedAt().setExpirationTime(opt.exp ?? "10m")
       .sign(opt.key ?? privateKey);
   let check: TokenCheck | null = checkerOver(settings, createLocalJWKSet(jwks));
@@ -421,11 +421,21 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   r = await json(await call("/v1/whoami", cap));
   assert(r.status === 200 && r.body.scope === "capture" && same(r.body.operations, CAPTURE_TOOL_NAMES), `…its operations are a capture key's (${JSON.stringify(r.body.operations)})`);
 
+  // A valid token whose scopes name no key scope reaches no operation: 403 as a token, RFC 6750's insufficient_scope.
+  for (const [label, scope] of [["brain:read with brain:capture, no key's scope", "brain:read brain:capture"], ["no brain scope", "openid offline_access"]] as const) {
+    calls.length = 0;
+    const res = await call("/v1/stats", await mint({ scope }));
+    const body = await res.json() as Record<string, unknown>;
+    assert(res.status === 403 && body.code === "FORBIDDEN" && body.credential === "token" && res.headers.get("www-authenticate") === 'Bearer error="insufficient_scope"' && calls.length === 0,
+      `${label}: 403 FORBIDDEN credential token, insufficient_scope, nothing run (${res.status} ${JSON.stringify(body)} ${res.headers.get("www-authenticate")})`);
+  }
+  r = await json(await call("/v1/whoami", await mint({ aud: [settings.audience] })));
+  assert(r.status === 200, `an audience list holding this REST core alone is accepted (${r.status})`);
+
   // Every token this server does not accept: 401 as a token, RFC 6750's invalid_token, and nothing runs.
   const refused: [string, Promise<string>][] = [
-    ["brain:read with brain:capture, no key's scope", mint({ scope: "brain:read brain:capture" })],
-    ["no brain scope", mint({ scope: "openid offline_access" })],
     ["the /mcp audience (Verify: the MCP-audience token sent straight to the REST core)", mint({ aud: `${ORIGIN}/mcp` })],
+    ["an audience list naming this REST core and the /mcp resource", mint({ aud: [settings.audience, `${ORIGIN}/mcp`] })],
     ["another tier's REST core", mint({ aud: `${ORIGIN}/canary/api` })],
     ["another issuer", mint({ iss: "https://elsewhere.example.test/auth" })],
     ["expired", mint({}, { exp: Math.floor(Date.now() / 1000) - 60 })],
@@ -475,6 +485,10 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   check = async (t) => { checked++; return counted!(t); };
   r = await json(await call("/v1/whoami", "not-a-jwt"));
   assert(r.status === 401 && !("credential" in r.body) && checked === 0, `a wrong key as Bearer: an unknown key, the token check not asked (${r.status} ${JSON.stringify(r.body)} ${checked})`);
+  // A key reader that fails any other way (a bug, a library's own throw) is no keys to check with: 503, never 401.
+  check = checkerOver(settings, async () => { throw new Error("a reader's own failure"); });
+  r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.credential === "token", `a key reader that throws: 503 BUSY credential token (${r.status} ${JSON.stringify(r.body)})`);
   // Unconfigured (no check): a token is an unknown key, as before SMD-2286.
   check = null;
   r = await json(await call("/v1/whoami", await mint()));
@@ -482,29 +496,57 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   const plainApp = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { authorization: `Bearer ${await mint()}` } })));
   assert(plainApp.status === 401 && !("credential" in plainApp.body), `…and a REST app given no token check accepts none (${plainApp.status})`);
 
-  // The key set on the network (remoteChecker): read once and cached; the authorization server gone, a token is
-  // checked against the keys read; never read and unreachable, a token is a 503 with the 30 s wait, not a 401.
+  // The key set on the network (remoteChecker, cachedKeys), on a clock of the suite's own (ms): read once and kept
+  // 600 s; when a read fails, the keys read last serve 600 s from that first failure and no read is tried for 30 s;
+  // past that, or never read, a token is a 503 with the 30 s wait, not a 401. A key the set lacks is read for, at
+  // most once in 30 s: right after a read it is the token's fault (401), within the 30 s it is a 503.
   let served = 0;
   let failing = false;
-  const jwksServer = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(jwks)) : new Response("no", { status: 404 })) });
+  const k2 = await generateKeyPair("ES256", { extractable: true });
+  let serving: { keys: unknown[] } = jwks;
+  const jwksServer = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(serving)) : new Response("no", { status: 404 })) });
   const at = `http://127.0.0.1:${jwksServer.port}/auth/jwks`;
-  check = remoteChecker(settings, at);
-  r = await json(await call("/v1/whoami", await mint()));
-  const second = await json(await call("/v1/whoami", await mint()));
-  assert(r.status === 200 && second.status === 200 && served === 1, `the remote key set: read once, then cached (${r.status} ${second.status}, ${served} read)`);
+  let T = 0;
+  const S = 1000;
+  const clock = () => T;
+  const status = async (token?: string) => (await call("/v1/whoami", token ?? await mint())).status;
+  const step = async (label: string, t: number, want: number, reads: number, token?: string) => {
+    T = t * S;
+    const got = await status(token);
+    assert(got === want && served === reads, `${label} (t=${t} s): ${want}, ${reads} read(s) so far (${got}, ${served})`);
+  };
+  check = remoteChecker(settings, at, clock);
+  await step("the remote key set: read at the first token", 0, 200, 1);
+  await step("…kept: no read for the next", 100, 200, 1);
   failing = true;
-  r = await json(await call("/v1/whoami", await mint()));
-  assert(r.status === 200, `…the authorization server failing, a token is checked against the keys read (${r.status})`);
-  check = remoteChecker(settings, at);
+  await step("…the authorization server failing, a set under 600 s old serves without a read", 599, 200, 1);
+  await step("a stale set: a read is tried, fails, and the keys read last serve", 601, 200, 2);
+  await step("…no read tried again within 30 s of the failure", 610, 200, 2);
+  await step("…tried again after 30 s, failing still: the keys read last serve, 600 s from the first failure", 632, 200, 3);
+  await step("…past 600 s from the first failure (every token issued before it has expired): 503", 1202, 503, 4);
+  failing = false;
+  await step("the server back: read again after 30 s, and served", 1240, 200, 5);
+  serving = { keys: [...jwks.keys, { ...(await exportJWK(k2.publicKey)), kid: "ob1-k2", alg: "ES256", use: "sig" }] };
+  const byK2 = await mint({}, { kid: "ob1-k2", key: k2.privateKey });
+  await step("a new signing key 10 s after a read: 503 while the set cannot be read again, not a 401 that would send its client to sign in", 1250, 503, 5, byK2);
+  await step("…after 30 s it is read for, and served", 1271, 200, 6, byK2);
+  const byNone = await mint({}, { kid: "ob1-nowhere", key: k2.privateKey });
+  await step("a kid the authorization server does not hold, read for: 401, the token's fault", 1302, 401, 7, byNone);
+  await step("…again within 30 s: 503, no read", 1303, 503, 7, byNone);
+  failing = true;
+  check = remoteChecker(settings, at, clock);
+  T = 2000 * S;
   const down = await call("/v1/whoami", await mint());
   const downBody = await down.json() as Record<string, unknown>;
-  assert(down.status === 503 && downBody.code === "BUSY" && downBody.credential === "token" && down.headers.get("retry-after") === "30",
+  assert(down.status === 503 && downBody.code === "BUSY" && downBody.credential === "token" && down.headers.get("retry-after") === "30" && served === 8,
     `a key set never read, the server answering 503: the token is 503 BUSY credential token, Retry-After 30 — not refused (${down.status} ${JSON.stringify(downBody)} ${down.headers.get("retry-after")})`);
+  await step("…and no read again within 30 s", 2010, 503, 8);
   jwksServer.stop(true);
-  check = remoteChecker(settings, at);
+  check = remoteChecker(settings, at, clock);
   const gone = await call("/v1/whoami", await mint());
   assert(gone.status === 503 && gone.headers.get("retry-after") === "30", `…nothing listening: 503 all the same (${gone.status})`);
-  assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000, "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s");
+  assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000 && JWKS_COOLDOWN_MS === 30_000,
+    "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s, with 30 s between reads");
   answer = async () => ok({});
 }
 

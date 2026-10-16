@@ -517,7 +517,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -622,7 +622,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -729,7 +729,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -849,7 +849,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -995,7 +995,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1131,7 +1131,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1243,7 +1243,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1368,7 +1368,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1474,7 +1474,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1580,7 +1580,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1687,7 +1687,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1790,7 +1790,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1899,7 +1899,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2002,7 +2002,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2105,7 +2105,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2210,7 +2210,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2320,7 +2320,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2429,7 +2429,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2539,7 +2539,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2653,7 +2653,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2767,7 +2767,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -2870,6 +2870,15 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
+            /** @description A bearer token whose scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
             /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
             405: {
                 headers: {
@@ -2939,6 +2948,15 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
+            /** @description A bearer token whose scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
             /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
             405: {
                 headers: {
@@ -2999,7 +3017,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_NOT_OPERATOR. */
             403: {
                 headers: {
                     [name: string]: unknown;

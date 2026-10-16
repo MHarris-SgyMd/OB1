@@ -599,6 +599,7 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
   row("G4 client credentials: a service identity, within its scope and resource", ccOk, `token ${cc.status} aud ${audOf(cr)} sub ${cr.sub} scope ${cr.scope}; brain:write → ${err(wider)}; /mcp → ${err(toMcp)}`);
 
   // Refresh, which a third-party client may use: the consent page must say so, and the refreshed token keeps its one audience.
+  let g5: { id: string; first: string; rotated: string; consentPage: string } | undefined;
   try {
     const id = await register(meta, ["authorization_code", "refresh_token"]);
     const pk3 = pkce();
@@ -611,21 +612,32 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
     const shown = consentPage.includes(`client ${id}`) && consentPage.includes("returning to http://localhost:9876") && /asks for brain:read offline_access on /.test(consentPage) && /keep access after you close it \( offline_access \)/.test(consentPage);
     const ok5 = shown && first.status === 200 && Boolean(first.body.refresh_token) && refreshed.status === 200 && oneAud(rc, L.mcp("")) && rc.sub === "operator" && brainScopes(rc.scope) === "brain:read";
     row("G5 a third-party client refreshes for its granted resource, and consent said so", ok5, `consent page names the client id and http://localhost:9876, lists offline_access and explains it: ${shown}; first ${first.status} refresh_token ${first.body.refresh_token ? "issued" : "none"}; refreshed ${errOf(refreshed)} aud ${audOf(rc)} scope ${rc.scope}`);
-    // The deploy's refresh policy (SMD-2286, deploy/auth/server.ts), not a
-    // criterion of the comparison, so the winner's alone: every refresh
-    // rotates, a spent token presented again is refused and revokes the grant,
-    // so the token it rotated to is refused after it. And the consent page
-    // says what brain:read is in an access key's words.
-    if (c.candidate === "oidc-provider") {
-      const rotated = String(refreshed.body.refresh_token ?? "");
-      const replay = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: String(first.body.refresh_token ?? "") }, { id });
-      const after = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: rotated }, { id });
-      const means = /brain:read : read thoughts, and nothing else — what a read key may do/.test(consentPage);
-      const okR = Boolean(rotated) && rotated !== first.body.refresh_token && replay.status === 400 && replay.body.error === "invalid_grant" && after.status === 400 && after.body.error === "invalid_grant" && means;
-      row("G5r every refresh rotates; a replayed refresh token is refused and revokes the grant; consent says a scope in a key's words", okR, `rotated ${rotated ? (rotated !== first.body.refresh_token ? "to a new token" : "to the same token") : "none issued"}; replay ${errOf(replay)}; the rotated token after it ${errOf(after)}; consent explains brain:read as a read key's: ${means}`);
-    }
+    g5 = { id, first: String(first.body.refresh_token ?? ""), rotated: String(refreshed.body.refresh_token ?? ""), consentPage };
   } catch (e) {
     row("G5 a third-party client refreshes for its granted resource, and consent said so", false, (e as Error).message);
+  }
+  // The deploy's refresh policy (SMD-2286, deploy/auth/server.ts and store.ts),
+  // not a criterion of the comparison, so the winner's alone: every refresh
+  // rotates, and two refreshes at once with one token (the MCP SDK has no
+  // lock) both succeed inside the 60 s reuse grace, rather than the second
+  // revoking the grant; the chain goes on after them. (A replay after the
+  // grace revokes the grant: store.ts's self-check holds the boundary.) And
+  // the consent page says what brain:read is in an access key's words.
+  if (c.candidate === "oidc-provider") {
+    const G5R = "G5r every refresh rotates; two refreshes at once with one token both succeed and the chain goes on; consent says a scope in a key's words";
+    try {
+      if (!g5) throw new Error("G5 gave no refresh token to go on from");
+      const { id, first, rotated, consentPage } = g5;
+      const refresh = (token: string) => tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: token }, { id });
+      const [one, two] = await Promise.all([refresh(rotated), refresh(rotated)]);
+      const next = await refresh(String(two.body.refresh_token ?? ""));
+      const means = /brain:read : read thoughts, and nothing else — what a read key may do/.test(consentPage);
+      const fresh = (r: TokenReply) => r.status === 200 && Boolean(r.body.refresh_token) && r.body.refresh_token !== rotated;
+      const okR = Boolean(rotated) && rotated !== first && fresh(one) && fresh(two) && one.body.refresh_token !== two.body.refresh_token && fresh(next) && means;
+      row(G5R, okR, `rotated ${rotated ? (rotated !== first ? "to a new token" : "to the same token") : "none issued"}; two at once ${errOf(one)} and ${errOf(two)}${one.body.refresh_token && one.body.refresh_token === two.body.refresh_token ? " (the same new token)" : ""}; the chain after them ${errOf(next)}; consent explains brain:read as a read key's: ${means}`);
+    } catch (e) {
+      row(G5R, false, (e as Error).message);
+    }
   }
   // What the consent page says. A native client with a custom scheme returns
   // to an app, whatever host the URI names; a request for openid alone still
