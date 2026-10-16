@@ -14821,6 +14821,27 @@ console.log("\n[88] Migration 098: the thoughts with no vector by an index of th
   try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
   const n = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'thoughts' AND indexdef LIKE '%WHERE (embedding IS NULL)%'`)).rows[0].n;
   assert(again.endsWith("_vectorless_index.sql") && n === 1 && (await def()) === d, `098 applied again changes nothing: one such index, the same definition (${again.slice(0, 80)}, ${n})`);
+  // Anything else under the name is refused, never recorded as applied over
+  // it: IF NOT EXISTS alone kept both of these, and the mender read every row
+  // (review pass 1).
+  const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (id)`);
+  const wrong = await refusal();
+  assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\)\. Drop it and re-run/.test(wrong),
+    `an index of another shape under the name (no WHERE): refused, naming what it is and what to do (${wrong.slice(0, 120)})`);
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE TABLE thoughts_vectorless_idx (x int)`);
+  const table = await refusal();
+  assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — a relation of kind r\./.test(table),
+    `a table under the name: refused, naming its kind (${table.slice(0, 120)})`);
+  await db.exec(`DROP TABLE thoughts_vectorless_idx`);
+  await reapply(file);
+  assert((await def()) === d, "dropped, the file builds it again in its shape");
+  // Last, and put back in place: a DROP after this catalog write fails inside PGlite.
+  await db.exec(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+  const invalid = await refusal();
+  assert(/migration 098: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build that did not finish, or one still running/.test(invalid),
+    `an INVALID index in the shape (an interrupted CONCURRENTLY build): refused, naming it (${invalid.slice(0, 120)})`);
+  await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

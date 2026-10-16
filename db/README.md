@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2895 assertions: 2895 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2899 assertions: 2899 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports ninety-eight (98) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -1638,19 +1638,23 @@ Migration 098 gives the thoughts with no vector an index of their own
 (SMD-3056): `thoughts_vectorless_idx`, a btree on `thoughts (id)` partial on
 `embedding IS NULL`. SMD-2889's vector mender reads a page of those rows in
 id order every tick, from each server, and brain_info's `vectorless` count
-(keyed `/health` among its readers) counts them; each was a scan of every
-row (2–4 ms at 100,000 thoughts, linear in the count). Both of the page's
+(keyed `/health` among its readers) counts them. The count read every row,
+and so did the page whenever none waited past its cursor — a healthy brain's
+every tick, and each sweep's tail (2–4 ms at 100,000 thoughts). Both of the page's
 forms (no cursor; `id > cursor`, generic plan included) now read the index
 from where they start, 0.005–0.04 ms on 100,000 thoughts with 0, 1 or 10%
-waiting, and the count is an index-only scan of the rows that wait (0.005 ms
+waiting, and the count is an index-only scan of the rows that wait (0.004 ms
 at none, 0.6 ms at 10,000). The index holds only those rows, so it stays a
 page or two on a healthy brain; HOT updates are unchanged, since `embedding`
 was already an indexed column (the HNSW index's). It is built inside the
 migrator's transaction, writes to `thoughts` waiting for it (SHARE) — one
-read of every row; a brain far past a few hundred thousand thoughts can build
-it by hand first, `CONCURRENTLY` under this name, as 074's can. Needs
-nothing past 001; a re-apply is a no-op. test-schema [88] (the definition),
-test-store-sql [18] (the store's two page statements and the count read
+read of the heap, 64–86 ms at a million thoughts; a brain of hundreds of
+millions can build it by hand first, `CONCURRENTLY` under this name and in this shape, and the
+file keeps it. Anything else under the name — an INVALID index (a
+`CONCURRENTLY` build that did not finish, which the planner ignores) or one
+of another shape — is refused by name rather than recorded as applied over
+it. Needs nothing past 001; a re-apply is a no-op. test-schema [88] (the
+definition, both refusals), test-store-sql [18] (the store's two page statements and the count read
 through it, neither page a scan of `thoughts`).
 
 ## What changed relative to the guide
@@ -4669,7 +4673,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2895 assertions, PGlite, no container
+bun test-schema.ts                          # 2899 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1376 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
