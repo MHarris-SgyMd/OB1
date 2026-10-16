@@ -257,7 +257,8 @@ instance. The alternative is one Ollama on the host that every instance names
 ## Several brains behind one edge
 
 The edge proxy (SMD-2876) puts several brains behind one port, each at a host
-of its own: `http://<name>.localhost:8090/mcp`. curl and browsers resolve
+of its own: `http://<name>.localhost:8090/mcp`, or `<name>.<domain>` with the
+registry's `edge.domain`, a name under `localhost`. curl and browsers resolve
 `*.localhost` to loopback themselves. Bun and most other programs ask the
 system's resolver, which answers it on macOS and under systemd-resolved. On
 another Linux resolver, give each name a hosts line (`127.0.0.1
@@ -317,7 +318,8 @@ there.
   machine over plain HTTP. A Linux resolver that doesn't follow it needs the
   hosts lines above.
 - **Two shapes**, because no one binding reaches a brain's loopback port from
-  a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
+  a container on both runtimes (measured;
+  [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
   - **Under a rootful podman machine** (`podman machine inspect --format
     '{{.Rootful}}'`), the edge is a container that publishes
     `127.0.0.1:<port>` and dials each brain at `host.containers.internal`.
