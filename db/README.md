@@ -3392,14 +3392,13 @@ The five variables are the canary's model settings. For another brain, they, and
 any of `OB1_LLM_TIMEOUT`, `OB1_CHUNK_CONTEXT` and `OB1_JEV_*` it sets, must mirror
 its server's: the direct calls use them, and each MCP call ends at the server's own
 bound on a capture, computed from them, plus a minute (a call that makes no model
-call ends at 30 s). The banner prints what was resolved. `--mcp` names the
-endpoint. Its default is this Mac's canary on stable's origin
-(`http://127.0.0.1:8010/canary/mcp`); a stack's own endpoint is `/mcp` on its
-`SERVER_PORT` (8000 by default). The key is the stable connector's from
-`~/.claude.json`; `--key-from` names another entry. Since SMD-2874 the canary
-takes its own key alone and answers on its own port: give `--mcp
-http://127.0.0.1:<port>/mcp --key-from open-brain-canary` once it has moved
-there (and stable's `/canary/mcp` is its 404 from SMD-2874's PR 3 on).
+call ends at 30 s). The banner prints what was resolved. The endpoint
+and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
+which `deploy/canary.sh up --connect` registers at the canary's own port with
+its own key (SMD-2874); `--key-from` names another entry, and `--mcp` another
+endpoint for its key. A stack's own endpoint is `/mcp` on its `SERVER_PORT`
+(8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
+404 from v2.0.0 (SMD-3101).
 
 Captures are real writes:
 - **Which brain:** it runs only against a brain whose `brain_info` says tier

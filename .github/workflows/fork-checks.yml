@@ -1909,13 +1909,12 @@ jobs:
           undeprecated() { if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi; }
           offprefix() {
             for p in /canary/mcp /canary/mcp/health /working/mcp /working/mcp/health /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
-              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
+              bare404 "a keyed tools/list to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+                -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B$p"
               undeprecated "tier-off's 404 at $p$1"
             done
             bare404 "GET /canary/mcp/health$1" "$B/canary/mcp/health"
             undeprecated "tier-off's 404 to GET /canary/mcp/health$1"
-            bare404 "a keyed tools/list at /canary/mcp$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
@@ -1925,8 +1924,9 @@ jobs:
               -e "Bun.serve({ port: 8000, fetch(r) { return new Response('$tier ' + new URL(r.url).pathname); } })" > /dev/null
           done
           # The stand-ins answer on the mesh, so a route to them would reach
-          # them: one container polls both, for up to 20 s.
-          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`).then((r) => r.ok, () => false))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } process.exit(1)' > /dev/null 2>&1 \
+          # them: one container polls both, each try bounded at 2 s, for 40
+          # tries; its own error, if it has one, stays in the log.
+          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } process.exit(1)' > /dev/null \
             || { echo "a stand-in never answered on the mesh, so this step proves nothing" >&2; exit 1; }
           offprefix " beside a stand-in under each tier's old mesh name"
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')

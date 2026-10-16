@@ -36,7 +36,7 @@
  *     the single slowest call.
  *
  *   bun db/bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
- *   --mcp URL (http://127.0.0.1:8010/canary/mcp)   --key-from NAME (open-brain: ~/.claude.json's mcpServers entry)
+ *   --key-from NAME (open-brain-canary: ~/.claude.json's mcpServers entry, its url and key)   --mcp URL (that entry's url)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
  *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard — no brain, no provider
  *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
@@ -59,8 +59,10 @@
  * never came back (a capture cut off at its deadline, or whose connection
  * dropped, can still land) and deletes those. It exits 1 if a probe is left,
  * or if a capture got no answer and was not found, since it may land yet;
- * else 128 + the signal's number if a signal cut the run short. The key is
- * read from ~/.claude.json and never printed.
+ * else 128 + the signal's number if a signal cut the run short. The key, and
+ * the url unless --mcp names one, are read from one ~/.claude.json entry, the
+ * canary's connector by default (since SMD-2874 the canary takes its own key
+ * alone, on its own port); the key is never printed.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -84,7 +86,6 @@ type Answer = { status: number; msg: Record<string, any> | null };
 export const PROBE_PREFIX = "SMD-3024 latency probe";
 
 /** The endpoint when --mcp is not given: this Mac's canary, on stable's origin (a stack's own endpoint is /mcp on its SERVER_PORT, 8000 by default). */
-export const DEFAULT_MCP = "http://127.0.0.1:8010/canary/mcp";
 
 /** The deadline of an MCP call that makes no model call: initialize, brain_info, and the cleanup's deletes, search and reads. */
 const QUICK_MS = 30_000;
@@ -254,11 +255,14 @@ export function schedule(want: Record<Kind, number>): { kind: Kind; i: number }[
   return order;
 }
 
-function keyFrom(name: string): string {
-  const config = JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
-  const key = config?.mcpServers?.[name]?.headers?.["x-brain-key"];
+/** A connector's url and key from ~/.claude.json, the url only where --mcp names none. */
+function connectorFrom(name: string, mcp: string | undefined): { mcp: string; key: string } {
+  const entry = JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"))?.mcpServers?.[name];
+  const key = entry?.headers?.["x-brain-key"];
   if (typeof key !== "string" || key === "") throw new Error(`~/.claude.json has no x-brain-key for mcpServers["${name}"]`);
-  return key;
+  const url = mcp ?? entry?.url;
+  if (typeof url !== "string" || url === "") throw new Error(`~/.claude.json has no url for mcpServers["${name}"]; give --mcp`);
+  return { mcp: url, key };
 }
 
 async function main(): Promise<void> {
@@ -283,11 +287,10 @@ async function main(): Promise<void> {
     console.error("bench-live.ts: a run needs --label, --out and --ids (--help lists every flag).");
     process.exit(2);
   }
-  const mcp = cli.value("mcp") ?? DEFAULT_MCP;
   const count = (name: "searches" | "captures" | "embeds" | "metadata", absent: number) => cli.int(name, { absent, min: 0, max: 10_000 });
   const want = { search: count("searches", 60), capture: count("captures", 30), embed: count("embeds", 40), metadata: count("metadata", 20) };
   const keep = cli.has("keep-probes");
-  const key = keyFrom(cli.value("key-from") ?? "open-brain");
+  const { mcp, key } = connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
   appendFileSync(ids, "");
