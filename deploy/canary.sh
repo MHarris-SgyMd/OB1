@@ -552,7 +552,7 @@ if mode == "own-fix":
             else:
                 return True
         return False
-    spans = [n for n in ("MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY") if spans_lines(out, n)]
+    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(out, n)]
     stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set())
     fix, said = {}, []
     # The canary'"'"'s port, address, tier and profiles (SMD-2874 PR 1).
@@ -677,7 +677,10 @@ if problems:
 make_canary_env() {
   local pw
   pw="$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
-  CANARY_TMP="$(dirname "$CANARY_ENV")/.env.canary-$$-$RANDOM.local"
+  # In the directory the file's path resolves to, as deploy/env-file.ts
+  # resolves it to name its own temporary file, so the EXIT trap's glob
+  # finds that one too (code review).
+  CANARY_TMP="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(dirname "$CANARY_ENV")")/.env.canary-$$-$RANDOM.local"
   (umask 077 && set -o noclobber && : > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not create a temporary file beside $CANARY_ENV." >&2; exit 1; }
   local why=""
   if ! why="$(CANARY_PW="$pw" CANARY_PORT="$PORT" env_file write "$ENV_FILE" "$CANARY_TMP" 2>&1 && CANARY_PW="$pw" CANARY_PORT="$PORT" env_file made "$ENV_FILE" "$CANARY_TMP" 2>&1)"; then
@@ -1388,7 +1391,14 @@ else
     # when the connector's key cannot be read.
     if [ "$at" = "$(endpoint_of "$BASE")" ]; then
       if [ -n "$CONN_KEY" ]; then
-        [ "$CONN_KEY" = "$KEY" ] || say "connector $NAME sends a key this canary does not take (not its OB1_CANARY_KEY): re-run with --connect"
+        # Taken when its digest is in the canary's MCP_ACCESS_KEYS: a key the
+        # operator minted and added for it is the connector's to keep (code
+        # review). The key reaches shasum on stdin, never argv.
+        conn_sha="$(printf '%s' "$CONN_KEY" | shasum -a 256 | cut -d' ' -f1)"
+        case ",$(env_file value "$CANARY_ENV" MCP_ACCESS_KEYS | tr '\n' ',' | tr -d ' ' | tr '[:upper:]' '[:lower:]')," in
+          *":$conn_sha,"*) ;;
+          *) say "connector $NAME sends a key this canary does not take (none in its MCP_ACCESS_KEYS): re-run with --connect to give it OB1_CANARY_KEY" ;;
+        esac
       else
         case "$OWN_SAID" in *"minted the canary"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run with --connect to give it OB1_CANARY_KEY" ;; esac
       fi

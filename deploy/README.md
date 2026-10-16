@@ -2278,10 +2278,12 @@ grant nothing: a key is accepted by `MCP_ACCESS_KEYS` alone, and those rows
 can only refuse one (`revoke_agent_key`). The canary's key registers its own
 agent at its first request. `up` writes these settings with
 `deploy/env-file.ts` (one line a setting, through a symlink), so it needs
-`bun` on PATH; a key setting spanning lines is refused (write it on one
+`bun` on PATH; a setting it must rewrite that spans lines is refused (write it on one
 line, entries separated by commas), and comments inside `MCP_ACCESS_KEYS` are
 not kept when `up` rewrites it. Of `OB1_HOOK_SECRETS`, stable's pairs are
-taken out and the canary's own kept. Stable's keys set in the shell are unset
+taken out and the canary's own kept. Stable's keys are those its env file holds now: a key stable rotated out
+before this canary's file was mended reads as the canary's own, so take it
+out of the file by hand. Stable's keys set in the shell are unset
 for the run, as its database password is, so they never reach the canary.
 
 The tier and the compose profiles (none) are the canary's own. Each tier has its own Postgres server, never a second
