@@ -180,7 +180,13 @@ x-otel-env: &otel-env
 #           or still starting, Traefik's 502 becomes a bare 404
 #           (`tier-absent`), as auth-absent does for the authorization
 #           server. The tiers' protected-resource paths are not routed, so
-#           a tier is reached with keys (OAuth per tier is SMD-2286's);
+#           a tier is reached with keys (OAuth per tier is SMD-2286's).
+#           Deprecated (SMD-3057): since SMD-2874 a canary is a brain of its
+#           own on its own port, and the three-brain stack
+#           (compose.tiers.yaml) routes its own canary and working tiers;
+#           v2.0.0 removes these two routes, and until then every answer
+#           carries a Deprecation header and a Link to the README's "A
+#           canary beside the stack", which names both (`tier-deprecated`);
 #   tier-off every other path that starts with /canary or /working, in
 #           any case and whatever follows: a bare 404 (`not-served`), so a
 #           client handed a tier's URL changed in any way after the prefix
@@ -223,6 +229,9 @@ x-otel-env: &otel-env
 #           upgrade guide;
 #   not-legacy  deletes that marker (an empty value deletes the header), so a
 #           client cannot send it on /mcp and be logged as a straggler;
+#   tier-deprecated  adds to every answer on the canary and working routes a
+#           Deprecation header (RFC 9745) dated 2026-10-16 and a Link to
+#           deploy/README.md's "A canary beside the stack" (SMD-3057);
 #   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -288,13 +297,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [not-legacy, tier-deprecated, tier-absent]
         service: canary
       working:
         rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [not-legacy, tier-deprecated, tier-absent]
         service: working
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
@@ -338,6 +347,11 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "502": 404
+      tier-deprecated:
+        headers:
+          customResponseHeaders:
+            Deprecation: "@1792108800"
+            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"'
       api-off:
         errors:
           status: ["418"]

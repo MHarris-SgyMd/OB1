@@ -16,7 +16,8 @@
  * checkpoint before it is still posting steps aside for it (SMD-2035); a provenance refusal is retried
  * without provenance; a dead endpoint keeps the payload for a later run; the
  * printed hook carries no key; --check tells a capture key from a wider one,
- * and warns on a url the proxy's legacy route answers (SMD-2686); the url's
+ * and warns on a url the proxy's legacy route answers (SMD-2686), or a tier
+ * route, sent to the tier itself and not stable's /mcp (SMD-3057); the url's
  * slash goes on its path, a `?key=` on it is refused, every url printed has
  * its query values masked, and a config that does not parse is named without
  * quoting it (SMD-2743).
@@ -2183,12 +2184,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
-  // The proxy's legacy root route: the fake's answers, each marked deprecated (SMD-2686). It keeps the last url asked for.
+  // The proxy's legacy root route: the fake's answers, each marked deprecated with legacy-window's Link (SMD-2686). It keeps the last url asked for.
   let legacyAsked = "";
   const legacy = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     legacyAsked = req.url;
     const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
-    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200" } });
+    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1790899200", Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"' } });
   } });
   const LEGACY = `http://127.0.0.1:${legacy.port}/`;
   writeFileSync(CONFIG, JSON.stringify({ url: LEGACY, key: "cap-key" }), { mode: 0o600 });
@@ -2198,6 +2199,44 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const onEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: `${LEGACY}sub` } });
   assert(onEnv.code === 0 && onEnv.err.includes(`set the url to its /mcp in OB1_BRAIN_URL (`), `…a url off the root is told its /mcp, and one from OB1_BRAIN_URL names the variable, not the file (${onEnv.err.trim().slice(0, 120)})`);
   assert(!/deprecated/.test(ok.err) && !/deprecated/.test(wide.err), "…and no such warning where the answer carries no Deprecation header");
+  // The proxy's tier routes: deprecated too, their own date and a Link to the canary's section; their /mcp would be stable's (SMD-3057).
+  const TIER_LINK = '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"';
+  let tierAnswer = {};
+  const tierRoute = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    const { date = "@1792108800", link = TIER_LINK, absent = false } = tierAnswer;
+    const headers = { Deprecation: date };
+    if (link) headers.Link = link;
+    if (absent) return new Response(null, { status: 404, headers }); // tier-absent: no tier behind the route
+    const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
+    return new Response(await r.text(), { status: r.status, headers: { ...headers, "Content-Type": r.headers.get("content-type") ?? "application/json" } });
+  } });
+  const TIER = `http://127.0.0.1:${tierRoute.port}/canary/mcp`;
+  const tierWarned = (err, url, source, date = "@1792108800") => err.includes(`warning: ${url}/ answered through the proxy's deprecated tier route (Deprecation: ${date}), which stops answering at v2.0.0 — set the url in ${source} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (`) && !/legacy route|set the url to its \/mcp/.test(err);
+  const checkAt = async (url, answer) => { tierAnswer = answer; writeFileSync(CONFIG, JSON.stringify({ url, key: "cap-key" }), { mode: 0o600 }); return spawnScript(["--check"]); };
+  const onTier = await checkAt(TIER, {});
+  assert(onTier.code === 0 && tierWarned(onTier.err, TIER, CONFIG),
+    `…a tier route's url is told the tier itself, never stable's /mcp (SMD-3057; ${onTier.err.trim().slice(0, 160)})`);
+  const onTierEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: TIER.replace("/canary/", "/working/") } });
+  assert(onTierEnv.code === 0 && tierWarned(onTierEnv.err, TIER.replace("/canary/", "/working/"), "OB1_BRAIN_URL"), `…one from OB1_BRAIN_URL names the variable (${onTierEnv.err.trim().slice(0, 160)})`);
+  const onMoved = await checkAt(TIER, { link: TIER_LINK.replace("#a-canary-beside-the-stack", "#a-renamed-heading") });
+  assert(onMoved.code === 0 && tierWarned(onMoved.err, TIER, CONFIG), `…the tiers' date decides, so a moved anchor never sends it to stable's /mcp (${onMoved.err.trim().slice(0, 160)})`);
+  const FRONTED = `http://127.0.0.1:${tierRoute.port}/ob1/mcp`;
+  const onStripped = await checkAt(FRONTED, { link: null });
+  assert(onStripped.code === 0 && tierWarned(onStripped.err, FRONTED, CONFIG), `…nor a front's prefix with the Link stripped (${onStripped.err.trim().slice(0, 160)})`);
+  const onOtherLink = await checkAt(FRONTED, { date: "@1800000000" });
+  assert(onOtherLink.code === 0 && tierWarned(onOtherLink.err, FRONTED, CONFIG, "@1800000000"), `…a date neither route sent falls back to the Link's anchor, on any path (${onOtherLink.err.trim().slice(0, 160)})`);
+  const onOtherBare = await checkAt(TIER, { date: "@1800000000", link: null });
+  assert(onOtherBare.code === 0 && tierWarned(onOtherBare.err, TIER, CONFIG, "@1800000000"), `…and with no Link to the url's tier path (${onOtherBare.err.trim().slice(0, 160)})`);
+  const CASED = TIER.replace("/canary/", "/Canary/");
+  const onOtherCased = await checkAt(CASED, { date: "@1800000000", link: null });
+  assert(onOtherCased.code === 0 && onOtherCased.err.includes(`warning: ${CASED}/ answered through the proxy's deprecated legacy route`), `…though a path no tier router matches, in another case, is not (${onOtherCased.err.trim().slice(0, 160)})`);
+  const onAbsent = await checkAt(TIER, { absent: true });
+  tierRoute.stop(true);
+  assert(onAbsent.code === 1 && /did not answer tools\/list — HTTP 404/.test(onAbsent.err) && tierWarned(onAbsent.err, TIER, CONFIG), `…and a tier route with no tier behind it, the bodiless 404, still says where the tier lives (${onAbsent.err.trim().slice(0, 200)})`);
+  // A tier path the legacy route answered, its Link legacy-window's: stable's server took it, so it is the legacy warning, never "the tier itself".
+  writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}canary/mcp`, key: "cap-key" }), { mode: 0o600 });
+  const onLegacyTierPath = await spawnScript(["--check"]);
+  assert(onLegacyTierPath.code === 0 && onLegacyTierPath.err.includes(`warning: ${LEGACY}canary/mcp/ answered through the proxy's deprecated legacy route`) && !/tier route/.test(onLegacyTierPath.err), `…while a tier path answered with the legacy route's Link is the legacy route, stable's (${onLegacyTierPath.err.trim().slice(0, 160)})`);
   // A query on the url: the warning names the url and suggests its /mcp with the query's names kept and its values masked; the request itself carries the query unmangled (SMD-2743: it went as `?tenant=<value>/`).
   writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}?tenant=SEKRET-Q`, key: "cap-key" }), { mode: 0o600 });
   const onRootQ = await spawnScript(["--check"]);
