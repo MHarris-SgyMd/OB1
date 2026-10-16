@@ -261,8 +261,8 @@ of its own: `http://<name>.localhost:8090/mcp`. curl and browsers resolve
 `*.localhost` to loopback themselves. Bun and most other programs ask the
 system's resolver, which answers it on macOS and under systemd-resolved. On
 another Linux resolver, give each name a hosts line (`127.0.0.1
-stable.localhost`), or the name goes to upstream DNS. The edge is a compose project of its own,
-`ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
+stable.localhost`), or the name goes to upstream DNS. The edge is a compose
+project of its own, `ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
 published port, as any client on the host does, and joins no brain's network.
 Because each brain is served at the root of its own host, its `/mcp`, its
 discovery documents and its authorization server stay its own.
@@ -273,6 +273,8 @@ cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by 
 bun --no-env-file deploy/edge/edge.ts check  # the shape, what publishes each brain's port, the URLs; starts nothing
 bun --no-env-file deploy/edge/edge.ts up     # renders the table, picks the shape, starts the edge
 bun --no-env-file deploy/edge/edge.ts down
+# a client of one brain through the edge, with that brain's own key:
+claude mcp add --transport http stable http://stable.localhost:8090/mcp --header "x-brain-key: <stable's key>"
 ```
 
 A brain's port is its env file's `SERVER_PORT`: 8000 unless set, or 8010
@@ -295,15 +297,20 @@ there.
   challenge, its discovery documents and its authorization server would be
   its own. But MCP clients send a token request over plain HTTP only to
   exactly `localhost`, `127.0.0.1` or `::1`, never to a name under
-  `localhost` (measured on MCP SDK v2 and Claude Code 2.1.301). Sign-in at
-  `<name>.localhost` therefore needs TLS at the edge (SMD-3053), and a token
-  is accepted at `/mcp` only after SMD-2286. Until then, a brain running the
-  `auth` profile keeps its `OB1_PUBLIC_ORIGIN`, and through the edge it
-  answers keys alone, since the edge's host is not its origin's.
+  `localhost`. This was measured on MCP SDK v2, and the same rule is read in
+  Claude Code 2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
+  TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only after
+  SMD-2286; the brain's origin will then be its host on the edge.
+
+  Until then, a brain running the `auth` profile keeps its
+  `OB1_PUBLIC_ORIGIN`. Since the edge's host is not its origin's, through the
+  edge its `/mcp` answers keys alone: a call with no key gets the server's
+  refusal (JSON-RPC -32001), not a sign-in. Its `/auth` paths still answer
+  through the edge, by path, naming its own origin.
 - **The authorization server's per-address limits see the edge's address**
   for every client that comes through the edge. One client's failed
-  sign-ins therefore lock out every client behind the edge for the
-  lockout's length.
+  authentications at a brain's `/auth` through the edge therefore lock out
+  every client behind the edge for the lockout's length.
 - **The domain is `localhost` or a name under it.** The edge listens on
   loopback alone. Under that domain, the resolvers that follow RFC 6761 answer
   loopback themselves, where a public name would send a client's key off the
