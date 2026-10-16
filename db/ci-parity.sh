@@ -114,8 +114,11 @@ main() {
   OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text nodb db test-schema.ts
 
   # Against the shared Postgres, in CI's order.
-  # CI runs test-live.ts's four shards side by side, one job each (SMD-3048);
-  # here, in series on the shared database, which each drops first.
+  # CI runs test-live.ts's four shards side by side, one job each, each on a
+  # fresh database (SMD-3048). Here they run in series on the shared one,
+  # each dropping its schema first. Cluster roles and any table dropSchema
+  # does not list stay, so the last three shards meet what the rest left, as a
+  # full run's later sections do.
   OB1_LIVE_SHARD=rest run db test-live.ts
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts

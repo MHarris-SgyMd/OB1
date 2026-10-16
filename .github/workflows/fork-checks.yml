@@ -739,9 +739,9 @@ jobs:
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
       # whether the planner actually reaches for the HNSW index. The suite runs
-      # in four shards, one job each (SMD-3048): this one runs [1] and every
-      # section test-live.ts's SHARDS does not list, and the three jobs below
-      # run the rest, each on a database of its own.
+      # in four shards, one job each (SMD-3048). This job runs the shard named
+      # rest: [1] and every section test-live.ts's SHARDS does not list. The
+      # three jobs below run SHARDS' three, each on a database of its own.
       - name: Run the live suite
         working-directory: db
         run: bun test-live.ts

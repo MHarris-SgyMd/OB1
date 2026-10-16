@@ -28,8 +28,10 @@
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below), on a database of its own; Fork Checks runs the four side by
- * side, one job each (SMD-3048).
+ * (SHARDS below). Fork Checks runs the four side by side, one job each, every
+ * one on a database of its own (SMD-3048). From one checkout, run them one at
+ * a time: [2] edits a migration file while it runs, which another shard's
+ * migrations would read.
  */
 
 import { SQL } from "bun";
@@ -88,13 +90,15 @@ if (!URL_) {
  * A shard without [1] migrates in the preamble without asserting.
  * [33] and [35] check the projection after the sections that write tickets
  * and sources, which are the rest's, so they stay there; [end] checks it again
- * at every run's end. db/README.md states each shard's assertion count beside
- * the full run's, and [doc] checks, on every run, that they add up.
+ * at every run's end. Extract takes four short sections of the rest's, each
+ * on its own client, to keep the rest under the full-stack jobs.
+ * db/README.md states each shard's assertion count beside the full run's,
+ * and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "17"],
+  extract: ["10", "10e", "10f", "17", "37", "39", "41", "43"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -103,18 +107,22 @@ if (SHARD !== undefined && SHARD !== "rest" && !Object.hasOwn(SHARDS, SHARD)) {
   console.error(`OB1_LIVE_SHARD=${JSON.stringify(SHARD)} names no shard: ${SHARD_NAMES.join(", ")}, or unset for every section`);
   process.exit(2);
 }
-const LISTED = new Set(Object.values(SHARDS).flat());
+const LISTED_ALL = Object.values(SHARDS).flat();
+const LISTED = new Set(LISTED_ALL);
 // A section listed twice would run in two shards and count in both, while a full run counts it once.
-if (LISTED.size !== Object.values(SHARDS).flat().length) {
-  console.error(`SHARDS lists a section in more than one shard: ${Object.values(SHARDS).flat().filter((id, i, all) => all.indexOf(id) !== i).map((id) => `[${id}]`).join(", ")}`);
+if (LISTED.size !== LISTED_ALL.length) {
+  console.error(`SHARDS lists a section in more than one shard: ${LISTED_ALL.filter((id, i) => LISTED_ALL.indexOf(id) !== i).map((id) => `[${id}]`).join(", ")}`);
   process.exit(2);
 }
 /** The sections this run has begun, by id: [doc] checks a shard's are all there. */
 const begun = new Set<string>();
+/** Every id a header has asked about, in order: [doc] checks no two headers share one. */
+const headed: string[] = [];
 /** Whether section `id` runs here: every section with no shard named, else the shard's. */
 const runsHere = (id: string): boolean => SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
 /** runsHere, noting the section begun: each section's header reads it. */
 function want(id: string): boolean {
+  headed.push(id);
   const runs = runsHere(id);
   if (runs) begun.add(id);
   return runs;
@@ -13566,14 +13574,16 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   const lines = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)].map((m) => m[0]);
   const counts = (ls: string[]) => ls.flatMap((l) => [...l.matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
   const shardOf = (l: string) => /\bOB1_LIVE_SHARD=(\S+)/.exec(l)?.[1];
-  const names = SHARD_NAMES;
   const full = counts(lines.filter((l) => shardOf(l) === undefined));
-  const byShard = new Map(names.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
+  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
   // On every run, the README's own sum: one count a shard, adding up to the
   // full run's once [end], which every run has, is counted once.
-  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (names.length - 1);
+  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (SHARD_NAMES.length - 1);
   docCheck([...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum),
-    `db/README.md quotes one count for each of test-live.ts's shards (${names.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})`);
+    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})`);
+  // No two headers share an id: a copied header would take its section to the other's shard unseen.
+  const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
+  docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
   // Every section a shard lists is one this file has: a stale id would leave the shard short of what it says.
   const listed = SHARD === undefined ? [...LISTED] : SHARD === "rest" ? [] : SHARDS[SHARD];
   const absent = listed.filter((id) => !begun.has(id));
