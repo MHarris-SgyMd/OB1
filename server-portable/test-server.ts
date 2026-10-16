@@ -2613,7 +2613,7 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   assert(old.split("\n")[0].endsWith(WRITERS_UNREAD) && !/By: |WRITER/.test(old), "a row from before 094 says once the writers are not shown, and flags nothing");
 }
 
-console.log("\n[16m] The stated-status label in words and fields: every moved ticket named, a board's status name on one line, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
+console.log("\n[16m] The stated-status label in words and fields: every moved ticket named in its type's word, never the board's, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
 {
   const { movedAmong, movedWords, MOVED_READ, TYPE_WORDS } = await import("./stated-status.ts");
   const { renderSearchThoughts, renderSearch } = await import("./render.ts");
@@ -2628,8 +2628,8 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   assert(w === "SMD-9 Todo → Done" && JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify(["backlog", "canceled", "completed", "started", "triage", "unstarted"])
       && movedWords([{ ...forged, now: st("x", "weird") }]) === "SMD-9 Todo → ?",
     `…each status as its type's fixed word, never the board's name — a forged one prints nothing of itself, an unknown type "?" (${JSON.stringify(w)})`);
-  assert(movedWords([], 3) === null && movedWords([m(1)], 2) === "SMD-1 In Progress → Done (+2 more keys not read)" && movedWords([], 0) === null && MOVED_READ === 50,
-    `…a line only beside a move — none that claims nothing — saying how many keys past the first ${MOVED_READ} went unread`);
+  assert(movedWords([], 3) === null && movedWords([m(1)], 2) === "SMD-1 In Progress → Done (+2 more named past the first 50, not checked)" && movedWords([], 0) === null && MOVED_READ === 50,
+    `…a line only beside a move — none that claims nothing — saying how many named past the first ${MOVED_READ} went unread`);
 
   // movedAmong: the measured population, by id.
   const H = 3_600_000, T = Date.parse("2026-10-01T12:00:00.000Z");
@@ -2651,8 +2651,10 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
     // A duplicate's ticket row: no lifecycle to node_state, but a ticket row all the same.
     { ...hit(9, "SMD-77 — a duplicate of SMD-1, which is in progress"), metadata: { issue: "SMD-77", status: "Duplicate", status_type: "duplicate" } },
   ], { [hit(2, "").id]: "bbbbbbbb-0000-4000-8000-000000000000" }, inputs);
-  assert(JSON.stringify(Object.keys(out)) === JSON.stringify([hit(1, "").id, hit(8, "").id]) && JSON.stringify(out[hit(1, "").id]) === JSON.stringify({ moved: [{ ticket: "SMD-1", then: st("In Progress", "started"), now: st("Done", "completed") }], notRead: 0 }),
-    `movedAmong: only the unsuperseded hits with no lifecycle (an id read in any case), no ticket row (a duplicate's included) and a time to read "then" at — stored, or the session line's when stored is unreadable — and not a move that settled within the hour or a ticket with no head (${JSON.stringify(Object.keys(out))})`);
+  const labelled = Object.keys(out).filter((k) => out[k].moved.length > 0);
+  assert(JSON.stringify(Object.keys(out)) === JSON.stringify([1, 6, 7, 8].map((n) => hit(n, "").id)) && JSON.stringify(labelled) === JSON.stringify([1, 8].map((n) => hit(n, "").id))
+      && JSON.stringify(out[hit(1, "").id]) === JSON.stringify({ moved: [{ ticket: "SMD-1", then: st("In Progress", "started"), now: st("Done", "completed") }], notRead: 0 }) && JSON.stringify(out[hit(6, "").id]) === JSON.stringify({ moved: [], notRead: 0 }),
+    `movedAmong: checks only the unsuperseded hits with no lifecycle (an id read in any case), no ticket row (a duplicate's included) and a written time — the session line when there is one, else the stored time — each checked hit present, empty when nothing moved (a move settled within the hour, a ticket with no head); every other absent, not checked (${JSON.stringify({ checked: Object.keys(out).length, labelled: labelled.length })})`);
 
   // Sixty keys mentioned in descending order, so the first fifty by mention (SMD-1059 … SMD-1010) are not the first fifty by key.
   const sixty = { ...hit(1, Array.from({ length: 60 }, (_, i) => `SMD-${1059 - i} is in progress`).join("; ")), metadata: {} };
@@ -2675,17 +2677,17 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const at = first.findIndex((l) => l.startsWith("⚠ Moved since written: "));
   assert(at > 1 && first[at - 2].startsWith("⚠ Superseded by a newer thought") && first[at - 1].startsWith("↓ Ranked ×") && first[at] === `⚠ Moved since written: SMD-1 In Progress → Done; ${w}` && text.split("⚠ Moved since written").length === 2,
     `search_thoughts: one line, after the superseded and demoted ones, on the hit it is about (${first.slice(at - 2, at + 1).join(" / ")})`);
-  assert(JSON.stringify(hits[0].moved) === JSON.stringify([{ ticket: "SMD-1", was: "started", now: "completed" }, { ticket: "SMD-9", was: "unstarted", now: "completed" }]) && JSON.stringify(hits[1].moved) === "[]",
-    `…the typed field: keys and status types, never the board's names; a hit without \`moved\` (a REST core before it) none (${JSON.stringify(hits.map((h) => h.moved))})`);
+  assert(JSON.stringify(hits[0].moved) === JSON.stringify([{ ticket: "SMD-1", was: "started", now: "completed" }, { ticket: "SMD-9", was: "unstarted", now: "completed" }]) && hits[1].moved === null,
+    `…the typed field: keys and status types, never the board's names; a hit without \`moved\` (a REST core before it) null, not checked (${JSON.stringify(hits.map((h) => h.moved))})`);
   const c = renderSearch({ ok: true, value: { results: [
     { id: id(1), title: "a page", url: "u1", trust: "ingested", moved: [m(2), m(3)] },
     { id: id(2), title: "a note", url: "u2", trust: "operator", moved: [] },
     { id: id(3), title: "old", url: "u3", trust: undefined },
   ] } } as never);
   const rs = (c.structuredContent as { results: Record<string, unknown>[] }).results;
-  assert(rs[0].title === "[ingested] a page — moved since written: SMD-2 In Progress → Done; SMD-3 In Progress → Done" && JSON.stringify(rs[0].moved) === JSON.stringify([2, 3].map((n) => ({ ticket: `SMD-${n}`, was: "started", now: "completed" })))
+  assert(rs[0].title === "[ingested] [moved since written: SMD-2 In Progress → Done; SMD-3 In Progress → Done] a page" && JSON.stringify(rs[0].moved) === JSON.stringify([2, 3].map((n) => ({ ticket: `SMD-${n}`, was: "started", now: "completed" })))
       && JSON.stringify(rs.slice(1).map((r) => Object.keys(r))) === JSON.stringify([["id", "title", "url"], ["id", "title", "url"]]) && c.content[0].text === JSON.stringify(c.structuredContent),
-    `search: every move at the end of the title (after the ingested mark) and in a field on that result only; the rest ChatGPT's shape exactly, an answer without \`moved\` too (${JSON.stringify(rs)})`);
+    `search: every move in a prefix of the title (after the ingested mark, before the thought's own words, which could forge one at the end) and in a field on that result only; the rest ChatGPT's shape exactly, an answer without \`moved\` too (${JSON.stringify(rs)})`);
 
   // core/reads.ts's movedOf reads only when a hit names a ticket, and only what the label can use.
   const { movedOf } = await import("./core/reads.ts");

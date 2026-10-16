@@ -131,13 +131,9 @@ const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^r
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
 const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[number] | null => oneOf(TRUST, m?.trust);
 
-/**
- * A hit's moved tickets as a typed field: the key and the status type then and
- * now — each one token (095 reads only known lifecycle types); the board's
- * names are the text's. A value without them — a REST core older than the MCP
- * server rendering its answer — reads as none moved.
- */
-const movedIn = (moved: readonly Moved[] | undefined): readonly Moved[] => moved ?? [];
+/** A hit's moved tickets for the words: none when not checked, or from a REST core older than the MCP server rendering its answer. */
+const movedIn = (moved: readonly Moved[] | null | undefined): readonly Moved[] => moved ?? [];
+/** The same as a typed field: the key and the status type then and now — each one token (095 reads only known lifecycle types). */
 const movedField = (moved: readonly Moved[] | undefined) => movedIn(moved).map((m) => ({ ticket: m.ticket, was: m.then.type, now: m.now.type }));
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
@@ -149,7 +145,8 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
-    trust: trustOf(h.metadata), moved: movedField(h.moved), movedNotRead: h.movedNotRead ?? 0,
+    // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
+    trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
@@ -522,7 +519,8 @@ export function currentSearchHint(msg: string): string {
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
     const words = movedWords(movedIn(moved), movedNotRead ?? 0);
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${r.title}${words ? ` — moved since written: ${words}` : ""}`;
+    // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${r.title}`;
     return words ? { ...r, title, moved: movedField(moved), ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);

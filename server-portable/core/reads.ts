@@ -148,7 +148,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
-      ...(moved[t.id] ? { moved: moved[t.id].moved, ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
+      ...(moved[t.id]?.moved.length ? { moved: moved[t.id].moved, ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
     })),
   });
 }
@@ -179,7 +179,8 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 /** What the query was taken to mean — every hybrid row carries the same four. */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
 /** A hybrid hit, with the newer thought that supersedes it (025), if any, and the tickets it names that moved since it was written (095, SMD-2540). */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[]; movedNotRead: number };
+/** `moved` is null when the hit's tickets were not checked (superseded, a ticket row or a note under one, no written time, a brain before 095), empty when checked and none moved or it names none. */
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number };
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -260,7 +261,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, moved: moved[t.id]?.moved ?? [], movedNotRead: moved[t.id]?.notRead ?? 0,
+      supersededBy: superseded[t.id] ?? null, moved: ticketsNamed(t.content).length === 0 ? [] : (moved[t.id]?.moved ?? null), movedNotRead: moved[t.id]?.notRead ?? 0,
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,

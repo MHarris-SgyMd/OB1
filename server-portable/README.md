@@ -308,8 +308,9 @@ type has moved since the hit was written (SMD-2540): `search_thoughts` prints
 `⚠ Moved since written: SMD-2306 In Progress → Done; …` after the superseded
 and demoted lines, every moved ticket by key, and lists them in each hit's
 `moved` (`{ticket, was, now}` in status types; the REST answer carries each
-status's name and type); `search` ends that result's title `— moved since
-written: …` and gives it `moved`. A status prints as its type's word (Triage,
+status's name and type); `search` starts that result's title `[moved since
+written: …]` — before the thought's own words, which could forge it at the
+end — and gives it `moved`. A status prints as its type's word (Triage,
 Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
 A hit's first 50 keys, in the order it mentions them, are read; beside a move
@@ -319,9 +320,19 @@ and a ticket that already held its current type an hour later is the writer's
 own move, not labelled — the reading `evals/eval-stated-status.ts` measured
 (`server-portable/stated-status.ts`).
 A superseded hit, a ticket row and a note filed under a ticket are not
-labelled, so an empty `moved` makes no claim. The inputs are one call to 095's
+checked: their `moved` is null, as is every hit naming a ticket on a brain
+before 095; an empty one means checked and nothing moved. The inputs are one call to 095's
 `ticket_status_inputs`, made only when a hit names a ticket; a brain before
 095, or a role without `ob1_config`, labels nothing and searches as before.
+
+There is no switch: the label never moves a rank or refuses a search. A wrong
+label is a wrong reading of one ticket. Its status now is the ticket's head
+(`SELECT head_id, status, status_type FROM ob1_ticket_head WHERE issue =
+'SMD-…'`): any write key's ticket row can take it (SMD-3047), so
+`update_thought` or `delete_thought` the row that should not hold it, and
+board-sync's own row is read again. A list step can read a count as a ticket
+(`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
+exists and moved.
 
 ## Steps
 

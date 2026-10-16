@@ -2,7 +2,7 @@
  * stated-status.ts — which tickets a search hit no longer tells right
  * (SMD-2540): the reading evals/eval-stated-status.ts measured and chose,
  * moved-session-settled. No imports: both searches call it (core/reads.ts's
- * movedAmong, SMD-2540 PR 2b) over a hit's text and migration 095's
+ * movedOf, SMD-2540 PR 2b) over a hit's text and migration 095's
  * ticket_status_inputs; the eval's self-check holds it to
  * evals/stated-status.ts's labelsOf("moved-session-settled", …) on hand cases
  * and a fuzz, so the label shipped is the label measured.
@@ -108,31 +108,34 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
   return out;
 }
 
-/** A labelled hit: the tickets that moved, and how many keys it mentions past MOVED_READ, which were not read. */
+/** A checked hit: the tickets that moved (none, maybe), and beside a move how many keys it mentions past MOVED_READ, not checked. */
 export type MovedHit = { moved: Moved[]; notRead: number };
 
 /** What the label reads, as migration 095 answers it (store.ts's TicketStatusInputs; spelled here so this module imports nothing). */
 export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<string, Status>; history: ReadonlyMap<string, readonly Change[]> };
 
 /**
- * Each hit's moved tickets, by id — only the hits the measurement labelled:
- * none `superseded` names (the eval sampled no superseded thought) and none
- * with a lifecycle of its own. Nor a ticket row (`metadata.issue`) whose type
- * gives it none: a duplicate's row is lifecycle-less to node_state (16 of
- * stable's 721 rows), so the measurement labelled the tickets its body
- * quotes, but a ticket row tells its own status, never others'. A hit whose
- * stored time does not parse is read at its session line, and with none is
- * labelled nothing (no change is at or before an unknown time); one with
- * nothing moved is absent.
+ * Each checked hit's moved tickets, by id — an empty list when none moved —
+ * and only the hits the measurement labelled: none `superseded` names (the
+ * eval sampled no superseded thought) and none with a lifecycle of its own.
+ * Nor a ticket row (`metadata.issue`) whose type gives it none: a duplicate's
+ * row is lifecycle-less to node_state (16 of stable's 721 rows), so the
+ * measurement labelled the tickets its body quotes, but a ticket row tells its
+ * own status, never others'. Nor a hit with no written time: the session line
+ * when it has one, else its stored time. Every other hit is absent — not
+ * checked, which the reply says as `moved: null` (the maintainer's call,
+ * review pass 4). The keys past MOVED_READ are counted beside a move only.
  */
 export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, MovedHit> {
   const out: Record<string, MovedHit> = {};
   for (const h of hits) {
     if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase()) || h.metadata?.issue !== undefined) continue;
+    const stored = Date.parse(h.created_at ?? "");
+    if (!Number.isFinite(writtenAt(h.content, stored))) continue;
     // Its first MOVED_READ keys only, as movedOf reads them: another hit's may be among the heads.
     const keys = keysInOrder(h.content), read = new Set(keys.slice(0, MOVED_READ));
-    const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
-    if (moved.length > 0) out[h.id] = { moved, notRead: Math.max(0, keys.length - MOVED_READ) };
+    const moved = movedSince(h.content, stored, (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
+    out[h.id] = { moved, notRead: moved.length > 0 ? Math.max(0, keys.length - MOVED_READ) : 0 };
   }
   return out;
 }
@@ -160,5 +163,5 @@ const word = (type: string) => TYPE_WORDS[type] ?? "?";
 export function movedWords(moved: readonly Moved[], notRead = 0): string | null {
   if (moved.length === 0) return null;
   const words = moved.map((m) => `${m.ticket} ${word(m.then.type)} → ${word(m.now.type)}`).join("; ");
-  return notRead > 0 ? `${words} (+${notRead} more keys not read)` : words;
+  return notRead > 0 ? `${words} (+${notRead} more named past the first ${MOVED_READ}, not checked)` : words;
 }
