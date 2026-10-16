@@ -7567,7 +7567,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
 console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
 {
   // A real pg_dump refresh needs client tools this job does not have: the
-  // deploy-stack job runs one through deploy/tier.sh (SMD-2036), and below,
+  // deploy-stack-brains job runs one through deploy/tier.sh (SMD-2036), and below,
   // stand-in tools drive refresh() to its restore and the guards run before
   // any tool is looked for.
   await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it

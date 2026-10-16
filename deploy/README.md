@@ -2203,7 +2203,7 @@ starts after a failed source half. Neither publishes anything. The client's majo
 server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
-every PR, the deploy-stack CI job seeds one thought and one logged search, then
+every PR, the deploy-stack-brains CI job seeds one thought and one logged search, then
 runs through this script: a refresh, its refusal of a `--diff`, a retry over a
 copy left stamped `stable` (as a refresh that died after its restore leaves
 it), both refusals, a run for another project that builds that project's image
@@ -2535,7 +2535,7 @@ beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
 Neither touches stable: `down` acts on the canary's project alone.
 
-On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
+On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
 started, stamped or registered: no port, a canary file naming stable's port,
 stable's port given, an empty `--port`, a `--stable-project` no project
