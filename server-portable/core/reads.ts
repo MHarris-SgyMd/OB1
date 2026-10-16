@@ -7,7 +7,7 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
-import { movedAmong, ticketsNamed, type Moved } from "../stated-status.ts";
+import { MOVED_READ, movedAmong, notReadIn, ticketsNamed, type Moved } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -131,7 +131,7 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * Absent, not empty, elsewhere: an MCP server older than this REST core passes
  * an unknown field through, and then only the results it is about carry it.
  */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: Moved[] }[] };
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: Moved[]; movedNotRead?: number }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -149,6 +149,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
       ...(moved[t.id] ? { moved: moved[t.id] } : {}),
+      ...(notReadIn(t.content) > 0 ? { movedNotRead: notReadIn(t.content) } : {}),
     })),
   });
 }
@@ -179,7 +180,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 /** What the query was taken to mean — every hybrid row carries the same four. */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
 /** A hybrid hit, with the newer thought that supersedes it (025), if any, and the tickets it names that moved since it was written (095, SMD-2540). */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] };
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[]; movedNotRead: number };
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -214,7 +215,8 @@ export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "tic
   const over = superseded ?? await store.supersededAmong(naming.map((h) => h.id));
   // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
   const open = naming.filter((h) => !over[h.id]);
-  const tickets = [...new Set(open.flatMap((h) => ticketsNamed(h.content)))];
+  // Each hit's first MOVED_READ named (stated-status.ts): 095's call grows with the keys sent.
+  const tickets = [...new Set(open.flatMap((h) => ticketsNamed(h.content).slice(0, MOVED_READ)))];
   if (tickets.length === 0) return {};
   const inputs = await store.ticketStatusInputs(open.map((h) => h.id), tickets);
   return inputs ? movedAmong(naming, over, inputs) : {};
@@ -259,7 +261,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, moved: moved[t.id] ?? [],
+      supersededBy: superseded[t.id] ?? null, moved: moved[t.id] ?? [], movedNotRead: notReadIn(t.content),
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,

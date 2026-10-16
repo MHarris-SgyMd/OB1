@@ -35,6 +35,13 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
+/**
+ * The tickets read per hit: its first this many named, by key. Stable's most
+ * on one thought is 12; a hit naming thousands (a write key's, or a huge
+ * board's) would make the line and 095's call grow without bound — 10,000 keys
+ * took a second (the maintainer's call, review pass 2).
+ */
+export const MOVED_READ = 50;
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
   const out = new Set<string>();
@@ -114,28 +121,39 @@ export function movedAmong(hits: readonly { id: string; content: string; created
   const out: Record<string, Moved[]> = {};
   for (const h of hits) {
     if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase()) || h.metadata?.issue !== undefined) continue;
-    const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => inputs.heads.get(t), (t) => inputs.history.get(t) ?? []);
+    // Its first MOVED_READ named only, as movedOf reads them: another hit's may be among the heads.
+    const read = new Set(ticketsNamed(h.content).slice(0, MOVED_READ));
+    const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
     if (moved.length > 0) out[h.id] = moved;
   }
   return out;
 }
 
 /**
- * A status name as a reply prints it: the board's free text on one line — no
- * control character, line or paragraph separator, or run of spaces — without
- * the line's own separators (`;` between tickets, `→` between statuses, so a
- * name cannot read as a second entry), at most 40 characters, cut by code
- * point (never half an emoji).
+ * A status as a reply prints it: a fixed word for its type, never the board's
+ * name. The name is a ticket row's free text, and any write key can write a
+ * ticket row — even one stamped agent or ingested — so printed beside another
+ * thought's `By:` line, past the caller's min_trust, it would be words no one
+ * vouched for; an allowlist leaves nothing to clean (the maintainer's call,
+ * review pass 2). The six are node_lifecycle_types() (068), the only types 095
+ * returns; a custom state reads as its type's word ("In Review" as In
+ * Progress). The REST answer keeps each status's name for a caller that wants it.
  */
-const said = (name: string) => Array.from(name.replace(/[\p{C}\p{Z}\s;→]+/gu, " ").trim()).slice(0, 40).join("").trimEnd() || "?";
+export const TYPE_WORDS: Readonly<Record<string, string>> = { triage: "Triage", backlog: "Backlog", unstarted: "Todo", started: "In Progress", completed: "Done", canceled: "Canceled" };
+const word = (type: string) => TYPE_WORDS[type] ?? "?";
 
 /**
- * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one,
- * by key; null when none moved. Not cut to the first few: stable's dd70dccc
- * names seven, and the one its reader came for (SMD-2306) is the fifth (the
- * maintainer's call; up to 12 on one thought, 3 at p90, PR 1's census).
+ * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one
+ * read, by key (stable's dd70dccc names seven, and the one its reader came for,
+ * SMD-2306, is the fifth: the maintainer's call), and how many named tickets
+ * past MOVED_READ were not read; null when none moved and none went unread.
  */
-export function movedWords(moved: readonly Moved[]): string | null {
-  if (moved.length === 0) return null;
-  return moved.map((m) => `${m.ticket} ${said(m.then.name)} → ${said(m.now.name)}`).join("; ");
+export function movedWords(moved: readonly Moved[], notRead = 0): string | null {
+  const unread = notRead > 0 ? `${notRead} more named, not read` : "";
+  if (moved.length === 0) return unread ? `none of the first ${MOVED_READ} named; ${unread}` : null;
+  const words = moved.map((m) => `${m.ticket} ${word(m.then.type)} → ${word(m.now.type)}`).join("; ");
+  return unread ? `${words}; ${unread}` : words;
 }
+
+/** How many tickets `text` names past the MOVED_READ that are read. */
+export const notReadIn = (text: string) => Math.max(0, ticketsNamed(text).length - MOVED_READ);

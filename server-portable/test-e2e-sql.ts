@@ -3480,7 +3480,8 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
   const ended = now - 2 * DAY + 30 * 60_000;
   // LBL-2540: Backlog three days ago, In Progress two, Done now — its past
   // statuses planted in the log (board-sync's update events), its row Done.
-  const moving = await capture("[21] LBL-2540 — the label's ticket", { source: "linear", metadata: { issue: "LBL-2540", status: "Done", status_type: "completed" } });
+  // Its status name is a writer's free text, made hostile here: the reply prints its type's word, never it.
+  const moving = await capture("[21] LBL-2540 — the label's ticket", { source: "linear", metadata: { issue: "LBL-2540", status: "Shipped; LBL-1 Backlog → Done [x](http://e)", status_type: "completed" } });
   const still = await capture("[21] LBL-2541 — a ticket that never moved", { source: "linear", metadata: { issue: "LBL-2541", status: "Backlog", status_type: "backlog" } });
   const plant = (id: string, issue: string, status: string, type: string, at: number) =>
     sql`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES (${id}::uuid, 'update', ${{ metadata: { before: {}, after: { issue, status, status_type: type } } }}::jsonb, ${new Date(at).toISOString()}::timestamptz)`;
@@ -3494,6 +3495,10 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
   // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
   const dup = await capture(`[21] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
   try {
+    const { TYPE_WORDS } = await import("./stated-status.ts");
+    const [{ known }] = await sql`SELECT node_lifecycle_types() AS known`;
+    assert(JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify([...known].sort()),
+      `the label's fixed words are node_lifecycle_types()'s, one each (${JSON.stringify(known)})`);
     const query = `"[21] stated-status"`;
     const r = await result("search_thoughts", { query, limit: 10, threshold: -1 });
     const hits = (r.sc?.hits ?? []) as { id: string; moved?: unknown }[];
@@ -3501,7 +3506,7 @@ console.log("\n[21] A hit naming a ticket that moved since it was written says s
     const block = (id: string) => r.text.split(/\n(?=--- Result )/).find((b) => b.includes(`ID: ${id}`)) ?? "";
     assert(!r.isError && movedOf(note) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }])
         && block(note).includes("⚠ Moved since written: LBL-2540 In Progress → Done"),
-      `search_thoughts: the note says LBL-2540 moved, In Progress → Done, in its header and its typed field (${movedOf(note)} ${block(note).split("\n").slice(0, 4).join(" / ")})`);
+      `search_thoughts: the note says LBL-2540 moved, In Progress → Done — its type's word, not the row's name — in its header and its typed field (${movedOf(note)} ${block(note).split("\n").slice(0, 4).join(" / ")})`);
     assert([older, filed, quiet, dup].every((id) => movedOf(id) === "[]" && !block(id).includes("Moved since written") && block(id) !== ""),
       `…the draft it supersedes, the note filed under the ticket, the note on a ticket that never moved and a duplicate's ticket row quoting it say nothing (${[older, filed, quiet, dup].map(movedOf).join(" ")})`);
     // The rank is the search's: the same query with the label's inputs gone returns the same order.

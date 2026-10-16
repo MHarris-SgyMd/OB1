@@ -149,7 +149,7 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
-    trust: trustOf(h.metadata), moved: movedField(h.moved),
+    trust: trustOf(h.metadata), moved: movedField(h.moved), movedNotRead: h.movedNotRead ?? 0,
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
@@ -520,10 +520,10 @@ export function currentSearchHint(msg: string): string {
  * keeps the shape exactly (the maintainer's call: title and field).
  */
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
-  render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, ...r }) => {
-    const words = movedWords(movedIn(moved));
+  render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
+    const words = movedWords(movedIn(moved), movedNotRead ?? 0);
     const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${r.title}${words ? ` — moved since written: ${words}` : ""}`;
-    return words ? { ...r, title, moved: movedField(moved) } : { ...r, title };
+    return words ? { ...r, title, moved: movedField(moved), ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
@@ -569,7 +569,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         if (demotion) parts.push(demotion);
         // SMD-2540: the tickets it names that moved since it was written; a
         // label, so the rank above is unchanged.
-        const moved = movedWords(movedIn(t.moved));
+        const moved = movedWords(movedIn(t.moved), t.movedNotRead ?? 0);
         if (moved) parts.push(`⚠ Moved since written: ${moved}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
