@@ -20,8 +20,8 @@ cd "$(dirname "$0")/../../deploy"
 KEY=$(openssl rand -hex 32)
 HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
-# And a read-scoped key beside it, for the dashboard smoke at the end
-# of this job (SMD-1801): a read key must get a read-only dashboard.
+# And a read-scoped key beside it, for deploy-stack's dashboard smoke
+# (SMD-1801): a read key must get a read-only dashboard.
 READ_KEY=$(openssl rand -hex 32)
 READ_HASH=$(printf '%s' "$READ_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_READ_KEY=$READ_KEY" >> "$GITHUB_ENV"
@@ -36,18 +36,18 @@ FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # No OPENROUTER_API_KEY: the provider is a local endpoint, which
 # needs no credential (preflight decides). Preflight dials it
-# (GET /models, SMD-1875), and the canary step below embeds through
+# (GET /models, SMD-1875), and deploy-stack-brains' canary step embeds through
 # it (POST /v1/embeddings); smoke.sh captures nothing and preflight
 # runs without --deep, so a listener on the runner answering those
 # two is the whole provider: the runner is the container's
 # host.docker.internal (compose.yaml's extra_hosts host-gateway), and
 # the listener binds every interface because host-gateway is the
 # bridge address, not loopback. The address is neither the code's
-# default nor the compose fallback, so the log line below can only
-# come from this file (SMD-1843); the query log likewise.
-# OB1_LLM_LOCAL declares the endpoint to the egress gate (SMD-1903),
-# which reads the flag and never the address; the log line below
-# holds the forward. The embeddings (SMD-2038) are a bag of words
+# default nor the compose fallback, so the log line deploy-stack's
+# .env step reads can only come from this file (SMD-1843); the query
+# log likewise. OB1_LLM_LOCAL declares the endpoint to the egress gate
+# (SMD-1903), which reads the flag and never the address; that step's
+# line holds the forward. The embeddings (SMD-2038) are a bag of words
 # hashed into dimensions 1–1023 of the stack's 1024, the model's
 # query instruction left off as the model reads it, so a text is
 # near itself and far from another; the probe thoughts are seeded
@@ -58,10 +58,10 @@ echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # 30%, under the canary smoke's 50% floor, on every run. While
 # /tmp/provider-stub-slow exists GET /models answers after 2 s, inside
 # preflight's 2.5 s probe, so a server started then is still in
-# preflight 2 s on (the SIGTERM step, SMD-2250). While
+# preflight 2 s on (deploy-stack's SIGTERM step, SMD-2250). While
 # /tmp/provider-stub-slow-embed exists an embedding answers after
 # 6 s, so a search's SSE stream carries the server's 5 s keepalive
-# frame before its result (the proxy step, SMD-1846).
+# frame before its result (deploy-stack-auth's proxy step, SMD-1846).
 nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
 import json, math, os, re, time, zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
