@@ -1198,6 +1198,13 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       let threw5: unknown;
       try { await mendOnce(shut.ctx, s5); } catch (e) { threw5 = e; }
       assert(threw5 !== undefined && s5.held.size === 0, `a shutdown's SQLSTATE mid-write: the tick throws, no row held (${String(threw5)})`);
+      for (const errno of ["08006", "53300"]) {
+        const gone2 = harness([row(1, "writer")], local(), { answer: () => { throw Object.assign(new Error(`database away (${errno})`), { errno }); } });
+        const s6 = newMendState();
+        let threw6: unknown;
+        try { await mendOnce(gone2.ctx, s6); } catch (e) { threw6 = e; }
+        assert(threw6 !== undefined && s6.held.size === 0, `SQLSTATE ${errno} mid-write (a connection lost, too many clients): the tick throws, no row held`);
+      }
       bad.delete("poison-400");
     }
     // A held row waits 1, 2, 4 … sweeps — no call meanwhile — and is tried
@@ -1544,6 +1551,30 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       loop8.stop();
       bad.delete("lone-loop");
       assert(said8.filter((l) => /provider is unavailable/.test(l)).length === 1 && !said8.some((l) => /answers again/.test(l)) && (callsFor.get("lone-loop text") ?? 0) <= 6, `a lone failing row: unavailable said once, never "answers again", ${callsFor.get("lone-loop text")} calls over ${loop8.ticks()} ticks (${said8.join(" / ")})`);
+      // A tick that finds the provider back and then loses it again: "answers again" then "unavailable", each once.
+      let phase = 0;
+      const twice = Bun.serve({ port: 0, async fetch(req) {
+        const body = await req.json() as { input: string | string[]; model: string };
+        const input = Array.isArray(body.input) ? body.input[0] : body.input;
+        if (phase === 0 || (phase === 1 && !input.includes("good"))) return new Response("{}", { status: 503 });
+        return Response.json({ model: body.model, data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] });
+      } });
+      try {
+        const rows = [row(1, "writer", {}, "open-brain", "a good one"), row(2, "writer", {}, "open-brain", "bad one"), row(3, "writer", {}, "open-brain", "bad two")];
+        const flip = harness(rows, { OB1_LLM_BASE_URL: at(twice.port), OB1_LLM_LOCAL: "1" });
+        const said10: string[] = [];
+        const loop10 = startVectorMender(flip.ctx, { intervalS: 0.05, firstDelayMs: 0, log: (l) => said10.push(l) });
+        for (let i = 0; i < 40 && !said10.some((l) => /unavailable/.test(l)); i++) await sleep(20);
+        // The provider back for good texts; two fresh texts it fails, side by side, behind them.
+        rows.push(row(0, "writer", {}, "open-brain", "good zero"), row(7, "writer", {}, "open-brain", "bad x"), row(8, "writer", {}, "open-brain", "bad y"));
+        phase = 1;
+        for (let i = 0; i < 60 && said10.filter((l) => /unavailable/.test(l)).length < 2; i++) await sleep(20);
+        loop10.stop();
+        const seq = said10.filter((l) => /unavailable|answers again/.test(l)).map((l) => (/answers again/.test(l) ? "again" : "down"));
+        assert(seq.slice(0, 3).join(",") === "down,again,down", `a tick that recovers and goes down again: said in order, once each (${seq.join(",")})`);
+      } finally {
+        twice.stop(true);
+      }
       // The policy refusing every call: idle, said once.
       const idle = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(provider.port) });
       const said9: string[] = [];

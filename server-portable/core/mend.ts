@@ -478,8 +478,9 @@ export function startVectorMender(ctx: Ctx, opts: { intervalS: number; log?: (li
       if (t.refusedAll && !refusedSaid) log(`vector mender: idle — ${t.refusedAll}`);
       refusedSaid = t.refusedAll !== null;
       if (t.skipped || t.refusedAll) return;
-      if (t.down && !saidDown) log(`vector mender: the embedding provider is unavailable (${t.down.detail}); rows without a vector wait, and are tried as their holds end`);
+      // In this order: a tick can find the provider back and then lose it again.
       if (t.recovered && saidDown) log("vector mender: the embedding provider answers again");
+      if (t.down && (t.recovered || !saidDown)) log(`vector mender: the embedding provider is unavailable (${t.down.detail}); rows without a vector wait, and are tried as their holds end`);
       // Said once an outage begins, and again only after this mender saw it end.
       saidDown = state.down;
       if (t.mended > 0) log(`vector mender: ${t.mended} thought${t.mended === 1 ? "" : "s"} given a vector${t.degraded ? ` (${t.degraded} with the head window's vector or windows without their blurb, as a capture would store them)` : ""}`);
