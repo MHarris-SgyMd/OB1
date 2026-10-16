@@ -391,9 +391,19 @@
  *      is a `typecheck` line; a line no step runs as written is stale; and
  *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
  *      — an excuse for what CI no longer has is reported too
+ *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
+ *      value for value — compose.yaml's proxy's Traefik and access log, no
+ *      trusted PROXY line, read-only and confined, the bridge shape on a
+ *      network of its own published on loopback and the host shape on the
+ *      host's network, joining no brain's — with check 28's character and tag
+ *      rules and no other compose file beside it; and deploy/edge/edge.ts
+ *      renders brains.example.yaml, in each shape, as EDGE_ROUTE_TABLE, byte
+ *      for byte: a router by host per brain, its header strip and its 404 for
+ *      a brain that is down, its service at the shape's dial host; each rule
+ *      the sole catch of a probe
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34 and 35 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35 and 36 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -7539,6 +7549,146 @@ function checkCiParity() {
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
 }
 checkCiParity();
+
+// ── 36: the edge proxy is held whole, and the table it renders (SMD-2876) ──
+//
+// deploy/edge/ is a project of its own in front of several brains, each
+// reached through its published port (docs/one-brain-per-stack.md). Checks 13
+// and 28 read the files directly in deploy/, so this holds what is under
+// deploy/edge/:
+//   files  its compose file is compose.yaml alone — another (an override
+//       compose reads with no -f, a second shape) would run what nothing holds;
+//   characters, tags, parse  as check 28's: compose and Bun.YAML read the
+//       file alike;
+//   service  the file is EDGE_COMPOSE, value for value: project ob1-edge; the
+//       bridge shape on a network of its own and the host shape on the host's,
+//       each under its profile; compose.yaml's proxy's Traefik by digest and
+//       its access log (built from PROXY_SERVICE, so the two move together),
+//       but no trusted PROXY line — a client reaches the edge directly; read
+//       only, confined, the file provider alone on the rendered table mounted
+//       read-only, no socket; the port on loopback by default;
+//   table  edge.ts renders the example registry, in each shape, as
+//       EDGE_ROUTE_TABLE: a router by host per brain with the strip of the two
+//       headers a brain's proxy reads from its own and the 404 for a brain
+//       that is down, and a service at the shape's dial host and the brain's
+//       port — nothing else, no comment (Traefik renders the file as a Go
+//       template), and parseRegistry refuses a name or domain that could carry one.
+// That each shape reaches a brain, and the brain no network of the edge's, CI
+// holds live ("The edge proxy reaches both brains through their published ports").
+/** deploy/edge/compose.yaml's Traefik environment: the proxy's, but its own entrypoints and no trusted PROXY line. */
+const edgeEnvironment = (web: string, ping: string) => ({
+  ...omitKeys(PROXY_SERVICE.environment, ["TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS"]),
+  TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: web,
+  TRAEFIK_ENTRYPOINTS_PING_ADDRESS: ping,
+});
+const EDGE_LOGGING = { driver: "json-file", options: { "max-size": "10m", "max-file": "3" } };
+const edgeService = (profile: string) => ({
+  profiles: [profile],
+  image: PROXY_SERVICE.image,
+  user: "65534:65534",
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  read_only: true,
+  volumes: ["./dynamic:/etc/traefik/dynamic:ro,z"],
+  labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}" },
+  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
+  restart: "unless-stopped",
+  logging: EDGE_LOGGING,
+});
+/** deploy/edge/compose.yaml as Bun.YAML reads it, x-* anchors aside. */
+const EDGE_COMPOSE = {
+  name: "ob1-edge",
+  services: {
+    edge: { ...edgeService("bridge"), environment: edgeEnvironment(":8000", "127.0.0.1:8082"), ports: ["${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}:8000"], networks: ["web"], dns_search: ["."] },
+    "edge-host": { ...edgeService("host"), environment: edgeEnvironment("${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}", "127.0.0.1:${EDGE_PING_PORT:-8091}"), network_mode: "host" },
+  },
+  networks: { web: {} },
+};
+/** What deploy/edge/edge.ts renders for deploy/edge/brains.example.yaml in a shape, byte for byte. */
+const edgeRouteTable = (dial: string) => "http:\n  routers:\n"
+  + ["canary", "stable"].map((b) => `    ${b}:\n      rule: "Host(\`${b}.localhost\`)"\n      entryPoints: [web]\n      middlewares: [edge-strip, brain-absent]\n      service: ${b}\n`).join("")
+  + "  middlewares:\n    edge-strip:\n      headers:\n        customRequestHeaders:\n          X-Brain-Forwarder: \"\"\n          X-OB1-Legacy-Route: \"\"\n"
+  + routeErrors("brain-absent", "502")
+  + "  services:\n" + [["canary", 8011], ["stable", 8010]].map(([b, p]) => routeService(String(b), `http://${dial}:${p}`)).join("");
+const EDGE_ROUTE_TABLE = { bridge: edgeRouteTable("host.containers.internal"), host: edgeRouteTable("127.0.0.1") } as const;
+const EDGE_RULES = ["files", "characters", "tags", "parse", "service", "table"] as const;
+type EdgeRule = (typeof EDGE_RULES)[number];
+type EdgeTree = { files: string[]; compose: string; example: string; render: (example: string, shape: "bridge" | "host") => string };
+/** Every way deploy/edge/ strays from check 36, each with its rule; none when it holds. */
+function edgeProblems(t: EdgeTree): { rule: EdgeRule; message: string }[] {
+  const out: { rule: EdgeRule; message: string }[] = [];
+  const flag = (rule: EdgeRule, message: string) => { out.push({ rule, message }); };
+  const extra = t.files.filter((f) => /compose/i.test(f) && f !== "compose.yaml");
+  if (extra.length) flag("files", `${extra.join(", ")}: a compose file beside compose.yaml, which no check holds — compose reads an override with no -f, and the edge runs one file, by profile per shape`);
+  const odd = oddCharacters(t.compose);
+  if (odd.length) flag("characters", `compose.yaml line ${odd.join(", ")} carries a control, format or separator character other than the space and the line feed, which compose and Bun.YAML read apart (check 28's rule)`);
+  const tagged = [...t.compose.matchAll(/(^|[\s\[{,:?-])!(<|[A-Za-z0-9-]*[!%]|reset\b|override\b)|^%/gm)].map((m) => t.compose.slice(0, m.index).split("\n").length);
+  if (tagged.length) flag("tags", `compose.yaml line ${[...new Set(tagged)].join(", ")} carries a tag compose resolves and Bun.YAML reads past, or a % directive (check 28's rule)`);
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(t.compose); } catch (e) { return [...out, { rule: "parse", message: `compose.yaml does not parse as YAML: ${(e as Error).message}` }]; }
+  if (!isMapping(doc)) return [...out, { rule: "parse", message: "compose.yaml is not one YAML mapping" }];
+  const diffs: string[] = [];
+  pathDiffs(JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(doc).filter(([k]) => !k.startsWith("x-"))))), EDGE_COMPOSE, "", diffs);
+  if (diffs.length) flag("service", `compose.yaml: ${diffs.slice(0, 6).join("; ")}${diffs.length > 6 ? `; and ${diffs.length - 6} more` : ""} — the edge is check 36's EDGE_COMPOSE: it sits in front of every brain and carries each client's key, so a change to it is made there too, on purpose`);
+  for (const shape of ["bridge", "host"] as const) {
+    let got: string;
+    try { got = t.render(t.example, shape); } catch (e) { flag("table", `edge.ts does not render brains.example.yaml in the ${shape} shape: ${(e as Error).message}`); continue; }
+    const tdiffs: string[] = [];
+    pathDiffs(got, EDGE_ROUTE_TABLE[shape], "", tdiffs);
+    if (tdiffs.length) flag("table", `edge.ts renders brains.example.yaml in the ${shape} shape otherwise than check 36's EDGE_ROUTE_TABLE: ${tdiffs[0].replace("(the file) ", "")} — a route the edge serves changes here too, on purpose`);
+  }
+  return out;
+}
+/** [what the probe changes, the file under deploy/edge/, the text it replaces there (once), its replacement] — each must turn check 36 false. */
+const EDGE_PROBES: [string, "compose.yaml" | "edge.ts" | "files", string, string][] = [
+  ["a compose.override.yaml beside the edge's file", "files", "", "compose.override.yaml"],
+  ["a line led by U+2028 in the edge's file", "compose.yaml", "\nservices:\n", "\n# a note x-shadow: 1\nservices:\n"],
+  ["an !override on the edge's networks, the same list to Bun.YAML", "compose.yaml", "    networks: [web]\n", "    networks: !override [web]\n"],
+  ["the edge's file not YAML", "compose.yaml", "services:\n", "services: [\n"],
+  ["the bridge shape published on every interface by default", "compose.yaml", "\"${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-8090}:8000\"", "\"${EDGE_BIND:-0.0.0.0}:${EDGE_PORT:-8090}:8000\""],
+  ["the edge joining a brain's network", "compose.yaml", "networks:\n  web: {}\n", "networks:\n  web: {}\n  brain:\n    name: open-brain_mesh\n    external: true\n"],
+  ["the engine's socket mounted into the edge", "compose.yaml", "    volumes:\n      - ./dynamic:/etc/traefik/dynamic:ro,z\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n    network_mode: host\n", "    volumes:\n      - ./dynamic:/etc/traefik/dynamic:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    labels:\n      ob1.edge-routes-sha256: ${EDGE_ROUTES_SHA256:-unrendered}\n    network_mode: host\n"],
+  ["the edge trusting a PROXY line from the private ranges", "compose.yaml", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n", "      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: \":8000\"\n      TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: \"10.0.0.0/8\"\n"],
+  ["the edge's table not deleting X-Brain-Forwarder", "edge.ts", "          X-Brain-Forwarder: \\\"\\\"\\n", ""],
+  ["the edge's table routing a brain by path, beside its host", "edge.ts", "rule: \"Host(\\`${b.name}.${r.domain}\\`)\"", "rule: \"Host(\\`${b.name}.${r.domain}\\`) || PathPrefix(\\`/${b.name}\\`)\""],
+  ["the bridge shape dialling a brain's mesh name", "edge.ts", "bridge: \"host.containers.internal\"", "bridge: \"mcp.ob1.internal.\""],
+];
+async function checkEdge() {
+  const dir = join(ROOT, "deploy", "edge");
+  if (!existsSync(join(dir, "compose.yaml")) || !existsSync(join(dir, "edge.ts")) || !existsSync(join(dir, "brains.example.yaml"))) { fail("deploy/edge", "compose.yaml, edge.ts or brains.example.yaml is missing — check 36 holds the edge proxy (SMD-2876)"); return; }
+  const files = readdirSync(dir).filter((f) => statSync(join(dir, f)).isFile());
+  const compose = readFileSync(join(dir, "compose.yaml"), "utf8");
+  const edgeTs = readFileSync(join(dir, "edge.ts"), "utf8");
+  const example = readFileSync(join(dir, "brains.example.yaml"), "utf8");
+  // edge.ts loaded from its text, so a probe's edit is what renders: a copy in a scratch directory, its import of
+  // ../instance.ts by that file's path.
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const scratch = mkdtempSync(join((await import("node:os")).tmpdir(), "ob1-check36-"));
+  let n = 0;
+  const renderOf = async (text: string) => {
+    const file = join(scratch, `edge-${n++}.ts`);
+    writeFileSync(file, text.replace('from "../instance.ts"', `from ${JSON.stringify(join(ROOT, "deploy", "instance.ts"))}`));
+    const mod = await import(file) as typeof import("../deploy/edge/edge.ts");
+    return (ex: string, shape: "bridge" | "host") => { const r = mod.parseRegistry(ex).registry; if (!r) throw new Error(mod.parseRegistry(ex).problems.join("; ")); return mod.renderRoutes(r, shape); };
+  };
+  try { await checkEdgeTree(files, compose, edgeTs, example, renderOf); } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+async function checkEdgeTree(files: string[], compose: string, edgeTs: string, example: string, renderOf: (text: string) => Promise<EdgeTree["render"]>) {
+  const tree: EdgeTree = { files, compose, example, render: await renderOf(edgeTs) };
+  const problems = edgeProblems(tree);
+  for (const p of problems) fail(`deploy/edge/${p.rule === "table" ? "edge.ts" : "compose.yaml"}`, `${p.message} (check 36, SMD-2876)`);
+  const soleCatch = new Set<EdgeRule>();
+  for (const [what, file, from, to] of EDGE_PROBES) {
+    const text = file === "compose.yaml" ? compose : file === "edge.ts" ? edgeTs : "";
+    if (file !== "files" && text.split(from).length !== 2) { fail(SELF, `check 36's probe "${what}" finds its anchor ${text.split(from).length - 1} times in deploy/edge/${file}, not once — re-anchor it`); continue; }
+    const probed: EdgeTree = file === "files" ? { ...tree, files: [...files, to] } : file === "compose.yaml" ? { ...tree, compose: compose.replace(from, to) } : { ...tree, render: await renderOf(edgeTs.replace(from, to)) };
+    const rules = new Set(edgeProblems(probed).map((p) => p.rule));
+    if (rules.size === 0) fail(SELF, `check 36 no longer catches ${what} (its own probe)`);
+    if (rules.size === 1) soleCatch.add([...rules][0]);
+  }
+  if (!problems.length) for (const rule of EDGE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 36's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
+}
+await checkEdge();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

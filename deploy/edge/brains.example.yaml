@@ -1,0 +1,24 @@
+# The edge proxy's registry (SMD-2876): copy to deploy/edge/brains.local.yaml
+# (ignored by git) and name your brains. deploy/edge/edge.ts reads it, renders
+# the edge's route table from it and runs the edge.
+#
+# edge.port    the edge's own port, on the host's loopback (default 8090);
+# edge.ping_port  under Docker Engine on Linux, where the edge is on the
+#              host's network, the port its healthcheck asks, on loopback
+#              (default one above edge.port); unused under podman machine;
+# edge.domain  each brain is served at <name>.<domain>:<port> (default
+#              localhost, which resolves to loopback with no hosts entry);
+# brains       each brain by name — lower-case letters, digits and hyphens,
+#              starting with a letter — and its published port: SERVER_PORT
+#              in the brain's own env file, on SERVER_BIND's loopback.
+#
+# With this file, stable is http://stable.localhost:8090/mcp and the canary
+# http://canary.localhost:8090/mcp, each with its own key.
+edge:
+  port: 8090
+  domain: localhost
+brains:
+  stable:
+    port: 8010
+  canary:
+    port: 8011

@@ -253,6 +253,47 @@ instance. The alternative is one Ollama on the host that every instance names
   loopback, so that Ollama must listen on the bridge address (SETUP.md) or on
   every interface. The second exposes it on the LAN.
 
+## Several brains behind one edge
+
+The edge proxy (SMD-2876) puts several brains behind one port, each at a host
+of its own: `http://<name>.localhost:8090/mcp`. `*.localhost` resolves to
+loopback with no hosts entry. The edge is a compose project of its own,
+`ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
+published port, as any client on the host does, and joins no brain's network.
+Because each brain is served at the root of its own host, its `/mcp`, its
+discovery documents and its authorization server stay its own.
+
+```bash
+cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by git
+# deploy/edge/brains.local.yaml: each brain by name, with its SERVER_PORT
+bun --no-env-file deploy/edge/edge.ts up     # renders the table, picks the shape, starts the edge
+bun --no-env-file deploy/edge/edge.ts check  # what up would do, without starting anything
+bun --no-env-file deploy/edge/edge.ts down
+```
+
+- **Each brain still answers on its own port**, and keeps its own keys. The
+  edge holds no key. A client's `?key=` or `x-brain-key` header passes
+  through unchanged to the brain the host names.
+- **A brain that is down** gets a bare 404 on its own host alone, and an
+  unknown host gets the edge's 404.
+- **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
+  request. A brain's proxy treats both as its own.
+- **The authorization server's per-address limits see the edge's address**
+  for every client that comes through the edge.
+- **Two shapes**, because no one binding reaches a brain's loopback port from
+  a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
+  - under podman machine, the edge is a container that publishes
+    `127.0.0.1:<port>` and dials each brain at `host.containers.internal`;
+  - on Docker Engine on Linux, it runs on the host's network, listens on
+    127.0.0.1 and dials each brain there, with its healthcheck's ping on
+    `edge.ping_port`.
+
+  `edge.ts` picks the shape from the runtime. Any other runtime (Docker
+  Desktop, a rootless engine, podman on Linux) is refused until `--shape
+  bridge` or `--shape host` names one.
+- **Changing the registry:** `up` again. The table's digest is a label on
+  the edge's container, so a changed table recreates it.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the

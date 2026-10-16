@@ -87,7 +87,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
       # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, and db/ci-parity.sh running what CI runs
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -136,6 +136,12 @@ jobs:
       # beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
+      # SMD-2876: deploy/edge/edge.ts reads the edge proxy's registry, refusing
+      # a name or domain that is no host name, renders the table, and picks the
+      # shape for each runtime measured; the deploy-stack job runs the edge in
+      # front of the stack and a second brain.
+      - name: The edge proxy's registry, table and shape
+        run: bun deploy/edge/edge.ts --self-check
       # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
       # side's password per half, the target's settings by name, the source
       # container gone before the target starts, each refusal it tries
@@ -1779,12 +1785,13 @@ jobs:
       # it), and an env file's COMPOSE_FILE without the same files as -f; and
       # passes ob1b on its own. ob1b comes up healthy on that port, and no
       # container of either brain is on the other's networks. Then the check
-      # reads ob1b's port as ob1b's own, and ob1b goes, its volume with it (its
-      # logs first, when the step failed).
+      # reads ob1b's port as ob1b's own. ob1b stays for the next step, the edge
+      # proxy's, which removes it; when this step fails it goes here, its
+      # volume with it (its logs first).
       - name: A second brain beside the stack, from its own env file
         working-directory: deploy
         run: |
-          trap 'rc=$?; [ "$rc" = 0 ] || docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local; fi; rm -f .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
           # Run from deploy/, whose .env Bun would load into the check: refused without --no-env-file, naming it.
           rc=0; bun instance.ts check > /tmp/instance-bunenv.out 2>&1 || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'Run it as: bun --no-env-file' /tmp/instance-bunenv.out; then cat /tmp/instance-bunenv.out >&2; echo "the check ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
@@ -1831,6 +1838,51 @@ jobs:
           if grep -v '^ob1b_' <<<"$ob1b_nets"; then echo "an ob1b container is on a network not ob1b's" >&2; exit 1; fi
           if grep -v '^open-brain_' <<<"$stack_nets"; then echo "a stack container is on a network not the stack's" >&2; exit 1; fi
           bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder"
+
+      # SMD-2876. The edge proxy in front of the stack (8010) and ob1b (8040),
+      # the step above's: on Docker Engine on Linux, edge.ts picks the host
+      # shape. Each brain answers at its host through the edge, and still on
+      # its own port; an MCP call goes through with the client's own key, as
+      # a header and as ?key=, and the key is in no line of the edge's log; an
+      # unknown host is the edge's 404. The edge is on the host's network and
+      # on no network of either brain. With ob1b's forwarder stopped, its host
+      # is a bare 404 and the stack's still answers. Then the edge goes, and
+      # ob1b with its volume (logs first, when the step failed).
+      - name: The edge proxy reaches both brains through their published ports
+        working-directory: deploy
+        run: |
+          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file /dev/null -p ob1-edge -f edge/compose.yaml --profile host logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 30 forwarder proxy 2>/dev/null || true; fi; bun --no-env-file edge/edge.ts down > /dev/null 2>&1 || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -rf .env.ob1b.local edge/brains.local.yaml edge/dynamic' EXIT
+          printf 'edge:\n  port: 8090\nbrains:\n  stable:\n    port: 8010\n  ob1b:\n    port: 8040\n' > edge/brains.local.yaml
+          bun --no-env-file edge/edge.ts check | tee /tmp/edge-check.out
+          grep -F 'Docker Engine on Linux, rootful: the host shape' /tmp/edge-check.out
+          bun --no-env-file edge/edge.ts up
+          for b in stable ob1b; do
+            [ "$(curl -s --max-time 10 "http://$b.localhost:8090/health")" = ok ] || { echo "$b does not answer at its host through the edge" >&2; exit 1; }
+          done
+          [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] && [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health)" = ok ] || { echo "a brain stopped answering on its own port beside the edge" >&2; exit 1; }
+          list='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+          got="$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" -d "$list" http://stable.localhost:8090/mcp)"
+          grep -qF '"search_thoughts"' <<<"$got" || { echo "an MCP call with a header key did not reach the stack through the edge" >&2; exit 1; }
+          got="$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$list" "http://ob1b.localhost:8090/mcp?key=$OB1_SMOKE_KEY")"
+          grep -qF '"search_thoughts"' <<<"$got" || { echo "an MCP call with ?key= did not reach ob1b through the edge" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$list" http://stable.localhost:8090/mcp)" = 401 ] || { echo "the edge answered a call with no key for the stack" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' http://other.localhost:8090/health)" = 404 ] || { echo "an unknown host was not the edge's 404" >&2; exit 1; }
+          edge="$(docker ps -q --filter label=com.docker.compose.project=ob1-edge)"
+          [ -n "$edge" ] && [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$edge")" = host ] || { echo "the edge is not on the host's network" >&2; exit 1; }
+          id="$(docker inspect -f '{{.Id}}' "$edge")"
+          brain_nets="$(docker network ls --format '{{.Name}}' | grep -E '^(open-brain|ob1b)_' || true)"
+          [ -n "$brain_nets" ] || { echo "found no network of either brain" >&2; exit 1; }
+          for n in $brain_nets; do
+            members="$(docker network inspect -f '{{range $id, $c := .Containers}}{{$id}}{{"\n"}}{{end}}' "$n")"
+            if grep -qx "$id" <<<"$members"; then echo "the edge is on $n, a brain's network" >&2; exit 1; fi
+          done
+          docker logs "$edge" > /tmp/edge.log 2>&1
+          [ -s /tmp/edge.log ] || { echo "the edge logged nothing, so its log says nothing of the key" >&2; exit 1; }
+          if grep -qF "$OB1_SMOKE_KEY" /tmp/edge.log; then echo "the edge's access log holds the key" >&2; exit 1; fi
+          docker compose --env-file .env.ob1b.local -f compose.yaml stop forwarder
+          down="$(curl -s --max-time 10 -o /tmp/edge-down.body -w '%{http_code}' http://ob1b.localhost:8090/health)"
+          [ "$down" = 404 ] && [ ! -s /tmp/edge-down.body ] || { echo "ob1b down gave $down with $(wc -c < /tmp/edge-down.body) bytes through the edge, not a bare 404" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 http://stable.localhost:8090/health)" = ok ] || { echo "the stack stopped answering through the edge while ob1b was down" >&2; exit 1; }
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
