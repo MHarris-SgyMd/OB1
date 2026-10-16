@@ -41,11 +41,12 @@
 --   as before: a writer's own transaction of several calls that holds a row
 --   (a content edit, say) and then takes the review lock by any call — a
 --   pointer write, a clear now too, a delete, a citation, rebuild_derived,
---   an accept — waits on the lock while a holder of it waits on that row,
---   which Postgres breaks with 40P01. Since this file that holder can be a
---   single-call unlink of the row, where under 088 the unlink waited on the
---   row and then passed (a re-point there closed the same cycle under
---   both; review pass 1, raced live). No shipped caller makes such a
+--   an accept — waits on the lock while a holder of it waits on something
+--   the transaction holds: its row, a fingerprint lock (033) or a node-state
+--   bucket (068). Postgres breaks that with 40P01. Since this file that
+--   holder can be a single-call unlink, which under 088 waited and then
+--   passed (a re-point there closed the same cycle under both; review pass
+--   1 raced it live on the row). No shipped caller makes such a
 --   transaction (each store call is a transaction of its own); taking the
 --   lock first, which is re-entrant, keeps one in the order.
 --
@@ -57,8 +58,10 @@
 --     accept holds. Two writes still take none and move nothing out: a
 --     first capture naming supersedes (a new row, nothing above it; 092's
 --     check refuses or waits on a capture-only pointer onto the tree), and
---     another taker's own lapse clears, which clear only what the accept's
---     walk would and which its re-read under the lock then skips. 097
+--     another taker's own lapse clears, which clear nothing the accept's
+--     walk read as staying: a pointer it would clear too (its re-read under
+--     the row lock then skips it), or one above its frontier that it never
+--     read (it walks on only from a row 082's log took; review pass 2). 097
 --     stands as written — migrations are append-only (migrate.ts checks
 --     each file's sha256) — and db/README says it.
 --   * A taker that holds no review lock — a write key's re-capture, a text
@@ -71,8 +74,11 @@
 --   — or 061 or 073, which also hold the 11-argument update_thought — puts
 --   the older gate back (060's 10-argument form lands beside it, which
 --   preflight refuses); this file, applied after it, restores the lock and
---   drops an older form — the re-apply order. test-schema [88], test-live
---   [6j], test-upgrade [20ar].
+--   drops an older form — update_thought alone: what else the older file
+--   put back stays until `bun migrate.ts --reapply`, which restores every
+--   body. Preflight does not read the gate: an 088 re-applied by hand over
+--   this file passes its edit-signature check, as an older file over 088
+--   did (SMD-1227; the remedies' order, SMD-3065). test-schema [88], test-live [6j], test-upgrade [20ar].
 --
 -- Prerequisites
 --   073 (ob1_declared_trust, ob1_actor_stamp; 088's body carries 073's).

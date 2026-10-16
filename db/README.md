@@ -1626,8 +1626,10 @@ moved out from under the event's row between the two still has the pointers
 above it cleared, and one moved in misses its own. Under an accept no
 write function moves one out since 098: every pointer write through
 `update_thought`, an unlink included, and every delete waits on the review
-lock the accept holds (a first capture naming supersedes still takes none;
-it adds a new row, with nothing above it). A taker that holds none — a
+lock the accept holds. Two writes still take none and move nothing out: a
+first capture naming supersedes (a new row, nothing above it), and another
+taker's own lapse clears, which clear nothing the accept's walk read as
+staying. A taker that holds none — a
 write key's re-capture, a text move, board-sync's adoption — still has the
 window (092 had it one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
@@ -1651,15 +1653,18 @@ other's transaction. That also closes the 40P01 the same pass found, a
 transaction unlinking a row and then re-pointing it while an accept waited
 on that row. Outside the order, as before: a transaction of several calls
 that holds a row and then takes the review lock by any call (a pointer
-write, a delete, a citation, `rebuild_derived`, an accept) deadlocks
-against a holder of the lock that waits on its row — since 098 that holder
-can be a single-call unlink of the row (no shipped caller makes such a
+write, a clear now too, a delete, a citation, `rebuild_derived`, an
+accept) deadlocks against a holder of the lock that waits on something it
+holds — its row, a fingerprint lock or a node-state bucket — and since 098
+that holder can be a single-call unlink (no shipped caller makes such a
 transaction; take the lock first).
 097's header still says only an unlink moves a link under an accept —
 migrations are append-only — and the paragraph above says what holds. 088's
 body otherwise verbatim, under its signature; it refuses to apply without
 073; 088 (or 061, 073) re-applied puts the old gate back and 098 after it
-the lock. test-schema [88] (the gate, 088's DDL verbatim, the lock held
+the lock — `update_thought` alone, the rest is `--reapply`'s. Preflight
+does not read the gate, so an 088 re-applied by hand over 098 passes its
+edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back. test-schema [88] (the gate, 088's DDL verbatim, the lock held
 by each call that names a pointer), test-live [6j] (each order, the other
 side waiting), test-upgrade [20ar].
 

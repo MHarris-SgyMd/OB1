@@ -14865,7 +14865,7 @@ console.log("\n[88] Migration 098: an unlink takes the review lock — update_th
   // when content arrives passed every other cell).
   const unlinkText = await held(`update_thought($1::uuid, $2::text, p_provenance => $3::jsonb)`, [t, "[88] the row edited, unlinked with new text", JSON.stringify({ supersedes: null })]);
   await db.query(`SELECT update_thought($1::uuid, $2::text)`, [t, "[88] the row edited"]);
-  const patch =await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb)`, [t, JSON.stringify({ topic: "88" })]);
+  const patch = await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb)`, [t, JSON.stringify({ topic: "88" })]);
   const derived = await held(PROV, [t, JSON.stringify({ derived_from: [u] })]);
   const text = await held(`update_thought($1::uuid, $2::text)`, [t, "[88] the row edited, new text"]);
   const pointer = (await one<{ s: string | null }>(`SELECT supersedes AS s FROM thoughts WHERE id = $1`, [t])).s;
