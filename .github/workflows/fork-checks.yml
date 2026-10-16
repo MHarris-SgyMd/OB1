@@ -1897,7 +1897,10 @@ jobs:
       # more than one container: the collision the route table's mesh names
       # avoid while no tier claims stable's own names, which check 28's
       # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
-      # each is a 404, and the proxy logged no route-table error.
+      # each is a 404, and the proxy logged no route-table error. The two
+      # routes are deprecated (SMD-3057; v2.0.0 removes them, SMD-2874): each
+      # answer through them carries a Deprecation header and a Link to where a
+      # tier lives now, and stable's own /mcp carries neither.
       - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
         working-directory: deploy
         run: |
@@ -1929,6 +1932,10 @@ jobs:
             for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
             got=$(curl -sS --max-time 5 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || got="no answer (curl exit $?)"
             [ "$got" = "$want" ] || { echo "/$tier/mcp/health did not reach the $tier stand-in with the client's Host and no legacy marker: '$got'" >&2; exit 1; }
+            # SMD-3057: deprecated until v2.0.0 removes the route, and every
+            # answer through it says so, with a Link to where a tier lives now.
+            curl -sS -o /dev/null -D /tmp/tier-dep --max-time 5 "$B/$tier/mcp/health" || true
+            { grep -qix 'deprecation: @1792108800'$'\r' /tmp/tier-dep && grep -qi '^link: <https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"' /tmp/tier-dep; } || { cat /tmp/tier-dep >&2; echo "/$tier/mcp answered without its Deprecation header and Link" >&2; exit 1; }
             got=$(curl -sS --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
             [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
             for s in 401 404 429 500 503 504; do
@@ -1941,6 +1948,7 @@ jobs:
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           [ "$(curl -s --max-time 5 "$B/mcp/health")" = ok ] || { echo "stable's /mcp/health stopped answering ok beside the tiers" >&2; exit 1; }
+          if curl -sS -o /dev/null -D - --max-time 5 "$B/mcp/health" | grep -qi '^deprecation:'; then echo "stable's own /mcp carries the tiers' Deprecation header" >&2; exit 1; fi
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
           for tier in canary working; do
             for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
