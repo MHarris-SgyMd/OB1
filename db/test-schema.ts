@@ -14808,6 +14808,21 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   await db.exec(`DELETE FROM thoughts`);
 }
 
+console.log("\n[88] Migration 098: the thoughts with no vector by an index of their own — a btree on thoughts (id), partial on embedding IS NULL, its comment naming it; a re-apply a no-op (SMD-3056)");
+{
+  const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_vectorless_idx')) AS d`)).rows[0].d ?? "";
+  const d = await def();
+  assert(/^CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\) WHERE \(embedding IS NULL\)$/.test(d), `thoughts_vectorless_idx is a btree on thoughts (id), partial on embedding IS NULL — the mender's page order and its predicate (${d || "absent"})`);
+  const c = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass('thoughts_vectorless_idx'), 'pg_class') AS c`)).rows[0].c ?? "";
+  assert(/Migration 098 \/ SMD-3056/.test(c), `…its comment naming the migration (${c.slice(0, 60)})`);
+  // By name, not number: main may take the number.
+  const file = files.find((f) => f.endsWith("_vectorless_index.sql")) ?? "no _vectorless_index.sql";
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  const n = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'thoughts' AND indexdef LIKE '%WHERE (embedding IS NULL)%'`)).rows[0].n;
+  assert(again.endsWith("_vectorless_index.sql") && n === 1 && (await def()) === d, `098 applied again changes nothing: one such index, the same definition (${again.slice(0, 80)}, ${n})`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

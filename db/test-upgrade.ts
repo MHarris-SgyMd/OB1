@@ -537,7 +537,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // extraction windows kept, SMD-2694), 094 (a proposal's listing names
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
-  // it, SMD-1849) and 097 (one walk for 082's lapse, SMD-3035)
+  // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035) and 098 (the
+  // thoughts with no vector by an index of their own, SMD-3056)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -662,13 +663,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // by name without 068 or 060 ([20ap]); 096 creates pg_stat_statements
   // where the server offers it, needing nothing; 097 adds the lapse's walk
   // and redefines 092's lapse and 094's read as calls of it, refusing by
-  // name without 092 or 094 ([20aq]) — all
+  // name without 092 or 094 ([20aq]); 098 adds a partial index on thoughts,
+  // needing nothing past 001 — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 68, `030 is among the last sixty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 69, `030 is among the last sixty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

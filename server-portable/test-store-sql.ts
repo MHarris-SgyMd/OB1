@@ -1567,6 +1567,49 @@ console.log("\n[17] ticketStatusInputs: migration 095's one call — the hits wi
   await raw.close();
 }
 
+console.log("\n[18] The vector mender's page, both forms, and brain_info's vectorless count are read through migration 098's partial index, never a scan of every thought (SMD-3056)");
+{
+  // One connection, so the statistics flushed below are the reads' own.
+  const one = new SqlStore(URL_, { max: 1 });
+  const conn = (one as unknown as { sql: SQL }).sql;
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    // A thousand thoughts with a vector and three without: enough heap that a
+    // read of every row costs the planner more than the index's one page.
+    await raw.unsafe(`INSERT INTO thoughts (content, metadata, embedding)
+      SELECT 'store-sql 3056 vectored ' || g, '{}'::jsonb,
+             (SELECT array_agg(CASE WHEN i = (g % ${EMBEDDING_DIM}) + 1 THEN 1 ELSE 0 END ORDER BY i)::vector FROM generate_series(1, ${EMBEDDING_DIM}) i)
+        FROM generate_series(1, 1000) g`);
+    await raw.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'store-sql 3056 vectorless ' || g, '{}'::jsonb FROM generate_series(1, 3) g`);
+    await raw.unsafe("VACUUM ANALYZE thoughts");
+    const waiting = (await raw`SELECT id FROM thoughts WHERE embedding IS NULL ORDER BY id`).map((r: { id: string }) => r.id);
+    const scans = async () => {
+      await conn`SELECT pg_stat_force_next_flush()`;
+      await conn`SELECT 1`;
+      await raw`SELECT pg_stat_clear_snapshot()`;
+      const [r] = await raw`SELECT (SELECT idx_scan::int FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_vectorless_idx') AS idx, (SELECT seq_scan::int FROM pg_stat_user_tables WHERE relname = 'thoughts') AS seq`;
+      return { idx: r.idx as number | null, seq: r.seq as number };
+    };
+    const s0 = await scans();
+    const first = await one.listVectorless({ limit: 8, after: null });
+    const s1 = await scans();
+    const next = await one.listVectorless({ limit: 8, after: waiting[0] });
+    const s2 = await scans();
+    const facts = await (await import("./brain-info.ts")).readDatabaseFacts(conn);
+    const s3 = await scans();
+    assert(waiting.length === 3 && first.map((r) => r.id).join() === waiting.join() && next.map((r) => r.id).join() === waiting.slice(1).join(),
+      `the page reads the three that wait in id order, and from a cursor the two after it (${first.length}, ${next.length})`);
+    assert(s0.idx !== null && s1.idx! - s0.idx >= 1 && s2.idx! - s1.idx! >= 1 && s1.seq === s0.seq && s2.seq === s1.seq,
+      `both page forms through thoughts_vectorless_idx (${s0.idx === null ? "no such index" : `${s1.idx! - s0.idx} and ${s2.idx! - s1.idx!} scans`}), neither a scan of thoughts (${s1.seq - s0.seq}, ${s2.seq - s1.seq})`);
+    assert(facts.vectorless === 3 && s3.idx! - s2.idx! >= 1,
+      `brain_info's vectorless count is 3, read through the index (${s3.idx === null ? "no such index" : `${s3.idx! - s2.idx!} scans`})`);
+  } finally {
+    await raw`DELETE FROM thoughts WHERE content LIKE 'store-sql 3056 %'`;
+    await one.close();
+    await raw.close();
+  }
+}
+
 await store.close();
 
 report();
