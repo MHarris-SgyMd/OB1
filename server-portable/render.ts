@@ -18,6 +18,7 @@
 // everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
+import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
@@ -130,7 +131,15 @@ const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^r
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
 const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[number] | null => oneOf(TRUST, m?.trust);
 
-/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, and its trust; the window prefer_current read. */
+/**
+ * A hit's moved tickets as a typed field, and the words' input: the key and
+ * the status type then and now — each one token (095 reads only known
+ * lifecycle types); none when not checked, or from a REST core older than the
+ * MCP server rendering its answer.
+ */
+const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved ?? []);
+
+/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   preferCurrent: v.preferCurrent,
   // Unknown, not false, when the brain had no row to report the query's facts on (review pass 6).
@@ -139,7 +148,8 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   hits: v.hits.map((h) => ({
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
-    trust: trustOf(h.metadata),
+    // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
+    trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
@@ -504,10 +514,18 @@ export function currentSearchHint(msg: string): string {
  * maintainer's call): the shape has no field every ChatGPT surface hands the
  * model but the title and the text, so a title starts `[ingested]` (search's
  * and fetch's, first review pass) and a fetched text starts with the notice. metadata.trust rides fetch's
- * metadata, as every key does.
+ * metadata, as every key does. A result naming a ticket that moved since it
+ * was written (SMD-2540) says so at the end of its title and carries the
+ * typed field search_thoughts' hits do — only that result, so every other
+ * keeps the shape exactly (the maintainer's call: title and field).
  */
 export const renderSearch = (o: Outcome<SearchResult>): Reply =>
-  render(o.ok ? ok({ results: o.value.results.map(({ trust, ...r }) => ({ ...r, title: oneOf(TRUST, trust) === "ingested" ? `[ingested] ${r.title}` : r.title })) }) : o,
+  render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
+    const words = movedWords(moved ?? [], movedNotRead ?? 0);
+    // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${r.title}`;
+    return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
+  }) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
@@ -550,6 +568,10 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // 059: a row prefer_current demoted says by what and why.
         const demotion = demotedLine(t);
         if (demotion) parts.push(demotion);
+        // SMD-2540: the tickets it names that moved since it was written; a
+        // label, so the rank above is unchanged.
+        const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
+        if (moved) parts.push(`⚠ Moved since written: ${moved}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
         const captured = displayDate(t.created_at);

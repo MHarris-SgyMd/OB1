@@ -537,7 +537,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // extraction windows kept, SMD-2694), 094 (a proposal's listing names
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
-  // it, SMD-1849) and 097 (one walk for 082's lapse, SMD-3035)
+  // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035) and 098 (the
+  // stated-status label's read bounded, SMD-2540)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -662,13 +663,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // by name without 068 or 060 ([20ap]); 096 creates pg_stat_statements
   // where the server offers it, needing nothing; 097 adds the lapse's walk
   // and redefines 092's lapse and 094's read as calls of it, refusing by
-  // name without 092 or 094 ([20aq]) — all
+  // name without 092 or 094 ([20aq]); 098 redefines 095's read over its own
+  // signature, refusing by name without 095 ([20ar]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 68, `030 is among the last sixty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 69, `030 is among the last sixty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4251,6 +4253,36 @@ console.log("\n[20aq] Migration 097: refused by name without 092 or 094; onto a 
   const [{ r }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false) AS r`;
   const [{ s }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${N}::uuid`;
   assert((r as { ok: boolean }).ok === true && s === null, `the accept after it lapses the hook's pointer the read named (${JSON.stringify(r)}, ${s})`);
+  await sql.close();
+}
+
+console.log("\n[20ar] Migration 098: refused by name without 095; onto a populated brain at the file before it — the label's inputs read the same, now bounded: a lock waited for at most 200 ms, no JIT, each event's diff read once (SMD-2540)");
+{
+  // By name: renumbered when main takes a number.
+  const the095 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs.sql"))!;
+  const the098 = MIGRATIONS.find((f) => f.endsWith("_ticket_status_inputs_bounded.sql"))!;
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the095 });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 098 needs 095 (ticket_status_inputs); this schema lacks it",
+    `098 on a schema stopped before 095 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the098 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const [{ r }] = await sql`SELECT upsert_thought('ticket SMD-1'::text, ${{ metadata: { source: "linear", issue: "SMD-1", status: "Backlog", status_type: "backlog" } }}::jsonb, ${vec}::vector) AS r`;
+  const id = (r as { id: string }).id;
+  for (const [status, type] of [["In Progress", "started"], ["Done", "completed"]]) await sql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type: type }}::jsonb WHERE id = ${id}::uuid`;
+  const read = async () => JSON.stringify(await sql`SELECT kind, thought_id::text, issue, status, status_type, history FROM ticket_status_inputs(ARRAY[${id}]::uuid[], ARRAY['SMD-1'])`);
+  const cfg = async () => JSON.stringify([...((await sql`SELECT proconfig AS c FROM pg_proc WHERE oid = 'ticket_status_inputs(uuid[], text[])'::regprocedure`)[0].c ?? [])].sort());
+  const before = await read(), cfgBefore = await cfg();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
+  const after = await read();
+  assert(after === before && cfgBefore === JSON.stringify(["max_parallel_workers_per_gather=0"]) && (await cfg()) === JSON.stringify(["jit=off", "lock_timeout=200ms", "max_parallel_workers_per_gather=0"]),
+    `onto a brain at 097: the same rows as 095's body (${after.length} bytes), now with no JIT and a 200 ms lock timeout beside 095's no parallel workers (${await cfg()})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
+  assert((await read()) === before, "a re-apply of 098 is a no-op");
   await sql.close();
 }
 

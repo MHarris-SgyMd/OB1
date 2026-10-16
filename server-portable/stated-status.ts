@@ -1,9 +1,9 @@
 /**
  * stated-status.ts — which tickets a search hit no longer tells right
  * (SMD-2540): the reading evals/eval-stated-status.ts measured and chose,
- * moved-session-settled. No imports: the search reply will call it (SMD-2540
- * PR 2b) over a hit's text and migration 095's ticket_status_inputs; the
- * eval's self-check holds it to
+ * moved-session-settled. No imports: both searches call it (core/reads.ts's
+ * movedOf, SMD-2540 PR 2b) over a hit's text and migration 095's
+ * ticket_status_inputs; the eval's self-check holds it to
  * evals/stated-status.ts's labelsOf("moved-session-settled", …) on hand cases
  * and a fuzz, so the label shipped is the label measured.
  *
@@ -35,8 +35,20 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
+/**
+ * The keys read per hit: the first this many it mentions. Stable's most on one
+ * thought is 39 key-shaped tokens; a hit naming thousands (a write key's, or a
+ * huge board's) made the line and 095's call grow without bound — 10,000 keys
+ * took a second (the maintainer's call, review pass 2).
+ */
+export const MOVED_READ = 50;
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
+  return keysInOrder(text).sort();
+}
+
+/** ticketsNamed's keys in the order `text` first mentions them: MOVED_READ reads the first. */
+export function keysInOrder(text: string): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(KEY_RE)) {
     const team = m[1], digits = m[2].length;
@@ -49,7 +61,7 @@ export function ticketsNamed(text: string): string[] {
       at += s[0].length;
     }
   }
-  return [...out].sort();
+  return [...out];
 }
 
 /** When the thought was written, ms since the epoch: the end of the session its hook line records (the last second of that minute, UTC), else `stored`. */
@@ -73,6 +85,9 @@ export function statusAt(history: readonly Change[], t: number): Status | undefi
 
 /** A ticket a hit no longer tells right: its status when the thought was written, and now. */
 export type Moved = { ticket: string; then: Status; now: Status };
+/** A moved ticket as a reply carries it: the key and the status TYPE then and now — never the board's names, which any write key can write. */
+export type MovedType = { ticket: string; was: string; now: string };
+export const typesOf = (moved: readonly Moved[]): MovedType[] => moved.map((m) => ({ ticket: m.ticket, was: m.then.type, now: m.now.type }));
 
 /**
  * The tickets `text` names that moved since it was written (moved-session-
@@ -94,4 +109,63 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
     out.push({ ticket, then, now });
   }
   return out;
+}
+
+/** A checked hit: the tickets that moved (none, maybe), and how many keys it mentions past MOVED_READ, not checked. */
+export type MovedHit = { moved: Moved[]; notRead: number };
+
+/** What the label reads, as migration 095 answers it (store.ts's TicketStatusInputs; spelled here so this module imports nothing). */
+export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<string, Status>; history: ReadonlyMap<string, readonly Change[]> };
+
+/**
+ * Each checked hit's moved tickets, by id — an empty list when none moved —
+ * and only the hits the measurement labelled: none `superseded` names (the
+ * eval sampled no superseded thought) and none with a lifecycle of its own.
+ * Nor a ticket row (`metadata.issue`) whose type gives it none: a duplicate's
+ * row is lifecycle-less to node_state (16 of stable's 721 rows), so the
+ * measurement labelled the tickets its body quotes, but a ticket row tells its
+ * own status, never others'. Nor a hit with no written time: the session line
+ * when it has one, else its stored time. Every other hit is absent — not
+ * checked, which the reply says as `moved: null` (the maintainer's call,
+ * review pass 4). Every checked hit counts the keys past MOVED_READ: an empty
+ * list beside a count says nothing about those (review pass 5).
+ */
+export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, MovedHit> {
+  const out: Record<string, MovedHit> = {};
+  for (const h of hits) {
+    if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase()) || h.metadata?.issue !== undefined) continue;
+    const stored = Date.parse(h.created_at ?? "");
+    if (!Number.isFinite(writtenAt(h.content, stored))) continue;
+    // Its first MOVED_READ keys only, as movedOf reads them: another hit's may be among the heads.
+    const keys = keysInOrder(h.content), read = new Set(keys.slice(0, MOVED_READ));
+    const moved = movedSince(h.content, stored, (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
+    out[h.id] = { moved, notRead: Math.max(0, keys.length - MOVED_READ) };
+  }
+  return out;
+}
+
+/**
+ * A status as a reply prints it: a fixed word for its type, never the board's
+ * name. The name is a ticket row's free text, and any write key can write a
+ * ticket row — even one stamped agent or ingested — so printed beside another
+ * thought's `By:` line, past the caller's min_trust, it would be words no one
+ * vouched for; an allowlist leaves nothing to clean (the maintainer's call,
+ * review pass 2). The six are node_lifecycle_types() (068), the only types 095
+ * returns; a custom state reads as its type's word ("In Review" as In
+ * Progress). The REST answer keeps each status's name for a caller that wants it.
+ */
+export const TYPE_WORDS: Readonly<Record<string, string>> = { triage: "Triage", backlog: "Backlog", unstarted: "Todo", started: "In Progress", completed: "Done", canceled: "Canceled" };
+const word = (type: string) => TYPE_WORDS[type] ?? "?";
+
+/**
+ * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one
+ * read, by key (stable's dd70dccc names seven, and the one its reader came for,
+ * SMD-2306, is the fifth: the maintainer's call), and beside them how many
+ * keys past MOVED_READ were not read; null when none moved — a line that claims
+ * nothing is not printed (review pass 3).
+ */
+export function movedWords(moved: readonly MovedType[], notRead = 0): string | null {
+  if (moved.length === 0) return null;
+  const words = moved.map((m) => `${m.ticket} ${word(m.was)} → ${word(m.now)}`).join("; ");
+  return notRead > 0 ? `${words} (+${notRead} more named past the first ${MOVED_READ}, not checked)` : words;
 }

@@ -877,6 +877,22 @@ export function ticketList(tickets: string[]): string[] {
  * never a search (SMD-2540 PR 2a's third review pass; the label is an
  * enhancement, as supersededAmong's).
  */
+/**
+ * The stated-status label's read failed (SMD-2540): said once per reason
+ * until a read succeeds, so a lock or a timeout under load is one line, not
+ * one per search. A brain before 095 (42883; PostgREST's PGRST202) is
+ * expected and brain_info's version check names it behind, so it is not
+ * said — nor, so, a 42883 from a callee a role's search_path misses; a missing grant
+ * (42501), 098's lock timeout (55P03) or a statement timeout (57014) is.
+ */
+const labelUnread = new Set<string>();
+export function labelReadFailed(code: string, cause: string): void {
+  if (code === "42883" || code === "PGRST202" || labelUnread.has(code)) return;
+  labelUnread.add(code);
+  console.warn(`stated-status label not read (${code || "no code"}): searches answer without it until a read succeeds — ${cause}`);
+}
+export const labelReadOk = (): void => labelUnread.clear();
+
 export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
   const text = (v: unknown) => (typeof v === "string" ? v : null);
