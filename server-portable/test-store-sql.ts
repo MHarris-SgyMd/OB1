@@ -1589,6 +1589,10 @@ console.log("\n[18] The vector mender's page, both forms, and brain_info's vecto
     // statistics (PG 16 holds an idle one's up to 10 s) move its counters;
     // a scan of thoughts' heap is not counted for that reason (review pass 2).
     const waiting = (await conn`SELECT id FROM thoughts WHERE embedding IS NULL AND content LIKE 'store-sql 3056 %' ORDER BY id`).map((r: { id: string }) => r.id);
+    // The page's own bound: two of the three (review pass 3: a page of eight
+    // over three never tested the LIMIT).
+    const two = await one.listVectorless({ limit: 2, after: null });
+    assert(two.map((r) => r.id).join() === waiting.slice(0, 2).join(), `a page of two over three waiting: the first two in id order (${two.length})`);
     const scans = async () => {
       await conn`SELECT pg_stat_force_next_flush()`;
       await conn`SELECT 1`;

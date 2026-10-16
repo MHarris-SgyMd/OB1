@@ -20,7 +20,7 @@
 --   order and its predicate in one index, so both of listVectorless's forms
 --   (no cursor; id > cursor) walk it from where they start and stop at the
 --   page, and the count reads it alone. It holds only the rows still waiting
---   for a vector, so it stays a few pages on a healthy brain: a capture with
+--   for a vector, so it stays a page or two on a healthy brain: a capture with
 --   its vector and every vectored row never enter it, and a mend's write is
 --   a row version that leaves it (the old entry goes at the next vacuum).
 --   HOT updates are unchanged: embedding is already an indexed column (the
@@ -50,11 +50,12 @@ DECLARE
   v_kind  "char";
   v_def   text;
   v_valid boolean;
+  v_on    oid;
 BEGIN
   -- By name in thoughts' own schema, never the search path's first match: a
   -- brain without the index would otherwise find another schema's under the
   -- name, keep it, and be recorded with none on thoughts (review pass 2).
-  SELECT c.oid, c.relkind, pg_get_indexdef(c.oid), i.indisvalid INTO v_oid, v_kind, v_def, v_valid
+  SELECT c.oid, c.relkind, pg_get_indexdef(c.oid), i.indisvalid, i.indrelid INTO v_oid, v_kind, v_def, v_valid, v_on
     FROM pg_class c LEFT JOIN pg_index i ON i.indexrelid = c.oid
    WHERE c.relname = 'thoughts_vectorless_idx'
      AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass);
@@ -62,7 +63,10 @@ BEGIN
     CREATE INDEX thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;
     v_oid := (SELECT c.oid FROM pg_class c WHERE c.relname = 'thoughts_vectorless_idx'
                 AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass));
-  ELSIF v_kind <> 'i' OR v_def !~ '^CREATE INDEX thoughts_vectorless_idx ON (\w+\.)?thoughts USING btree \(id\) WHERE \(embedding IS NULL\)$' THEN
+  -- On thoughts by its oid, the rest by its text: the schema as
+  -- pg_get_indexdef prints it is never read, a quoted one included (review
+  -- pass 3).
+  ELSIF v_kind <> 'i' OR v_on <> 'thoughts'::regclass OR v_def !~ '^CREATE INDEX thoughts_vectorless_idx ON .+ USING btree \(id\) WHERE \(embedding IS NULL\)$' THEN
     RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it (an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running) and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
       USING ERRCODE = 'object_not_in_prerequisite_state';
   ELSIF NOT v_valid THEN

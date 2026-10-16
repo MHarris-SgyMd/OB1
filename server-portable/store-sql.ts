@@ -362,8 +362,8 @@ export class SqlStore implements ThoughtStore {
 
   async listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]> {
     // Through 098's partial index on (id) WHERE embedding IS NULL, both forms:
-    // the page is the index's first rows from where it starts, 0.02 ms at
-    // 100,000 thoughts with 0, 1 or 10% waiting (SMD-3056; before it, a scan
+    // the page is the index's first rows from where it starts, 0.005-0.04 ms
+    // at 100,000 thoughts with 0, 1 or 10% waiting (SMD-3056; before it, a scan
     // of every row whenever none waited past the cursor, 2-4 ms there).
     const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
     // Two statements, not one with `$1 IS NULL OR id > $1`: under a generic

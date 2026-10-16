@@ -14822,14 +14822,24 @@ console.log("\n[88] Migration 098: the thoughts with no vector by an index of th
   const n = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'thoughts' AND indexdef LIKE '%WHERE (embedding IS NULL)%'`)).rows[0].n;
   assert(again.endsWith("_vectorless_index.sql") && n === 1 && (await def()) === d, `098 applied again changes nothing: one such index, the same definition (${again.slice(0, 80)}, ${n})`);
   // Anything else under the name is refused, never recorded as applied over
-  // it: IF NOT EXISTS alone kept both of these, and the mender read every row
-  // (review pass 1).
+  // it: IF NOT EXISTS alone kept each of the five below, and the mender read
+  // every row (review pass 1).
   const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
   await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (id)`);
   const wrong = await refusal();
   assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\)\. Drop it \(an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running\) and re-run/.test(wrong),
     `an index of another shape under the name (no WHERE): refused, naming what it is and what to do (${wrong.slice(0, 120)})`);
-  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE TABLE thoughts_vectorless_idx (x int)`);
+  // The predicate right, the column or the table wrong (review pass 3: a
+  // shape check reading any column passed every cell above).
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (created_at) WHERE embedding IS NULL`);
+  const column = await refusal();
+  assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(created_at\) WHERE \(embedding IS NULL\)\./.test(column),
+    `the predicate on another column: refused, naming it (${column.slice(0, 120)})`);
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE TABLE tu_other (id uuid, embedding vector(3)); CREATE INDEX thoughts_vectorless_idx ON tu_other (id) WHERE embedding IS NULL`);
+  const other = await refusal();
+  assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.tu_other USING btree \(id\) WHERE \(embedding IS NULL\)\./.test(other),
+    `the same shape on another table: refused, naming it (${other.slice(0, 120)})`);
+  await db.exec(`DROP TABLE tu_other; CREATE TABLE thoughts_vectorless_idx (x int)`);
   const table = await refusal();
   assert(/migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — a relation of kind r\./.test(table),
     `a table under the name: refused, naming its kind (${table.slice(0, 120)})`);
