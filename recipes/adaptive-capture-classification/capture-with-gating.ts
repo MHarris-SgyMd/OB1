@@ -8,7 +8,8 @@
 // which writes the content fingerprint (003) with the text; a raw insert left the
 // fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
 // one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
-// here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
+// here, so the 2-argument form is resolved and the row waits for the servers'
+// vector mender (SMD-2889) or a re-embed pass. FORK.md
 // change 71; scripts/check-fork-consistency.ts check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
@@ -216,7 +217,8 @@ async function writeToOB1(classified: Classified): Promise<void> {
   // replaced left the fingerprint NULL, and 016's trigger does not fill it. A
   // server that authenticates a key passes `actor: { name }` in p_payload so
   // 008's audit row names it; this example has no key and names none. No vector is made here: the 2-argument form is resolved and
-  // the row waits for a re-embed pass (db/reembed.ts). The OB1 capture MCP tool
+  // the row waits for the servers' vector mender (SMD-2889) or a re-embed
+  // pass (db/reembed.ts). The OB1 capture MCP tool
   // embeds as it captures — if you use it, call it here instead. The
   // classifier's fields ride in metadata: `thoughts` has no tags/project/
   // due_date columns, and `type` as a column is the enhanced-thoughts

@@ -432,6 +432,41 @@ export type ThoughtIdPage = {
 };
 
 /**
+ * A thought saved without a vector — the provider did not answer, the egress
+ * gate refused the call, or an import wrote it bare — as the vector mender
+ * reads it (SMD-2889).
+ * `updatedAt` is `COALESCE(updated_at, created_at)`, the stamp
+ * update_thought's guard compares against, so the mender's write never lands
+ * over an edit made since this read.
+ */
+export type VectorlessRow = {
+  id: string;
+  content: string;
+  updatedAt: string;
+  metadata: Record<string, unknown> | null;
+  /**
+   * The door its capture came through — thought_audit.origin on its capture
+   * row (046): a server's name for a key's capture, a tool's (`ingest-records`,
+   * board-sync's) for a pass's; null when no capture row says (a raw insert,
+   * or a store that cannot read the audit). The mender asks the gate the
+   * question that writer's own gate asked.
+   */
+  origin: string | null;
+};
+
+/** One `listVectorless` row from either store: `updated_at` is the COALESCE the query selects. */
+export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRow {
+  const metadata = r.metadata;
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    updatedAt: isoTimestamp(r.updated_at),
+    metadata: metadata !== null && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : null,
+    origin: typeof r.origin === "string" ? r.origin : null,
+  };
+}
+
+/**
  * One logged search from `query_log` (SMD-2245), for a log-sourced cross-brain
  * replay. Telemetry, not thought content: the query text, which arm ran it, the
  * tier that logged it, when, and the search's own arguments. `result_ids` (the
@@ -1166,6 +1201,13 @@ export type Actor = {
    * when the vector landed or the call was not made.
    */
   vectorFailed?: string;
+  /**
+   * A write a server's background work made, not a caller's: the vector
+   * mender's (SMD-2889). Lands in thought_audit.actor_context as
+   * `background`, which db/sleep.ts reads past as it reads past an ingested
+   * write. Only the server sets it; no caller's write carries it.
+   */
+  background?: string;
 };
 
 /**
@@ -1189,6 +1231,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     ...(actor.act !== undefined ? { act: { name: actor.act.name, ...(actor.act.agentId !== undefined ? { agent_id: actor.act.agentId } : {}) } } : {}),
     ...(actor.scope !== undefined ? { scope: actor.scope } : {}),
     ...(actor.vectorFailed !== undefined ? { vector_failed: actor.vectorFailed } : {}),
+    ...(actor.background !== undefined ? { background: actor.background } : {}),
   };
 }
 
@@ -1432,6 +1475,27 @@ export interface ThoughtStore {
   listThoughtIds(opts: { limit: number; after: string | null }): Promise<ThoughtIdPage>;
 
   /**
+   * A page of the thoughts with no vector (`embedding IS NULL`), in id order
+   * after the keyset cursor `after` (exclusive; null for the first page), for
+   * the vector mender (SMD-2889). Id order, as listThoughtIds pages: a row the
+   * mender skips — refused by the gate, or failed — never holds back the rows
+   * behind it.
+   */
+  listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]>;
+
+  /**
+   * The vector mender's leader lock (SMD-2889): both servers run a mender, and
+   * a tick acts only while it holds this — a session advisory lock on a
+   * connection of its own, so one mender acts at a time across processes and
+   * replicas, and a process that dies lets it go with its connection. The
+   * release — true when it let the lock go, false when the session that
+   * took it was not the one asked (a pooler between) — or null when another
+   * holds it. The PostgREST store has no session to hold one: it answers a
+   * release that does nothing.
+   */
+  mendLock(): Promise<(() => Promise<boolean>) | null>;
+
+  /**
    * A window of the brain's logged searches (`query_log`), most recent first, for a
    * log-sourced cross-brain replay (SMD-2245). `since` bounds the window; `limit`
    * caps it (one extra row is read to set `truncated`). Empty when the log is off
@@ -1529,11 +1593,11 @@ export interface ThoughtStore {
     actor?: Actor;
     payload: { metadata: Record<string, unknown> };
     /**
-     * NULL when the egress gate refused the embedding call (SMD-1903): the row
-     * lands with its text and fingerprint and no vector — findable by exact
-     * text, absent from semantic search until a re-embed pass against an
-     * endpoint the gate allows. The only path that stores a row without a
-     * vector on purpose; a failed call still fails the capture.
+     * NULL when the egress gate refused the embedding call (SMD-1903) or the
+     * provider did not answer it (SMD-2888): the row lands with its text and
+     * fingerprint and no vector — findable by exact text, absent from semantic
+     * search until the servers' vector mender embeds it (SMD-2889). Any
+     * other failed call still fails the capture.
      */
     embedding: number[] | null;
     /**
@@ -1911,7 +1975,7 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
-  listThoughtIds: true, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,

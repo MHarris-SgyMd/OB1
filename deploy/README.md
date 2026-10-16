@@ -257,14 +257,16 @@ instance. The alternative is one Ollama on the host that every instance names
 ## Several brains behind one edge
 
 The edge proxy (SMD-2876) puts several brains behind one port, each at a host
-of its own: `http://<name>.localhost:8090/mcp`. curl, Bun and browsers resolve
-`*.localhost` to loopback themselves, and macOS and systemd-resolved do too.
-On another Linux resolver, give each name a hosts line (`127.0.0.1
-stable.localhost`). The edge is a compose project of its own,
-`ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
-published port, as any client on the host does, and joins no brain's network.
-Because each brain is served at the root of its own host, its `/mcp`, its
-discovery documents and its authorization server stay its own.
+of its own: `http://<name>.localhost:8090/mcp`, or `<name>.<domain>` with the
+registry's `edge.domain`, a name under `localhost`. curl and browsers resolve
+`*.localhost` to loopback themselves. Bun and most other programs ask the
+system's resolver, which answers it on macOS and under systemd-resolved. On
+another Linux resolver, give each name a hosts line (`127.0.0.1
+stable.localhost`), or the name goes to upstream DNS. The edge is a compose
+project of its own, `ob1-edge` (`deploy/edge/`). It reaches each brain
+through the brain's published port, as any client on the host does, and
+joins no brain's network. Each brain is served at the root of a host of its
+own. Access keys pass through; sign-in waits for TLS at the edge (below).
 
 ```bash
 cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by git
@@ -272,6 +274,8 @@ cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by 
 bun --no-env-file deploy/edge/edge.ts check  # the shape, what publishes each brain's port, the URLs; starts nothing
 bun --no-env-file deploy/edge/edge.ts up     # renders the table, picks the shape, starts the edge
 bun --no-env-file deploy/edge/edge.ts down
+# a client of one brain through the edge, with that brain's own key:
+claude mcp add --transport http stable http://stable.localhost:8090/mcp --header "x-brain-key: <stable's key>"
 ```
 
 A brain's port is its env file's `SERVER_PORT`: 8000 unless set, or 8010
@@ -289,17 +293,33 @@ there.
   such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
+- **Sign-in (OAuth) is not served through the edge yet. Keys are.** Each
+  brain's host on the edge would be its origin, with its challenge, its
+  discovery documents and its authorization server its own. But MCP SDK v2
+  and Claude Code send a token request over plain HTTP only to exactly
+  `localhost`, `127.0.0.1` or `::1`, never to a name under `localhost`. This
+  was measured on MCP SDK v2, and the same rule is read in Claude Code
+  2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
+  TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only after
+  SMD-2286; the brain's origin will then be its host on the edge.
+
+  Until then, a brain running the `auth` profile keeps its
+  `OB1_PUBLIC_ORIGIN`. Since the edge's host is not its origin's, through the
+  edge its `/mcp` answers keys alone: a call with no key gets the server's
+  refusal (JSON-RPC -32001), not a sign-in. Its `/auth` paths still answer
+  through the edge, by path, naming its own origin.
 - **The authorization server's per-address limits see the edge's address**
   for every client that comes through the edge. One client's failed
-  sign-ins therefore lock out every client behind the edge for the
-  lockout's length.
+  authentications at a brain's `/auth` through the edge therefore lock out
+  every client behind the edge for the lockout's length.
 - **The domain is `localhost` or a name under it.** The edge listens on
   loopback alone. Under that domain, the resolvers that follow RFC 6761 answer
   loopback themselves, where a public name would send a client's key off the
   machine over plain HTTP. A Linux resolver that doesn't follow it needs the
   hosts lines above.
 - **Two shapes**, because no one binding reaches a brain's loopback port from
-  a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
+  a container on both runtimes (measured;
+  [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
   - **Under a rootful podman machine** (`podman machine inspect --format
     '{{.Rootful}}'`), the edge is a container that publishes
     `127.0.0.1:<port>` and dials each brain at `host.containers.internal`.
@@ -415,7 +435,7 @@ stack's networks.
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
-| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000`; `proxy.ob1.internal` on `front` | Nothing of its own: `/mcp`, `/canary/mcp`, `/working/mcp` on the forwarder's port | Through the forwarder |
+| `proxy` | dials the MCP server on `mesh` as `mcp.ob1.internal:8000`, and no tier's since SMD-2874 PR 3 (until v2.0.0, `mcp.canary.ob1.internal:8000` and `mcp.working.ob1.internal:8000` too); `proxy.ob1.internal` on `front` | Nothing of its own: `/mcp` on the forwarder's port | Through the forwarder |
 | `forwarder` | on `edge`, and dials the proxy alone on `front`, as compose.yaml's (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` | Through a TLS proxy or tunnel, as compose.yaml's; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
 | `<tier>-server` | `<tier>-server:8000` on `data` and `egress`; `mcp.<tier>.ob1.internal` (stable: `mcp.ob1.internal`) on `mesh` | Nothing of its own: its path on the proxy's port | Through the proxy |
 | `<tier>-api` | `api.<tier>.ob1.internal:8000` (stable: `api.ob1.internal`) on `mesh`, and `<tier>-api:8000` on `data` and `egress` — a key is still required for anything but `/health` and `/openapi.json` | Nothing | Nothing |
@@ -470,7 +490,7 @@ paths today:
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
-| every path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to SMD-2874 a tier answered at `/canary/mcp` here), so a client still given a tier's URL on this origin, in any spelling after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
+| every path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went), so a client still given a tier's URL on this origin, in any spelling after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
 | `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. Kept off the legacy route, which would hand the POST to the MCP server (SMD-2382). The authorization server's own are under `/auth` |
@@ -1025,8 +1045,8 @@ with a key it does not show that record to, the pass line says this could not
 be judged. A URL spelled otherwise than the server's origin (`:443`, upper
 case), or a document naming another origin (`http` in front of an `https`
 tunnel), fails with the URL to use instead. A URL under another
-path (a tier at `/canary/mcp`, reached with keys until SMD-2286 gives tiers
-OAuth) is asked at its own path form and
+path (a three-brain stack's tier at `/canary/mcp`, reached with keys until
+SMD-2286 gives tiers OAuth) is asked at its own path form and
 the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
 
@@ -1810,8 +1830,9 @@ Once newer thoughts have been judged, three cases miss their pairs however
 the passes are run (`db/README.md`, "Consolidation: proposing which thoughts
 supersede which"):
 - an older thought whose extraction failed (`--retry-failed` extracts it);
-- an older thought whose embedding failed (`db/reembed.ts` embeds it; no
-  service runs it);
+- an older thought whose embedding failed (the servers' vector mender embeds
+  it once the provider answers and the gate allows, SMD-2889; `db/reembed.ts`
+  does a whole brain);
 - an import dated older than thoughts already judged.
 
 **Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged
@@ -1869,7 +1890,8 @@ the same as under `workers`, spent only while nobody is using the brain.
 `db/README.md`, "Sleep", has the full rules.
 
 **What wakes it.** A write through a key that is not classified `ingested`
-(board-sync's sync writes are), and a search, but only when the server logs
+(board-sync's sync writes are; the servers' vector mender's are marked
+background and do not wake it either), and a search, but only when the server logs
 searches (`OB1_QUERY_LOG=on`) and the scheduler's role may read the log. This
 stack's database URL is the owner's, which may. A role set up with
 `migrate.ts --grant` may only when granted the opt-in **sleep** group,
@@ -2202,7 +2224,7 @@ starts after a failed source half. Neither publishes anything. The client's majo
 server's, and `refreshToolsReady` refuses the refresh otherwise, so a
 Postgres bump in the compose files means bumping the package in
 `db/tier.Dockerfile` with it. On
-every PR, the deploy-stack CI job seeds one thought and one logged search, then
+every PR, the deploy-stack-brains CI job seeds one thought and one logged search, then
 runs through this script: a refresh, its refusal of a `--diff`, a retry over a
 copy left stamped `stable` (as a refresh that died after its restore leaves
 it), both refusals, a run for another project that builds that project's image
@@ -2534,7 +2556,7 @@ beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
 Neither touches stable: `down` acts on the canary's project alone.
 
-On every PR, the deploy-stack CI job runs `canary.sh` beside its stack, in
+On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in
 two steps. The first is every refusal above, each with exit 2 and nothing
 started, stamped or registered: no port, a canary file naming stable's port,
 stable's port given, an empty `--port`, a `--stable-project` no project
@@ -2847,6 +2869,11 @@ lines naming the same one are refused.
        model, oldest first, not only this run's. That is normally just this
        run's. After a model switch it is the whole brain, and imports then
        run to their deadline for as long as that takes.
+     - The servers' vector mender (SMD-2889) embeds the same rows too, 8 a
+       tick per server, within a sweep of their landing. Neither writes over the other's
+       newer text — each write carries the stamp it read — but a row both
+       reach may be embedded and written twice; `OB1_VECTOR_MEND_INTERVAL=off`
+       leaves imports to the runner alone.
 - **Success** means every row of the pipeline's source has a vector.
   reembed's own exit code (1 for any failed row in its job, or another
   pass's leases) does not decide it.

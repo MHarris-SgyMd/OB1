@@ -1451,6 +1451,16 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     "a catalog that never answers is the database's error at the deadline, the server's facts still there");
 }
 
+// The Vectors row (SMD-2889): how many wait, none, or why not read.
+{
+  const { vectorsLine } = await import("./brain-info.ts");
+  assert(vectorsLine({ vectorless: 0, unread: {} }) === "every thought has one", "none waiting: said");
+  assert(vectorsLine({ vectorless: 1, unread: {} }) === "1 thought waits for a vector — the servers' vector mender embeds it once the provider answers and the egress gate allows the call", `one: singular (${vectorsLine({ vectorless: 1, unread: {} })})`);
+  assert(/^1,204 thoughts wait for a vector — the servers' vector mender embeds them/.test(vectorsLine({ vectorless: 1204, unread: {} })), "many: counted, plural");
+  assert(/^\? \(thoughts /.test(vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "canceling statement due to statement timeout" } } })) && vectorsLine({ vectorless: null, unread: {} }) === "no table",
+    `not read: why; no table: said (${vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "x" } } })})`);
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -1870,6 +1880,16 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const goodGrace = await preflightWith("30");
   assert(/✗\s+stop grace\s+OB1_STOP_GRACE="1m" is not a whole number of seconds/.test(badGrace) && /30, not 30s/.test(badGrace) && /✓\s+stop grace\s+30 s \(OB1_STOP_GRACE\) — a stop drains what is in flight for up to 28 s/.test(goodGrace),
     "preflight fails a stop grace compose would render wrong (1m → a 1 ms kill), with the fix, and reports one it reads");
+  // The vector mender's knob (SMD-2889): said when set — its interval, off, or a value the servers read as the default.
+  const preflightMend = async (v: string) => {
+    const p = Bun.spawn(["bun", "--no-env-file", "preflight.ts"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_VECTOR_MEND_INTERVAL: v }, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    await p.exited;
+    return out;
+  };
+  const [mendBad, mendOff, mendEvery] = await Promise.all([preflightMend("1d"), preflightMend("off"), preflightMend("120")]);
+  assert(/vector mender\s+OB1_VECTOR_MEND_INTERVAL="1d" is not a whole number of seconds from 1 to 86400/.test(mendBad) && /✓\s+vector mender\s+off \(OB1_VECTOR_MEND_INTERVAL\)/.test(mendOff) && /✓\s+vector mender\s+every 120 s/.test(mendEvery),
+    `preflight says the mender's knob: a bad value warned, off, an interval (${mendBad.split("\n").find((l) => /vector mender/.test(l))?.trim()})`);
 
   // A tool call runs on after its client has gone, which Bun's request count
   // does not see (review pass 3: a stop whose only call's client had just left
@@ -2471,7 +2491,7 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
     return { text: r.content[0].text, note: r.content[0].text.split("\n\n").find((p) => p.startsWith("Note:")) ?? "", sc: r.structuredContent as Record<string, unknown> };
   };
   const fresh = away(true, false), recaptured = away(true, true), unsaid = away(true), hookAway = away(false);
-  assert(fresh.note === "Note: saved WITHOUT a vector — the embedding provider at http://embed-host:11434/v1 was unavailable (the connection was refused). It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: re-capture the same text once the provider is back, or run a re-embed pass (db/reembed.ts).",
+  assert(fresh.note === "Note: saved WITHOUT a vector — the embedding provider at http://embed-host:11434/v1 was unavailable (the connection was refused). It is findable by exact text (search_thoughts_keyword) now, and joins semantic search once it is embedded: the server embeds it by itself once the provider answers.",
     `a fresh row: saved without a vector, where and why, and the two ways it is still reached (${fresh.note})`);
   assert(/^Note: no vector was made for this capture — the embedding provider at http:\/\/embed-host:11434\/v1 was unavailable \(the connection was refused\)\. This text was already a thought, and it keeps the vector it had, if it had one\.$/.test(recaptured.note) && !/WITHOUT/.test(recaptured.note),
     `a reader's re-capture: the existing vector stands (${recaptured.note})`);
@@ -2480,6 +2500,15 @@ console.log("\n[16k] A capture reply says what a re-capture does for the key tha
     `a capture-only key: no endpoint, no detail, and not told whether the text was new (${hookAway.note})`);
   assert(hookAway.sc.vectorFailed === "provider_unreachable" && fresh.sc.vectorFailed === "provider_unreachable" && !JSON.stringify(hookAway.sc).replace(hookAway.text, "").includes("embed-host") && hookAway.sc.embeddingCall === true,
     `the typed result: the call was made, and the word for why no vector came of it — never the endpoint (${JSON.stringify({ ...hookAway.sc, text: undefined })})`);
+  // The gate refused the call: the server embeds it once the policy allows
+  // (SMD-2889) — said to a reader on a fresh row and on a database that does
+  // not say, and to a capture-only key, never naming db/reembed.ts as the only way.
+  const gated = (reader: boolean, existed?: boolean) => (renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000b0", reader, ...(existed === undefined ? {} : { existed }), tags: { type: "observation" }, embeddings: { allowed: false, reason: "OB1_EGRESS_POLICY=deny (the default) and no OB1_EGRESS_ALLOW term matches this capture" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never).content[0].text
+    .split("\n\n").find((p: string) => p.startsWith("Note:")) ?? "");
+  assert(/^Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny .*\. It is findable by exact text \(search_thoughts_keyword\), and joins semantic search once the egress policy allows the call \(a changed policy takes effect when the server restarts\): the server then embeds it by itself \(SMD-2889\)\.$/.test(gated(true, false)),
+    `a refused call, a fresh row: the server embeds it once the policy allows (${gated(true, false)})`);
+  assert(/embedded by the server itself once the egress policy allows the call \(a changed policy takes effect when the server restarts\); text already captured keeps the vector it had\. This reply does not say which\.$/.test(gated(false)) && !/reembed/.test(gated(false)),
+    `a refused call, a capture-only key: the same, both readings (${gated(false)})`);
   const vectored = renderCapture({ ok: true, value: { id: "00000000-0000-4000-8000-0000000000ae", reader: true, existed: false, tags: { type: "observation" }, embeddings: { allowed: true, reason: "" }, chat: { allowed: true, reason: "", base: "http://chat" }, chunks: 0, contextFailures: 0, headWindow: null, recapture: null } } as never);
   assert(!/Note:/.test(vectored.content[0].text) && !("vectorFailed" in (vectored.structuredContent as object)), "a capture whose vector landed says nothing of it, and its typed result carries no vectorFailed");
   // The chat provider down too: the marker alone (no placeholders), said per
@@ -2762,7 +2791,7 @@ console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id re
 console.log("\n[19] A key on the old root URL is logged once, by name, only when the proxy's legacy route marked the request (SMD-2306)");
 {
   // The proxy's legacy route sets the marker and its /mcp route deletes it
-  // (deploy/compose.yaml); CI's deploy-stack job holds that half. Here: the
+  // (deploy/compose.yaml); CI's deploy-stack-auth job holds that half. Here: the
   // server logs a marked request's key name once, after the key check, and
   // never an unmarked one, which a server with no proxy in front only gets —
   // from the MCP endpoint and from a keyed REST route alike (review pass 1:

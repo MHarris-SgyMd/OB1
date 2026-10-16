@@ -8,7 +8,7 @@
 
 import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { routable } from "./auth.ts";
-import { createCore } from "./core/index.ts";
+import { createCore, mendIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -60,6 +60,13 @@ if (SERVES_ON_BUN) {
   void startTelemetry(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
+  // The vector mender (SMD-2889), as the MCP server starts one: a tick acts
+  // only under the store's leader lock, so the two servers' menders take
+  // turns, and this one goes on mending once the MCP endpoint is
+  // mcp-server/'s, which holds no store (SMD-2287).
+  const mend = mendIntervalFrom(process.env.OB1_VECTOR_MEND_INTERVAL);
+  if (mend.problem) console.warn(mend.problem);
+  const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
     server: () => bunServer,
@@ -68,7 +75,11 @@ if (SERVES_ON_BUN) {
     // The telemetry still batched goes beside the pool's close, under its bound, said on its own.
     flush: flushTelemetry,
     // A record the runtime no longer counts but that is still open ends before that flush, on every path (PR 2c review pass 3).
-    endOpen: cutOpenRequests,
+    // The mender stops beside it, before the pool closes: no further row starts.
+    endOpen: () => {
+      mender?.stop();
+      cutOpenRequests();
+    },
     onCut: () => {
       // Every request still in flight gets its line — `cut`, or `abandoned`
       // for a client already gone — before the process exits — the middleware would write it after the handler, and

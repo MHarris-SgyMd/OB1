@@ -94,7 +94,7 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > through the database's `upsert_thought`, so the row carries its content fingerprint —
 > the raw insert it replaced left the fingerprint NULL and the row invisible to dedup. It
 > names no audit actor (a server with an access key passes `actor: { name }` in the payload). It makes no vector, so the 2-argument form is resolved and the row
-> waits for a re-embed pass (`db/reembed.ts`); the OB1 capture MCP tool embeds as it
+> waits for the servers' vector mender (SMD-2889) or a re-embed pass (`db/reembed.ts`); the OB1 capture MCP tool embeds as it
 > captures, and is the better call there. The classifier's `type`, `tags`, `project` and
 > `due_date` ride in `metadata` — `thoughts` has no such columns; a brain with the
 > enhanced-thoughts schema can write its `type` column beside the call, on a fresh row, as

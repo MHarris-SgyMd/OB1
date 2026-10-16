@@ -134,7 +134,8 @@ export interface PassStamper {
   startWait?(on: boolean): Promise<void>;
   /**
    * A pass's word that it is waiting mid-pass for a provider that stopped
-   * answering, after its workers' pauses (true), or no longer is (false):
+   * answering (true) — past its workers' pauses for a 5xx, at once for a
+   * model gone missing or a call no probe answers — or no longer is (false):
    * consolidate.ts says it through a caller's stamper, and the scheduler sets
    * extraction to the newer work meanwhile (SMD-3008). Not on the row: the
    * `waiting` word is the start's, and a mid-pass wait reads "running a pass"

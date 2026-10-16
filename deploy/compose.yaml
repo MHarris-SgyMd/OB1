@@ -176,7 +176,8 @@ x-otel-env: &otel-env
 #           and whatever follows: a bare 404 (`not-served`). A canary or a
 #           working tier is a brain of its own on its own port (SMD-2874;
 #           docs/one-brain-per-stack.md), and this stack routes none; from
-#           SMD-2294 to SMD-2874 a tier answered at /canary/mcp here. Kept
+#           SMD-2294 to v2.0.0 a tier answered at /canary/mcp here,
+#           deprecated by SMD-3057 for a release before it went. Kept
 #           until SMD-2532 removes the legacy route, so a client still given
 #           a tier's URL on this origin, in any spelling after the prefix
 #           (its case, an escaped slash, a pasted invisible space), never
@@ -889,6 +890,11 @@ services:
       # less (SMD-2250). Unset, 10 — and stop_grace_period below reads the same
       # variable, so compose waits exactly what the server plans for.
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+      # Seconds between the vector mender's ticks, 1 to 86400, 0 or off for
+      # none: the servers embed the thoughts saved without a vector once the
+      # provider answers (SMD-2889). Unset, 60. Both this server and the REST
+      # core read it; a leader lock lets one mend at a time.
+      OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env, *otel-env]
@@ -1078,9 +1084,10 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
-    # authorization server as auth.ob1.internal, and the tier routes' MCP
-    # servers as mcp.<tier>.ob1.internal (SMD-2294), which no project of
-    # another brain joins since SMD-2874. It shares no network with Postgres,
+    # authorization server as auth.ob1.internal. Until v2.0.0 it also
+    # reached a tier's MCP server there as mcp.<tier>.ob1.internal
+    # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
+    # stack routes none. It shares no network with Postgres,
     # the model services, n8n or the workers, and has no route out.
     networks:
       front:
