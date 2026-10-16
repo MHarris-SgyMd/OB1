@@ -7118,7 +7118,7 @@ The consent-page mutants above hold its pages too.
   service's own volume (`../deploy/auth/store.ts`; this kit's image runs it
   too, in the container's own layer), the service is `deploy/compose.yaml`'s
   `auth` profile, and compose does not pass `OB1_AUTH_POC_ERROR_DETAIL`, so
-  the POC's `error_detail` stays off there. CI's full-stack job holds the
+  the POC's `error_detail` stays off there. CI's deploy-stack-auth job holds the
   service across a restart (`../deploy/README.md`, "Authorization server").
 - **Work step 3, done in the deploy, its third cut:** registration stays open
   but is capped (`OB1_AUTH_MAX_CLIENTS`), and an hourly purge removes expired
