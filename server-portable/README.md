@@ -92,7 +92,7 @@ pooler in statement or transaction mode it is not let go where it was taken
 (the mender says so, once) — point `DATABASE_URL` at Postgres, or set the knob
 off on every server but one. The lock's connection is one beyond
 `OB1_PG_POOL` per server. A tick reads in id order from where the last stopped,
-passing over the rows the gate refuses and the rows held, until it has embedded
+passing over the rows the gate refuses and the rows held, until it has tried
 8 rows (a long row is a call per window and one for the whole, and a blurb call
 per window under `OB1_CHUNK_CONTEXT`), read 256 rows, or reached the end; a
 policy that refuses every call (deny with no allow term, an endpoint not
@@ -105,24 +105,22 @@ stamp (who wrote the text, its trust) kept, the egress decision recorded, and
 its `updated_at` moved, as any event moves it — an agent holding the old stamp
 for `if_unchanged_since` re-reads. The provider away needs no rule about which
 row is to blame: every failure holds its row — an outage-shaped one (refused,
-reset, timed out, 5xx, 408, 429) for 1, 2, 4, up to 8 sweeps — and two
-outage-shaped failures in a row stop the tick, so the provider away costs two
-calls a tick at most. A tick whose calls all met an outage is the provider
-away, said once; the first call the provider answers after — a vector, or an
-HTTP status that is not an outage's — says it is back, and the first answer of
-any tick lets go the outage holds of rows that have failed fewer than three
-times, so an outage's rows are tried again at once. A text the provider fails
-alone with an outage's answer is held like any: answers let it go until its
-third failure, after which it waits out its own hold; tried as the only call
-of a tick, it reads as the provider away until then, and two such texts side
-by side read so each time their holds end, every few sweeps at most. An egress
-refusal is the row's failure and says nothing either way; a body that is not
-JSON (a proxy's page in front of a provider that is away) is taken as an
-outage. A sweep's end drops the holds of rows no longer waiting (mended by
-another writer, or deleted), and with no outage hold left the outage is over.
-The only row waiting through a long outage has failed more than twice by the
-provider's return, so it waits out its hold: up to 8 sweeps, about 9
-intervals. A row whose call
+reset, timed out, 5xx, 408, 429, or a body that is not JSON, a proxy's page)
+for 1, 2, then up to 4 sweeps — and two outage-shaped failures in a row stop
+the tick, so the provider away costs two calls a tick at most. Two ticks
+running whose calls met outages and none was answered are the provider away,
+said once; the first answer after — a vector, or an HTTP status that is not an
+outage's — is its return, said, and lets every outage hold go, so the rows
+that waited through it are tried again at once. One such tick alone, or an
+outage met beside an answer, lets nothing go: a text the provider fails alone,
+a blip or a rate limit waits out its own short hold, and nothing is said; and a
+row that has failed three times speaks no more for the provider — a tick whose
+outages all met such rows counts toward no outage. An
+egress refusal is the row's failure and says nothing either way. A sweep's end
+drops the holds of rows no longer waiting (mended by another writer, or
+deleted); with no outage hold left, an outage that stood is over, and said so.
+The only row waiting through an outage has no other row's answer to show the
+provider back, so it waits out its hold: up to 4 sweeps, about 5 intervals. A row whose call
 or write fails otherwise (a 4xx other than 408 or 429, the wrong width, a write the database refuses)
 is held for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a
 restart tries every row again. A database not there to answer stops the tick, and the loop

@@ -517,7 +517,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
       if (!mended) await Bun.sleep(200);
     }
     const [row] = await sql`SELECT embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
-    assert(mended && row.embedding_model === EMB_MODEL, `the provider back: within the interval the row has its vector and label (${JSON.stringify(row)})`);
+    assert(mended && row.embedding_model === EMB_MODEL, `the provider back: within 15 s at a 1 s interval the row has its vector and label, no hand step (${JSON.stringify(row)})`);
     // Every row that waited mended (the rows behind it in id order may be a tick behind), then counted.
     for (let deadline = Date.now() + 15_000; (await health()) !== 0 && Date.now() < deadline; ) await Bun.sleep(200);
     assert((await health()) === 0, "keyed /health: none wait");

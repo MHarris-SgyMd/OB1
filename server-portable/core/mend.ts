@@ -29,21 +29,28 @@
 //
 // The provider away, with no rule about which row is to blame (review pass
 // 5: passes 2 to 4 each classified a failing row — the provider's, or its own
-// — and each classification broke; the holds alone are the state now):
-// - every failure holds its row: an outage-shaped one (providerDown) for 1,
-//   2, 4, up to MAX_OUTAGE_HOLD_SWEEPS sweeps, any other up to MAX_HOLD_SWEEPS;
+// — and each classification broke; the holds are the state, with one count):
+// - every failure holds its row: an outage-shaped one (providerDown, or a body
+//   that is not JSON — a proxy's page) for 1, 2, 4, up to
+//   MAX_OUTAGE_HOLD_SWEEPS sweeps, any other up to MAX_HOLD_SWEEPS;
 // - two outage-shaped failures in a row stop the tick, whatever rows they
 //   were — the provider away costs two calls a tick at most;
-// - the first call of a tick the provider answers — a vector, or an HTTP
-//   status that is not an outage's — lets go the outage holds of rows that
-//   have failed fewer than RELEASE_BELOW times, so an outage's rows are tried
-//   again at once, and a text the provider fails alone, past its third
-//   failure, waits out its own growing hold;
-// - a tick whose calls all met an outage is the provider away, said once,
-//   until a call is answered; a sweep's end drops the holds of rows no longer
-//   waiting, and with no outage hold left the outage is over.
-// An egress refusal is the row's failure and says nothing either way; a body
-// that is not JSON (a proxy's page) is taken as an outage.
+// - OUTAGE_TICKS ticks running whose calls met outages and were never
+//   answered are the provider away, said once; the first answer after — a
+//   vector, or an HTTP status that is not an outage's — is its return, said,
+//   and lets every outage hold go, so an outage's rows are tried again at
+//   once (review pass 6: letting holds go at every tick's first answer let a
+//   text the provider fails alone go each time, and an outage long enough to
+//   fail a row three times let nothing go);
+// - a tick that met an outage and then an answer, or a single tick with no
+//   answer, lets nothing go: a text the provider fails alone, a blip or a
+//   rate limit waits out its own short hold; and a row failed SPENT_FAILURES
+//   times speaks no more for the provider — a tick whose outages all met such
+//   rows counts toward no outage;
+// - a sweep's end drops the holds of rows no longer waiting (mended by
+//   another writer, or deleted), and with no outage hold left an outage that
+//   stood is over, said so.
+// An egress refusal is the row's failure and says nothing either way.
 
 import { createEmbedder, providerDown, ProviderError, type Embedder } from "../embed.ts";
 import { hostOf, mayLeaveBox, refusesEverything, type EgressRecord, type EgressSubject } from "../egress.ts";
@@ -64,9 +71,11 @@ export const FIRST_MEND_DELAY_MS = 5_000;
 /** The most sweeps a failing row is held for; it doubles from one with each failure. */
 export const MAX_HOLD_SWEEPS = 32;
 /** The most sweeps a row an outage held waits: the provider's return lets it go anyway, once another row's call shows it. */
-export const MAX_OUTAGE_HOLD_SWEEPS = 8;
-/** An outage hold is let go at the provider's next answer only while its row has failed fewer times than this: past it, a text the provider fails alone waits out its own hold. */
-export const RELEASE_BELOW = 3;
+export const MAX_OUTAGE_HOLD_SWEEPS = 4;
+/** Ticks running, each making calls that met outages and none answered, that are the provider away: one is a blip, a rate limit or a text the provider fails alone. */
+export const OUTAGE_TICKS = 2;
+/** A row that has failed this many times speaks no more for the provider: a tick whose outages all met such rows counts toward no outage (review pass 6: two texts the provider fails alone, coming due together, declared one each time). */
+export const SPENT_FAILURES = 3;
 /** The most a run of ticks that throw (the database away) stretches the interval, as a multiple of it. */
 export const MAX_TICK_BACKOFF = 32;
 /** The rows held at once; past it the hold that has stood longest unrenewed is dropped (the row is tried again). */
@@ -114,10 +123,12 @@ export type MendTick = {
   held: number;
   /** Rows edited, deleted or given a vector by another writer between the read and the write: the next sweep reads them afresh. */
   raced: number;
-  /** The provider's outage that stopped the tick, if one did. */
+  /** The tick's calls met outages and none was answered: the last outage met. */
   down: { reason: string; detail: string } | null;
-  /** The provider answered after an outage: the outage holds of rows that had failed fewer than RELEASE_BELOW times were let go. */
+  /** The provider answered after an outage stood: every outage hold was let go. */
   recovered: boolean;
+  /** An outage stood, and the sweep's end found no row it held still waiting (another writer gave them their vectors): it is over. */
+  over: boolean;
   /** The leader lock was not let go by the session that took it, which is still open (a pooler in statement or transaction mode). */
   lockKept: boolean;
   /** The first failure's words, cut short, for the log line. */
@@ -126,8 +137,8 @@ export type MendTick = {
   sweepEnded: boolean;
 };
 
-/** A held row: how often it failed, the sweep it waits for, and whether an outage-shaped failure held it last. */
-type Hold = { failures: number; until: number; outage: boolean };
+/** A held row: how often it failed, the sweep it waits for, whether an outage-shaped failure held it last, and the last sweep that read it. */
+type Hold = { failures: number; until: number; outage: boolean; seen: number };
 
 /** What a mender carries from tick to tick. */
 export type MendState = {
@@ -135,17 +146,17 @@ export type MendState = {
   cursor: string | null;
   sweep: number;
   held: Map<string, Hold>;
-  /** A tick's calls all met an outage, and none has been answered since. */
+  /** Ticks running whose calls met outages and were never answered. */
+  unanswered: number;
+  /** An outage stands: OUTAGE_TICKS such ticks ran, and no call has been answered since. */
   down: boolean;
-  /** The ids read this sweep, so its end drops the holds of rows no longer waiting. */
-  seen: Set<string>;
   /** The most rows held at once (MAX_HELD_ROWS; a suite asks for fewer). */
   maxHeld: number;
   /** An embedder that sends no blurb, for a row whose blurb the gate refuses (built once, on need). */
   bare?: Embedder;
 };
 
-export const newMendState = (maxHeld = MAX_HELD_ROWS): MendState => ({ cursor: null, sweep: 0, held: new Map(), down: false, seen: new Set(), maxHeld });
+export const newMendState = (maxHeld = MAX_HELD_ROWS): MendState => ({ cursor: null, sweep: 0, held: new Map(), unanswered: 0, down: false, maxHeld });
 
 const actorName = (row: VectorlessRow): string | undefined => {
   const name = row.metadata?.actor_name;
@@ -204,6 +215,13 @@ export function mendAllowed(ctx: Ctx, row: VectorlessRow): { embeddings: boolean
 
 const cut = (s: string) => (s.length > 300 ? `${s.slice(0, 300)}…` : s);
 
+/** The record as the call went: a short row has no windows, so no blurb was asked for and the chat endpoint is not named (review pass 6). */
+const egressRecord = (record: EgressRecord | undefined, windows: boolean): EgressRecord | undefined => {
+  if (!record || windows || !record.chat) return record;
+  const { chat: _, ...rest } = record;
+  return rest.embeddings ? rest : undefined;
+};
+
 /**
  * A fault the database answered about the write itself — it carries a
  * SQLSTATE — as against a database not there to answer: no SQLSTATE, or a
@@ -232,7 +250,8 @@ const faultWords = (e: unknown): string => {
  * One tick: under the leader lock, vectorless rows in id order from the
  * cursor, each embedded by the capture's path and written through
  * update_thought with the stamp it read, until MEND_BATCH rows embedded,
- * MEND_SCAN rows read, two outage-shaped failures in a row, or the end. `stopped`
+ * MEND_SCAN rows read, two outage-shaped failures in a row, or the end
+ * (a row tried counts, its failure as much as its mend). `stopped`
  * is read before each row and before each write: a stop starts no further
  * call, and writes nothing the call it cut short answered. A database that
  * stops answering throws out of the tick (the loop backs off); a write it
@@ -240,7 +259,7 @@ const faultWords = (e: unknown): string => {
  * endpoint reads nothing.
  */
 export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolean = () => false): Promise<MendTick> {
-  const tick: MendTick = { skipped: false, refusedAll: null, mended: 0, degraded: 0, refused: 0, failed: 0, held: 0, raced: 0, down: null, recovered: false, lockKept: false, firstError: null, sweepEnded: false };
+  const tick: MendTick = { skipped: false, refusedAll: null, mended: 0, degraded: 0, refused: 0, failed: 0, held: 0, raced: 0, down: null, recovered: false, over: false, lockKept: false, firstError: null, sweepEnded: false };
   const cfg0 = ctx.embedConfig();
   const everything = refusesEverything(cfg0.embeddings, cfg0.egress);
   if (everything) return { ...tick, refusedAll: everything };
@@ -253,25 +272,27 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // Re-set, not updated, so the map's order is the order of the latest failures and the cap drops the stalest.
     state.held.delete(id);
     // Held for 1, 2, 4 … sweeps: the first failure skips the next sweep.
-    state.held.set(id, { failures, until: state.sweep + 1 + Math.min(2 ** (failures - 1), outage ? MAX_OUTAGE_HOLD_SWEEPS : MAX_HOLD_SWEEPS), outage });
+    state.held.set(id, { failures, until: state.sweep + 1 + Math.min(2 ** (failures - 1), outage ? MAX_OUTAGE_HOLD_SWEEPS : MAX_HOLD_SWEEPS), outage, seen: state.sweep });
     if (state.held.size > state.maxHeld) state.held.delete(state.held.keys().next().value as string);
     tick.failed++;
     tick.firstError ??= `${id}: ${words}`;
   };
   let answered = false;
   let outages = 0;
+  let freshOutages = 0;
   let outagesInARow = 0;
   let lastOutage: { reason: string; detail: string } | null = null;
-  // The provider answered a call of this tick: the first does what an answer does.
+  // The provider answered a call of this tick: an outage that stood is over, and its holds go.
   const answer = () => {
     outagesInARow = 0;
     if (answered) return;
     answered = true;
+    state.unanswered = 0;
     if (state.down) {
       state.down = false;
       tick.recovered = true;
+      for (const h of state.held.values()) if (h.outage) h.until = state.sweep;
     }
-    for (const h of state.held.values()) if (h.outage && h.failures < RELEASE_BELOW) h.until = state.sweep;
   };
   try {
     let embeddedRows = 0;
@@ -283,8 +304,8 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         if (embeddedRows >= MEND_BATCH || scanned >= MEND_SCAN) break outer;
         scanned++;
         state.cursor = row.id;
-        state.seen.add(row.id);
         const h = state.held.get(row.id);
+        if (h) h.seen = state.sweep;
         if (h && state.sweep < h.until) {
           tick.held++;
           continue;
@@ -308,6 +329,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
           // calls a tick and holds no return let go).
           const down = providerDown(e) ?? (e instanceof ProviderError && e.kind === "body" ? { reason: "provider_body", detail: faultWords(e) } : null);
           if (down) {
+            if ((h?.failures ?? 0) < SPENT_FAILURES) freshOutages++;
             hold(row.id, down.detail, true);
             outages++;
             lastOutage = down;
@@ -336,7 +358,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
             chunks: embedded.chunks,
             ifUnchangedSince: row.updatedAt,
             // `background`: db/sleep.ts reads past it; `egress`: the decision that let the text go, as a capture's audit row carries it.
-            actor: { name: MENDER_ACTOR, via: ctx.door, background: MENDER_ACTOR, ...(gate.record ? { egress: gate.record } : {}) },
+            actor: { name: MENDER_ACTOR, via: ctx.door, background: MENDER_ACTOR, ...(egressRecord(gate.record, embedded.chunks.length > 0) ? { egress: egressRecord(gate.record, embedded.chunks.length > 0) } : {}) },
             embeddingModel: embedded.model,
             lineage: embedded.chunks.length ? { chunks: chunkRecipe(cfg, embedded) } : undefined,
           });
@@ -360,21 +382,26 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         } else hold(row.id, `update_thought ${result.error}`, false);
       }
       if (rows.length < MEND_BATCH) {
-        // The sweep's end: the holds of rows no longer waiting go, and with
-        // no outage hold left nothing says the provider is away.
-        for (const id of state.held.keys()) if (!state.seen.has(id)) state.held.delete(id);
-        if (![...state.held.values()].some((x) => x.outage)) state.down = false;
-        state.seen = new Set();
+        // The sweep's end: the holds of rows no longer waiting (not read this
+        // sweep) go, and with no outage hold left an outage is over.
+        for (const [id, x] of state.held) if (x.seen !== state.sweep) state.held.delete(id);
+        if (![...state.held.values()].some((x) => x.outage)) {
+          if (state.down) tick.over = true;
+          state.down = false;
+          state.unanswered = 0;
+        }
         state.cursor = null;
         state.sweep++;
         tick.sweepEnded = true;
         break;
       }
     }
-    // Stopped on two outages in a row, or every call this tick met one: the provider away.
-    if (outages > 0 && (outagesInARow >= 2 || !answered)) {
+    // Calls that met outages and none answered: one more tick running —
+    // unless every outage met a row spent by its failures — and at
+    // OUTAGE_TICKS, the provider away.
+    if (outages > 0 && !answered) {
       tick.down = lastOutage;
-      state.down = true;
+      if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;
   } finally {
@@ -438,11 +465,13 @@ export function startVectorMender(ctx: Ctx, opts: { intervalS: number; log?: (li
       if (t.refusedAll && !refusedSaid) log(`vector mender: idle — ${t.refusedAll}`);
       refusedSaid = t.refusedAll !== null;
       if (t.skipped || t.refusedAll) return;
-      // In this order: a tick can find the provider back and then lose it again.
       if (t.recovered && saidDown) log("vector mender: the embedding provider answers again");
-      if (t.down && (t.recovered || !saidDown)) log(`vector mender: the embedding provider is unavailable (${t.down.detail}); rows without a vector wait, and are tried as their holds end`);
-      // Said once an outage begins, and again only after this mender saw it end.
-      saidDown = state.down;
+      if (t.over && saidDown) log("vector mender: the outage is over as far as this mender can tell — the rows it held were given their vectors by another writer");
+      if (t.recovered || t.over) saidDown = false;
+      if (state.down && !saidDown) {
+        log(`vector mender: the embedding provider is unavailable (${t.down?.detail ?? "no call answered"}); rows without a vector wait, and are tried as their holds end`);
+        saidDown = true;
+      }
       if (t.mended > 0) log(`vector mender: ${t.mended} thought${t.mended === 1 ? "" : "s"} given a vector${t.degraded ? ` (${t.degraded} with the head window's vector or windows without their blurb, as a capture would store them)` : ""}`);
       sweep = { refused: sweep.refused + t.refused, failed: sweep.failed + t.failed, held: sweep.held + t.held, firstError: sweep.firstError ?? t.firstError };
       if (t.sweepEnded) {
