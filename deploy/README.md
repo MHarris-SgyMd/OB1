@@ -257,10 +257,11 @@ instance. The alternative is one Ollama on the host that every instance names
 ## Several brains behind one edge
 
 The edge proxy (SMD-2876) puts several brains behind one port, each at a host
-of its own: `http://<name>.localhost:8090/mcp`. curl, Bun and browsers resolve
-`*.localhost` to loopback themselves, and macOS and systemd-resolved do too.
-On another Linux resolver, give each name a hosts line (`127.0.0.1
-stable.localhost`). The edge is a compose project of its own,
+of its own: `http://<name>.localhost:8090/mcp`. curl and browsers resolve
+`*.localhost` to loopback themselves. Bun and most other programs ask the
+system's resolver, which answers it on macOS and under systemd-resolved. On
+another Linux resolver, give each name a hosts line (`127.0.0.1
+stable.localhost`), or the name goes to upstream DNS. The edge is a compose project of its own,
 `ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
 published port, as any client on the host does, and joins no brain's network.
 Because each brain is served at the root of its own host, its `/mcp`, its
@@ -289,15 +290,16 @@ there.
   such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
-- **Sign-in (OAuth) through the edge.** A brain running the `auth` profile
-  sets its env file's `OB1_PUBLIC_ORIGIN` to its host on the edge,
-  `http://<name>.localhost:8090`. Plain HTTP is allowed there, because a name
-  under `localhost` is loopback. A client given `http://<name>.localhost:8090/mcp`
-  is then challenged and finds that brain's own authorization server at
-  `/.well-known/oauth-authorization-server`. Each brain behind the edge has its
-  own origin, so its own discovery documents and its own authorization
-  server. Asked at its own port, which is not its origin's host, the brain
-  answers keys alone, with no challenge.
+- **Sign-in (OAuth) is not served through the edge yet. Keys are.** Each
+  brain's host on the edge is the root of an origin of its own, so its
+  challenge, its discovery documents and its authorization server would be
+  its own. But MCP clients send a token request over plain HTTP only to
+  exactly `localhost`, `127.0.0.1` or `::1`, never to a name under
+  `localhost` (measured on MCP SDK v2 and Claude Code 2.1.301). Sign-in at
+  `<name>.localhost` therefore needs TLS at the edge (SMD-3053), and a token
+  is accepted at `/mcp` only after SMD-2286. Until then, a brain running the
+  `auth` profile keeps its `OB1_PUBLIC_ORIGIN`, and through the edge it
+  answers keys alone, since the edge's host is not its origin's.
 - **The authorization server's per-address limits see the edge's address**
   for every client that comes through the edge. One client's failed
   sign-ins therefore lock out every client behind the edge for the

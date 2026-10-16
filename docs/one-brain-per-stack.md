@@ -117,7 +117,8 @@ The setup was the same as above: scratch Bun targets, with Docker Engine 29.9 in
 
 Also measured:
 - **podman machine publishes one host port on one loopback only.** It refuses to publish `127.0.0.1:P` and `[::1]:P` together. A `127.0.0.1:P` publish leaves the Mac's `[::1]:P` free for any process to bind.
-- **`*.localhost` resolves to `::1`, then `127.0.0.1`**, in Bun and curl with no hosts entry. A client asking `<name>.localhost` therefore tries `::1` first.
+- **`*.localhost` resolves to `::1`, then `127.0.0.1`**, on this Mac with no hosts entry: in curl, which resolves it itself, and in Bun and Python, which ask macOS's resolver. A client asking `<name>.localhost` therefore tries `::1` first. A Linux resolver without systemd-resolved may send the name to upstream DNS instead.
+- **MCP clients send a token request over plain HTTP only to exactly `localhost`, `127.0.0.1` or `::1`** (2026-10-16). `@modelcontextprotocol/client` 2.1.0 discovered an authorization server at `http://ob1c.localhost`, then refused its token endpoint (`InsecureTokenEndpointError`, SEP-2207). The installed Claude Code 2.1.301 holds the same rule. A name under `localhost` gets no exemption.
 
 ## What changes
 
@@ -150,7 +151,7 @@ Also measured:
 - **Promote** (built, SMD-2875 PR 2) reads the canary's `schema_version` and writes stable's `tier`, `promoted_schema_version` and `promoted_at`. The read runs in a container on the canary's network, the write in one on stable's.
 
 **New:**
-- the edge proxy: `deploy/edge/`, its own project and port (SMD-2876; built: PR 1 for key clients, PR 2 for sign-in at each brain's host on it);
+- the edge proxy: `deploy/edge/`, its own project and port (SMD-2876; built for key clients; sign-in through it waits for TLS at the edge, SMD-3053, and SMD-2286);
 - the federation contract: brain-to-brain operations through the edge, where there are none today beyond compare and refresh (SMD-2877).
 
 **Retired, or replaced:** `compose.tiers.yaml` and check 27, retired or replaced by a launcher of instances and the edge (SMD-2878).
@@ -199,15 +200,16 @@ Also measured:
 
    The first two amend a row (see the list under the table).
 
-   **Answered (the maintainer's choice, 2026-10-15): the limits treat the edge as one client.** Row 7 holds: the edge asserts nothing. One client's failed sign-ins through the edge lock out every client behind it for the lockout's length (`deploy/README.md` says so). Revisit with SMD-2309 if an edge is ever published beyond loopback.
+   **Answered (the maintainer's choice, 2026-10-15): the limits treat the edge as one client.** Row 7 holds: the edge asserts nothing a brain trusts. Traefik's own `X-Forwarded-For` is dropped by the brain's proxy, which trusts no forwarded header. One client's failed sign-ins through the edge lock out every client behind it for the lockout's length (`deploy/README.md` says so). Revisit with SMD-2309 if an edge is ever published beyond loopback.
 3. **Routing and identity at the edge** (SMD-2876, SMD-2286):
    - **Path or host routing.** A brain's OAuth challenge fires only at its origin's `Host` and exactly the path `/mcp`, since RFC 9728 wants the protected-resource document's `resource` identical to the URL the client used (SMD-2382, as built). Path routing at the edge (`/<brain>/mcp`) therefore breaks a brain's OAuth unless the brain learns its path. Host routing (`<brain>.<domain>`) keeps it.
    - **The authorization server.** Brains behind one edge either share one or each keeps its own. Under one origin, the bare `/.well-known/oauth-authorization-server` route that Claude Code fetches can name only one.
 
    **Answered (the maintainer's choice, 2026-10-15): routing by host, `<name>.<domain>`.**
    - The domain is `localhost` or a name under it, since the edge listens on loopback alone.
-   - Each brain behind the edge is the root of an origin of its own. A brain running the `auth` profile sets `OB1_PUBLIC_ORIGIN` to `http://<name>.localhost:<edge port>`. Plain HTTP is allowed there: both copies of the origin rule, `server-portable/oauth-edge.ts` and `deploy/auth/layout.ts`, read a name under `localhost` as loopback (SMD-2876 PR 2).
-   - Through the edge, at that host, the challenge, the protected-resource document and the bare discovery route are each that brain's own. Each brain keeps its own authorization server, so row 4 holds. At the brain's own port it answers keys alone.
+   - Each brain behind the edge is the root of an origin of its own, so its challenge, its protected-resource document and the bare discovery route would each be its own, at its host. Each brain keeps its own authorization server, so row 4 holds.
+   - **Sign-in there is not served yet.** MCP clients send a token request over plain HTTP only to exactly `localhost`, `127.0.0.1` or `::1` (measured above), so an origin `http://<name>.localhost` can't finish a sign-in. It needs `https://<name>.localhost`, TLS at the edge (SMD-3053), which today's origin rule already accepts. A token is accepted at `/mcp` only after SMD-2286. SMD-2876 PR 2 therefore left the origin rule as it was, after first widening plain HTTP to `*.localhost` and measuring that no client would use it.
+   - Until then, the edge serves key clients, and a brain keeps its own `OB1_PUBLIC_ORIGIN`.
 4. **The federation contract** (SMD-2877):
    - which operations a peer may call (export, import, search, capture), with which key scope;
    - what an imported thought records (source brain, source id, source trust per SMD-1724);

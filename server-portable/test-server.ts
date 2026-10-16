@@ -529,9 +529,7 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
   const { originFromEnv } = await import("../deploy/auth/layout.ts");
   const origins = ["https://brain.example.com", "https://brain.example.com/", "https://brain.example.com:8443", "http://127.0.0.1:8000", "http://localhost", "http://[::1]:8000",
     "http://brain.example.com", "https://brain.example.com/mcp", "https://brain.example.com?x=1", "https://brain.example.com#f", "https://u:p@brain.example.com", "brain.example.com",
-    "ftp://brain.example.com", "https://brain.example.com:443", " https://brain.example.com ", "", "not a url",
-    // A brain behind the edge proxy, at <name>.localhost (SMD-2876): a name under localhost is loopback, one merely ending in it is not.
-    "http://stable.localhost:8090", "http://a.b-c.localhost", "http://xlocalhost", "http://localhost.example.com", "http://stable.localhost.", "http://-a.localhost", "http://a..localhost", "http://STABLE.localhost:8090"];
+    "ftp://brain.example.com", "https://brain.example.com:443", " https://brain.example.com ", "", "not a url"];
   const disagree = origins.filter((o) => {
     let auth: string | null = null;
     try { originFromEnv({ OB1_PUBLIC_ORIGIN: o }); } catch (e) { auth = (e as Error).message; }
@@ -550,7 +548,6 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
   assert(s("auth", "https://brain.example.com/").origin === "https://brain.example.com", "configured with a sound origin: the origin, without its trailing slash");
   assert(s(undefined, "https://brain.example.com").origin === null && s("", "https://brain.example.com").configured === false, "an origin without the profile is not configured: no origin to advertise");
   assert(s("auth", "http://brain.example.com").origin === null && s("auth", "http://brain.example.com").configured, "configured with an unsound origin: configured, nothing to advertise");
-  assert(s("auth", "http://stable.localhost:8090").origin === "http://stable.localhost:8090" && s("auth", "http://xlocalhost").origin === null, "an origin under localhost, the edge proxy's, is sound over http; one merely ending in localhost is not");
 
   const req = (url: string, headers: Record<string, string> = {}) => new Request(url, { method: "POST", headers });
   const HEX = "a".repeat(64);
@@ -590,10 +587,6 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
     ["an https origin and Host :80, which is not its default", "brain.example.test:80", PUBLIC_ORIGIN, false],
     ["an http loopback origin and Host :80", "localhost:80", "http://localhost", true],
     ["an http loopback origin and Host :443", "localhost:443", "http://localhost", false],
-    ["an origin behind the edge proxy and its Host", "stable.localhost:8090", "http://stable.localhost:8090", true],
-    ["an origin behind the edge proxy and its Host in upper case", "STABLE.localhost:8090", "http://stable.localhost:8090", true],
-    ["an origin behind the edge proxy and another brain's Host on the edge", "canary.localhost:8090", "http://stable.localhost:8090", false],
-    ["an origin behind the edge proxy and the brain's own port", "127.0.0.1:8010", "http://stable.localhost:8090", false],
     ["userinfo in the Host", "evil@brain.example.test", PUBLIC_ORIGIN, false],
     ["a path in the Host", "brain.example.test/x", PUBLIC_ORIGIN, false],
     ["a query in the Host", "brain.example.test?x", PUBLIC_ORIGIN, false],
