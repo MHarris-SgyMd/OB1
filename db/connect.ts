@@ -233,10 +233,11 @@ export const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.
 /**
  * The override of the loopback rule, named once so a suite that spawns another
  * checked script can pass it on. One name: the test scaffolding also honoured
- * `OB1_EVAL_ALLOW_REMOTE_DB`, the eval-local copy's, but deploy/tier.sh hands
+ * `OB1_EVAL_ALLOW_REMOTE_DB`, the eval-local copy's, but deploy/tier.sh handed
  * tier.ts every OB1_* variable of the stack's env file except this one — it
  * sets this one itself, and never for a --to given as a URL — so a second name
- * read here would have been a way past the wrapper (SMD-2302).
+ * read here would have been a way past the wrapper (SMD-2302). It hands on a
+ * list of names since SMD-2875, still without this one.
  */
 export const REMOTE_DB_FLAG = "OB1_ALLOW_REMOTE_DB";
 

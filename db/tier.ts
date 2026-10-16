@@ -33,6 +33,12 @@
  *   # in one report (SMD-2109, db/brain-compare.ts). No Postgres, no writes.
  *   bun db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> … | --from-log <brain> [--since <iso>]] [--json]
  *
+ * Each of --refresh and --promote runs as two halves, a source and a target,
+ * which share a directory (--handoff): deploy/tier.sh runs each half in a
+ * container of its own, on its own brain's network with its own password, so
+ * no container reaches both brains (SMD-2875). Given --from and --to, both
+ * halves run here, the target's guards before anything is dumped.
+ *
  * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
  * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
  * migration might touch), copies the source's database-level settings the dump
@@ -52,7 +58,9 @@
  * reached a database other than the one it names (an exported PGDATABASE
  * beats the URL's in Bun; SMD-2317). pg_dump and pg_restore get a connection
  * built from the URL's parts (connect.ts toolTarget), never the URL, and
- * pg_dump must find a table made through the dropping connection first.
+ * pg_dump must find a table made through the dropping connection first. The
+ * dump runs as pg_read_all_data where the login may take that role, so it
+ * reads everything and can write nothing (SMD-2875).
  *
  * --replay and --diff reach the two brains over HTTP, never Postgres (SMD-2875):
  * --from and --to are each brain's MCP URL or Claude Code connector name, with
@@ -77,8 +85,8 @@
  */
 
 import { SQL } from "bun";
-import { mkdtemp, rm } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,30 +160,37 @@ async function toolMajor(tool: string): Promise<number | null> {
 }
 
 /**
- * Whether `a` and `b` reached the same database. The test is exact: `a`'s own
- * session — its backend pid and the instant it started, the pair no two live
- * sessions on one cluster share — is looked up in `b`'s pg_stat_activity, which
- * lists every session on `b`'s cluster. Found means one cluster, and then the
- * database names decide. No URL, host name or address is compared, so a compose
- * service name and its container name, an alias and an IP, are still one
- * database; and a copy that shares the source's system_identifier (a volume
- * copy, a base backup) is still another. A role that may not read another
- * role's backend_start sees it NULL, and a matching pid is then taken as a
- * match: the error falls on the side of refusing.
+ * Where a database is, as its server says: the cluster's system_identifier,
+ * the instant that cluster's postmaster started, and the database's name. A
+ * refresh's or a promote's two halves (deploy/tier.sh runs each in a container
+ * of its own, on its own brain's network, SMD-2875) compare them to tell
+ * whether --from and --to are one database. No URL, host name or address is
+ * compared, so a compose service name and its container name, an alias and an
+ * IP, are still one database; a copy that shares the source's
+ * system_identifier (a volume copy, a base backup) started at another instant,
+ * so it is still another. Until SMD-2875 one process held both connections and
+ * looked one's session up in the other's pg_stat_activity, which the halves,
+ * one connection each, cannot. A server restarted between the two reads reads
+ * as another; the target's own guards (targetRefusal) stand behind this one.
+ * pg_control_system() is every role's to call on PostgreSQL 16.
  */
-async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
-  const [me] = await a<{ pid: number; started: string; db: string }[]>`
-    SELECT pid, extract(epoch FROM backend_start)::text AS started, pg_catalog.current_database() AS db
-    FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
-  const [seen] = await b<{ found: boolean; db: string }[]>`
-    SELECT EXISTS (
-             SELECT 1 FROM pg_stat_activity
-             WHERE pid = ${me.pid}
-               AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
-           ) AS found,
-           pg_catalog.current_database() AS db`;
-  return seen.found && seen.db === me.db;
+export type DatabaseIdentity = { system: string; started: string; database: string };
+
+async function databaseIdentity(sql: SQL): Promise<DatabaseIdentity> {
+  const [row] = await sql<DatabaseIdentity[]>`
+    SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS system,
+           extract(epoch FROM pg_catalog.pg_postmaster_start_time())::text AS started,
+           pg_catalog.current_database() AS database`;
+  return row;
 }
+
+export const sameDatabase = (a: DatabaseIdentity, b: DatabaseIdentity): boolean =>
+  a.system === b.system && a.started === b.started && a.database === b.database;
+
+const isIdentity = (v: unknown): v is DatabaseIdentity => {
+  const o = v as Record<string, unknown> | null;
+  return typeof o === "object" && o !== null && typeof o.system === "string" && typeof o.started === "string" && typeof o.database === "string";
+};
 
 /**
  * The mark a refresh leaves on its target: the tier, as a database-level
@@ -421,166 +436,301 @@ export async function toolReachRefusal(dst: SQL, tool: ToolTarget): Promise<stri
   return refusal;
 }
 
+/** A refresh's or a promote's hand-off between its halves: these files, in one directory. */
+const HANDOFF = { source: "source.json", dump: "stable.dump", promote: "promote.json" } as const;
+
+/** What a refresh's source half hands its target half, beside the dump. */
+export type RefreshSource = { identity: DatabaseIdentity; major: number; settings: Record<string, string> };
+
 /**
- * Snapshot `fromUrl` into `toUrl` and migrate it forward with this tree.
- *   1. pg_dump the source (custom format, no owner/privileges — the target's role
- *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
- *   2. mark the target as a refresh target (refreshMark), then reset its public
- *      schema (the destructive step, guarded by targetRefusal, the loopback
- *      check, the connected check asked on the connection that drops, and a
- *      probe showing pg_dump reaches that same database, toolReachRefusal).
- * pg_dump and pg_restore get toolTarget's connection, never the URL.
- *   3. pg_restore the dump.
- *   4. copy the source's database-level settings (databaseSettings), which the
+ * Make a hand-off directory, mode 700, refusing one that exists: an existing
+ * directory keeps its own mode (/tmp's is world-readable), and the dump of the
+ * whole source is about to go in it (review pass 1).
+ */
+async function makeHandoff(dir: string): Promise<void> {
+  try {
+    await mkdir(dir, { mode: 0o700 });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    throw new Error(code === "EEXIST"
+      ? `--handoff: ${dir} already exists; name a directory this run can make, mode 700 (the source's dump goes in it).`
+      : `--handoff: could not make ${dir} (${code ?? (e as Error).message}).`);
+  }
+}
+
+/** The URL rules a refresh asks of a side before it opens either (connect.ts). */
+function refuseRefreshUrl(side: "--from" | "--to", url: string): void {
+  // connect.ts's one rule, the test scaffolding's too. Each URL must be one
+  // Bun (the guards, the drop) and libpq (pg_dump, pg_restore) take to the
+  // same place, naming its database: no override lifts that (SMD-2317). Then
+  // --to's host must be loopback by name, not an empty host (it resolves
+  // through PGHOST), or the override set.
+  const fixed = identityRefusal(url);
+  if (fixed !== null) throw new Error(`${side}: ${fixed}. Refusing: --refresh dumps --from and drops --to's schema, so each must name one database every client reaches.`);
+  if (side === "--to") {
+    const refusal = resetRefusal(url);
+    if (refusal !== null) throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
+  }
+}
+
+/**
+ * The source's facts, read before anything is dumped: where it is, its major,
+ * its database-level settings, and who the server says the connection is (the
+ * login pg_dump is handed). Bun lets an exported PGDATABASE beat the URL's
+ * database, so the server is asked which one it reached: pg_dump keeps the URL's.
+ */
+async function readRefreshSource(fromUrl: string): Promise<{ source: RefreshSource; fromAs: { database: string; user: string }; readOnly: boolean }> {
+  const src = openSql(fromUrl);
+  try {
+    await reach(src, fromUrl, "--from");
+    const fromReached = await reachedDatabaseRefusal(src, fromUrl);
+    if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
+    // A CASE, since AND need not stop before pg_has_role, which errors on a
+    // role that does not exist (before PostgreSQL 14); taking a role by SET
+    // ROLE is the 'SET' privilege from 16, membership before it. And not where
+    // the role reads less than the login: pg_read_all_data does not bypass
+    // row-level security, which pg_dump refuses to dump under, nor read large
+    // objects (review pass 4: either refused the whole refresh, which ran
+    // before as the login).
+    const [{ readOnly }] = await src<{ readOnly: boolean }[]>`
+      SELECT CASE WHEN pg_catalog.to_regrole('pg_read_all_data') IS NULL THEN false
+                  WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relrowsecurity AND relkind IN ('r', 'p')) THEN false
+                  WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata) THEN false
+                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_catalog.pg_has_role(session_user, 'pg_read_all_data', 'SET')
+                  ELSE pg_catalog.pg_has_role(session_user, 'pg_read_all_data', 'MEMBER') END AS "readOnly"`;
+    return {
+      source: { identity: await databaseIdentity(src), major: await serverMajor(src), settings: await databaseSettings(src) },
+      fromAs: await reachedAs(src),
+      readOnly,
+    };
+  } finally {
+    await src.close();
+  }
+}
+
+/**
+ * The target's guards, before anything is written to it, and its major. The
+ * reset below drops --to's schema, so --to must be neither the source nor the
+ * record. The loopback guard covers neither — deploy/tier.sh sets
+ * OB1_ALLOW_REMOTE_DB, since from its container every database is remote — and
+ * the likeliest slips are both: stable under the other name it answers to on
+ * the network, and --from and --to the wrong way round.
+ */
+async function checkRefreshTarget(toUrl: string, source: RefreshSource): Promise<number> {
+  const target = openSql(toUrl);
+  try {
+    await reach(target, toUrl, "--to");
+    const toReached = await connectedResetRefusal(target, toUrl);
+    if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
+    if (sameDatabase(source.identity, await databaseIdentity(target))) throw new Error(`--from and --to name the same database. Refusing: --refresh drops the target's schema.`);
+    const refusal = await targetRefusal(target);
+    if (refusal) throw new Error(`${refusal}. Refusing: --refresh drops the target's schema.`);
+    return await serverMajor(target);
+  } finally {
+    await target.close();
+  }
+}
+
+async function requireRefreshTools(sourceMaj: number, targetMaj: number = sourceMaj): Promise<void> {
+  const ready = await refreshToolsReady(sourceMaj, targetMaj);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${Math.max(sourceMaj, targetMaj)}.`);
+}
+
+/**
+ * pg_dump the source to `file`: custom format, no owner or privileges (the
+ * target's role may differ; ROLE_GRANTS are re-issued by migrate --grant, not
+ * carried). The tool gets a connection built from the URL's parts and the
+ * server's answer, never the URL: libpq read URLs by rules of its own and
+ * followed PGHOSTADDR/PGSERVICE past the guards (connect.ts toolTarget,
+ * SMD-2317). --no-password: a missing password fails rather than waits on a
+ * prompt. As pg_read_all_data when the login may take it (a superuser, or a
+ * member; PostgreSQL 14+) and that role reads all the login would: the dump
+ * reads every table and sequence and can write nothing (SMD-2875; measured on
+ * a migrated brain, the same contents as the superuser's dump). Where a table
+ * has row-level security or a large object exists, which the role cannot
+ * dump, it runs as the login, as before.
+ */
+async function dumpSource(fromUrl: string, fromAs: { database: string; user: string }, readOnly: boolean, file: string): Promise<void> {
+  const fromTool = toolTarget(fromUrl, fromAs);
+  const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "--no-password", ...(readOnly ? ["--role=pg_read_all_data"] : []), "-f", file, "-d", fromTool.conninfo], { env: fromTool.env });
+  if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
+}
+
+/**
+ * Restore `dumpFile` into `toUrl` and migrate it forward with this tree:
+ *   1. mark the target as a refresh target (refreshMark), then reset its public
+ *      schema (the destructive step, guarded by checkRefreshTarget, the
+ *      loopback check, the connected check asked on the connection that drops,
+ *      and a probe showing pg_dump reaches that same database, toolReachRefusal).
+ *      pg_restore gets toolTarget's connection, never the URL.
+ *   2. pg_restore the dump.
+ *   3. copy the source's database-level settings (databaseSettings), which the
  *      dump does not carry — 014's HNSW bounds among them (SMD-2037).
- *   5. migrate.ts forward — the point of the canary: a migration meets real data.
- *   6. stamp the tier and this refresh's time in ob1_config.
+ *   4. migrate.ts forward — the point of the canary: a migration meets real data.
+ *   5. stamp the tier and this refresh's time in ob1_config.
+ */
+async function restoreTarget(dumpFile: string, toUrl: string, tier: Tier, settings: Record<string, string>): Promise<void> {
+  // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
+  // the destructive act --refresh exists to perform; it is guarded above. The
+  // mark goes first, so a refresh that dies from here on — a migration that
+  // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
+  // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
+  // the caller; ALTER DATABASE takes no bind parameters.
+  const dst = openSql(toUrl);
+  let toTool: ToolTarget;
+  try {
+    if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+    // Asked again on this connection, the one that marks and drops: the
+    // guard's own connection is closed, and this one is a new resolution.
+    const again = await connectedResetRefusal(dst, toUrl);
+    if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
+    // pg_restore will write where its connection goes, so pg_dump is asked,
+    // on that same connection string, to find a table made on this one.
+    toTool = toolTarget(toUrl, await reachedAs(dst));
+    const unreached = await toolReachRefusal(dst, toTool);
+    if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing before the reset: --to is untouched.`);
+    try {
+      // pg_catalog's, not the path's: a URL's options= may set search_path,
+      // and a planted current_database() would put the mark on another
+      // database, where it disarms targetRefusal (review pass 2).
+      await dst.unsafe(`DO $mark$ BEGIN EXECUTE pg_catalog.format('ALTER DATABASE %I SET ob1.refresh_target = %L', pg_catalog.current_database(), '${tier}'); END $mark$`);
+    } catch (e) {
+      // Nothing is reset yet. A database-level setting of a custom name needs a
+      // superuser, or on PG15+ a role granted SET on the parameter; restoring
+      // pgvector into a public schema the reset emptied needs a superuser in
+      // the default install too, so a role that cannot mark could rarely finish.
+      throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
+    }
+    // A probe schema a killed run left (Ctrl-C during the probe's pg_dump, or
+    // a drop that failed) sits outside public, so the reset below would
+    // never take it: sweep them here, on the target that is being reset.
+    const leftovers = await dst<{ n: string }[]>`SELECT nspname AS n FROM pg_catalog.pg_namespace WHERE pg_catalog.starts_with(nspname, 'ob1_refresh_probe_')`;
+    for (const { n } of leftovers) await dst.unsafe(`DROP SCHEMA IF EXISTS "${n.replaceAll('"', '""')}" CASCADE`);
+    await dst`DROP SCHEMA IF EXISTS public CASCADE`;
+    await dst`CREATE SCHEMA public`;
+  } finally {
+    await dst.close();
+  }
+
+  const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "--no-password", "-d", toTool.conninfo, dumpFile], { env: toTool.env });
+  // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
+  // it did not create); treat a restore that produced the core table as success,
+  // otherwise surface it.
+  const check = openSql(toUrl);
+  let hasThoughts = false;
+  try {
+    const [{ present }] = await check<{ present: boolean }[]>`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`;
+    hasThoughts = present;
+  } finally {
+    await check.close();
+  }
+  if (!hasThoughts) throw new Error(`pg_restore did not produce the thoughts table (exit ${restored.code}): ${restored.err.trim()}`);
+  // pg_restore commonly exits non-zero on benign warnings (a comment on an
+  // extension it did not create, an already-present object). The core table is
+  // present, so proceed — but show the warnings rather than swallow them, so a
+  // partial restore is not silent.
+  if (restored.code !== 0 && restored.err.trim()) console.error(`pg_restore warnings (exit ${restored.code}):\n${restored.err.trim()}`);
+
+  // Before the migration, so a migration that reads a setting sees the
+  // source's; each later session on --to — migrate.ts's, the server's — does.
+  const settle = openSql(toUrl);
+  try {
+    await applyDatabaseSettings(settle, settings);
+  } catch (e) {
+    throw new Error(`copying --from's database settings onto --to failed: ${(e as Error).message}. --to is restored and still marked, so re-run the refresh once that is fixed.`);
+  } finally {
+    await settle.close();
+  }
+
+  const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
+  if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
+
+  const stamp = openSql(toUrl);
+  try {
+    await settleRefreshed(stamp, tier);
+  } finally {
+    await stamp.close();
+  }
+}
+
+/**
+ * Snapshot `fromUrl` into `toUrl` and migrate it forward with this tree: both
+ * halves in one process, the target's guards before anything is dumped.
  * Throws with a plain message on any failed step.
  */
 export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
-  // connect.ts's one rule, the test scaffolding's too, before either side is
-  // opened. Each URL must be one Bun (the guards, the drop) and libpq
-  // (pg_dump, pg_restore) take to the same place, naming its database: no
-  // override lifts that (SMD-2317). Then --to's host must be loopback by name,
-  // not an empty host (it resolves through PGHOST), or the override set.
-  for (const [side, url] of [["--from", fromUrl], ["--to", toUrl]] as const) {
-    const fixed = identityRefusal(url);
-    if (fixed !== null) throw new Error(`${side}: ${fixed}. Refusing: --refresh dumps --from and drops --to's schema, so each must name one database every client reaches.`);
-  }
-  const refusal = resetRefusal(toUrl);
-  if (refusal !== null) {
-    throw new Error(`--to is not plainly this machine — ${refusal} — and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset it. (--refresh drops the target's schema.)`);
-  }
-  const src = openSql(fromUrl);
-  const target = openSql(toUrl);
-  let serverMaj: number;
-  let targetMaj: number;
-  let settings: Record<string, string>;
-  let fromAs: { database: string; user: string };
-  try {
-    await reach(src, fromUrl, "--from");
-    await reach(target, toUrl, "--to");
-    // Where each connection went, from the server: Bun lets an exported
-    // PGDATABASE beat the URL's database, so the guards below would judge one
-    // database while pg_dump and pg_restore, which keep the URL's, used another.
-    const fromReached = await reachedDatabaseRefusal(src, fromUrl);
-    if (fromReached !== null) throw new Error(`--from: ${fromReached}. Refusing: pg_dump would read the URL's database, not the one checked.`);
-    const toReached = await connectedResetRefusal(target, toUrl);
-    if (toReached !== null) throw new Error(`--to: ${toReached}. Refusing: --refresh drops the target's schema.`);
-    fromAs = await reachedAs(src);
-    serverMaj = await serverMajor(src);
-    targetMaj = await serverMajor(target);
-    settings = await databaseSettings(src);
-    // The reset below drops --to's schema, so --to must be neither the source
-    // nor the record. The loopback guard covers neither — deploy/tier.sh sets
-    // OB1_ALLOW_REMOTE_DB, since from its container every database is remote —
-    // and the likeliest slips are both: stable under the other name it answers
-    // to on the network, and --from and --to the wrong way round.
-    if (await sameDatabase(src, target)) throw new Error(`--from and --to name the same database. Refusing: --refresh drops the target's schema.`);
-    const refusal = await targetRefusal(target);
-    if (refusal) throw new Error(`${refusal}. Refusing: --refresh drops the target's schema.`);
-  } finally {
-    await src.close();
-    await target.close();
-  }
-  const ready = await refreshToolsReady(serverMaj, targetMaj);
-  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. deploy/tier.sh runs this in an image with both (db/tier.Dockerfile, postgresql16-client); on a host install postgresql-client >= ${Math.max(serverMaj, targetMaj)}.`);
-
+  refuseRefreshUrl("--from", fromUrl);
+  refuseRefreshUrl("--to", toUrl);
+  const { source, fromAs, readOnly } = await readRefreshSource(fromUrl);
+  const targetMaj = await checkRefreshTarget(toUrl, source);
+  await requireRefreshTools(source.major, targetMaj);
   const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
-  const dumpFile = join(dir, "stable.dump");
   try {
-    // The tools get a connection built from the URL's parts and the server's
-    // answer, never the URL: libpq read URLs by rules of its own and followed
-    // PGHOSTADDR/PGSERVICE past the guards (connect.ts toolTarget, SMD-2317).
-    // --no-password: a missing password fails rather than waits on a prompt.
-    const fromTool = toolTarget(fromUrl, fromAs);
-    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "--no-password", "-f", dumpFile, "-d", fromTool.conninfo], { env: fromTool.env });
-    if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
-
-    // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
-    // the destructive act --refresh exists to perform; it is guarded above. The
-    // mark goes first, so a refresh that dies from here on — a migration that
-    // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
-    // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
-    // the caller; ALTER DATABASE takes no bind parameters.
-    const dst = openSql(toUrl);
-    let toTool: ToolTarget;
-    try {
-      if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
-      // Asked again on this connection, the one that marks and drops: the
-      // guard's own connection is closed, and this one is a new resolution.
-      const again = await connectedResetRefusal(dst, toUrl);
-      if (again !== null) throw new Error(`--to: ${again}. Refusing: --refresh drops the target's schema. --to is untouched.`);
-      // pg_restore will write where its connection goes, so pg_dump is asked,
-      // on that same connection string, to find a table made on this one.
-      toTool = toolTarget(toUrl, await reachedAs(dst));
-      const unreached = await toolReachRefusal(dst, toTool);
-      if (unreached !== null) throw new Error(`--to: ${unreached}. Refusing before the reset: --to is untouched.`);
-      try {
-        // pg_catalog's, not the path's: a URL's options= may set search_path,
-        // and a planted current_database() would put the mark on another
-        // database, where it disarms targetRefusal (review pass 2).
-        await dst.unsafe(`DO $mark$ BEGIN EXECUTE pg_catalog.format('ALTER DATABASE %I SET ob1.refresh_target = %L', pg_catalog.current_database(), '${tier}'); END $mark$`);
-      } catch (e) {
-        // Nothing is reset yet. A database-level setting of a custom name needs a
-        // superuser, or on PG15+ a role granted SET on the parameter; restoring
-        // pgvector into a public schema the reset emptied needs a superuser in
-        // the default install too, so a role that cannot mark could rarely finish.
-        throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. That needs a superuser on --to, or GRANT SET ON PARAMETER ob1.refresh_target (PG15+); restoring pgvector needs a superuser in the default install anyway. --to is untouched.`);
-      }
-      // A probe schema a killed run left (Ctrl-C during the probe's pg_dump, or
-      // a drop that failed) sits outside public, so the reset below would
-      // never take it: sweep them here, on the target that is being reset.
-      const leftovers = await dst<{ n: string }[]>`SELECT nspname AS n FROM pg_catalog.pg_namespace WHERE pg_catalog.starts_with(nspname, 'ob1_refresh_probe_')`;
-      for (const { n } of leftovers) await dst.unsafe(`DROP SCHEMA IF EXISTS "${n.replaceAll('"', '""')}" CASCADE`);
-      await dst`DROP SCHEMA IF EXISTS public CASCADE`;
-      await dst`CREATE SCHEMA public`;
-    } finally {
-      await dst.close();
-    }
-
-    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "--no-password", "-d", toTool.conninfo, dumpFile], { env: toTool.env });
-    // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
-    // it did not create); treat a restore that produced the core table as success,
-    // otherwise surface it.
-    const check = openSql(toUrl);
-    let hasThoughts = false;
-    try {
-      const [{ present }] = await check<{ present: boolean }[]>`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`;
-      hasThoughts = present;
-    } finally {
-      await check.close();
-    }
-    if (!hasThoughts) throw new Error(`pg_restore did not produce the thoughts table (exit ${restored.code}): ${restored.err.trim()}`);
-    // pg_restore commonly exits non-zero on benign warnings (a comment on an
-    // extension it did not create, an already-present object). The core table is
-    // present, so proceed — but show the warnings rather than swallow them, so a
-    // partial restore is not silent.
-    if (restored.code !== 0 && restored.err.trim()) console.error(`pg_restore warnings (exit ${restored.code}):\n${restored.err.trim()}`);
-
-    // Before the migration, so a migration that reads a setting sees the
-    // source's; each later session on --to — migrate.ts's, the server's — does.
-    const settle = openSql(toUrl);
-    try {
-      await applyDatabaseSettings(settle, settings);
-    } catch (e) {
-      throw new Error(`copying --from's database settings onto --to failed: ${(e as Error).message}. --to is restored and still marked, so re-run the refresh once that is fixed.`);
-    } finally {
-      await settle.close();
-    }
-
-    const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
-    if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
-
-    const stamp = openSql(toUrl);
-    try {
-      await settleRefreshed(stamp, tier);
-    } finally {
-      await stamp.close();
-    }
+    const dumpFile = join(dir, HANDOFF.dump);
+    await dumpSource(fromUrl, fromAs, readOnly, dumpFile);
+    await restoreTarget(dumpFile, toUrl, tier, source.settings);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * A refresh's source half (deploy/tier.sh's container on the source's network
+ * alone, SMD-2875): the source's facts and its dump, written into `dir` for
+ * the target half. Nothing is written to the source.
+ */
+export async function refreshSource(fromUrl: string, dir: string): Promise<void> {
+  refuseRefreshUrl("--from", fromUrl);
+  const { source, fromAs, readOnly } = await readRefreshSource(fromUrl);
+  await requireRefreshTools(source.major);
+  await makeHandoff(dir);
+  await dumpSource(fromUrl, fromAs, readOnly, join(dir, HANDOFF.dump));
+  await writeFile(join(dir, HANDOFF.source), JSON.stringify(source), { mode: 0o600 });
+}
+
+/** A refresh source as the target half reads it from the hand-off, or null when it is not one. */
+export function parseRefreshSource(v: unknown): RefreshSource | null {
+  const o = v as Record<string, unknown> | null;
+  if (typeof o !== "object" || o === null || !isIdentity(o.identity) || !Number.isInteger(o.major)) return null;
+  const settings = o.settings as Record<string, unknown> | null;
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return null;
+  // The names are written into ALTER DATABASE … SET, so each must be one
+  // databaseSettings would have read; never the refresh mark, the target's own.
+  for (const [name, value] of Object.entries(settings)) {
+    // Postgres folds a setting's name to lower case, so the mark in any case is the mark.
+    if (!SETTING_NAME.test(name) || name.toLowerCase() === "ob1.refresh_target" || typeof value !== "string") return null;
+  }
+  return { identity: o.identity, major: o.major as number, settings: settings as Record<string, string> };
+}
+
+/** Read one file of a hand-off, as `parse` reads it. */
+function readHandoff<T>(dir: string, file: string, verb: string, parse: (v: unknown) => T | null): T {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, file), "utf8");
+  } catch (e) {
+    throw new Error(`--handoff: ${join(dir, file)} could not be read (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); a --${verb} source half writes it.`);
+  }
+  let value: unknown = null;
+  try { value = JSON.parse(text); } catch { /* refused below */ }
+  const parsed = parse(value);
+  if (parsed === null) throw new Error(`--handoff: ${join(dir, file)} is not what a --${verb} source half writes.`);
+  return parsed;
+}
+
+/**
+ * A refresh's target half (deploy/tier.sh's container on the target's network
+ * alone, SMD-2875): the source half's facts and dump from `dir`, the target's
+ * guards, then the restore, the settings, the migration and the stamp.
+ */
+export async function refreshTarget(dir: string, toUrl: string, tier: Tier): Promise<void> {
+  refuseRefreshUrl("--to", toUrl);
+  const source = readHandoff(dir, HANDOFF.source, "refresh", parseRefreshSource);
+  const dumpFile = join(dir, HANDOFF.dump);
+  if (!existsSync(dumpFile)) throw new Error(`--handoff: ${dumpFile} is missing; the --refresh source half writes it beside ${HANDOFF.source}.`);
+  const targetMaj = await checkRefreshTarget(toUrl, source);
+  await requireRefreshTools(source.major, targetMaj);
+  await restoreTarget(dumpFile, toUrl, tier, source.settings);
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +769,20 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
 }
 
+/** What a promote's source half (the canary's side) hands its target half. */
+export type PromoteSource = { identity: DatabaseIdentity; version: string | null };
+
+/** The canary's side of a promote: where it is, and the schema version it carries. Nothing is written. */
+async function readPromoteSource(canaryUrl: string): Promise<PromoteSource> {
+  const canary = openSql(canaryUrl);
+  try {
+    await reach(canary, canaryUrl, "--from (canary)");
+    return { identity: await databaseIdentity(canary), version: await readConfig(canary, "schema_version") };
+  } finally {
+    await canary.close();
+  }
+}
+
 /**
  * Promotion, the data half: record that stable was promoted to the soaked
  * canary's schema version (migration 044's `ob1_config.schema_version`, SMD-1804),
@@ -628,34 +792,53 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
  * the published image and migrating it) is SMD-1860's step, named rather than
  * performed because no image is published yet.
  */
-export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
-  const canary = openSql(canaryUrl);
+async function applyPromote(stableUrl: string, source: PromoteSource): Promise<{ version: string | null }> {
   const stable = openSql(stableUrl);
   try {
-    await reach(canary, canaryUrl, "--from (canary)");
     await reach(stable, stableUrl, "--to (stable)");
     // The mirror of refresh's guard: promote stamps --to as stable, so --to must
     // not be the canary itself, nor a tier — the shape of --from and --to the
     // wrong way round, which would make the canary read as the record.
-    if (await sameDatabase(canary, stable)) throw new Error(`--from and --to name the same database. Refusing: --promote stamps --to as stable.`);
+    if (sameDatabase(source.identity, await databaseIdentity(stable))) throw new Error(`--from and --to name the same database. Refusing: --promote stamps --to as stable.`);
     const mark = await refreshMark(stable);
     const tier = await configTier(stable);
     if (mark !== null || tier === "canary" || tier === "working") {
       const [{ db }] = await stable<{ db: string }[]>`SELECT pg_catalog.quote_ident(pg_catalog.current_database()) AS db`;
       throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
-    const version = await readConfig(canary, "schema_version");
     // Assert the target is stable — but only the tier key, not stampTier's
     // last_ingest: a promotion is not an ingest, and stable's last_ingest must
     // keep naming the real rebuild time (preflight's `tier` check reads it).
     await setConfig(stable, "tier", "stable");
-    if (version !== null) await setConfig(stable, "promoted_schema_version", version);
+    if (source.version !== null) await setConfig(stable, "promoted_schema_version", source.version);
     await setConfig(stable, "promoted_at", new Date().toISOString());
-    return { version };
+    return { version: source.version };
   } finally {
-    await canary.close();
     await stable.close();
   }
+}
+
+/** Promote in one process: the canary read, then stable stamped. */
+export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
+  return applyPromote(stableUrl, await readPromoteSource(canaryUrl));
+}
+
+/** A promote's source half (deploy/tier.sh's container on the canary's network alone, SMD-2875). */
+export async function promoteSource(canaryUrl: string, dir: string): Promise<void> {
+  const source = await readPromoteSource(canaryUrl);
+  await makeHandoff(dir);
+  await writeFile(join(dir, HANDOFF.promote), JSON.stringify(source), { mode: 0o600 });
+}
+
+export function parsePromoteSource(v: unknown): PromoteSource | null {
+  const o = v as Record<string, unknown> | null;
+  if (typeof o !== "object" || o === null || !isIdentity(o.identity) || !(o.version === null || typeof o.version === "string")) return null;
+  return { identity: o.identity, version: o.version as string | null };
+}
+
+/** A promote's target half (deploy/tier.sh's container on stable's network alone, SMD-2875). */
+export async function promoteTarget(dir: string, stableUrl: string): Promise<{ version: string | null }> {
+  return applyPromote(stableUrl, readHandoff(dir, HANDOFF.promote, "promote", parsePromoteSource));
 }
 
 // ---------------------------------------------------------------------------
@@ -664,9 +847,10 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
 
 const COMPARE_USAGE =
   "  db/tier.ts --compare <a> <b> [--replay [--hybrid]] [--query <q> ...] [--queries-file <path>] [--from-log <brain> [--since <iso>]] [--json]\n" +
-  "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, OB1_COMPARE_KEY, or ?key=) or a connector name (open-brain, open-brain-canary)";
+  "  <a>/<b>: an http(s):// URL (key from --a-key/--b-key, else ?key=, else OB1_COMPARE_KEY) or a connector name (open-brain, open-brain-canary; its own key)";
 const VERB_USAGE =
   "  db/tier.ts --refresh | --promote (one verb) --from <postgres://…> --to <postgres://…> [--tier <canary|working>]\n" +
+  "    or one half: --from <postgres://…> --handoff <dir>, then --handoff <dir> --to <postgres://…> (deploy/tier.sh's two containers)\n" +
   "  db/tier.ts --replay | --diff (one verb) --from <stable> --to <canary> [--from-key <key>] [--to-key <key>] [--since <iso-ts>] [--json]\n" +
   "  <stable>/<canary>: an http(s):// MCP URL (key from --from-key/--to-key, else ?key=, else OB1_COMPARE_KEY) or a connector name (its own key)";
 
@@ -774,16 +958,20 @@ async function main(): Promise<void> {
 
   // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
   const cli = commandLine("tier.ts", {
-    from: "one", to: "one", tier: "one", refresh: "none", promote: "none",
-  }, { hints: { from: "<postgres://…>", to: "<postgres://…>", tier: "<canary|working>" } }, args);
+    from: "one", to: "one", handoff: "one", tier: "one", refresh: "none", promote: "none",
+  }, { hints: { from: "<postgres://…>", to: "<postgres://…>", handoff: "<dir>", tier: "<canary|working>" } }, args);
 
   const verbs = (["refresh", "promote"] as const).filter((v) => cli.has(v));
   oneVerb(verbs.length);
   const verb = verbs[0];
   const from = cli.value("from");
   const to = cli.value("to");
-  if (!from || !to) {
-    console.error(`--${verb} needs --from and --to.`);
+  // Both sides in one process, or one half with the directory the halves
+  // share: deploy/tier.sh runs each half in a container of its own, on its
+  // own brain's network alone (SMD-2875).
+  const handoff = cli.value("handoff");
+  if (handoff === undefined ? !from || !to : !from === !to) {
+    console.error(`--${verb} needs --from and --to, or one of them with --handoff <dir>.\n${VERB_USAGE}`);
     process.exit(2);
   }
 
@@ -793,17 +981,25 @@ async function main(): Promise<void> {
       console.error(`--tier must be canary or working (stable is the source, ingest-records.ts writes it).`);
       process.exit(2);
     }
-    await refresh(from, to, tier);
+    if (handoff !== undefined && from) {
+      await refreshSource(from, handoff);
+      console.log(`dumped --from into ${handoff} for the refresh's target half.`);
+      return;
+    }
+    if (handoff !== undefined) await refreshTarget(handoff, to!, tier);
+    else await refresh(from!, to!, tier);
     console.log(`refreshed ${tier} from stable and migrated forward.`);
     return;
   }
 
-  if (verb === "promote") {
-    const { version } = await promote(from, to);
-    console.log(`promoted: stable stamped tier=stable${version ? `, promoted_schema_version=${version}` : " (canary recorded no schema_version — pre-migration-044)"}.`);
-    console.log(`remaining: point the stable stack at the published image and migrate it (SMD-1860) — no image is published yet.`);
+  if (handoff !== undefined && from) {
+    await promoteSource(from, handoff);
+    console.log(`read the canary's schema version into ${handoff} for the promote's target half.`);
     return;
   }
+  const { version } = handoff !== undefined ? await promoteTarget(handoff, to!) : await promote(from!, to!);
+  console.log(`promoted: stable stamped tier=stable${version ? `, promoted_schema_version=${version}` : " (canary recorded no schema_version — pre-migration-044)"}.`);
+  console.log(`remaining: point the stable stack at the published image and migrate it (SMD-1860) — no image is published yet.`);
 }
 
 // A refusal or a failed step is a sentence for the operator, not a stack trace

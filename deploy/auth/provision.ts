@@ -484,14 +484,14 @@ async function selfCheck(): Promise<number> {
     // deploy/tier.sh's own filter, run: what it hands tier.ts's container.
     const tierSh = readFileSync(join(HERE, "..", "tier.sh"), "utf8");
     // The loop that reads compose's environment, wherever it sits: the one
-    // whose `case` names OB1_* (a comment moved above it must not fail this).
-    const loop = [...tierSh.matchAll(/while IFS= read -r line; do\n[\s\S]*?\ndone <<< "\$RESOLVED"\n/g)].map((m) => m[0]).find((l) => l.includes("OB1_*"));
+    // whose `case` hands on POSTGRES_PASSWORD (a comment moved above it must not fail this).
+    const loop = [...tierSh.matchAll(/while IFS= read -r line; do\n[\s\S]*?\ndone <<< "\$RESOLVED"\n/g)].map((m) => m[0]).find((l) => l.includes("|POSTGRES_PASSWORD) ;;"));
     const handed = join(dir, "tier-handed.env");
-    const resolved = ["OB1_TIER=canary", "OB1_AUTH_JWKS={}", "OB1_AUTH_COOKIE_KEYS=c", "OB1_AUTH_OPERATOR_PASSWORD=x", "OB1_AUTH_OPERATOR_PASSWORD_HASH=h", "OB1_AUTH_SECRET_GUI=y", "OB1_ENV_FILE=f", "POSTGRES_PASSWORD=p", "OPENROUTER_API_KEY=o", "MCP_ACCESS_KEYS=k"].join("\n");
+    const resolved = ["OB1_TIER=canary", "OB1_AUTH_JWKS={}", "OB1_AUTH_COOKIE_KEYS=c", "OB1_AUTH_OPERATOR_PASSWORD=x", "OB1_AUTH_OPERATOR_PASSWORD_HASH=h", "OB1_AUTH_SECRET_GUI=y", "OB1_ENV_FILE=f", "POSTGRES_PASSWORD=p", "OPENROUTER_API_KEY=o", "MCP_ACCESS_KEYS=k", "OB1_COMPARE_KEY=ck", "OB1_LLM_API_KEY=lk", "OB1_WORKER_KEY=wk", "OB1_EMBEDDING_MODEL=m"].join("\n");
     const ran = loop ? Bun.spawnSync(["bash", "-c", `TMP_ENV="$1"; RESOLVED="$2"; POSTGRES_PASSWORD=""\n${loop}`, "tier", handed, resolved]) : undefined;
     const got = ran?.exitCode === 0 && existsSync(handed) ? readFileSync(handed, "utf8").trim().split("\n") : [];
-    // OPENROUTER_API_KEY stays behind since the replay left the container (SMD-2875).
-    expect("deploy/tier.sh hands tier.ts no OB1_AUTH_* setting, and still hands its own", JSON.stringify(got) === '["OB1_TIER=canary","POSTGRES_PASSWORD=p"]', loop ? JSON.stringify(got) : "the loop was not found in tier.sh");
+    // Since SMD-2875 by name: OPENROUTER_API_KEY, OB1_COMPARE_KEY and the provider and worker keys stay behind too.
+    expect("deploy/tier.sh hands tier.ts no OB1_AUTH_* setting, nor a key, and still hands its own", JSON.stringify(got) === '["OB1_TIER=canary","POSTGRES_PASSWORD=p","OB1_EMBEDDING_MODEL=m"]', loop ? JSON.stringify(got) : "the loop was not found in tier.sh");
 
     // deploy/compose.yaml's `auth` service, as written.
     const doc = Bun.YAML.parse(readFileSync(COMPOSE_FILE, "utf8")) as any;
