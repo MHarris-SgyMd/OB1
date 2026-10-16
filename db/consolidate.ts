@@ -564,9 +564,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
     err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
-    if (await probeUntil(() => probe(undefined, wake), wake, (p) => !isOut(p))) {
-      outage.end();
-      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    // Said to the sleep scheduler, which sets extraction to the newer work
+    // while the judge waits (SMD-3008); a stop wakes the probes, so the end is
+    // said before the pass settles.
+    await opts.stamper?.providerWait?.(true);
+    try {
+      if (await probeUntil(() => probe(undefined, wake), wake, (p) => !isOut(p))) {
+        outage.end();
+        out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+      }
+    } finally {
+      await opts.stamper?.providerWait?.(false);
     }
   }
   /** The start's refusal of what a probe found — the judge model unserved, or the endpoint refusing — or null. */
