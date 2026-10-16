@@ -4275,19 +4275,22 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   const older = await made("upgrade 098: the older note", 1), newer = await made("upgrade 098: the newer note", 2), third = await made("upgrade 098: a third note", 3);
   await sql`SELECT update_thought(p_id := ${newer}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
   await sql`SELECT update_thought(p_id := ${third}::uuid, p_actor := ${LAP}::jsonb, p_provenance := jsonb_build_object('supersedes', ${older}::uuid))`;
-  // Whether a call's transaction holds the review lock once the call returns.
+  // Whether a call's transaction holds the review lock, exclusive, once the
+  // call returns — and whether this connection still holds it, in any mode,
+  // after the transaction (a session-level lock would; review pass 3).
+  const LOCKS = (mode: string) => sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295) AND mode LIKE ${mode}`;
   const holdsReviewLock = async (id: string) => {
     let n = -1;
     await sql.begin(async (tx: SQL) => {
       await tx`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${LAP}::jsonb, p_provenance := '{"supersedes": null}'::jsonb)`;
-      n = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295)`)[0].n);
+      n = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295) AND mode = 'ExclusiveLock'`)[0].n);
     });
-    return n;
+    return { n, after: Number((await LOCKS("%"))[0].n) };
   };
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beforeLock = await holdsReviewLock(third);
-  assert(beforeLock === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock})`);
+  assert(beforeLock.n === 0 && beforeLock.after === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock.n})`);
   const before = await rows(), auditBefore = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
   const [fn] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'update_thought'`;
@@ -4296,8 +4299,8 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   const afterLock = await holdsReviewLock(newer);
   const edit = (await sql`SELECT update_thought(p_id := ${older}::uuid, p_metadata_patch := ${{ topic: "after" }}::jsonb, p_actor := ${LAP}::jsonb) AS r`)[0].r as { ok: boolean; stamp?: Record<string, unknown>; same_text?: boolean; metadata_merged?: boolean };
   const [{ s }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${newer}::uuid`;
-  assert(afterLock === 1 && s === null && edit.ok && edit.same_text === true && edit.metadata_merged === true && edit.stamp?.actor_name === "lap-key",
-    `after it, an unlink holds the review lock to the end of its transaction and clears the pointer (${afterLock}, ${s}), and an edit answers as 088's did (${JSON.stringify(edit)})`);
+  assert(afterLock.n === 1 && afterLock.after === 0 && s === null && edit.ok && edit.same_text === true && edit.metadata_merged === true && edit.stamp?.actor_name === "lap-key",
+    `after it, an unlink holds the review lock, exclusive, to the end of its transaction and not past it, and clears the pointer (${afterLock.n}/${afterLock.after}, ${s}), and an edit answers as 088's did (${JSON.stringify(edit)})`);
   // A re-apply moves nothing.
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });

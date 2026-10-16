@@ -1655,7 +1655,8 @@ on that row. Outside the order, as before: a transaction of several calls
 that holds a row and then takes the review lock by any call (a pointer
 write, a clear now too, a delete, a citation, `rebuild_derived`, an
 accept) deadlocks against a holder of the lock that waits on something it
-holds — its row, a fingerprint lock or a node-state bucket — and since 098
+holds — a row, or an advisory lock taken after the review lock, such as a
+fingerprint lock or a node-state bucket — and since 098
 that holder can be a single-call unlink (no shipped caller makes such a
 transaction; take the lock first).
 097's header still says only an unlink moves a link under an accept —
@@ -1664,7 +1665,8 @@ body otherwise verbatim, under its signature; it refuses to apply without
 073; 088 (or 061, 073) re-applied puts the old gate back and 098 after it
 the lock — `update_thought` alone, the rest is `--reapply`'s. Preflight
 does not read the gate, so an 088 re-applied by hand over 098 passes its
-edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back. test-schema [88] (the gate, 088's DDL verbatim, the lock held
+edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back.
+test-schema [88] (the gate, 088's DDL verbatim, the lock held
 by each call that names a pointer), test-live [6j] (each order, the other
 side waiting), test-upgrade [20ar].
 

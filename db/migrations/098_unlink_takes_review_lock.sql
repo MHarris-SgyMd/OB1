@@ -42,8 +42,9 @@
 --   (a content edit, say) and then takes the review lock by any call — a
 --   pointer write, a clear now too, a delete, a citation, rebuild_derived,
 --   an accept — waits on the lock while a holder of it waits on something
---   the transaction holds: its row, a fingerprint lock (033) or a node-state
---   bucket (068). Postgres breaks that with 40P01. Since this file that
+--   the transaction holds: a row, or an advisory lock taken after the
+--   review lock (a fingerprint lock, 033; a node-state bucket, 068).
+--   Postgres breaks that with 40P01. Since this file that
 --   holder can be a single-call unlink, which under 088 waited and then
 --   passed (a re-point there closed the same cycle under both; review pass
 --   1 raced it live on the row). No shipped caller makes such a
@@ -61,7 +62,8 @@
 --     another taker's own lapse clears, which clear nothing the accept's
 --     walk read as staying: a pointer it would clear too (its re-read under
 --     the row lock then skips it), or one above its frontier that it never
---     read (it walks on only from a row 082's log took; review pass 2). 097
+--     read (from a row it clears it walks on only when 082's log took that
+--     row, and no further than its 1,001-row bound; review pass 2). 097
 --     stands as written — migrations are append-only (migrate.ts checks
 --     each file's sha256) — and db/README says it.
 --   * A taker that holds no review lock — a write key's re-capture, a text
@@ -77,8 +79,9 @@
 --   drops an older form — update_thought alone: what else the older file
 --   put back stays until `bun migrate.ts --reapply`, which restores every
 --   body. Preflight does not read the gate: an 088 re-applied by hand over
---   this file passes its edit-signature check, as an older file over 088
---   did (SMD-1227; the remedies' order, SMD-3065). test-schema [88], test-live [6j], test-upgrade [20ar].
+--   this file passes its edit-signature check, as 073 re-applied over 088
+--   did (SMD-1227; the remedies' order, SMD-3065). test-schema [88],
+--   test-live [6j], test-upgrade [20ar].
 --
 -- Prerequisites
 --   073 (ob1_declared_trust, ob1_actor_stamp; 088's body carries 073's).

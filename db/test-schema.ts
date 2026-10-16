@@ -14848,14 +14848,21 @@ console.log("\n[88] Migration 098: an unlink takes the review lock — update_th
   // none, a derived_from alone or a change of text (the fingerprint lock is
   // its own, not counted here). pg_locks keys a one-bigint advisory lock by
   // its low 32 bits in objid, objsubid 1; PGlite is one backend, whose
-  // pg_locks rows carry no pid.
+  // pg_locks rows carry no pid. The mode is the exclusive one the accept
+  // takes — a shared lock would let two re-points close a loop (review pass
+  // 3) — and `after` counts the key in any mode once the transaction has
+  // ended, which a session-level lock would outlive.
   const t = (await one<{ r: { id: string } }>(`SELECT upsert_thought('[88] the row edited', '{"metadata":{}}'::jsonb) AS r`)).r.id;
   const u = (await one<{ r: { id: string } }>(`SELECT upsert_thought('[88] the row it points at', '{"metadata":{}}'::jsonb) AS r`)).r.id;
-  const held = (call: string, params: unknown[]) => db.transaction(async (tx) => {
-    const r = (await tx.query<{ r: { ok: boolean; error?: string } }>(`SELECT ${call} AS r`, params)).rows[0].r;
-    const n = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295)`)).rows[0].n;
-    return { ok: r.ok, n };
-  });
+  const REVIEW_LOCK = `FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295)`;
+  const held = async (call: string, params: unknown[]) => {
+    const inTx = await db.transaction(async (tx) => {
+      const r = (await tx.query<{ r: { ok: boolean; error?: string } }>(`SELECT ${call} AS r`, params)).rows[0].r;
+      const n = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n ${REVIEW_LOCK} AND mode = 'ExclusiveLock'`)).rows[0].n;
+      return { ok: r.ok, n };
+    });
+    return { ...inTx, after: (await one<{ n: number }>(`SELECT count(*)::int AS n ${REVIEW_LOCK}`)).n };
+  };
   const PROV = `update_thought($1::uuid, p_provenance => $2::jsonb)`;
   const repoint = await held(PROV, [t, JSON.stringify({ supersedes: u })]);
   const unlink = await held(PROV, [t, JSON.stringify({ supersedes: null })]);
@@ -14865,13 +14872,20 @@ console.log("\n[88] Migration 098: an unlink takes the review lock — update_th
   // when content arrives passed every other cell).
   const unlinkText = await held(`update_thought($1::uuid, $2::text, p_provenance => $3::jsonb)`, [t, "[88] the row edited, unlinked with new text", JSON.stringify({ supersedes: null })]);
   await db.query(`SELECT update_thought($1::uuid, $2::text)`, [t, "[88] the row edited"]);
+  // And beside the other arguments a caller sends with it — a patch, the
+  // stale-read guard, an actor (review pass 3: a gate skipped for any of
+  // them passed every behaviour cell).
+  const unlinkPatch = await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb, p_provenance => $3::jsonb)`, [t, JSON.stringify({ topic: "88u" }), JSON.stringify({ supersedes: null })]);
+  const unlinkGuard = await held(`update_thought($1::uuid, p_if_unchanged_since => now() + interval '1 day', p_provenance => $2::jsonb)`, [t, JSON.stringify({ supersedes: null })]);
+  const unlinkActor = await held(`update_thought($1::uuid, p_actor => $2::jsonb, p_provenance => $3::jsonb)`, [t, JSON.stringify({ name: "desk-88", via: "test-door" }), JSON.stringify({ supersedes: null })]);
   const patch = await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb)`, [t, JSON.stringify({ topic: "88" })]);
   const derived = await held(PROV, [t, JSON.stringify({ derived_from: [u] })]);
   const text = await held(`update_thought($1::uuid, $2::text)`, [t, "[88] the row edited, new text"]);
   const pointer = (await one<{ s: string | null }>(`SELECT supersedes AS s FROM thoughts WHERE id = $1`, [t])).s;
-  assert(repoint.ok && repoint.n === 1 && unlink.ok && unlink.n === 1 && unlinkAgain.ok && unlinkAgain.n === 1 && unlinkText.ok && unlinkText.n === 1 && pointer === null,
-    `a re-point, an unlink, an unlink of an unlinked row and an unlink with a change of text each hold the review lock to the end of the call's transaction (${[repoint, unlink, unlinkAgain, unlinkText].map((x) => x.n).join(", ")}), the pointer cleared`);
-  assert(patch.ok && patch.n === 0 && derived.ok && derived.n === 0 && text.ok && text.n === 0,
+  const holders = [repoint, unlink, unlinkAgain, unlinkText, unlinkPatch, unlinkGuard, unlinkActor];
+  assert(holders.every((x) => x.ok && x.n === 1 && x.after === 0) && pointer === null,
+    `a re-point, an unlink, an unlink of an unlinked row, and an unlink with a change of text, a patch, the stale-read guard or an actor each hold the review lock, exclusive, to the end of the call's transaction and not past it (${holders.map((x) => `${x.n}/${x.after}`).join(", ")}), the pointer cleared`);
+  assert([patch, derived, text].every((x) => x.ok && x.n === 0 && x.after === 0),
     `…and an edit naming no supersedes takes none — a patch, a derived_from alone, a change of text (${[patch, derived, text].map((x) => x.n).join(", ")})`);
 
   // Re-apply: 098 again moves nothing; 088 re-applied puts its gate back —
