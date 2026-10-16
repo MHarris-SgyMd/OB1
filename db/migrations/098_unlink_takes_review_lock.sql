@@ -44,12 +44,16 @@
 --   an accept — waits on the lock while a holder of it waits on something
 --   the transaction holds: a row, or an advisory lock taken after the
 --   review lock (a fingerprint lock, 033; a node-state bucket, 068).
---   Postgres breaks that with 40P01. Since this file that
---   holder can be a single-call unlink, which under 088 waited and then
---   passed (a re-point there closed the same cycle under both; review pass
---   1 raced it live on the row). No shipped caller makes such a
+--   Postgres breaks that with 40P01. Since this file that holder can be a
+--   single-call unlink, which under 088 waited and then passed (a re-point
+--   there closed the same cycle under both; review pass 1 raced it live on
+--   the row). No shipped caller makes such a
 --   transaction (each store call is a transaction of its own); taking the
---   lock first, which is re-entrant, keeps one in the order.
+--   lock first, which is re-entrant, keeps one in the order. And an unlink,
+--   like a re-point or a delete, holds the brain's one supersession lock to
+--   the end of its caller's transaction: every delete, accept and pointer
+--   write waits behind one left open, so a caller commits before slow work
+--   (review pass 4: no shipped path holds it past one statement).
 --
 -- NOT HERE
 --   * 097's NOT HERE says that under an accept "only an unlink (which takes

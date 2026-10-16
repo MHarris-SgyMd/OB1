@@ -4278,19 +4278,21 @@ console.log("\n[20ar] Migration 098: refused by name without 073; onto a populat
   // Whether a call's transaction holds the review lock, exclusive, once the
   // call returns — and whether this connection still holds it, in any mode,
   // after the transaction (a session-level lock would; review pass 3).
-  const LOCKS = (mode: string) => sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295) AND mode LIKE ${mode}`;
+  // One predicate for both reads, on the connection given: inside the
+  // transaction the exclusive mode, after it any.
+  const locks = (q: SQL, exclusive: boolean) => q`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND classid::bigint = ((hashtext('ob1:supersession-review')::bigint >> 32) & 4294967295) AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295) AND (NOT ${exclusive} OR mode = 'ExclusiveLock')`.then((r) => Number(r[0].n));
   const holdsReviewLock = async (id: string) => {
     let n = -1;
     await sql.begin(async (tx: SQL) => {
       await tx`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${LAP}::jsonb, p_provenance := '{"supersedes": null}'::jsonb)`;
-      n = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid() AND objsubid = 1 AND objid::bigint = (hashtext('ob1:supersession-review')::bigint & 4294967295) AND mode = 'ExclusiveLock'`)[0].n);
+      n = await locks(tx, true);
     });
-    return { n, after: Number((await LOCKS("%"))[0].n) };
+    return { n, after: await locks(sql, false) };
   };
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beforeLock = await holdsReviewLock(third);
-  assert(beforeLock.n === 0 && beforeLock.after === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock.n})`);
+  assert(beforeLock.n === 0 && beforeLock.after === 0, `[20ar] setup: at 097 an unlink holds no review lock (${beforeLock.n}/${beforeLock.after})`);
   const before = await rows(), auditBefore = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the098 });
   const [fn] = await sql`SELECT count(*)::int AS fns, max(prosrc) AS body FROM pg_proc WHERE proname = 'update_thought'`;
