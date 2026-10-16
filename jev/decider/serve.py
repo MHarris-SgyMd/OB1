@@ -28,6 +28,7 @@ INSUFFICIENT_LABEL = "insufficient evidence"
 MAX_OPTIONS, MAX_BATCH, MAX_TEXT, MAX_BODY = 24, 64, 20_000, 8 * 2 ** 20
 MAX_TOKENS = 32_768  # decider's state limit (decider_config.json max_state_tokens); passed on every call, since decide()'s own default cuts the context at 1,536 (SMD-3058)
 MODEL_NAME = "decider-4b"
+PACK = os.environ.get("DECIDER_PACK", "0") == "1"  # one decide() for the decisions that share a context (SMD-3058)
 REPO = os.environ.get("DECIDER_MODEL", "Mapika/decider-4b")
 
 path = snapshot_download(REPO)
@@ -135,18 +136,27 @@ async def decide(req: Request):
     if body.get("model") is not None and body["model"] != MODEL_NAME:
         return JSONResponse({"error": f"this service serves {MODEL_NAME}, not {body['model']}"}, status_code=409)
     t = time.time()
-    results = []
+    decs = body["decisions"]
+    results = [None] * len(decs)
+    # One decide() per context: by default each decision alone, as the model was measured; with DECIDER_PACK=1,
+    # every decision of the request that shares a context in one call, which reads the context once and asks the
+    # questions after it in one row (decider's multi-question layout; SMD-3058 measures what that changes).
+    groups = {}
+    for i, dd in enumerate(decs):
+        groups.setdefault(dd["context"] if PACK else i, []).append(i)
     try:
-        for dd in body["decisions"]:
-            labels, ids = labels_ids(dd)
+        for idxs in groups.values():
+            ctx = decs[idxs[0]]["context"]
             # The context's own token count, as decider's prompt builder encodes it ("Context:\n" + context), so a
             # result says how much the model read; MAX_TOKENS is passed because decide() otherwise reads the first
             # 1,536 tokens alone and says nothing (SMD-3058).
-            n = len(d.m.tok.encode("Context:\n" + dd["context"], add_special_tokens=False))
-            r = d.decide(dd["context"], [{"question": dd.get("proposition") or dd["question"], "options": labels}], max_ctx_tokens=MAX_TOKENS)
-            res = result_from(dd, ids, r[0]["probs_list"])
-            res["tokens"], res["truncated"] = min(n, MAX_TOKENS), n > MAX_TOKENS
-            results.append(res)
+            n = len(d.m.tok.encode("Context:\n" + ctx, add_special_tokens=False))
+            asked = [(i, *labels_ids(decs[i])) for i in idxs]
+            r = d.decide(ctx, [{"question": decs[i].get("proposition") or decs[i]["question"], "options": labels} for i, labels, _ in asked], max_ctx_tokens=MAX_TOKENS)
+            for (i, _, ids), ri in zip(asked, r):
+                res = result_from(decs[i], ids, ri["probs_list"])
+                res["tokens"], res["truncated"] = min(n, MAX_TOKENS), n > MAX_TOKENS
+                results[i] = res
     except Exception as e:
         # the contract's 500 shape ({error}), as jev/serve.ts returns on a model failure
         return JSONResponse({"error": f"the model failed: {str(e)[:200]}"}, status_code=500)
@@ -154,5 +164,6 @@ async def decide(req: Request):
 
 if __name__ == "__main__":
     host, port = os.environ.get("JEV_HOST", "127.0.0.1"), int(os.environ.get("JEV_PORT", "8021"))
-    print(f"jev-decider: {MODEL_NAME} ({REPO}@{revision[:8]}) loaded in {load_ms:.0f} ms; serving {CONTRACT} on http://{host}:{port}", flush=True)
+    print(f"jev-decider: {MODEL_NAME} ({REPO}@{revision[:8]}) loaded in {load_ms:.0f} ms; serving {CONTRACT} on http://{host}:{port}; "
+          f"{'one call per shared context (DECIDER_PACK=1)' if PACK else 'one call per decision'}", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")

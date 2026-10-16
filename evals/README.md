@@ -3808,12 +3808,16 @@ prompt 4 renders the two thoughts, so both framings score from one run:
 
 The options carry prompt 4's verdict definitions. The decider never settles
 `outdates`, since a proposal needs the judge's direction and quote, so a
-cascade loses a supersession only by settling it as something else.
+cascade loses a supersession only by settling it as something else. The
+judges' answers are saved once (`eval-judge.ts --out`), and every cascade is
+scored from them.
 
 ```bash
 JEV_PORT=8021 <venv>/bin/python ../jev/decider/serve.py      # decider-4b by hand: jev/decider/README.md (SMD-2265 deploys it)
 OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
   bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/decider.jsonl
+# with DECIDER_PACK=1 on the server: S and T in one call (--packed); each thought cut to 600 characters (--clip 600)
+bun eval-judge-decide.ts --pairs … --out /private/tmp/decider-600.jsonl --packed --clip 600
 OB1_JUDGE_MODEL=qwen2.5:7b bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/answers-7b.jsonl --concurrency 1 --logprobs 10
 bun eval-judge-decide.ts --pairs … --decider /private/tmp/decider.jsonl --judge 7b=/private/tmp/answers-7b.jsonl --judge 27b=…
 ```
@@ -3824,7 +3828,14 @@ proposals, 135 linked ticket pairs (16 duplicate_of, 40 child_of, 40 blocks,
 true supersessions. Each judge ran one pair at a time on this Mac (Ollama,
 temperature 0), and decider-4b on PyTorch over the GPU.
 
-**What the decider says**, by its one-pass verdict:
+**The judges.** qwen2.5:7b catches 2 of the 62 true supersessions, with 3
+false proposals, at 3.6 s a pair. qwen3.8:27b catches 23, with 17 false, at
+13.0 s. They give the same verdict on only 50% of the candidates; the most
+common split (32 of 120) is the 7B's "unrelated" against the 27B's "related".
+The linked pairs side with the 27B: on relates_to it is right on 34 of 39, and
+the 7B on 22.
+
+**What the decider says** at full length, by its one-pass verdict:
 
 | label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
 |---|---|---|---|---|---|---|---|
@@ -3835,47 +3846,64 @@ temperature 0), and decider-4b on PyTorch over the GPU.
 | linked: relates_to | 39 | 27 | 3 | 9 | 0 | 0 | 0.04 |
 | linked: blocks, child_of, duplicate_of | 96 | 14 | 16 | 64 | 0 | 2 | 0.52–0.79 |
 
-**The cascade.** Each band is picked from the data: no supersession the judge
-caught is lost, and the most candidates are settled.
+**What a decision costs.** Reading the pair is nearly all of it, about 1 ms a
+token on this Mac, for decider-4b and the 7B alike. Ollama's own timing has the
+7B reading judge prompts at 0.84 ms a token (2,639 tokens in 2.2 s, then about
+1.4 s writing its answer). So at full length a decision costs about what the 7B
+spends reading the same pair. Two ways to make it cheaper were measured:
 
-| judge, framing and band | settled: candidates / all | true supersessions caught | false proposals | judge calls | model s per pair |
+* **Packing** (`DECIDER_PACK=1` on the server, `--packed` here): S and T in one
+  call, one read of the pair for both, which took 1.97 s against 4.38 s. S kept
+  its answer on 95% of pairs, and T, asked after S, on 63%. C is always asked
+  alone; packed after T, it kept its answer on 5 of 10 in a trial.
+* **Clipping** (`--clip N`): each thought cut to its first N characters before
+  the decider reads it.
+
+**The cascade, every variant.** Each band is picked from the data: no
+supersession the judge caught is lost, and the most candidates are settled.
+These are the two-pass bands: S at most 0.3 settles unrelated, and S at least
+0.6 asks T. The one-pass rows are in each run's report.
+
+| the decider reads (two-pass) | decider s per pair | behind 7B: model s per pair (alone 3.6) | settled pairs right: decider / 7B | behind 27B: model s per pair (alone 13.0) | settled pairs right: decider / 27B |
 |---|---|---|---|---|---|
-| 7B alone | — | 2 of 62 | 3 | 444 | 3.6 |
-| 7B, one-pass: top ≥ 0.6, outdates ≤ 0.3 | 66% / 46% | 2 of 62 | 2 | 241 | 4.4 |
-| 7B, two-pass: same ≤ 0.3 unrelated; ≥ 0.6, then top ≥ 0.5, outdates ≤ 0.2 | 83% / 65% | 2 of 62 | 2 | 157 | 4.7 |
-| 27B alone | — | 23 of 62 | 17 | 444 | 13.0 |
-| 27B, one-pass: top ≥ 0.7, outdates ≤ 0.3 | 58% / 32% | 23 of 62 | 17 | 303 | 11.4 |
-| 27B, two-pass: same ≤ 0.3 unrelated; ≥ 0.6, then top ≥ 0.6, outdates ≤ 0.2 | 81% / 54% | 23 of 62 | 17 | 204 | 9.4 |
+| full length, S and T apart | 2.1–4.4 | 4.7 | 110 / 144 of 187 | 9.4 | 78 / 128 of 143 |
+| full length, packed | 2.0 | 3.5 | 98 / 135 of 170 | 8.3 | 73 / 127 of 137 |
+| 1,500 characters, packed | 0.8 | 2.7 | 51 / 88 of 123 | 8.4 | 33 / 85 of 99 |
+| 600 characters, packed | 0.5 | 2.2 | 49 / 92 of 143 | 7.5 | 41 / 100 of 113 |
+| 300 characters, packed | 0.4 | 1.9 | 73 / 117 of 167 | 7.1 | 47 / 107 of 116 |
 
-Picked on one half of the pairs and scored on the other, every band loses at
-most one supersession.
+"Settled pairs right" counts the labelled pairs the decider settles: how many
+its verdict gets right, and how many the judge it replaces got right on the
+same pairs. Picked on one half of the pairs and scored on the other, the bands
+lose up to one of the 7B's supersessions, and up to three of the 27B's at 300
+and 600 characters.
 
-**Why it is declined.**
+**Why it is declined.** Packing and clipping make the cascade cheap. Behind the
+7B the cheapest variant needs about half the 7B's model time, and behind the
+27B the packed variants need 35–45% less. But on every variant, on the pairs it
+would settle, the decider is right less often than the judge it replaces would
+have been:
 
-* **It isn't cheap here.** A decision costs a median 2.2 s on a 2,200-token
-  pair, about 1 ms a token, which is 60% of a 7B judge call (3.6 s). Behind the
-  7B, the default judge, every cascade costs more model time than the judge
-  alone: 4.4–4.7 s a pair against 3.6 s, though it calls the 7B half as often.
-* **It changes what the pass writes.** Its confident verdicts are mostly
-  "unrelated" (86 of 120 candidates), where both judges see related or evolving
-  pairs.
-  * On the candidates it settles, it gives the 7B's own verdict 71–81% of the
-    time and the 27B's 38–49%. The difference is relations dropped: 14–28 of
-    the 7B's per 120 candidates, and 36–59 of the 27B's.
-  * The labels side with the judges. On pairs the board links, the 27B is
-    right on 124 of 135 and the 7B on 113, while the decider calls 27 of the 39
-    relates_to pairs unrelated (median P(same subject) 0.04).
-  * On the labelled pairs it settles, it is right 51–60% of the time.
-* **Behind the 27B it saves 12–28% of model time** without losing a
-  supersession, at that cost to the relations.
-* **Its "evolves" is reliable:** it is right on every labelled pair it settles
-  as evolves. Its "duplicate" lands on true supersessions, pointer pairs the
-  7B misses too.
+* 18–30 points less than the 7B;
+* 35–53 points less than the 27B.
 
-**What would reopen it:** a runtime serving decider-4b at a fraction of a
-judge call (MLX or llama.cpp rather than PyTorch), and a framing of "same
-subject" that reads it as the judge does. The decider's strict reading of it
-is the error, not its calibration.
+Clipping widens the gap, since S, T and C all move off their full-length
+answers (at 600 characters, T keeps its answer on 48% of pairs). Its errors are
+of two kinds:
+
+* "unrelated" for pairs both judges and the board call related; at full length
+  it calls 27 of the 39 relates_to pairs unrelated;
+* "duplicate" for true supersessions: 37 of the 60 pointer pairs.
+
+A cheaper pass that writes wrong relations is no gain. Its "evolves" alone is
+reliable: it is right on every labelled pair it settles that way.
+
+**What would reopen it:** a decider whose "same subject" and relation calls
+match the judges' on the linked pairs, through a fine-tune or a framing this
+spike didn't try, measured with this harness. A faster runtime won't do it
+alone: reading costs the 7B on llama.cpp 0.84 ms a token, so a 4B on the same
+runtime would read about twice as fast as now, and accuracy is the binding
+problem.
 
 **Found on the way.** The decider adapter (`jev/decider/serve.py`) cut every
 context to its first 1,536 tokens, the default of decider's `decide()`, while
@@ -3889,12 +3917,14 @@ Caveats:
 
 * The labels are SMD-1873's: most rejected proposals are two tickets, and 44
   proposal pairs have a side edited since they were judged.
-* The candidates have no label, so agreeing with a judge is not being right;
-  only the linked pairs say which reading holds.
+* The candidates have no label, so agreeing with a judge is not being right,
+  and the judges agree with each other on only half of them. Only the linked
+  pairs say which reading holds.
 * The bands are picked on the same 444 pairs; the held-out halves are the
   guard.
 * The 27B's timings include a few minutes of stable's sleep working four new
-  captures on the same model server.
+  captures on the same model server. The decider's own times vary by about 15%
+  between runs.
 * Only decider-4b, these three questions and these option descriptions were
   measured.
 

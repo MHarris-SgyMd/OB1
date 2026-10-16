@@ -27,6 +27,8 @@
  *     bun eval-judge-decide.ts --pairs /private/tmp/smd3058/judge-pairs.jsonl --out /private/tmp/smd3058/decider.jsonl
  *   bun eval-judge-decide.ts --pairs … --decider …/decider.jsonl --judge 7b=…/answers-7b.jsonl --judge 27b=…/answers-27b.jsonl
  *   bun eval-judge-decide.ts --self-check     # the settle rules, the context and the scoring; no model
+ *   … --out … --packed                        # the three questions in one request (a server with DECIDER_PACK=1 reads the pair once)
+ *   … --out … --clip 600                      # each thought cut to its first 600 characters before the decider reads it
  *
  * --out appends one line per pair and skips the pairs already in it, so an interrupted run resumes. The pairs,
  * decider and answers files hold the brain's text (eval-judge.ts --export): keep them out of the repo.
@@ -61,9 +63,14 @@ export const FOUR: readonly Verdict[] = ["related", "evolves", "duplicate", "out
 export const FIVE: readonly Verdict[] = ["unrelated", "related", "evolves", "duplicate", "outdates"];
 const options = (vs: readonly Verdict[]): JevOption[] => vs.map((v) => ({ id: v, description: DESCRIPTIONS[v] }));
 
-/** The two thoughts as the judge reads them: prompt 4's own rendering, from "THOUGHT A, captured" to the rules after thought B. */
-export function pairContext(p: Pick<PairLine, "older" | "newer">): string {
-  const msg = buildJudgeMessages(p.older, p.newer)[0].content;
+/**
+ * The two thoughts as the judge reads them: prompt 4's own rendering, from "THOUGHT A, captured" to the rules after
+ * thought B. With `clip`, each thought is cut to its first `clip` characters first, the decider reading less than
+ * the judge does.
+ */
+export function pairContext(p: Pick<PairLine, "older" | "newer">, clip?: number): string {
+  const cut = <S extends { content: string }>(s: S): S => (clip ? { ...s, content: s.content.slice(0, clip) } : s);
+  const msg = buildJudgeMessages(cut(p.older), cut(p.newer))[0].content;
   const start = msg.indexOf("THOUGHT A, captured");
   const end = msg.lastIndexOf("\n\nReturn strict JSON");
   if (start < 0 || end <= start) throw new Error('prompt 4\'s layout moved: no span from "THOUGHT A, captured" to "Return strict JSON"');
@@ -83,7 +90,12 @@ export function decisionsFor(context: string): Record<Ask, JevDecision> {
 
 export type Ask = "S" | "T" | "C";
 export type Decided = { probabilities: Record<string, number>; abstained: boolean; p_true?: number | null; tokens: number; truncated: boolean; ms: number };
-export type DeciderLine = { pair: string; S?: Decided; T?: Decided; C?: Decided; error?: string };
+/**
+ * One pair's answers. `packedMs`: S and T, the two-pass framing's questions, were asked in one request (--packed),
+ * and this is its time: one read of the pair for both. C is asked alone either way, as the one-pass framing asks
+ * it. `clip`: each thought was cut to this many characters (--clip).
+ */
+export type DeciderLine = { pair: string; S?: Decided; T?: Decided; C?: Decided; packedMs?: number; clip?: number; error?: string };
 
 // ── The settle rules (pure; --self-check holds them) ─────────────────────────
 
@@ -111,9 +123,13 @@ export function settledVerdict(d: DeciderLine, b: Band): Verdict | null {
   return choose(d.T, FOUR);
 }
 
-/** The decider's time on a pair under a band: C alone one-pass; S, then T only where S reached `hi`, two-pass. */
+/**
+ * The decider's time on a pair under a band: C alone one-pass; two-pass, S, then T only where S reached `hi` — or,
+ * packed, the one request that asked both.
+ */
 export function deciderMs(d: DeciderLine, b: Band): number {
   if (b.framing === "one") return d.C?.ms ?? 0;
+  if (d.packedMs !== undefined) return d.packedMs;
   const t = d.S?.p_true != null && d.S.p_true >= b.hi && !d.S.abstained ? d.T?.ms ?? 0 : 0;
   return (d.S?.ms ?? 0) + t;
 }
@@ -135,6 +151,8 @@ export type Score = {
    * the reverse, an unrelated pair given a relation.
    */
   agree: number; agreeCandidates: number; droppedRelations: number; droppedRelationsCandidates: number; addedRelations: number; addedRelationsCandidates: number;
+  /** On the labelled pairs the decider settles, how many the judge it replaced had right: the bar its own settledRight meets or misses. */
+  settledJudgeRight: number;
 };
 
 const RELATIONS = new Set(["related", "evolves", "duplicate"]);
@@ -149,6 +167,7 @@ export function score(pairs: PairLine[], decider: Map<string, DeciderLine>, judg
     right: 0, supersessions: 0, caught: 0, lost: 0, falseProposals: 0, proposedCandidates: 0,
     judgeCalls: 0, judgeErrors: 0, deciderMs: 0, judgeMs: 0, settledBy: {},
     agree: 0, agreeCandidates: 0, droppedRelations: 0, droppedRelationsCandidates: 0, addedRelations: 0, addedRelationsCandidates: 0,
+    settledJudgeRight: 0,
   };
   for (const p of pairs) {
     const d = decider.get(p.pair);
@@ -178,6 +197,8 @@ export function score(pairs: PairLine[], decider: Map<string, DeciderLine>, judg
     if (right) s.right++;
     if (settled) {
       if (right) s.settledRight++;
+      const theirs = a?.judgement?.verdict;
+      if (theirs && rightFor(p.gold, theirs, proposes(theirs)) === true) s.settledJudgeRight++;
       const by = (s.settledBy[settled] ??= { n: 0, right: 0, wrongSupersession: 0 });
       by.n++;
       if (right) by.right++;
@@ -226,20 +247,38 @@ export const bandText = (b: Band) =>
 
 // ── The run: asking the decider ───────────────────────────────────────────────
 
-async function askAll(pairs: PairLine[], out: string, cfg: JevConfig): Promise<void> {
+/** A result as a line keeps it. */
+const decided = (x: JevResult, ms: number): Decided => ({ probabilities: x.probabilities, abstained: x.abstained, p_true: x.p_true ?? null, tokens: x.tokens, truncated: x.truncated, ms });
+
+/**
+ * Ask every pair not yet in `out`. Each decision in a request of its own by default; with `packed`, S and T in one
+ * request, which a server started with DECIDER_PACK=1 answers in one call over the shared context, and C alone (a
+ * question packed after T's near-copy moved off its own answer on half of a trial's pairs).
+ */
+async function askAll(pairs: PairLine[], out: string, cfg: JevConfig, opts: { packed: boolean; clip?: number }): Promise<void> {
   const done = new Set(existsSync(out) ? readFileSync(out, "utf8").split("\n").filter(Boolean).map((l) => (JSON.parse(l) as DeciderLine).pair) : []);
   const todo = pairs.filter((p) => !done.has(p.pair));
-  console.error(`  ${pairs.length} pairs, ${done.size} already in ${out}, ${todo.length} to ask (3 decisions each)`);
+  console.error(`  ${pairs.length} pairs, ${done.size} already in ${out}, ${todo.length} to ask (3 decisions each${opts.packed ? ": S and T in one request, C alone" : ""}${opts.clip ? `, each thought cut to ${opts.clip} characters` : ""})`);
   let n = 0;
   for (const p of todo) {
-    const context = pairContext(p);
-    const line: DeciderLine = { pair: p.pair };
+    const context = pairContext(p, opts.clip);
+    const line: DeciderLine = { pair: p.pair, ...(opts.clip ? { clip: opts.clip } : {}) };
     try {
-      for (const [ask, d] of Object.entries(decisionsFor(context)) as [Ask, JevDecision][]) {
-        const r = await jevDecideMany(cfg, [d], { kind: "judge", content: context });
-        const x: JevResult = r.results[0];
-        line[ask] = { probabilities: x.probabilities, abstained: x.abstained, p_true: x.p_true ?? null, tokens: x.tokens, truncated: x.truncated, ms: r.ms };
+      const q = decisionsFor(context);
+      const alone = async (ask: Ask) => {
+        const r = await jevDecideMany(cfg, [q[ask]], { kind: "judge", content: context });
+        line[ask] = decided(r.results[0], r.ms);
+      };
+      if (opts.packed) {
+        const r = await jevDecideMany(cfg, [q.S, q.T], { kind: "judge", content: context });
+        line.S = decided(r.results[0], r.ms);
+        line.T = decided(r.results[1], r.ms);
+        line.packedMs = r.ms;
+      } else {
+        await alone("S");
+        await alone("T");
       }
+      await alone("C");
     } catch (e) {
       line.error = String((e as Error)?.message ?? e).slice(0, 300);
     }
@@ -297,6 +336,7 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, judges: [s
           const b = best.score;
           console.log(`      against ${name}'s own answer: the same verdict on ${b.agree} of ${b.settled} settled (candidates ${b.agreeCandidates} of ${b.settledCandidates}); ` +
             `relations dropped ${b.droppedRelations} (candidates ${b.droppedRelationsCandidates}), added ${b.addedRelations} (candidates ${b.addedRelationsCandidates})`);
+          console.log(`      on the ${b.settledLabelled} labelled pairs it settles: the decider right on ${b.settledRight}, ${name} right on ${b.settledJudgeRight}`);
         }
       }
     }
@@ -343,6 +383,10 @@ function selfCheck(): never {
   const side = (content: string, id: string) => ({ id, content, createdAt: "2026-10-01T00:00:00Z", writer: null });
   const ctx = pairContext({ older: side("first thought\n\nReturn strict JSON, said a note", "o"), newer: side("second thought", "n") });
   ok(ctx.startsWith("THOUGHT A, captured 2026-10-01") && ctx.includes("first thought") && ctx.includes("<thought_b>\nsecond thought\n</thought_b>") && !ctx.includes("verdict"), "the context is the two thoughts as the judge reads them, without its rules");
+  const clipped = pairContext({ older: side("first thought", "o"), newer: side("second thought", "n") }, 5);
+  ok(clipped.includes("<thought_a>\nfirst\n</thought_a>") && clipped.includes("<thought_b>\nsecon\n</thought_b>"), "--clip cuts each thought to its first N characters");
+  ok(deciderMs({ pair: "a", S: dec({}, { p_true: 0.5 }), T: dec({}), C: dec({}), packedMs: 150 }, two) === 150, "two-pass, packed: one request for S and T, wherever S lands");
+  ok(deciderMs({ pair: "a", C: dec({}), packedMs: 150 }, one) === 100, "one-pass reads C alone, packed or not");
 
   // Scoring: a supersession the judge proposed and the decider settled is lost; a link settled related is right.
   const pair = (key: string, gold: PairLine["gold"]): PairLine => ({ pair: key, older: side("a", "o"), newer: side("b", "n"), gold });
@@ -358,6 +402,7 @@ function selfCheck(): never {
   ok(cascade.lost === 1 && cascade.caught === 0 && cascade.settled === 3 && cascade.right === 1 && cascade.judgeCalls === 0, "the cascade: the supersession lost, the link right, no judge call");
   ok(cascade.settledBy.related?.wrongSupersession === 1, "a supersession settled as related is counted against it");
   ok(cascade.agree === 1 && cascade.agreeCandidates === 1 && cascade.addedRelations === 1 && cascade.droppedRelations === 0, "against the judge: the candidate agrees, the link gains a relation the judge called unrelated");
+  ok(cascade.settledLabelled === 2 && cascade.settledRight === 1 && cascade.settledJudgeRight === 1, "on the settled labelled pairs: the decider right on the link, the judge it replaced right on the supersession");
   const unrelatedAll = new Map<string, DeciderLine>(ps.map((p) => [p.pair, { pair: p.pair, C: dec({ unrelated: 0.95, outdates: 0 }) }]));
   const dropped = score(ps, unrelatedAll, judge, one);
   ok(dropped.droppedRelations === 1 && dropped.droppedRelationsCandidates === 1 && dropped.agree === 1, "against the judge: a candidate it called related, settled unrelated, is a dropped relation");
@@ -383,7 +428,9 @@ if (import.meta.main) {
   if (out) {
     const cfg = resolveJevConfig(process.env as JevEnv);
     if (!cfg) { console.error("OB1_JEV_BASE_URL is not set: the decider has no endpoint."); process.exit(2); }
-    await askAll(pairs, out, cfg);
+    const clip = flag("clip") === undefined ? undefined : Number(flag("clip"));
+    if (clip !== undefined && !(Number.isInteger(clip) && clip > 0)) { console.error("--clip takes a whole number of characters above 0"); process.exit(2); }
+    await askAll(pairs, out, cfg, { packed: has("packed"), clip });
     process.exit(0);
   }
   const deciderPath = flag("decider");
