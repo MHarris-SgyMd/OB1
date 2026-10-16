@@ -3378,7 +3378,10 @@ call ends at 30 s). The banner prints what was resolved. `--mcp` names the
 endpoint. Its default is this Mac's canary on stable's origin
 (`http://127.0.0.1:8010/canary/mcp`); a stack's own endpoint is `/mcp` on its
 `SERVER_PORT` (8000 by default). The key is the stable connector's from
-`~/.claude.json`, which the canary also accepts; `--key-from` names another entry.
+`~/.claude.json`; `--key-from` names another entry. Since SMD-2874 the canary
+takes its own key alone and answers on its own port: give `--mcp
+http://127.0.0.1:<port>/mcp --key-from open-brain-canary` once it has moved
+there (and stable's `/canary/mcp` is its 404 from SMD-2874's PR 3 on).
 
 Captures are real writes:
 - **Which brain:** it runs only against a brain whose `brain_info` says tier
