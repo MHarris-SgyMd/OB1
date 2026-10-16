@@ -216,7 +216,8 @@ async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], gr
         : `Refused: role ${pinned.role} has no USAGE on schema public, so Postgres leaves public off its search_path, and this migrator builds the brain there.\n` +
             `  Run the migrator as the database's owner, ${pinned.owner}, or a role that is a member of it. To build as ${pinned.role} instead, as the schema's owner:\n` +
             `    GRANT USAGE, CREATE ON SCHEMA public TO ${pinned.role};\n` +
-            "  Either way, 001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has. Nothing was changed."
+            "  Either way, 001's vector needs a superuser unless it is installed, and 011's pg_trgm needs CREATE on the database, which its owner has;\n" +
+            "  096's pg_stat_statements needs a superuser too, and is left out without one. Nothing was changed."
     );
     return false;
   }
@@ -1190,6 +1191,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // a plain run never fails on a malformed releases.json.
   const releases = dryRun ? readReleases() : [];
 
+  /** The files this run applied for the first time, for the notes read after the loop. */
+  const appliedNow = new Set<string>();
   // Under a live --reapply every file ran above; this loop is the plain run's and --dry-run's.
   for (const m of reapply && !dryRun ? [] : migrations) {
     const prior = applied.get(m.name);
@@ -1279,6 +1282,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     out(`  ✓  ${m.name}  applied`);
     if (note !== null) out(note);
     ran++;
+    appliedNow.add(m.name);
 
     if (m.seeds.length) await reportSeeds(m);
   }
@@ -1298,6 +1302,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     );
   }
   const coreCode = floorBlocked || drifted > 0 ? 1 : 0;
+  if (coreCode === 0 && !dryRun && !baseline) await confineStatStatements();
   if (plugins.length === 0) return coreCode;
   const named = plugins.map((p) => p.name).join(", ");
   if (baseline || reapply) {
@@ -1309,6 +1314,79 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return coreCode;
   }
   return Math.max(coreCode, await migratePlugins());
+
+  /**
+   * pg_stat_statements' views and functions kept from PUBLIC on every run, not
+   * on 096's alone (SMD-1849 PR 3b, review pass 1). A restore without
+   * privileges — a tier refresh's pg_restore -x (db/tier.ts) — creates the
+   * extension again with its own grants, PUBLIC's among them, under a ledger
+   * that already records 096, so nothing else would run it again; and
+   * readable by PUBLIC they are core relations the plugins' login role holds,
+   * which preflight's "plugin tables" row refuses. So read the grants, and run
+   * 096 again where PUBLIC holds one. Read after the fact, as reportSeeds
+   * reads: 096's grants left as they were where this role does not own the
+   * objects, and its skip where this role may not create the extension, are
+   * warnings, which this client does not surface. Said, never fatal: the
+   * brain runs without the extension, and preflight refuses what needs
+   * refusing. The file is found by its name, not its number, which main may
+   * take (review pass 2: 092 was taken, and "092_" would have found that file).
+   */
+  async function confineStatStatements(): Promise<void> {
+    const file = migrations!.find((m) => m.name.endsWith("_pg_stat_statements.sql"));
+    if (!file) return;
+    // The objects 096 revokes, by name among the extension's members, wherever it lives.
+    const state = async () =>
+      ((await sql`
+        SELECT current_database() AS db,
+               (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements') AS ns,
+               COALESCE((SELECT has_schema_privilege('public', e.extnamespace, 'USAGE') FROM pg_extension e WHERE e.extname = 'pg_stat_statements'), false) AS public_usage,
+               EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed,
+               EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered,
+               EXISTS (SELECT 1 FROM pg_extension e
+                         JOIN pg_depend d ON d.refobjid = e.oid AND d.deptype = 'e' AND d.classid = 'pg_class'::regclass
+                         JOIN pg_class c ON c.oid = d.objid AND c.relname IN ('pg_stat_statements', 'pg_stat_statements_info')
+                         CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+                        WHERE e.extname = 'pg_stat_statements' AND a.grantee = 0)
+            OR EXISTS (SELECT 1 FROM pg_extension e
+                         JOIN pg_depend d ON d.refobjid = e.oid AND d.deptype = 'e' AND d.classid = 'pg_proc'::regclass
+                         JOIN pg_proc p ON p.oid = d.objid AND p.proname IN ('pg_stat_statements', 'pg_stat_statements_info')
+                         CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+                        WHERE e.extname = 'pg_stat_statements' AND a.grantee = 0) AS to_public`) as { db: string; ns: string | null; public_usage: boolean; installed: boolean; offered: boolean; to_public: boolean }[])[0];
+    // The file applied by hand, into this database, from the repository's root or into the compose stack's Postgres (review pass 3: a psql with no database named created it in another).
+    // The database's name in a shell's single quotes, so a name with `$`, a backquote or a double quote pastes as itself (review pass 4: an identifier's double quotes ran a command substitution).
+    const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
+    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f db/migrations/${file.name}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < db/migrations/${file.name} (a pipeline tier's service is <tier>-postgres)`;
+    try {
+      const before = await state();
+      if (!before.installed) {
+        if (before.offered && appliedNow.has(file.name)) {
+          out(`  ·  ${file.name}  left pg_stat_statements out: the server offers it, and this role could not create it — a superuser may, unless the server keeps extensions to an allow-list. Applied once as a superuser, from the repository's root (${byHand(before.db)}), it creates the extension and keeps its views from PUBLIC, and the observability profile's exporter reads each statement's times. Said on this run alone`);
+        }
+        return;
+      }
+      if (!before.to_public) return;
+      await begin((tx: SQL) => tx.unsafe(file.sql));
+      if ((await state()).to_public) {
+        // A warning where every role reaches the view: in public, where preflight's "plugin tables" row reads, or in a
+        // schema PUBLIC may use, which that row does not read (review pass 4). Behind a schema PUBLIC may not use (a
+        // managed Postgres's own, its owner the provider's) a note: a run that cannot act need not alarm on every start
+        // (review pass 3).
+        if (before.ns === "public" || before.public_usage) {
+          err(
+            `  ⚠  ${file.name}  ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can: this role does not own its views, so it may not change their grants.\n` +
+              `  Apply the file once as their owner or a superuser, from the repository's root (${byHand(before.db)}). Until then every role here reads the view, ` +
+              (before.ns === "public" ? `and with a plugin enabled preflight's "plugin tables" row refuses the server.` : `the plugins' login role among them, which preflight's "plugin tables" row, reading public alone, does not see.`)
+          );
+        } else {
+          out(`  ·  ${file.name}  pg_stat_statements, in schema ${before.ns}, keeps PUBLIC's grant behind a schema PUBLIC may not use: this role does not own it, so may not change its grants (its owner may, applying the file)`);
+        }
+      } else {
+        out(`  ↻  ${file.name}  ran again: PUBLIC could read pg_stat_statements (a restore without privileges gives it back), and now cannot`);
+      }
+    } catch (caught) {
+      err(`  ⚠  ${file.name}  pg_stat_statements' grants could not be read or set: ${(caught as Error).message}`);
+    }
+  }
 
   /**
    * The enabled plugins' migrations (SMD-2310), after the core's: each plugin
