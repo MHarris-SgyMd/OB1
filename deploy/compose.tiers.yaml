@@ -29,8 +29,9 @@
 # set in the shell for one of them, which wins over deploy/.env. The
 # servers, the REST cores, the three Postgres services and Ollama publish
 # nothing. Each server reaches its own database by service name on the
-# internal `data` network, and db/tier.ts reaches them the same way through
-# deploy/tier.sh --network open-brain-tiers_data (SMD-2036, SMD-2583). The
+# internal `data` network, and db/tier.ts's --refresh reaches them the same way
+# through deploy/tier.sh --project open-brain-tiers (SMD-2036, SMD-2583, SMD-2875);
+# its --replay and --diff reach each tier at its path, over HTTP (SMD-2875). The
 # proxy reaches the servers
 # on the internal `mesh` network by name — mcp.ob1.internal, the stable tier's
 # as in compose.yaml, and mcp.canary.ob1.internal, mcp.working.ob1.internal —
@@ -189,6 +190,8 @@ x-migrate-env: &migrate-env
 x-tier-postgres: &tier-postgres
   image: pgvector/pgvector:0.8.6-pg16
   shm_size: ${POSTGRES_SHM_SIZE:-1g}
+  # compose.yaml's: pg_stat_statements loaded (POSTGRES_PRELOAD_LIBRARIES), utility statements untracked, I/O timed (SMD-1849 PR 3b).
+  command: ["postgres", "-c", "shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-pg_stat_statements}", "-c", "pg_stat_statements.track_utility=off", "-c", "track_io_timing=on"]
   environment:
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
     POSTGRES_DB: openbrain

@@ -649,6 +649,19 @@ services:
     # backed only as used; raise it with maintenance_work_mem, or build with
     # max_parallel_maintenance_workers = 0, which uses ordinary backend memory.
     shm_size: ${POSTGRES_SHM_SIZE:-1g}
+    # pg_stat_statements' library at the server's start, which migration 096's
+    # extension needs, with utility statements untracked: an ALTER ROLE …
+    # PASSWORD (login-role.ts's verifier) is never kept with its text. Each
+    # SQL statement's calls and times — its blocks' read and write times too,
+    # with track_io_timing on — are then the observability profile's
+    # exporter's to read (SMD-1849 PR 3b); with the profile off they stay in
+    # Postgres, its memory and PGDATA (the statements' text is a file there),
+    # and go nowhere else. A -c outranks postgresql.conf and
+    # ALTER SYSTEM, so a library of the operator's own (auto_explain; the
+    # image has no pg_cron) goes in POSTGRES_PRELOAD_LIBRARIES beside
+    # pg_stat_statements, which the list must keep: without it the view
+    # answers an error.
+    command: ["postgres", "-c", "shared_preload_libraries=${POSTGRES_PRELOAD_LIBRARIES:-pg_stat_statements}", "-c", "pg_stat_statements.track_utility=off", "-c", "track_io_timing=on"]
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       POSTGRES_DB: openbrain
@@ -672,12 +685,12 @@ services:
       timeout: 5s
       retries: 12
     # `data` alone: internal, so no route out, and joined only by what
-    # connects to the database (SMD-2583). Not the mesh, which a tier of
-    # another project joins (compose.canary.yaml): compose names each
-    # container by its service name on every network it joins, and there
-    # `postgres` would answer that tier's server too, which then had only
-    # its own password (deploy/canary.sh's env file) between it and this
-    # database.
+    # connects to the database (SMD-2583). Not the mesh, beside every
+    # backend the proxy reaches: compose names each container by its service
+    # name on every network it joins, and a canary's servers joined this
+    # stack's mesh from SMD-2294 to SMD-2874, where `postgres` would have
+    # answered them with only the canary's own password between them and
+    # this database.
     networks: [data]
     # As the servers': with none, a reboot would bring the servers back
     # (Docker, or podman with its restart unit) without the database they
@@ -1096,9 +1109,9 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
-    # authorization server as auth.ob1.internal, and another tier's MCP
-    # server, a compose project of its own that joins this mesh, as
-    # mcp.<tier>.ob1.internal (SMD-2294). It shares no network with Postgres,
+    # authorization server as auth.ob1.internal, and the tier routes' MCP
+    # servers as mcp.<tier>.ob1.internal (SMD-2294), which no project of
+    # another brain joins since SMD-2874. It shares no network with Postgres,
     # the model services, n8n or the workers, and has no route out.
     networks:
       front:
@@ -1658,9 +1671,9 @@ services:
       - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
     # `egress` alone: the vendors its workflows name, and the brain as
     # `server:8000` and the import runner as `orchestration-runner:8090`. Not
-    # the mesh: a tier of another project joins this stack's mesh, where
-    # compose names its server `server` too, and n8n would reach either
-    # (SMD-2294). `egress` is this project's own.
+    # the mesh, where every backend the proxy reaches is (a canary of another
+    # project joined it from SMD-2294 to SMD-2874, its server `server` too).
+    # `egress` is this project's own.
     networks: [egress]
     volumes:
       # The store: workflows, encrypted credentials, each workflow's cursor
@@ -2037,14 +2050,23 @@ services:
       # and the last -config.file Tempo is given is the one it reads (measured).
       TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false"
       PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false"
+      # The collector scrapes pg-exporter every 30 s on `telemetry` into its
+      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b): a second
+      # config the image's run-otelcol.sh appends, as one argument — no space
+      # in it, since the script splits OTELCOL_EXTRA_ARGS on whitespace; the
+      # pipeline's receivers are the image's two and this one.
+      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
-    # `mesh` alone, as lgtm.ob1.internal: the two servers send to it there, and
-    # compose.grafana-public.yaml's proxy reaches its Grafana there. No `ports:`.
+    # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
+    # compose.grafana-public.yaml's proxy reaches its Grafana there; and
+    # `telemetry`, where it scrapes pg-exporter alone (SMD-1849 PR 3b). No
+    # `ports:`.
     networks:
       mesh:
         aliases: [lgtm.ob1.internal]
+      telemetry: {}
     # run-all.sh removes /tmp/ready as it starts and writes it once the
     # collector and every backend answer (4 s here, measured); it watches none
     # of them after, so each answers its own ready URL here, run-all.sh's own
@@ -2063,6 +2085,71 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # The database's own numbers for the observability profile (SMD-1849 PR 3b).
+  # pg-monitor-role gives ob1_monitor a login and Postgres's predefined
+  # read-only pg_monitor role, and nothing else (db/login-role.ts --member-of:
+  # pg_monitor alone, from its allow-list); no schema privilege is granted,
+  # since the statistics views are pg_monitor's to read, in public, which
+  # PUBLIC may use on this stack. Its password is
+  # OB1_MONITOR_DB_PASSWORD in deploy/.env, 24 or more of [A-Za-z0-9_-]
+  # (openssl rand -hex 32): unset, login-role.ts refuses, this exits 2, and
+  # pg-exporter, which waits on it, never starts.
+  pg-monitor-role:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
+    pull_policy: never
+    profiles: ["observability"]
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
+      OB1_MONITOR_DB_PASSWORD: ${OB1_MONITOR_DB_PASSWORD:-}
+    command: ["bun", "login-role.ts", "--role", "ob1_monitor", "--password-env", "OB1_MONITOR_DB_PASSWORD", "--member-of", "pg_monitor"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks: [data]
+    logging: *logging
+
+  # postgres_exporter, pinned by the digest the multi-arch index v0.20.1
+  # resolved to (2026-10-14), as ob1_monitor: pg_stat_statements' top 100
+  # statements by time (of those above the tenth percentile), each labelled
+  # by its normalized text cut to 120 characters (constants are $1, $2 there;
+  # utility statements are untracked, compose.yaml's postgres), its own
+  # queries left out; connections by database and state (pg_stat_activity,
+  # the servers' pool among them, which their client cannot count), and the
+  # exporter's default collectors. On `data`, where Postgres is, and on the
+  # internal `telemetry`, where lgtm's collector scrapes it every 30 s and
+  # nothing else is; it publishes nothing. Confined as the authorization
+  # server is: read-only, no capability, no new privileges.
+  pg-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    profiles: ["observability"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["--collector.stat_statements", "--collector.stat_statements.include_query", "--collector.stat_statements.query_length=120", "--collector.stat_statements.limit=100", "--collector.stat_statements.exclude_users=ob1_monitor"]
+    environment:
+      DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable"
+      DATA_SOURCE_USER: ob1_monitor
+      DATA_SOURCE_PASS: ${OB1_MONITOR_DB_PASSWORD:-}
+    depends_on:
+      pg-monitor-role:
+        condition: service_completed_successfully
+    networks:
+      data: {}
+      telemetry:
+        aliases: [pg-exporter.ob1.internal]
+    # Its landing page, which reads nothing from Postgres; a scrape would.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging: *logging
+
 networks:
   # The ADR's networks (docs/operator-surface-tiers.md, "Two networks"), as
   # the network move built them (SMD-2583). Every service names its own, so
@@ -2070,9 +2157,9 @@ networks:
   #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
   #          core (api.ob1.internal), the authorization server
   #          (auth.ob1.internal) and the observability profile's collector
-  #          (lgtm.ob1.internal), each called by that name; a tier of another
-  #          project joins it under its own (compose.canary.yaml), and a
-  #          path-mode canary's servers send to stable's collector there.
+  #          (lgtm.ob1.internal), each called by that name. No other
+  #          project joins it: a canary is a brain of its own, on its own
+  #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
   #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
@@ -2083,6 +2170,9 @@ networks:
   #   auth-egress  outward, the authorization server's alone.
   #   front  internal: the forwarder and the proxy alone, where the forwarder
   #          reaches the proxy as proxy.ob1.internal.
+  #   telemetry  internal: the observability profile's collector and
+  #          pg-exporter alone, where the collector scrapes it (SMD-1849
+  #          PR 3b).
   #   edge   outward, the forwarder's alone: where the stack's port is
   #          published. The proxy is on internal networks alone, so a name it
   #          looks up that nothing holds never reaches the host's resolvers.
@@ -2099,6 +2189,8 @@ networks:
   auth-egress: {}
   edge: {}
   front:
+    internal: true
+  telemetry:
     internal: true
 
 volumes:

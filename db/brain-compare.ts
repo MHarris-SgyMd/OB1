@@ -107,6 +107,13 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
   }
 }
 
+/** The verb a reference was given to and its key flags, for the messages: --compare's, or tier.ts --diff's (SMD-2875). */
+export interface AskedBy {
+  verb: string;
+  keys: string;
+}
+const COMPARE_ASKS: AskedBy = { verb: "--compare", keys: "--a-key/--b-key" };
+
 /**
  * A reference is a URL or a connector name. A URL carries its key in --*-key, the
  * env, or its own ?key= (which is then taken OFF the base — the key travels as a
@@ -115,28 +122,31 @@ export function splitKeyFromUrl(url: string): { base: string; urlKey: string | u
  * that output also prints the key, so this reads only the two lines it needs and
  * returns the key without ever putting it in a message.
  */
-export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
+export async function resolveBrain(ref: string, keyArg: string | undefined, envKey: string | undefined, how: AskedBy = COMPARE_ASKS): Promise<BrainEndpoint> {
   if (/^https?:\/\//i.test(ref)) {
     const parsed = splitKeyFromUrl(ref);
     // Never echo the raw ref: an invalid URL cannot be parsed to strip a ?key=, so
     // show only the part before any query string (review pass 2 — a key-safety tidy
     // in already-merged code, reachable via --a/--b too).
-    if (!parsed) throw new Error(`--compare: ${JSON.stringify(ref.split("?")[0])} is not a valid URL.`);
+    // Neither a ?key= nor a user and password in it is echoed (review pass 4:
+    // `http://u:pw@bad host/mcp`). The userinfo is cut to the last @ first, so
+    // a password holding a raw ? or / cannot end the cut early (pass 5).
+    if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@]*@/i, "$1…@").split("?")[0])} is not a valid URL.`);
     // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
     // /mcp against /canary/mcp, and a host alone would label both alike.
     const at = new URL(parsed.base);
     const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;
-    if (!key) throw new Error(`--compare: no read key for ${label}. Pass --a-key/--b-key, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
+    if (!key) throw new Error(`${how.verb}: no read key for ${label}. Pass ${how.keys}, set OB1_COMPARE_KEY, or put it in the URL as ?key=.`);
     return { label, base: parsed.base, key, basic: parsed.basic };
   }
   // A connector name — resolve it the way canary.sh does, reading the URL and the
   // x-brain-key header out of `claude mcp get`, and echoing neither back.
-  return resolveConnector(ref, keyArg, envKey);
+  return resolveConnector(ref, keyArg, envKey, how);
 }
 
 /** Read a connector's base URL and key from `claude mcp get <name>` — its key is used, never printed. */
-export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined): Promise<BrainEndpoint> {
+export async function resolveConnector(name: string, keyArg: string | undefined, envKey: string | undefined, how: AskedBy = COMPARE_ASKS): Promise<BrainEndpoint> {
   let out: string;
   let code: number;
   try {
@@ -145,25 +155,25 @@ export async function resolveConnector(name: string, keyArg: string | undefined,
   } catch (e) {
     // The binary is not on PATH (ENOENT) — say so, rather than surface a raw spawn
     // error, and point at the URL path that needs no CLI (review pass 3).
-    throw new Error(`--compare: the connector-name path needs the Claude CLI (\`claude\`) on PATH to resolve ${JSON.stringify(name)} — pass an http(s):// URL instead. (${(e as Error).message})`);
+    throw new Error(`${how.verb}: the connector-name path needs the Claude CLI (\`claude\`) on PATH to resolve ${JSON.stringify(name)} — pass an http(s):// URL instead. (${(e as Error).message})`);
   }
   if (code !== 0) {
-    throw new Error(`--compare: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
+    throw new Error(`${how.verb}: could not resolve the brain named ${JSON.stringify(name)} — \`claude mcp get ${name}\` exited ${code}. Pass an http(s):// URL instead, or register the connector.`);
   }
   // Read the `URL: http://…` line and the `x-brain-key: …` header line; the URL is
   // normalized below (a ?key= split off), never followed or rewritten otherwise.
   const urlLine = out.split("\n").find((l) => /^\s*URL:/i.test(l));
   const url = urlLine?.replace(/^\s*URL:\s*/i, "").trim();
-  if (!url) throw new Error(`--compare: \`claude mcp get ${name}\` named no URL.`);
+  if (!url) throw new Error(`${how.verb}: \`claude mcp get ${name}\` named no URL.`);
   const headerLine = out.split("\n").find((l) => /x-brain-key:/i.test(l));
   const headerKey = headerLine?.replace(/^.*x-brain-key:\s*/i, "").trim() || undefined;
   // A connector may hold its key as ?key= on the URL rather than a header; split it
   // off the base (which then has /health appended) so the key never rides the POST
   // target a proxy logs — the same normalization the URL path does (review pass 1).
   const parsed = splitKeyFromUrl(url);
-  if (!parsed) throw new Error(`--compare: the connector ${JSON.stringify(name)} named an invalid URL.`);
+  if (!parsed) throw new Error(`${how.verb}: the connector ${JSON.stringify(name)} named an invalid URL.`);
   const key = keyArg ?? headerKey ?? parsed.urlKey ?? envKey;
-  if (!key) throw new Error(`--compare: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass --a-key/--b-key or set OB1_COMPARE_KEY.`);
+  if (!key) throw new Error(`${how.verb}: the connector ${JSON.stringify(name)} carries no x-brain-key and none was given. Pass ${how.keys} or set OB1_COMPARE_KEY.`);
   return { label: name, base: parsed.base, key, basic: parsed.basic };
 }
 
@@ -183,7 +193,10 @@ async function fetchOrThrow(ep: BrainEndpoint, url: string, init: RequestInit): 
   try {
     const headers = new Headers(init.headers);
     if (ep.basic) headers.set("authorization", `Basic ${ep.basic}`);
-    return await fetch(url, { ...init, headers, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+    // No redirect is followed: fetch keeps x-brain-key on a hop to another
+    // host (it drops only Authorization), so a redirect would hand the brain's
+    // key to wherever it points (SMD-2875 review pass 4).
+    return await fetch(url, { ...init, headers, redirect: "error", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
   } catch (e) {
     const why = e instanceof Error && e.name === "TimeoutError" ? `no reply within ${HTTP_TIMEOUT_MS} ms` : (e as Error).message;
     throw new Error(`${ep.label}: could not be reached — ${why}`);
@@ -550,7 +563,9 @@ export async function fetchLoggedSearches(ep: BrainEndpoint, since: string | nul
   } catch {
     throw new Error(`${ep.label}: list_logged_searches did not return JSON (${text.slice(0, 80)}).`);
   }
-  return { searches: Array.isArray(page.searches) ? page.searches : [], truncated: page.truncated === true };
+  // A page whose searches are not a list is not an empty log: the caller says it could not read it.
+  if (!Array.isArray(page.searches)) throw new Error(`${ep.label}: list_logged_searches returned no list of searches (${text.slice(0, 80)}).`);
+  return { searches: page.searches, truncated: page.truncated === true };
 }
 
 /**
@@ -594,8 +609,10 @@ export interface RetrievalRow {
   onlyA: string[];
   reordered: boolean;
   changed: boolean;
-  /** Set when the row could not be replayed (one brain refused or failed the query); the reason. A skipped row never counts as changed. */
+  /** Set when the row could not be compared (a brain refused or failed the query); the reason. A skipped row never counts as changed. */
   skipped?: string;
+  /** Set when one brain failed the query and the other answered it: which one failed. Both failing is a plain skip. */
+  failedOn?: "a" | "b";
 }
 
 export interface Comparison {
@@ -686,14 +703,24 @@ export async function compareBrains(
   if (plan.length || opts.fromLog || opts.sourceError) {
     const rows: RetrievalRow[] = [];
     for (const { query, arm } of plan) {
-      // One query one brain refuses (an egress-gated embedding) or a hybrid arm a
-      // peer has no provider for must not abort the whole compare — mark the row
-      // skipped-with-reason and go on, the way newestCapture degrades (review pass 1).
-      try {
-        const [ida, idb] = await Promise.all([searchIds(a, arm, query), searchIds(b, arm, query)]);
-        rows.push(diffRow(query, arm, ida, idb));
-      } catch (e) {
-        rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: (e as Error).message });
+      // One query a brain refuses (an egress-gated embedding) or fails must not
+      // abort the whole compare — mark the row skipped-with-reason and go on,
+      // the way newestCapture degrades (review pass 1). When only one brain
+      // failed it, that brain is named: the other answered, so the two differ
+      // (SMD-2875: a canary whose search broke is a failed gate, not a skip).
+      const [ra, rb] = await Promise.allSettled([searchIds(a, arm, query), searchIds(b, arm, query)]);
+      if (ra.status === "fulfilled" && rb.status === "fulfilled") {
+        rows.push(diffRow(query, arm, ra.value, rb.value));
+      } else {
+        // A search's error already starts with its brain's label (callTool's).
+        const why = (r: PromiseSettledResult<string[]>, ep: BrainEndpoint) => {
+          if (r.status !== "rejected") return null;
+          const msg = (r.reason as Error).message;
+          return msg.startsWith(`${ep.label}:`) ? msg : `${ep.label}: ${msg}`;
+        };
+        const reason = [why(ra, a), why(rb, b)].filter(Boolean).join("; ");
+        const failedOn = ra.status === "fulfilled" ? "b" : rb.status === "fulfilled" ? "a" : undefined;
+        rows.push({ query, arm, a: [], b: [], onlyA: [], onlyB: [], reordered: false, changed: false, skipped: reason, ...(failedOn ? { failedOn } : {}) });
       }
     }
     retrieval = { rows, arms: [...new Set(plan.map((p) => p.arm))], queries: plan.length, source: opts.source ?? "the supplied queries", truncated: opts.truncated, sourceError: opts.sourceError };
@@ -836,24 +863,30 @@ export function renderComparison(c: Comparison): string {
     lines.push("  skipped — pass --replay with --query/--queries-file, or --from-log <brain> to source the queries from a brain's own log.");
   } else if (c.retrieval.sourceError) {
     // A --from-log source that resolved but whose log could not be read.
-    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError}; identity and freshness above still compare.`);
+    lines.push(`  could not read ${c.retrieval.source} — ${c.retrieval.sourceError.replace(/\.$/, "")}; identity and freshness above still compare.`);
   } else if (c.retrieval.queries === 0) {
     // A --from-log source that yielded nothing (OB1_QUERY_LOG off, or an empty window).
     lines.push(`  no queries — ${c.retrieval.source} logged no searches (OB1_QUERY_LOG off, or none in the window).`);
   } else {
     const moved = c.retrieval.rows.filter((r) => r.changed);
-    const skipped = c.retrieval.rows.filter((r) => r.skipped);
+    // A row one brain failed and the other answered is a difference, shown
+    // apart from the rows both failed (review pass 2).
+    const oneSided = c.retrieval.rows.filter((r) => r.failedOn !== undefined);
+    const skipped = c.retrieval.rows.filter((r) => r.skipped && r.failedOn === undefined);
     const trunc = c.retrieval.truncated ? " (window truncated — the most recent were replayed)" : "";
     const hybridNote = c.retrieval.arms.includes("hybrid") ? " (hybrid = the vector arm, embedded by each brain; until SMD-2037 a hybrid diff can be HNSW-GUC-induced)" : "";
     // "replays" not "queries": the count is query-arm pairs (a query on two arms is two).
     lines.push(`  arms: ${c.retrieval.arms.join(", ")} over ${c.retrieval.queries} replay${c.retrieval.queries === 1 ? "" : "s"} from ${c.retrieval.source}${trunc}${hybridNote}`);
     lines.push(`  (these are real searches — a brain running OB1_QUERY_LOG=on records them in query_log, telemetry, not the thoughts corpus.)`);
     for (const r of skipped) lines.push(`  ~ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: skipped — ${r.skipped}`);
-    if (moved.length === 0) {
+    for (const r of oneSided) lines.push(`  ✗ [${r.arm}] ${JSON.stringify(r.query.slice(0, 60))}: ${r.failedOn === "a" ? "a failed, b answered" : "b failed, a answered"} — ${r.skipped}`);
+    if (oneSided.length > 0 && moved.length === 0) {
+      lines.push(`  ${oneSided.length} replay${oneSided.length === 1 ? "" : "s"} failed on one brain and answered on the other — a delta.`);
+    } else if (moved.length === 0) {
       // All rows skipped is not "no delta" — nothing was compared (review pass 3).
       const allSkipped = skipped.length > 0 && skipped.length === c.retrieval.rows.length;
       lines.push(allSkipped
-        ? `  nothing compared — all ${skipped.length} replay${skipped.length === 1 ? "" : "s"} were skipped.`
+        ? skipped.length === 1 ? "  nothing compared — the one replay was skipped." : `  nothing compared — all ${skipped.length} replays were skipped.`
         : `  no delta — b returns the same ids as a for every replay${skipped.length ? ` (${skipped.length} skipped)` : ""}.`);
     } else {
       for (const r of moved) {
@@ -944,6 +977,119 @@ export async function runCompare(args: CompareArgs): Promise<number> {
     c.identity.length > 0 ||
     (c.migrationDelta ?? 0) !== 0 ||
     freshDelta ||
-    (c.retrieval?.rows.some((r) => r.changed) ?? false);
+    (c.retrieval?.rows.some((r) => r.changed || r.failedOn !== undefined) ?? false);
   return anyDelta ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The tier gate — db/tier.ts --replay and --diff (SMD-2875).
+// ---------------------------------------------------------------------------
+
+/** --replay and --diff: stable's logged searches replayed on stable and the canary, each over HTTP. */
+export interface TierReplayArgs {
+  /** Stable: the brain whose logged searches are replayed. */
+  from: string;
+  /** The canary, replayed beside it. */
+  to: string;
+  fromKey?: string;
+  toKey?: string;
+  /** The window for stable's logged searches (ISO-8601). */
+  since?: string;
+  /** --diff: exit 1 when a ranking moved and 3 when nothing was compared; --replay reports, and both exit 1 on a log not read or a search one brain failed. */
+  gate: boolean;
+  json: boolean;
+}
+
+/**
+ * What a log-sourced replay found: `unread` when stable's log could not be
+ * read; `failed` when a brain failed a search the other answered (a canary
+ * whose search broke must not pass as a skip); `empty` when no search was
+ * compared.
+ */
+export type ReplayVerdict = "moved" | "unmoved" | "empty" | "unread" | "failed";
+
+export function replayVerdict(r: NonNullable<Comparison["retrieval"]>): ReplayVerdict {
+  if (r.sourceError) return "unread";
+  if (r.rows.some((row) => row.failedOn !== undefined)) return "failed";
+  const ran = r.rows.filter((row) => !row.skipped);
+  if (ran.length === 0) return "empty";
+  return ran.some((row) => row.changed) ? "moved" : "unmoved";
+}
+
+/**
+ * The gate's lines under the report: the window and the counts, then the
+ * verdict in words. A window that compared nothing says why, so --diff's exit
+ * 3 is not read as a pass (SMD-2182).
+ */
+export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels: { stable: string; canary: string }, since: string | undefined, gate: boolean, noArm = 0): string[] {
+  const verdict = replayVerdict(r);
+  if (verdict === "unread") return [`nothing replayed: the log of ${labels.stable} could not be read.`];
+  const ran = r.rows.filter((row) => !row.skipped);
+  // A skip is a search both brains failed; one failed on one brain alone is counted apart (review pass 3).
+  const oneSided = r.rows.filter((row) => row.failedOn !== undefined).length;
+  const skipped = r.rows.length - ran.length - oneSided;
+  // The window as stable's log gives it: --since's, else its most recent page.
+  const window = since !== undefined ? `since ${since} (--since)` : `in the most recent page of ${labels.stable}'s log`;
+  // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on.
+  const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${noArm ? `; ${noArm} more logged with no arm, before migration 045, not replayed` : ""})`];
+  const moved = ran.filter((row) => row.changed).length;
+  if (verdict === "failed") {
+    const on = (side: "a" | "b") => r.rows.filter((row) => row.failedOn === side).length;
+    const parts = [on("b") ? `${labels.canary} failed ${on("b")} that ${labels.stable} answered` : "", on("a") ? `${labels.stable} failed ${on("a")} that ${labels.canary} answered` : ""].filter(Boolean);
+    if (moved) lines.push(`what moved: ${moved} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
+    lines.push(`failed: ${parts.join(", and ")} (under Retrieval, above) — not a pass.`);
+  } else if (verdict === "empty") {
+    lines.push(r.queries === 0
+      ? noArm
+        ? `nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on.`
+        : `nothing to compare: ${labels.stable} logged no searches in the window. A brain logs them only with OB1_QUERY_LOG=on${since !== undefined ? ", and an earlier --since widens the window" : ""}.`
+      : "nothing to compare: both brains failed every search in the window.");
+  } else if (verdict === "unmoved") {
+    const scope = skipped ? `the ${ran.length} replayed (${skipped} skipped, not compared)` : ran.length === 1 ? "the one replayed" : `all ${ran.length} replayed`;
+    lines.push(gate ? `what moved: nothing — ${labels.canary} returns ${labels.stable}'s ids on ${scope}.` : `no ranking moved on ${scope}.`);
+  } else {
+    lines.push(`what moved: ${moved} of ${ran.length} replayed searches returned different ids (under Retrieval, above).`);
+  }
+  return lines;
+}
+
+/**
+ * Run --replay or --diff end to end: stable's logged searches, each on the arm
+ * that ran it, replayed on both brains as a client searches, the ids diffed.
+ * Neither brain's database is reached, and each embeds its own query. Returns
+ * the exit code: 1 when stable's log could not be read or a brain failed a
+ * search the other answered, and for --diff 1 when a ranking moved, 3 when
+ * nothing was compared.
+ */
+export async function runTierReplay(args: TierReplayArgs): Promise<number> {
+  const how: AskedBy = { verb: args.gate ? "--diff" : "--replay", keys: "--from-key/--to-key" };
+  const envKey = process.env.OB1_COMPARE_KEY;
+  const [stable, canary] = await Promise.all([
+    resolveBrain(args.from, args.fromKey, envKey, how),
+    resolveBrain(args.to, args.toKey, envKey, how),
+  ]);
+  let opts: Parameters<typeof compareBrains>[2];
+  let noArm = 0;
+  try {
+    const page = await fetchLoggedSearches(stable, args.since ?? null);
+    opts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${stable.label}`, truncated: page.truncated };
+    // Distinct, as the plan's own count is: one query logged a hundred times with no arm is one.
+    noArm = new Set(page.searches.filter((s) => s.arm === null && typeof s.query === "string" && s.query.length > 0).map((s) => s.query)).size;
+  } catch (e) {
+    opts = { fromLog: [], source: `the log of ${stable.label}`, sourceError: (e as Error).message };
+  }
+  const c = await compareBrains(stable, canary, opts);
+  // A plan from a log always reports, an empty one included.
+  const retrieval = c.retrieval!;
+  const verdict = replayVerdict(retrieval);
+  if (args.json) {
+    console.log(JSON.stringify({ ...c, gate: verdict }, null, 2));
+  } else {
+    console.log(renderComparison(c));
+    console.log("");
+    for (const line of replayGateLines(retrieval, { stable: stable.label, canary: canary.label }, args.since, args.gate, noArm)) console.log(line);
+  }
+  if (verdict === "unread" || verdict === "failed") return 1;
+  if (!args.gate) return 0;
+  return verdict === "moved" ? 1 : verdict === "empty" ? 3 : 0;
 }

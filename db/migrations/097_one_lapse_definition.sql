@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 096: one definition for 082's lapse — ob1_lapse_walk is the walk
+-- Migration 097: one definition for 082's lapse — ob1_lapse_walk is the walk
 --                the trigger clears and the review listing's read returns,
 --                so the listing's preview of an accept's lapses is no longer
 --                a hand-kept copy of 092's trigger (SMD-3035)
@@ -88,9 +88,9 @@
 --   default; no grant group in db/config.mjs names any of them. Re-applying
 --   092 or 094 restores its own body; this file, applied after it, puts the
 --   walk back — the re-apply order.
---   test-schema [86], test-upgrade [20aq]; the behaviour cells of the
+--   test-schema [87], test-upgrade [20aq]; the behaviour cells of the
 --   trigger's [72] and [82] and the read's [84] unchanged (only their
---   last-definer asserts name 096).
+--   last-definer asserts name 097).
 --
 -- Prerequisites
 --   092 (ob1_lapse_capture_pointers, ob1_capture_taken_by_log), 094
@@ -104,7 +104,7 @@ BEGIN
   IF to_regprocedure('ob1_lapse_capture_pointers()') IS NULL
      OR to_regprocedure('ob1_capture_taken_by_log(uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 096 needs 092 (ob1_lapse_capture_pointers, ob1_capture_taken_by_log); this schema lacks it',
+      MESSAGE = 'migration 097 needs 092 (ob1_lapse_capture_pointers, ob1_capture_taken_by_log); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -112,7 +112,7 @@ BEGIN
   IF to_regprocedure('ob1_accept_takes(uuid, uuid)') IS NULL
      OR to_regprocedure('ob1_accept_lapses(uuid, uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 096 needs 094 (ob1_accept_takes, ob1_accept_lapses); this schema lacks it',
+      MESSAGE = 'migration 097 needs 094 (ob1_accept_takes, ob1_accept_lapses); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -188,7 +188,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_walk(uuid, uuid) IS
-  'The pointers 082''s lapse clears for an update event that leaves p_row''s pointer at p_onto, as [{id, onto}] in the order they are cleared — none unless the row is taken now (ob1_accept_takes: 082''s log, or its chain read with the new pointer reaching outside its capturer''s own; past the bound, not taken); else, up from the row, each row''s capturer''s capture-scoped pointers onto it that no update has re-pointed (never p_row''s own), on through the pointers that stay and from a cleared row 082''s log had already taken, to 1,000 rows above it. The one walk ob1_lapse_capture_pointers clears and ob1_accept_lapses returns. Migration 096 / SMD-3035.';
+  'The pointers 082''s lapse clears for an update event that leaves p_row''s pointer at p_onto, as [{id, onto}] in the order they are cleared — none unless the row is taken now (ob1_accept_takes: 082''s log, or its chain read with the new pointer reaching outside its capturer''s own; past the bound, not taken); else, up from the row, each row''s capturer''s capture-scoped pointers onto it that no update has re-pointed (never p_row''s own), on through the pointers that stay and from a cleared row 082''s log had already taken, to 1,000 rows above it. The one walk ob1_lapse_capture_pointers clears and ob1_accept_lapses returns. Migration 097 / SMD-3035.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The trigger clears what the walk returns.
@@ -210,7 +210,7 @@ BEGIN
   -- clears every capture-scoped pointer the capturer wrote onto T and no
   -- update has re-pointed since. 092 (SMD-2708): taken by 082's rule or by
   -- T's chain reaching outside, and then T and every row above it through
-  -- the pointers that stay. 096 (SMD-3035): what ob1_lapse_walk returns.
+  -- the pointers that stay. 097 (SMD-3035): what ob1_lapse_walk returns.
   -- The lapse's own clearing event, named before it was appended, its diff
   -- the clear and nothing else, from inside a trigger: the walk already
   -- went on from it. A write function's event fires at depth 1, so a flag
@@ -273,7 +273,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_capture_pointers() IS
-  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, clears what ob1_lapse_walk returns for the row''s pointer as the event leaves it — each pointer, re-read under a row lock and left when it moved or an update has written it since, an update event of its own under the current actor, appended and projected, in the walk''s order. Its own clearing events do not fire it again: each is named in ob1.lapse_clearing before it is appended, and only a firing from inside a trigger on an event that is that clear and nothing else reads it (a flag set by hand turns no write function''s lapse off); the walk went on from them. A pointer a write key set is never lapsed. Migration 082 / SMD-2638; up the chain 092 / SMD-2708; the one walk 096 / SMD-3035.';
+  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, clears what ob1_lapse_walk returns for the row''s pointer as the event leaves it — each pointer, re-read under a row lock and left when it moved or an update has written it since, an update event of its own under the current actor, appended and projected, in the walk''s order. Its own clearing events do not fire it again: each is named in ob1.lapse_clearing before it is appended, and only a firing from inside a trigger on an event that is that clear and nothing else reads it (a flag set by hand turns no write function''s lapse off); the walk went on from them. A pointer a write key set is never lapsed. Migration 082 / SMD-2638; up the chain 092 / SMD-2708; the one walk 097 / SMD-3035.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The read returns what the walk returns.
@@ -289,7 +289,7 @@ DECLARE
 BEGIN
   -- ob1:accept-lapses-read — 082's lapse for the event an accept making
   -- p_side stand over p_other appends (p_side.supersedes = p_other): the
-  -- walk the trigger clears (ob1_lapse_walk, 096), once the accept writes
+  -- walk the trigger clears (ob1_lapse_walk, 097), once the accept writes
   -- an event at all. No event, no lapse (094's review pass 2): 029's accept
   -- writes only onto a NULL pointer (one already p_other writes nothing, a
   -- third thought is ALREADY_SUPERSEDES), and update_thought refuses a loop
@@ -314,10 +314,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_accept_lapses(uuid, uuid) IS
-  'The pointers 082''s lapse would clear if an accept made p_side supersede p_other, as [{id, onto}] — the thought whose pointer is cleared and the thought it pointed at: none when the accept writes no event (p_side already points somewhere: 029 writes nothing or refuses ALREADY_SUPERSEDES; the pointer would close a loop, or the chain below p_other runs past update_thought''s 1,001-row walk: WOULD_CYCLE); else ob1_lapse_walk(p_side, p_other), the walk the trigger clears. Migration 094 / SMD-2707; the one walk 096 / SMD-3035.';
+  'The pointers 082''s lapse would clear if an accept made p_side supersede p_other, as [{id, onto}] — the thought whose pointer is cleared and the thought it pointed at: none when the accept writes no event (p_side already points somewhere: 029 writes nothing or refuses ALREADY_SUPERSEDES; the pointer would close a loop, or the chain below p_other runs past update_thought''s 1,001-row walk: WOULD_CYCLE); else ob1_lapse_walk(p_side, p_other), the walk the trigger clears. Migration 094 / SMD-2707; the one walk 097 / SMD-3035.';
 
 -- ---------------------------------------------------------------------------
 -- 4. The gate's comment.
 -- ---------------------------------------------------------------------------
 COMMENT ON FUNCTION ob1_accept_takes(uuid, uuid) IS
-  'Whether an accept making p_side supersede p_other would take p_side from its capturer: 092''s taken read (ob1_capture_taken_by_log, or ob1_chain_reaches_outside with p_side''s pointer read as p_other; past the bound, not taken, as the lapse reads it). False for a thought no attributable agent captured. The gate of ob1_lapse_walk, so of the lapse and of ob1_accept_lapses alike (096), and the listing''s WRITER flag reads it between one capturer''s two thoughts. Migration 094 / SMD-2707; the lapse''s gate 096 / SMD-3035.';
+  'Whether an accept making p_side supersede p_other would take p_side from its capturer: 092''s taken read (ob1_capture_taken_by_log, or ob1_chain_reaches_outside with p_side''s pointer read as p_other; past the bound, not taken, as the lapse reads it). False for a thought no attributable agent captured. The gate of ob1_lapse_walk, so of the lapse and of ob1_accept_lapses alike (097), and the listing''s WRITER flag reads it between one capturer''s two thoughts. Migration 094 / SMD-2707; the lapse''s gate 097 / SMD-3035.';
