@@ -12114,7 +12114,6 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     wakeReads.length = 0;
     const midRun = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
     let held3At: string | undefined;
-    let prog3: { stops: number; stalled: number } | undefined;
     const midJoined = await pollUntil(async () => {
       if (judged.length === 0 || !midLines.some((x) => /consolidating first/.test(x.l))) return false;
       held3At = await status(held3);
@@ -12125,7 +12124,7 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await (stopMid as PassStop | null)?.();
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
-    [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as typeof prog3[];
+    const [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number } | undefined)[];
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
     // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];

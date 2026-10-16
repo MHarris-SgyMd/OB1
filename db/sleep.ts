@@ -284,6 +284,8 @@ const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claimed > 0 && p.pending + p.claimed === p.stalled;
 /** Extraction's worker ids in this process (extract-entities.ts's `workerId`, heldHere's prefix). */
 const MINE = `extract-${hostname()}-${process.pid}-`;
+/** The work extraction has that no stall holds back: rows pending that are not stalled, and thoughts not yet in the pool (none in a claims-only read). */
+const newerWork = (p: Pool): number => p.pending - p.stalledPending + p.unpooled;
 /**
  * Extraction has only stalled thoughts in hand while newer work waits behind
  * them — a row pending that is not stalled, or a thought not yet in the pool:
@@ -292,7 +294,7 @@ const MINE = `extract-${hostname()}-${process.pid}-`;
  * would not join past it either, and both waited out the window in hand.
  * In hand is this process's: a lapsed lease another left is not (review pass 2).
  */
-const queuesBehind = (p: Pool): boolean => p.mine > 0 && p.stalledMine === p.mine && p.pending - p.stalledPending + p.unpooled > 0;
+const queuesBehind = (p: Pool): boolean => p.mine > 0 && p.stalledMine === p.mine && newerWork(p) > 0;
 
 /**
  * 093's rows that speak for the thought as it stands and the windowing in
@@ -1141,9 +1143,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // Only where the stalled thoughts can be told and moved behind the
           // newer work: otherwise one is claimed first, set aside at the next
           // poll, and let out again a minute on (review pass 1).
-          if (ex.stalledRead && ex.pending > ex.stalledPending && (reorders = await stoppedLast())) {
+          if (ex.stalledRead && newerWork(ex) > 0 && (reorders = await stoppedLast())) {
             if (stopping) return stopped();
-            out(`  consolidation waits for its provider — extracting the ${ex.pending - ex.stalledPending} newer thought(s) meanwhile; the stalled thought(s) wait for consolidation`);
+            out(`  consolidation waits for its provider — extracting the ${newerWork(ex)} newer thought(s) meanwhile; the stalled thought(s) wait for consolidation`);
             // One worker, so the stalled thought is not claimed beside the
             // newer work, whose call it would hold on a one-slot model (review pass 1).
             start("extract", 1);
@@ -1165,7 +1167,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         const stalledInHand = !ex.stalledRead || ex.stalledMine > 0;
         // (Two statements: a claim reaped between them reads more stalled
         // pending than pending, so `<=`: review pass 2.)
-        if (stalledInHand || (ex.mine === 0 && ex.pending <= ex.stalledPending)) {
+        if (stalledInHand || (ex.mine === 0 && newerWork(ex) <= 0)) {
           out(`  extraction ${!ex.stalledRead ? "cannot tell the stalled thought(s) now" : stalledInHand ? "has reached the stalled thought(s)" : "has done the newer work"} — set aside again until consolidation drains`);
           if (await setAside()) return stopped();
           aside = false;
@@ -1176,11 +1178,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // The let-out ran one worker: with more, it ends through the
           // set-aside once it holds nothing, so the drain's resume starts them
           // all, where it ran one for the rest of the sleep (review pass 2).
-          if (drained(co) && WORKERS === 1) aside = false;
-          else if (drained(co) && ex.mine === 0) {
-            if (await setAside()) return stopped();
-            aside = false;
-            parked = true;
+          if (drained(co)) {
+            if (WORKERS === 1) aside = false;
+            else if (ex.mine === 0) {
+              if (await setAside()) return stopped();
+              aside = false;
+              parked = true;
+            }
           }
         }
       } else if (!consolidating || !FOLLOW) {
@@ -1215,7 +1219,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // has its turn then, and such a capture goes first next sleep. The
           // stop counts on the thought as any hard stop does — a stall only
           // past the floor (093), and this one is stalled already.
-          out(`  extraction has only stalled thought(s) in hand, and ${pools.extract.pending - pools.extract.stalledPending + pools.extract.unpooled} newer thought(s) wait behind — extraction restarts, the stalled thought(s) after them`);
+          out(`  extraction has only stalled thought(s) in hand, and ${newerWork(pools.extract)} newer thought(s) wait behind — extraction restarts, the stalled thought(s) after them`);
           if (await setAside()) return stopped();
           behindPolls = 0;
           restartedAt = Date.now();
