@@ -2409,27 +2409,36 @@ export async function main(argv) {
     let cfg;
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
-    let tools;
-    try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
-    // The summary mode, and whether a configured model would run — read from the
-    // config, the model endpoint not called (SMD-2014).
-    if (cfg.summary === "model") console.log(modelStatusLine(cfg));
     // An answer from the root through the proxy's legacy route works until
     // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
     // A tier's route through stable's proxy closes then too (SMD-3057), and
-    // its /mcp is stable's: the tier itself is the url to set. The Link says
-    // which route answered: a tier's names the canary's section, and any
-    // other is the root's, stable's, whatever the url's path. With none,
-    // the url's tier path decides, in case as the routers match it.
-    const u = cfg.deprecation && new URL(cfg.url); // endpointOf made it, so it parses
-    const tierRoute = cfg.deprecation && (/rel="deprecation"/.test(cfg.deprecationLink) ? /#a-canary-beside-the-stack>/.test(cfg.deprecationLink) : /^\/(canary|working)\/mcp(\/|$)/.test(u.pathname));
-    if (tierRoute) {
-      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
-    } else if (cfg.deprecation) {
-      let to = "its /mcp";
-      if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);
-      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${urlSource()} (deploy/README.md, "Moving a client to /mcp")`);
-    }
+    // its /mcp is stable's: the tier itself is the url to set. Each route's
+    // Deprecation date is its own, stamped by a release and never moved
+    // (RFC 9745: when the deprecation began), so it says which answered:
+    // the tiers' @1792108800, the root's @1790899200. Another date falls
+    // back to the Link's anchor, and with no deprecation Link to the url's
+    // tier path, in case as the routers match it. Said on a refused answer
+    // too: a tier route with no tier behind it is a 404, and its client is
+    // the one to tell.
+    const warnDeprecated = () => {
+      if (!cfg.deprecation) return;
+      const u = new URL(cfg.url); // endpointOf made it, so it parses
+      const link = cfg.deprecationLink ?? "";
+      const tierRoute = cfg.deprecation === "@1792108800" || (cfg.deprecation !== "@1790899200" && (/rel="deprecation"/.test(link) ? /#a-canary-beside-the-stack>/.test(link) : /^\/(canary|working)\/mcp(\/|$)/.test(u.pathname)));
+      if (tierRoute) {
+        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
+      } else {
+        let to = "its /mcp";
+        if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);
+        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${urlSource()} (deploy/README.md, "Moving a client to /mcp")`);
+      }
+    };
+    let tools;
+    try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); warnDeprecated(); return 1; }
+    // The summary mode, and whether a configured model would run — read from the
+    // config, the model endpoint not called (SMD-2014).
+    if (cfg.summary === "model") console.log(modelStatusLine(cfg));
+    warnDeprecated();
     if (tools.join() === "capture_thought") { console.log(`ok: ${shownUrl(cfg.url)} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
     if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
     console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);

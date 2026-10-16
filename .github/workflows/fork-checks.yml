@@ -1924,7 +1924,7 @@ jobs:
             for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
               bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
               # tier-off's 404 is no tier route's, so no tier deprecation (SMD-3057).
-              if grep -qi '^deprecation:' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "tier-off's 404 at $p$1 carries a Deprecation header" >&2; exit 1; fi
+              if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "tier-off's 404 at $p$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi
             done
           }
           offprefix ""
