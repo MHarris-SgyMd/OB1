@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2899 assertions: 2899 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2900 assertions: 2900 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports ninety-eight (98) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -1648,14 +1648,15 @@ at none, 0.6 ms at 10,000). The index holds only those rows, so it stays a
 page or two on a healthy brain; HOT updates are unchanged, since `embedding`
 was already an indexed column (the HNSW index's). It is built inside the
 migrator's transaction, writes to `thoughts` waiting for it (SHARE) — one
-read of the heap, 64–86 ms at a million thoughts; a brain of hundreds of
-millions can build it by hand first, `CONCURRENTLY` under this name and in this shape, and the
-file keeps it. Anything else under the name — an INVALID index (a
-`CONCURRENTLY` build that did not finish, which the planner ignores) or one
-of another shape — is refused by name rather than recorded as applied over
-it. Needs nothing past 001; a re-apply is a no-op. test-schema [88] (the
-definition, both refusals), test-store-sql [18] (the store's two page statements and the count read
-through it, neither page a scan of `thoughts`).
+read of the heap, 64–86 ms at a million thoughts, about a second at ten
+million; a brain past that can build it by hand first, `CONCURRENTLY` under this name and in this shape, and the
+file keeps it. Anything else under the name in `thoughts`' schema — an
+INVALID index (a `CONCURRENTLY` build that did not finish, which the planner
+ignores), one of another shape, a relation that is not an index — is refused
+by name, with the statement that clears it, rather than recorded as applied
+over it; another schema's index under the name is never taken for it. Needs nothing past 001; a re-apply is a no-op. test-schema [88] (the
+definition, the refusals, another schema's index), test-store-sql [18] (the store's two page statements and the count read
+through it, each reading only its own rows' entries).
 
 ## What changed relative to the guide
 
@@ -4673,7 +4674,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2899 assertions, PGlite, no container
+bun test-schema.ts                          # 2900 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1376 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

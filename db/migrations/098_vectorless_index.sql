@@ -31,10 +31,11 @@
 --   Built inside the migrator's transaction, so writes to thoughts wait for
 --   it (SHARE): one read of the heap, entries for the vectorless ones only
 --   — 64-86 ms at a million thoughts, measured (340 MB of heap; the null
---   test reads no vector's TOAST). A brain of hundreds of millions can
---   build it by hand first, CONCURRENTLY under this name and
+--   test reads no vector's TOAST), so about a second at ten million. A
+--   brain past that can build it by hand first, CONCURRENTLY under this name and
 --   in this shape, and the file then keeps it. Anything else under the name
---   is refused, naming it, rather than recorded as applied: IF NOT EXISTS
+--   in thoughts' schema is refused, naming it and the statement that clears
+--   it, rather than recorded as applied: IF NOT EXISTS
 --   alone would accept an INVALID index (an interrupted CONCURRENTLY build,
 --   which the planner ignores) or one of another shape, and the mender
 --   would go on reading every row with nothing saying so (review pass 1).
@@ -45,24 +46,30 @@
 
 DO $vectorless$
 DECLARE
+  v_oid   oid;
   v_kind  "char";
   v_def   text;
   v_valid boolean;
 BEGIN
-  SELECT c.relkind, pg_get_indexdef(c.oid), i.indisvalid INTO v_kind, v_def, v_valid
+  -- By name in thoughts' own schema, never the search path's first match: a
+  -- brain without the index would otherwise find another schema's under the
+  -- name, keep it, and be recorded with none on thoughts (review pass 2).
+  SELECT c.oid, c.relkind, pg_get_indexdef(c.oid), i.indisvalid INTO v_oid, v_kind, v_def, v_valid
     FROM pg_class c LEFT JOIN pg_index i ON i.indexrelid = c.oid
-   WHERE c.oid = to_regclass('thoughts_vectorless_idx');
-  IF v_kind IS NULL THEN
+   WHERE c.relname = 'thoughts_vectorless_idx'
+     AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass);
+  IF v_oid IS NULL THEN
     CREATE INDEX thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;
+    v_oid := (SELECT c.oid FROM pg_class c WHERE c.relname = 'thoughts_vectorless_idx'
+                AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass));
   ELSIF v_kind <> 'i' OR v_def !~ '^CREATE INDEX thoughts_vectorless_idx ON (\w+\.)?thoughts USING btree \(id\) WHERE \(embedding IS NULL\)$' THEN
-    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
+    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it (an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running) and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
       USING ERRCODE = 'object_not_in_prerequisite_state';
   ELSIF NOT v_valid THEN
-    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build that did not finish, or one still running; the planner reads nothing from it. Once no build is running, drop it (DROP INDEX thoughts_vectorless_idx) and re-run, or build it again CONCURRENTLY first.'
+    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running (pg_stat_progress_create_index lists a running one); the planner reads nothing from it. Once no build is running, finish it with REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx, or DROP INDEX CONCURRENTLY thoughts_vectorless_idx, and re-run.'
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
+  EXECUTE format('COMMENT ON INDEX %s IS %L', v_oid::regclass,
+    'The thoughts with no vector, in id order: the vector mender''s page (listVectorless, both forms) and brain_info''s vectorless count read it. Migration 098 / SMD-3056.');
 END
 $vectorless$;
-
-COMMENT ON INDEX thoughts_vectorless_idx IS
-  'The thoughts with no vector, in id order: the vector mender''s page (listVectorless, both forms) and brain_info''s vectorless count read it. Migration 098 / SMD-3056.';
