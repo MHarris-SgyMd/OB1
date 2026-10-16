@@ -35,6 +35,7 @@ import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readD
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
+import { mendIntervalFrom } from "./core/mend.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -105,7 +106,8 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
      WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
   if (mem?.other) problems.push(`${login} is a member of ${mem.other}: a plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
   if (mem?.inherited) problems.push(`${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
-  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login})`);
+  // pg_stat_statements' views reach it through PUBLIC, which a restore without privileges gives them back to; migrate.ts takes them back on its next plain run, as their owner (SMD-1849 PR 3b review pass 2: the REVOKE named here changed nothing).
+  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login}, or FROM PUBLIC where the grant is PUBLIC's${/\bpg_stat_statements(_info)?\b/.test(l.reaches) ? "; for pg_stat_statements' views, run a plain migrate.ts as their owner or a superuser, which takes them back from PUBLIC" : ""})`);
   if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
   else {
     const { SQL } = await import("bun");
@@ -790,7 +792,11 @@ if (!egress.problems.length) {
   }
 }
 /** What a refused call costs, per endpoint, for the rows below. */
-const EMB_REFUSED = "captures land without a vector, findable by exact text only, until a re-embed pass against an endpoint the gate allows";
+// What the servers do with such a capture depends on the mender's knob (SMD-2889).
+const MEND = mendIntervalFrom(env.OB1_VECTOR_MEND_INTERVAL);
+const EMB_REFUSED = MEND.intervalS > 0
+  ? "captures land without a vector, findable by exact text only, until the gate allows the call (a changed policy takes a restart) — the servers' vector mender then embeds them (SMD-2889)"
+  : "captures land without a vector, findable by exact text only — OB1_VECTOR_MEND_INTERVAL is off, so only a db/reembed.ts pass against an endpoint the gate allows embeds them";
 const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what
@@ -862,6 +868,17 @@ if (env.OB1_STOP_GRACE) {
   } else {
     add("stop grace", "ok", `${grace.graceS} s (OB1_STOP_GRACE) — a stop drains what is in flight for up to ${grace.drainBoundMs / 1000} s`);
   }
+}
+
+// ── Vector mender ────────────────────────────────────────────────────────────
+
+// Only when set, as the stop grace is (SMD-2889): unset is every 60 s. A value
+// the servers cannot read is the default there, with a warning in their log
+// that an operator may never read — said here as well.
+if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !== "") {
+  if (MEND.problem) add("vector mender", "warn", MEND.problem, "Set OB1_VECTOR_MEND_INTERVAL to whole seconds from 1 to 86400, or off, or unset it for 60.");
+  else if (MEND.intervalS === 0) add("vector mender", "ok", "off (OB1_VECTOR_MEND_INTERVAL) — a thought saved without a vector keeps none until a db/reembed.ts pass gives it one");
+  else add("vector mender", "ok", `every ${MEND.intervalS} s (OB1_VECTOR_MEND_INTERVAL) — the servers embed the thoughts saved without a vector once the provider answers and the egress gate allows`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────

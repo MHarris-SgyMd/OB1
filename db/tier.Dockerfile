@@ -1,12 +1,13 @@
-# The environment db/tier.ts runs in: open-brain-tier (SMD-2036).
+# The environment db/tier.ts runs in: <project>-tier (SMD-2036, SMD-2875).
 #
 # tier.ts --refresh runs under Bun and shells to pg_dump / pg_restore, and no
 # image the stack runs carries both: oven/bun has no Postgres client, the
 # pgvector image has no Bun, and a host need not have either at the right major.
-# This is the pair, and nothing else — no code is copied in. deploy/tier.sh
-# mounts the checkout read-only and runs the tree's own tier.ts and migrate.ts,
-# because a refresh migrates the copy forward WITH THAT TREE; an image of the
-# code would migrate with whatever tree it was built from.
+# This is the pair, and nothing else — no code is built in. deploy/tier.sh
+# copies the tree's own code into each container it makes from this image
+# (the files git lists, never the checkout: SMD-2875) and runs its tier.ts and
+# migrate.ts, because a refresh migrates the copy forward WITH THAT TREE; an
+# image of the code would migrate with whatever tree it was built from.
 #
 # deploy/tier.sh builds it from stdin with no context (`build - < this file`), so
 # there is no .dockerignore to keep in step, and runs it with the command; the

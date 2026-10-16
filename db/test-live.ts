@@ -33,13 +33,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlin
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
@@ -62,7 +64,7 @@ import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, settleRefreshed, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, parsePromoteSource, parseRefreshSource, promote, promoteSource, promoteTarget, refresh, refreshSource, refreshTarget, refreshToolsReady, sameDatabase, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -7564,18 +7566,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806); the CLI reports its window, exits 3 on nothing compared, and names a side that does not answer (SMD-2182)");
+console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
 {
-  // The live replay gate (SMD-1295's live half): stable logs a search and the ids
-  // it returned; the canary, refreshed from stable, replays that search and its
-  // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
-  // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. A real pg_dump refresh needs client tools this job
-  // does not have: the deploy-stack job runs one through deploy/tier.sh
-  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
-  // the guards run before any tool is looked for. The hybrid arm needs a
-  // provider, the same split as eval-replay.ts vs test-replay.ts.
-  await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
+  // A real pg_dump refresh needs client tools this job does not have: the
+  // deploy-stack-brains job runs one through deploy/tier.sh (SMD-2036), and below,
+  // stand-in tools drive refresh() to its restore and the guards run before
+  // any tool is looked for.
+  await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
       VALUES (${id}::uuid, ${content}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${content}))`;
@@ -7589,19 +7586,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     { id: recordId("fork", "tier-d"), content: "zqdelta — unrelated content about pruning old rows" },
   ];
   for (const c of corpus) await put(sql, c.id, c.content);
-
-  // Log what STABLE returns for each needle — the answer the canary is diffed against.
-  const loggedFor = async (needle: string): Promise<string[]> => {
-    const rows = await sql`SELECT id FROM search_thoughts_keyword(${needle}, 25, 0, '{}'::jsonb)`;
-    const ids = rows.map((r: { id: string }) => r.id);
-    await sql`
-      INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm, tier)
-      VALUES ('search', 'search_thoughts_keyword', NULL, ${needle}, 25, NULL, NULL, '{}'::jsonb, ${`{${ids.join(",")}}`}::uuid[], NULL, 'keyword', 'stable')`;
-    return ids;
-  };
-  const canaryHits = await loggedFor("zqcanary");
-  await loggedFor("zqdelta");
-  assert(canaryHits.length === 3, `stable's "zqcanary" search returned the three matching rows (${canaryHits.length})`);
 
   // Build the canary as a genuinely separate database on this cluster, migrated
   // forward and given the identical corpus — the refresh's shape without pg_dump,
@@ -7618,111 +7602,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     canarySql = new SQL({ url: canaryUrl, max: 4 });
     for (const c of corpus) await put(canarySql, c.id, c.content);
 
-    // An identical canary reproduces stable's rankings — the diff is empty.
-    const clean = await replayAndDiff(sql, canarySql, { since: null });
-    assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
-    assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
-
-    // 059 (SMD-2255): a row logged as arm `current` — search_thoughts with
-    // prefer_current — replays through search_thoughts_current. The canary's
-    // first zqcanary row is stamped a completed ticket, so the two functions
-    // differ: the current replay moves it last, the hybrid keeps it where it
-    // was (first review pass: with nothing demotable the two agreed, and a
-    // replay sending `current` to the hybrid passed). A stub vector stands in
-    // for the provider (the rows carry none, so they rank on the quoted literal).
-    const stub = async () => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return v; };
-    const logged = { id: "00000000-0000-4000-8000-000000002255", query: "\"zqcanary\"", matchCount: 10, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [] };
-    const plainHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const settledId = plainHybrid.ids[0];
-    await canarySql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-9955", "status": "Done", "status_type": "completed"}'::jsonb WHERE id = ${settledId}::uuid`;
-    const asCurrent = await replayOne(canarySql, { ...logged, arm: "current" }, stub);
-    const asHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
-    await canarySql`UPDATE thoughts SET metadata = metadata - 'issue' - 'status' - 'status_type' WHERE id = ${settledId}::uuid`;
-    assert(asCurrent.ran && asCurrent.ids.length === 3 && asHybrid.ids[0] === settledId && asCurrent.ids[2] === settledId
-        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)",
-      `a logged prefer_current search replays through search_thoughts_current — the completed row the hybrid ranks first comes last — and without a provider it is skipped with the arm named (${asCurrent.ids.indexOf(settledId) + 1} of ${asCurrent.ids.length}; ${noModel.reason})`);
-
-    // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
-    // print the window and the counts, and a window that replayed nothing is
-    // --diff's exit 3, where it used to be the pass "nothing moved".
-    // The replay embeds through the egress gate (SMD-2290): with the embeddings
-    // endpoint not declared local under the default deny, the hybrid/current arms
-    // are skipped before any request, so these CLI runs reach no provider. Start
-    // each run from a clean, refusing egress config (a stray OB1_LLM_LOCAL or
-    // OB1_EGRESS_* in the host's env would let it embed) and let a case opt back
-    // in through extraEnv; --no-env-file and OB1_ENV_FILES=off from a directory
-    // outside the checkout, as tier.sh does, keep a .env from declaring one local.
+    // The CLI as tier.sh runs it: --no-env-file and OB1_ENV_FILES=off from a
+    // directory outside the checkout, so no .env reaches it.
     const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
-      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
-      for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete env[k];
-      Object.assign(env, extraEnv);
+      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off", ...extraEnv };
       const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
       const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
       return { code: await p.exited, out, err };
     };
-    const both = ["--from", URL_!, "--to", canaryUrl];
-    const all = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(all.code === 0 && /^replayed 2 of 2 logged searches since 1970-01-01T00:00:00Z \(--since\) \(0 skipped\)$/m.test(all.out) && all.out.includes("what moved: nothing — the canary reproduces stable's rankings on all 2 replayed."),
-      `--diff over both keyword searches prints the window and the counts, and passes (exit ${all.code}: ${all.out.trim()})`);
-    // The server's clock, which stamped the logged rows, not this host's.
-    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    const fresh = await tierCli(["--diff", ...both]);
-    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches") && fresh.out.includes("an earlier --since widens the window"),
-      `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
-    const freshReplay = await tierCli(["--replay", ...both]);
-    assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
-    // A hybrid row, logged after the refresh: with the embeddings endpoint refused
-    // by the default deny it is skipped, and the report says so on both windows.
-    await sql`
-      INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
-      VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
-    const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
-      `--diff with a hybrid row and the endpoint refused reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
-    const skippedAll = await tierCli(["--diff", ...both]);
-    assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
-      `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
-
-    // SMD-2290: the embed arms send the logged query text to the provider, so they
-    // pass through the egress gate now, like every other provider call in the fork.
-    // A stub records requests. The property that matters is the zero: no logged
-    // query text leaves under the default deny. It is held twice over — the up-front
-    // skip when the endpoint is not declared local, and, under that, getEmbedding's
-    // own per-call gate (a ProviderError before any request). The local case then
-    // embeds and the stub IS called, so the zero is a gate holding, not a broken
-    // embedder. (Dropping the up-front skip alone keeps the zero — the per-call gate
-    // still refuses — but turns the graceful skip into an exit-1 error, which the
-    // [20] skip assertions above catch.)
-    {
-      let stubReqs = 0;
-      const stub = Bun.serve({ port: 0, fetch() { stubReqs++; const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return Response.json({ data: [{ embedding: v }] }); } });
-      const stubUrl = `http://127.0.0.1:${stub.port}/v1`;
-      try {
-        stubReqs = 0;
-        const denied = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL });
-        assert(stubReqs === 0 && denied.out.includes("hybrid needs a provider"),
-          `the replay sends the stub nothing under the default deny — the logged query text does not leave (${stubReqs} request(s) to the stub; ${denied.out.trim().split("\n").pop()})`);
-        stubReqs = 0;
-        const allowed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL, OB1_LLM_LOCAL: "1" });
-        assert(stubReqs >= 1 && /replayed 3 of 3 logged searches/.test(allowed.out),
-          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay, so the deny zero is a gate holding, not a dead embedder (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
-      } finally {
-        stub.stop(true);
-      }
-    }
-    await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
-    await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
-    // A window that is already all of the log: the canary as its own --from
-    // (its query_log is empty, and it records no refresh). No --since can
-    // widen that, so the hint does not offer one.
-    const unbounded = await tierCli(["--diff", "--from", canaryUrl, "--to", canaryUrl]);
-    assert(unbounded.code === 3 && /^replayed 0 of 0 logged searches in all of stable's log \(the canary records no refresh\)/m.test(unbounded.out) && unbounded.out.includes("only with OB1_QUERY_LOG=on.") && !unbounded.out.includes("--since"),
-      `--diff over all of an empty log exits 3 and offers no --since (exit ${unbounded.code}: ${unbounded.out.trim()})`);
-    // A side that does not answer is named, with its host, and never its password.
-    const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
-    assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
-      `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
     // OB1_ALLOW_REMOTE_DB only so a test server off loopback still reaches the
     // connection check rather than the loopback refusal; nothing is reset, as
     // --from never answers.
@@ -7735,14 +7622,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
     assert(unencoded.every((w) => w === "a URL with an @ after its host — is its password percent-encoded?"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
     assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
-
-    // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
-    // query — moves, and the diff names the dropped id. The gate has teeth.
-    await canarySql`DELETE FROM thoughts WHERE id = ${corpus[0].id}::uuid`;
-    const perturbed = await replayAndDiff(sql, canarySql, { since: null });
-    assert(perturbed.changed === 1, `deleting one canary row moves exactly the query that returned it (${perturbed.changed} changed)`);
-    const moved = perturbed.diffs[0];
-    assert(moved?.dropped.includes(corpus[0].id) && moved.added.length === 0, "the diff names the dropped id and adds none — a real difference, measured");
 
     // --promote, the data half: it reads the soaked canary's schema_version (044,
     // stamped when the canary migrated) and records it on stable as
@@ -7948,6 +7827,140 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     catch (e) { refusedSamePromote = (e as Error).message; }
     assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
+
+    // SMD-2875: the halves deploy/tier.sh runs in two containers, one on each
+    // brain's network, through the directory they share. The source half dumps
+    // as pg_read_all_data and writes its facts; the target half refuses a
+    // hand-off that is not one, and the source's own database by its identity
+    // (no connection of the target half reaches the source to ask otherwise).
+    {
+      const handDir = join(tmpdir(), `ob1-tier-handoff-${process.pid}`);
+      const toolDir = join(tmpdir(), `ob1-tier-halves-${process.pid}`);
+      const argsLog = join(toolDir, "pg_dump.args");
+      const savedPath = process.env.PATH;
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(toolDir, { recursive: true });
+      for (const tool of ["pg_dump", "pg_restore"]) {
+        writeFileSync(join(toolDir, tool), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${tool} (PostgreSQL) ${major}.0"; exit 0; fi\necho "$*" >> "${argsLog}"\nwhile [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done\nexit 0\n`);
+        chmodSync(join(toolDir, tool), 0o755);
+      }
+      const identityOf = async (s: SQL) => (await s<{ system: string; started: string; database: string }[]>`
+        SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS system,
+               extract(epoch FROM pg_catalog.pg_postmaster_start_time())::text AS started,
+               pg_catalog.current_database() AS database`)[0];
+      const refusedBy = async (run: () => Promise<unknown>) => { try { await run(); return "no refusal"; } catch (e) { return (e as Error).message; } };
+      process.env.PATH = `${toolDir}:${savedPath}`;
+      const savedAllow = process.env[REMOTE_DB_FLAG];
+      try {
+        // Both halves in one process run the target's guards before anything
+        // is dumped: with a usable pg_dump on PATH, a refusal on --to (stable,
+        // stamped tier=stable) leaves no pg_dump call at all (review pass 1:
+        // dumping first passed every check while the tools were absent).
+        const beforeDump = await refusedBy(() => refresh(canaryUrl, URL_!, "canary"));
+        assert(/stamped tier=stable/.test(beforeDump) && !existsSync(argsLog), `a refresh refused on --to calls no pg_dump first (${beforeDump.slice(0, 80)}; pg_dump ${existsSync(argsLog) ? "was called" : "was not called"})`);
+        // Each half asks the URL rules of its own side (review pass 1): the
+        // target half a remote --to without the override, the source half a
+        // --from with no host.
+        delete process.env[REMOTE_DB_FLAG];
+        mkdirSync(handDir);
+        const remoteTo = await refusedBy(() => refreshTarget(handDir, "postgres://u@example.com:5432/b", "canary"));
+        const hostlessFrom = await refusedBy(() => refreshSource("postgres:///b", join(handDir, "never")));
+        rmSync(handDir, { recursive: true, force: true });
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
+        assert(/^--to is not plainly this machine — example\.com is not a loopback host/.test(remoteTo), `the target half refuses a remote --to without OB1_ALLOW_REMOTE_DB (${remoteTo.slice(0, 90)})`);
+        assert(/^--from: .*Refusing: --refresh dumps --from/.test(hostlessFrom), `the source half refuses a --from that names no host (${hostlessFrom.slice(0, 90)})`);
+
+        await refreshSource(URL_!, handDir);
+        const facts = JSON.parse(readFileSync(join(handDir, "source.json"), "utf8"));
+        const dumpArgs = readFileSync(argsLog, "utf8");
+        // SMD-2119: the password reaches pg_dump through its environment, never
+        // its argv: no password= keyword and no URL there. (Not the password's
+        // text: a test server's may also be its database's name, which is.)
+        const carriesPassword = /\bpassword\s*=|postgres(ql)?:\/\//i.test(dumpArgs);
+        assert(parseRefreshSource(facts) !== null && facts.major === major && facts.identity.database === new URL(URL_!).pathname.slice(1)
+            && /--role=pg_read_all_data/.test(dumpArgs) && !carriesPassword
+            && existsSync(join(handDir, "stable.dump")) && (statSync(join(handDir, "source.json")).mode & 0o777) === 0o600 && (statSync(handDir).mode & 0o777) === 0o700,
+          `the source half writes its facts (mode 600) and its dump into a directory it made mode 700, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
+        assert(/--handoff: .* already exists; name a directory this run can make, mode 700/.test(await refusedBy(() => refreshSource(URL_!, handDir))),
+          "the source half refuses a hand-off directory that exists (it keeps its own mode, and the dump goes in it)");
+        // pg_read_all_data does not bypass row-level security, under which
+        // pg_dump refuses to dump: with a table that has it, the dump runs as
+        // the login, as before (review pass 4: the role failed the refresh).
+        {
+          const rlsDir = join(handDir, "..", `ob1-tier-handoff-rls-${process.pid}`);
+          writeFileSync(argsLog, "");
+          await sql`CREATE TABLE ob1_tier_rls_probe (id int)`;
+          try {
+            await sql`ALTER TABLE ob1_tier_rls_probe ENABLE ROW LEVEL SECURITY`;
+            await refreshSource(URL_!, rlsDir);
+            const rlsArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(rlsArgs) && !/--role=/.test(rlsArgs), `with a table under row-level security the dump runs as the login, not pg_read_all_data (${rlsArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`DROP TABLE IF EXISTS ob1_tier_rls_probe`;
+            rmSync(rlsDir, { recursive: true, force: true });
+          }
+          // …nor a large object, which the role may not read (review pass 5: untested).
+          const loDir = join(handDir, "..", `ob1-tier-handoff-lo-${process.pid}`);
+          writeFileSync(argsLog, "");
+          const [{ lo }] = await sql<{ lo: number }[]>`SELECT lo_from_bytea(0, 'tier probe'::bytea)::int AS lo`;
+          try {
+            await refreshSource(URL_!, loDir);
+            const loArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(loArgs) && !/--role=/.test(loArgs), `with a large object the dump runs as the login, not pg_read_all_data (${loArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`SELECT lo_unlink(${lo}::oid)`;
+            rmSync(loDir, { recursive: true, force: true });
+          }
+        }
+        // The identity's three parts each decide (the halves cannot ask each other's server).
+        const me = facts.identity;
+        assert(sameDatabase(me, { ...me }) && !sameDatabase(me, { ...me, system: `${me.system}1` }) && !sameDatabase(me, { ...me, started: `${me.started}1` }) && !sameDatabase(me, { ...me, database: `${me.database}x` }),
+          "sameDatabase: one database only when the cluster, its start and the database name all agree (a volume copy started at another time is another)");
+        assert(/--from and --to name the same database/.test(await refusedBy(() => refreshTarget(handDir, URL_!, "canary"))),
+          "the target half refuses the source half's own database, by the identity in the hand-off (targetRefusal would refuse it too, in other words)");
+        writeFileSync(join(handDir, "source.json"), JSON.stringify({ ...facts, identity: await identityOf(canarySql) }));
+        assert(/--from and --to name the same database/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "…and the canary when the hand-off names the canary");
+        for (const [what, bad] of [
+          ["a setting name no database has", { ...facts, settings: { "x; DROP SCHEMA public": "1" } }],
+          ["the refresh mark, the target's own", { ...facts, settings: { "ob1.refresh_target": "canary" } }],
+          ["the refresh mark in capitals, which Postgres folds", { ...facts, settings: { "OB1.Refresh_Target": "canary" } }],
+          ["a major that is not a number", { ...facts, major: "16" }],
+          ["no identity", { ...facts, identity: undefined }],
+          ["a setting value that is not text", { ...facts, settings: { "hnsw.ef_search": 5 } }],
+        ] as const) {
+          writeFileSync(join(handDir, "source.json"), JSON.stringify(bad));
+          const why = await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"));
+          assert(/source\.json is not what a --refresh source half writes/.test(why), `the target half refuses a hand-off with ${what} (${why})`);
+        }
+        writeFileSync(join(handDir, "source.json"), JSON.stringify(facts));
+        rmSync(join(handDir, "stable.dump"));
+        assert(/stable\.dump is missing/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "the target half refuses a hand-off without its dump");
+        rmSync(join(handDir, "source.json"));
+        assert(/source\.json could not be read \(ENOENT\)/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "…and one without its facts");
+
+        // promote's halves: the canary read, stable stamped.
+        rmSync(handDir, { recursive: true, force: true });
+        await promoteSource(canaryUrl, handDir);
+        const promoted = JSON.parse(readFileSync(join(handDir, "promote.json"), "utf8"));
+        assert(parsePromoteSource(promoted) !== null && promoted.identity.database === canaryDb, `the promote's source half writes the canary's identity and version (${promoted.version})`);
+        const { version: halfVersion } = await promoteTarget(handDir, URL_!);
+        const [{ v }] = await sql<{ v: string | null }[]>`SELECT value AS v FROM ob1_config WHERE key = 'promoted_schema_version'`;
+        assert(halfVersion === promoted.version && v === promoted.version, `the promote's target half stamps stable with the hand-off's version (${v})`);
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ ...promoted, identity: await identityOf(sql) }));
+        assert(/--from and --to name the same database/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "the promote's target half refuses stable as its own canary, by identity");
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ ...promoted, version: 44 }));
+        assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and a hand-off whose version is not text");
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ version: promoted.version }));
+        assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and one with no identity");
+      } finally {
+        process.env.PATH = savedPath;
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
+        rmSync(handDir, { recursive: true, force: true });
+        rmSync(toolDir, { recursive: true, force: true });
+        await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
+      }
+    }
   } finally {
     if (canarySql) await canarySql.close();
     await sql.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${canaryDb}' AND pid <> pg_backend_pid()`);
@@ -11274,12 +11287,23 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
     const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    // A mend (SMD-2889): the servers' vector mender giving a row saved without
+    // one its vector is background work, as the passes are — it leaves the
+    // brain asleep, though its event's actor_kind is NULL.
+    const mendText = "A row saved without a vector, which the mender gives one.";
+    const bare = ((await sql`SELECT upsert_thought(${mendText}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${bare}::uuid`;
+    const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
+      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-model'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
+    const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
     await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
     assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
-      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+      `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
+    assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
+      `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
     ac.abort();
     const followCode = await following;
     const endBeat = await beat();
@@ -11905,7 +11929,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   }
 }
 
-console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694)");
+console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
 {
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -11917,8 +11941,15 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   // pass's start would refuse: set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
-  /** Each extraction call's window ("whole" for a one-window thought) and the text's marker; each judgement's time. */
-  const extracts: { marker: string; part: string }[] = [];
+  /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
+  const extracts: { marker: string; part: string; at: number }[] = [];
+  /** Run as each extraction call begins, before its answer: a write the test makes mid-sleep at a known point (SMD-3008). */
+  let onExtract: ((marker: string) => Promise<void>) | null = null;
+  /** A judge on its own model (OB1_JUDGE_MODEL), its probes answering 500 while `judgeProbeDown` and its judgements 404 "not found" while `judgeMissing` (SMD-3008). */
+  const JUDGE = "stub-judge";
+  let judgeProbeDown = false, judgeMissing = false;
+  /** Run as each judgement arrives, before its answer. */
+  let onJudge: (() => void) | null = null;
   const judged: number[] = [];
   /** When each judgement's answer went back, and when each call for the stuck window began: the slot's order (review pass 5). */
   const judgedEnd: number[] = [];
@@ -11941,18 +11972,24 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
-      const body = (await req.json()) as { messages?: { role: string; content: string }[] };
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (/<thought_a>/.test(prompt)) {
+        onJudge?.();
+        if (body.model === JUDGE && judgeMissing) return Response.json({ error: { message: `model "${JUDGE}" not found, try pulling it first` } }, { status: 404 });
         judged.push(Date.now());
         await Bun.sleep(judgeHold38b);
         judgedEnd.push(Date.now());
         return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
       }
-      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : "short";
-      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole" });
+      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : /midnote-one/.test(prompt) ? "mid1" : /midnote-two/.test(prompt) ? "mid2" : /judgenote/.test(prompt) ? "judgenote" : /We bill/.test(prompt) ? "pair" : "short";
+      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole", at: Date.now() });
+      await onExtract?.(marker);
       if (marker === "stuck") stuckStarts.push(Date.now());
       if (marker === "stuck") {
         // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
@@ -11962,8 +11999,9 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
       }
       if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
-      // A window of the long document takes a second (the stuck thought's one window eight, above); the rest are quick.
-      await Bun.sleep(marker === "long" ? 1000 : 100);
+      // A window of the long document takes a second (the stuck thought's one window eight, above), a judgenote's
+      // longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2); the rest are quick.
+      await Bun.sleep(marker === "long" ? 1000 : marker === "judgenote" ? 1500 : 100);
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -12159,13 +12197,174 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
     assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
 
+    // Work that lands during a sleep — a sync's capture, which wakes nothing —
+    // goes ahead of a stalled thought (SMD-3008). One written before it is
+    // claimed is dated ahead of it, the stalled thought dated forward as the
+    // sleep began; one pending beside it in hand restarts extraction, the
+    // stalled thought moved behind it, and consolidation still joins past it
+    // in the same sleep. With neither, a capture waited behind it, the pool
+    // was never all stalled, and the join waited out the window too.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    extracts.length = 0;
+    judged.length = 0;
+    stuckCalls.length = 0;
+    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
+    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
+    const held3 = await capture("The stuckdoc note, held: one window the model takes eight seconds over.", 0, 15);
+    const [{ fp3 }] = await sql`SELECT content_fingerprint AS fp3 FROM thoughts WHERE id = ${held3}::uuid`;
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${held3}::uuid, ${EX}, ${fp3}, ${sig}, 3, 3)`;
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    const syncNote = async (text: string, axis: number) =>
+      ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    // Both notes as the pair's first call begins. The second stands for one
+    // that lands between the stalled thought's claim and the next poll, held
+    // there: dated just behind it — as a thought reclaimed from a lapsed lease
+    // with its old date would be — it is pending beside the thought in hand at
+    // every poll until a restart moves the thought behind it. Written as the
+    // stalled call began, it raced the join's poll (review pass 1).
+    let mid1 = "", mid2 = "";
+    onExtract = async (marker) => {
+      if (marker !== "pair" || mid1) return;
+      mid1 = await syncNote("The midnote-one, written by a sync during the sleep.", 16);
+      mid2 = await syncNote("The midnote-two, written by a sync during the sleep and queued behind the stalled thought.", 17);
+      await sql`UPDATE thought_work_claims SET enqueued_at = (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${held3}::uuid AND work_type = ${EX}) + interval '1 microsecond'
+                 WHERE thought_id = ${mid2}::uuid AND work_type = ${EX}`;
+    };
+    const midLines: { l: string; at: number }[] = [];
+    let stopMid: PassStop | null = null;
+    wakeReads.length = 0;
+    const midRun = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
+    let held3At: string | undefined;
+    const midJoined = await pollUntil(async () => {
+      if (judged.length === 0 || !midLines.some((x) => /consolidating first/.test(x.l))) return false;
+      held3At = await status(held3);
+      return true;
+    }, 45_000);
+    // Stopped hard: a soft stop would let the stalled thought in hand finish.
+    (stopMid as PassStop | null)?.();
+    await (stopMid as PassStop | null)?.();
+    await Promise.race([midRun, Bun.sleep(15_000)]);
+    onExtract = null;
+    const [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number } | undefined)[];
+    const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
+    // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
+    const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
+    const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
+    const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
+    const restartAt = midLines.find((x) => /extraction restarts, the stalled thought\(s\) after them/.test(x.l))?.at ?? Infinity;
+    const joinAtMid = midLines.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
+    assert(mid1 !== "" && firstAt("mid1") < firstAt("stuck"),
+      `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
+    // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
+    const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+      `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
+    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
+      `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+
+    // While consolidation waits for a judge that does not answer, extraction
+    // takes the newer work and leaves the stalled thought to wait for it: the
+    // judge's pool never drained, and parked extraction got nothing for the
+    // sleep (SMD-3008). The judge on its own model, as a judge that will not
+    // load beside a serving extraction model is; at its start (a probe
+    // answering 500) and mid-pass (judgements answering "not found", which
+    // starts the wait at once rather than after the pauses, its probes 500).
+    const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
+    const COJ = consolidateKey(JUDGE);
+    const judgeCase = async (mid: boolean) => {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${COJ})`;
+      extracts.length = 0;
+      judged.length = 0;
+      stuckStarts.length = 0;
+      stuckCalls.length = 0;
+      const stalledJ = await capture("The stuckdoc note, behind a judge that does not answer.", 0, 18);
+      const [{ fpj }] = await sql`SELECT content_fingerprint AS fpj FROM thoughts WHERE id = ${stalledJ}::uuid`;
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
+      await capture("We bill monthly, decided in March.", 3, 0);
+      await capture("We bill annually now.", 0, 0);
+      // At its start, beside a lease another host's scheduler holds on a
+      // stalled thought — not this process's, so it neither sets the let-out
+      // aside nor is claimed (a day left on it) — and with two workers, the
+      // let-out's one worker not claiming the stalled thought beside the
+      // note (review pass 2).
+      if (!mid) {
+        /** A stalled thought another scheduler holds a lease on, under `worker`, claimed `ago` before now, a day left on it. */
+        const plantLease = async (text: string, axis: number, worker: string, ago: string) => {
+          const id = await capture(text, 0, axis);
+          await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${worker}, claimed_at = now() - ${ago}::interval, ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                     WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+          const [{ fpl }] = await sql`SELECT content_fingerprint AS fpl FROM thoughts WHERE id = ${id}::uuid`;
+          await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fpl}, ${sig}, 3, 3)`;
+        };
+        await plantLease("The stuckdoc note another host's scheduler left a lease on.", 21, "extract-otherhost-1-0-deadbeef", "0 seconds");
+        // And one under this process's own worker-id prefix, claimed before the
+        // run began — a container restarted in place keeps its hostname and pid,
+        // and its last run's lease lives on: not this run's (post-merge review).
+        await plantLease("The stuckdoc note this container's last run left a lease on.", 22, `extract-${hostname()}-${process.pid}-9-deadbeef`, "10 minutes");
+      }
+      // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
+      judgeProbeDown = !mid;
+      judgeMissing = false;
+      onJudge = mid ? () => { judgeMissing = true; judgeProbeDown = true; onJudge = null; } : null;
+      const jl: { l: string; at: number }[] = [];
+      let stopJ: PassStop | null = null;
+      // Mid-pass, let-outs two seconds apart, so a wait still read once the judge answers would let the second note out (review pass 1).
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
+      // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
+      const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
+      await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
+      if (!mid) await Bun.sleep(1500);
+      const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
+      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // A second note: at its start, while the judge is still down — let out
+      // at most once a minute, it waits for consolidation; mid-pass, once the
+      // judge answers — the wait over, it is not let out (review pass 1).
+      let noteB = "";
+      if (!mid) {
+        noteB = await syncNote("The judgenote, again, while the judge is still down.", 20);
+        await Bun.sleep(2500);
+      }
+      const flipAt = Date.now();
+      judgeProbeDown = false;
+      judgeMissing = false;
+      if (mid && (await pollUntil(async () => seen(/\[consolidate\].*the provider answers again/) < Infinity, 30_000))) {
+        noteB = await syncNote("The judgenote, again, once the judge answers.", 20);
+      }
+      const resumed = await pollUntil(async () => judged.length > 0 && seen(/consolidation drained — extracting beside it/) < Infinity, 60_000);
+      (stopJ as PassStop | null)?.();
+      await (stopJ as PassStop | null)?.();
+      await Promise.race([runJ, Bun.sleep(30_000)]);
+      onJudge = null;
+      const joinJ = seen(/consolidating first/), unparkJ = seen(/consolidation waits for its provider — extracting the 1 newer thought\(s\) meanwhile/);
+      const reparkJ = seen(/set aside again until consolidation drains/), resumeJ = seen(/consolidation drained — extracting beside it/);
+      const noteCall = extracts.find((e) => e.marker === "judgenote")?.at ?? Infinity;
+      const noteBCall = extracts.filter((e) => e.marker === "judgenote")[1]?.at ?? Infinity;
+      const letOuts = jl.filter((x) => /consolidation waits for its provider — extracting/.test(x.l)).length;
+      const rel = (t: number) => (t === Infinity ? "never" : `+${t - joinJ} ms`);
+      // Claimed after the note, by its place, the stalled thought is set aside
+      // at the next poll: its call cut within a poll, and none begun after.
+      const stuckAside = stuckCalls.filter(([a, b]) => a > unparkJ && a < resumeJ && (b - a > 2500 || a > reparkJ || a < noteCall + 1400)).length;
+      assert(noteDone && unparkJ > joinJ && noteCall > unparkJ && noteCall < flipAt && reparkJ > noteCall && reparkJ < flipAt,
+        `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
+      assert(noteB !== "" && letOuts === 1 && noteBCall > resumeJ,
+        `…a second note ${mid ? "written once the judge answers" : "written while the judge is still down"} is not let out — ${mid ? "the wait is over" : "at most once a minute"} — and is extracted once consolidation drains (${letOuts} let-out(s); the note ${rel(noteBCall)}, resumed ${rel(resumeJ)})`);
+      assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
+        `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
+    };
+    await judgeCase(false);
+    await judgeCase(true);
+    judgeProbeDown = false;
+    judgeMissing = false;
+
     // A kept row speaks for the thought only at its text and windowing now:
     // one of other text (an edit since) or another windowing is not counted
     // stalled, nor named — the dry run reads the scheduler's own gate.
     await sql`DELETE FROM thoughts`;
-    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
-    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
-    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
     const planted = await capture("The stuckdoc note, planted.", 0, 8);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted}::uuid])`;
     const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${planted}::uuid`;
@@ -12258,6 +12457,19 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await Promise.race([orderRun, Bun.sleep(15_000)]);
     assert(order.moved && order.n === 2 && order.ids[0] === planted,
       `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
+    // A forward date outlives its stop record: a thought finished since and put
+    // back by a --retry-* flag keeps it, and went behind every capture for up
+    // to 30 days. The sleep's move dates it now (post-merge review).
+    const retried = await capture("A note put back by --retry-partial after it finished.", 0, 23);
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '20 days' WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`;
+    let stopRetried: PassStop | null = null;
+    const retriedRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopRetried = s; }, writer: { out: () => {}, err: () => {} } });
+    const redated = await pollUntil(async () => ((await sql`SELECT enqueued_at <= now() AS ok FROM thought_work_claims WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`)[0] as { ok: boolean } | undefined)?.ok === true, 15_000);
+    (stopRetried as PassStop | null)?.();
+    await (stopRetried as PassStop | null)?.();
+    await Promise.race([retriedRun, Bun.sleep(15_000)]);
+    await sql`DELETE FROM thoughts WHERE id = ${retried}::uuid`;
+    assert(redated, "a forward-dated row that is no longer a stopped thought (put back by a retry after it finished) is dated now as a sleep begins, not left behind every capture");
     // A scheduler started while thoughts are held names them before its first sleep.
     // The row case C's scheduler ended names its own stuck thought: gone first.
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
@@ -13135,6 +13347,174 @@ console.log("\n[43] Migration 095: the stated-status label's inputs read the hit
   } finally {
     await tsql`DELETE FROM thoughts WHERE metadata->>'issue' LIKE 'ZS-%' AND content LIKE '% — a ticket (label-inputs fixture)'`;
     await tsql.close();
+  }
+}
+
+console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
+{
+  const xsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    const [{ offered, installed }] = (await xsql`SELECT (SELECT count(*)::int FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered, (SELECT count(*)::int FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed`) as { offered: number; installed: number }[];
+    assert(offered === installed, `096 created pg_stat_statements exactly where the server offers it (offered ${offered}, installed ${installed})`);
+    if (installed === 1) {
+      // Readable by pg_monitor alone: PUBLIC's default grant revoked, so the plugins' login role and the servers' reach neither view.
+      const [g] = (await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') AS public_view, has_table_privilege('public', 'pg_stat_statements_info', 'SELECT') AS public_info,
+                                     has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS public_fn,
+                                     has_table_privilege('pg_monitor', 'pg_stat_statements', 'SELECT') AS monitor_view, has_function_privilege('pg_monitor', 'pg_stat_statements(boolean)', 'EXECUTE') AS monitor_fn`) as Record<string, boolean>[];
+      assert(!g.public_view && !g.public_info && !g.public_fn && g.monitor_view && g.monitor_fn, `096 revokes the views and their function from PUBLIC and grants them to pg_monitor (${JSON.stringify(g)})`);
+    }
+    const [{ superuser }] = (await xsql`SELECT rolsuper AS superuser FROM pg_roles WHERE rolname = current_user`) as { superuser: boolean }[];
+    if (installed !== 1 || !superuser) {
+      skip("096 as a migrator that is no superuser, the grants a restore gives back, and login-role.ts --member-of", installed !== 1 ? "the server does not offer pg_stat_statements" : "the connection's role is not a superuser");
+    } else {
+      const publicReads = async () => ((await xsql`SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE') AS p`) as { p: boolean }[])[0].p;
+      // 096 as a role that is no superuser and owns nothing of the extension's: where it is confined already, PUBLIC holding nothing, its GRANT is an error, not a warning (review pass 2: the run stopped there); where it is not there, an untrusted extension may not be created (review pass 1: the run stopped there too). Both are warnings.
+      await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_nosuper; CREATE ROLE ob1_live_nosuper NOLOGIN`);
+      const file096 = readFileSync(join(HERE, "migrations", "096_pg_stat_statements.sql"), "utf8");
+      const asNosuper = async (): Promise<string | null> => {
+        try {
+          await xsql.begin(async (tx) => { await tx.unsafe("SET LOCAL ROLE ob1_live_nosuper"); await tx.unsafe(file096); });
+          return null;
+        } catch (e) {
+          return (e as Error).message;
+        }
+      };
+      let confinedRun: string | null = "not run", stillConfined = false, leftOutRun: string | null = "not run";
+      try {
+        confinedRun = await asNosuper();
+        stillConfined = !(await publicReads());
+        await xsql.unsafe("DROP EXTENSION pg_stat_statements");
+        leftOutRun = await asNosuper();
+      } finally {
+        await xsql.unsafe("DROP ROLE ob1_live_nosuper");
+      }
+      const [{ left }] = (await xsql`SELECT count(*)::int AS left FROM pg_extension WHERE extname = 'pg_stat_statements'`) as { left: number }[];
+      assert(confinedRun === null && stillConfined, `096 run by a role that neither owns the confined views nor holds a grant on them warns and leaves the grants as they were, not a failure (${confinedRun ?? "applied"}; still confined ${stillConfined})`);
+      assert(leftOutRun === null && left === 0, `096 run by a role that is no superuser leaves pg_stat_statements out with a warning, not a failure (${leftOutRun ?? "applied"}; installed ${left})`);
+      // The run that applies 096 as a role that may not create the extension says it left it out, and what applies it (review pass 2: no suite ran that line).
+      const MIG_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mig:ob1-live-mig-password-0123@");
+      if (MIG_URL === URL_) {
+        skip("a plain run as a role that is no superuser says it left pg_stat_statements out", "DATABASE_URL carries no credentials to swap for the role's");
+      } else {
+        let leftOutNote: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig`);
+          await xsql`DELETE FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`;
+          leftOutNote = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const [{ recorded }] = (await xsql`SELECT count(*)::int AS recorded FROM schema_migrations WHERE name = '096_pg_stat_statements.sql'`) as { recorded: number }[];
+        assert(leftOutNote.code === 0 && /096_pg_stat_statements\.sql {2}left pg_stat_statements out: the server offers it, and this role could not create it/.test(leftOutNote.stdout) && /psql -d '[^']+' -v ON_ERROR_STOP=1 -f db\/migrations\/096_pg_stat_statements\.sql/.test(leftOutNote.stdout) && recorded === 1,
+          `a plain run as a role that is no superuser applies 096, says it left pg_stat_statements out and the file to apply as a superuser, exit 0 (exit ${leftOutNote.code}; ${(leftOutNote.stdout.split("\n").find((l) => /left pg_stat_statements out/.test(l)) ?? leftOutNote.stderr.trim().split("\n")[0] ?? "").trim().slice(0, 140)}; recorded ${recorded})`);
+      }
+      // A tier refresh's pg_restore -x creates the extension again with its own grants, PUBLIC's among them, under a ledger that records 096: the next plain run takes them back, and the one after has nothing to do.
+      await xsql.unsafe("CREATE EXTENSION pg_stat_statements");
+      const restored = await publicReads();
+      const healed = await migrate();
+      const after = await publicReads();
+      const quiet = await migrate();
+      assert(restored && healed.code === 0 && /↻ {2}096_pg_stat_statements\.sql {2}ran again: PUBLIC could read pg_stat_statements/.test(healed.stdout) && !after && quiet.code === 0 && !/096_pg_stat_statements\.sql {2}ran again/.test(quiet.stdout),
+        `a plain run takes back the grants a restore gave PUBLIC on pg_stat_statements, says so, and the next run is quiet (restored ${restored}, exit ${healed.code}, after ${after}, quiet exit ${quiet.code}: ${healed.stdout.split("\n").find((l) => /ran again/.test(l)) ?? "no ran-again line"})`);
+      // The function alone given back: the view reads through it, so the run reads the functions' grants too (review pass 2: that half of the read went untested).
+      await xsql.unsafe("GRANT EXECUTE ON FUNCTION pg_stat_statements(boolean) TO PUBLIC");
+      const fnHealed = await migrate();
+      const fnAfter = await publicReads();
+      assert(fnHealed.code === 0 && /ran again: PUBLIC could read pg_stat_statements/.test(fnHealed.stdout) && !fnAfter,
+        `a grant to PUBLIC on the function alone is taken back by the next plain run too (exit ${fnHealed.code}, after ${fnAfter})`);
+      // A plain run as a role that does not own the views, over a grant to PUBLIC: it may not take it back, warns naming the file, and exits 0; the owner's next run does (review pass 3: that branch went untested).
+      if (MIG_URL !== URL_) {
+        let warned: { code: number; stdout: string; stderr: string } | null = null;
+        try {
+          await xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_mig; CREATE ROLE ob1_live_mig LOGIN PASSWORD 'ob1-live-mig-password-0123'; GRANT USAGE, CREATE ON SCHEMA public TO ob1_live_mig; GRANT SELECT, INSERT ON schema_migrations TO ob1_live_mig; GRANT SELECT ON pg_stat_statements TO PUBLIC`);
+          warned = await runMigrator(MIG_URL, undefined);
+        } finally {
+          await xsql.unsafe("DROP OWNED BY ob1_live_mig; DROP ROLE IF EXISTS ob1_live_mig");
+        }
+        const stillPublic = await publicReads();
+        const ownerRun = await migrate();
+        const ownerAfter = await publicReads();
+        assert(warned.code === 0 && /⚠ {2}096_pg_stat_statements\.sql {2}ran again, as PUBLIC could read pg_stat_statements, and PUBLIC still can/.test(warned.stderr) && /-f db\/migrations\/096_pg_stat_statements\.sql/.test(warned.stderr) && stillPublic && ownerRun.code === 0 && !ownerAfter,
+          `a run as a role that does not own the views warns, names the file, exits 0 and leaves PUBLIC's grant; the owner's next run takes it (exit ${warned.code}: ${warned.stderr.trim().split("\n")[0]?.slice(0, 120)}; public ${stillPublic} → ${ownerAfter})`);
+      }
+
+      // login-role.ts --member-of pg_monitor on a real server: created, run again, and each membership it would not give refused (review pass 1: no suite ran it).
+      const MROLE = "ob1_live_monitor";
+      const MGR_URL = URL_!.replace(/\/\/[^@]*@/, "//ob1_live_mgr:ob1-live-mgr-password-0123@");
+      const dropM = () => xsql.unsafe(`DROP ROLE IF EXISTS ob1_live_monitor_member; DROP ROLE IF EXISTS ${MROLE}; DROP ROLE IF EXISTS ob1_live_monitor_adm; DROP ROLE IF EXISTS ob1_live_monitor_mgd; DROP ROLE IF EXISTS ob1_live_monitor_mgd2; DROP ROLE IF EXISTS ob1_live_mgr`);
+      const loginRoleAs = (url: string, name: string, ...extra: string[]) => {
+        const child = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "login-role.ts"), "--role", name, "--password-env", "OB1_LIVE_MONITOR_PW", "--url", url, ...extra], { cwd: HERE, env: { ...process.env, OB1_ENV_FILES: "off", OB1_LIVE_MONITOR_PW: "ob1-live-monitor-password-0123" } as Record<string, string> });
+        return { code: child.exitCode, out: child.stdout.toString(), err: child.stderr.toString() };
+      };
+      const loginRole = (...extra: string[]) => loginRoleAs(URL_!, MROLE, ...extra);
+      const inherits = async (name: string) => ((await xsql`SELECT pg_has_role(${name}, 'pg_monitor', 'USAGE') AS u`) as { u: boolean }[])[0].u;
+      const membership = async () => ((await xsql`SELECT bool_or(m.admin_option) AS admin, bool_or((to_jsonb(m) ->> 'set_option')::boolean) AS set, count(*)::int AS n FROM pg_auth_members m WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${MROLE}) AND m.roleid = 'pg_monitor'::regrole`) as { admin: boolean | null; set: boolean | null; n: number }[])[0];
+      await dropM();
+      try {
+        const created = loginRole("--member-of", "pg_monitor");
+        const m1 = await membership();
+        // NOINHERIT between the runs, and on Postgres 16 the grant itself WITH INHERIT FALSE (where a role's INHERIT only sets new grants'): a member that inherits nothing holds none of pg_monitor's privileges (review pass 2), and the run puts both back.
+        const [{ pg16 }] = (await xsql`SELECT current_setting('server_version_num')::int >= 160000 AS pg16`) as { pg16: boolean }[];
+        await xsql.unsafe(`ALTER ROLE ${MROLE} NOINHERIT${pg16 ? `; GRANT pg_monitor TO ${MROLE} WITH INHERIT FALSE` : ""}`);
+        const inheritsBefore = await inherits(MROLE);
+        const again = loginRole("--member-of", "pg_monitor");
+        const inheritsAgain = await inherits(MROLE);
+        assert(created.code === 0 && /created .*a member of pg_monitor/.test(created.out) && m1.n > 0 && m1.admin === false && m1.set !== true && !inheritsBefore && again.code === 0 && /updated/.test(again.out) && inheritsAgain,
+          `login-role.ts --member-of pg_monitor creates the role a member of pg_monitor without ADMIN OPTION or (Postgres 16) SET, and run again over a membership that inherits nothing updates it holding pg_monitor's privileges (exit ${created.code}/${again.code}; ${JSON.stringify(m1)}; inherits ${inheritsBefore} → ${inheritsAgain})`);
+        await xsql.unsafe(`GRANT pg_monitor TO ${MROLE} WITH ADMIN OPTION`);
+        const admin = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy: each grantor's row named (review pass 2).
+        const printed = admin.err.match(/REVOKE ADMIN OPTION FOR [^;]*;/g) ?? [];
+        for (const statement of printed) await xsql.unsafe(statement);
+        const afterRemedy = loginRole("--member-of", "pg_monitor");
+        assert(printed.length > 0 && printed.every((st) => / GRANTED BY /.test(st)) && afterRemedy.code === 0,
+          `the WITH ADMIN OPTION refusal prints a REVOKE … GRANTED BY for each grantor, and run as printed the next run passes (${printed.join(" ") || "none printed"}; exit ${afterRemedy.code}: ${afterRemedy.err.trim().slice(0, 120)})`);
+        await xsql.unsafe(`CREATE ROLE ob1_live_monitor_member NOLOGIN; GRANT ${MROLE} TO ob1_live_monitor_member`);
+        const member = loginRole("--member-of", "pg_monitor");
+        // The refusal's own statements, run as printed, are the remedy (review pass 4: a plain REVOKE could fail on a dependent grant).
+        const memberPrinted = member.err.match(/REVOKE "?ob1_live_monitor"? FROM [^;]*;/g) ?? [];
+        for (const statement of memberPrinted) await xsql.unsafe(statement);
+        const afterMemberRemedy = loginRole("--member-of", "pg_monitor");
+        // A superuser migrator is never made a member of what it creates: one made a member by hand is refused, not exempt, or its inheriting members would hold pg_monitor (review pass 4).
+        await xsql.unsafe(`GRANT ${MROLE} TO CURRENT_USER`);
+        const superMember = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE ${MROLE} FROM CURRENT_USER`);
+        const [{ me }] = (await xsql`SELECT current_user AS me`) as { me: string }[];
+        assert(memberPrinted.length > 0 && memberPrinted.every((st) => / GRANTED BY .* CASCADE;$/.test(st)) && afterMemberRemedy.code === 0 && superMember.code === 2 && new RegExp(`${me} is a member of ${MROLE}`).test(superMember.err),
+          `the members refusal prints each row's REVOKE … GRANTED BY … CASCADE, which run as printed lets the next run pass, and a superuser migrator made a member is refused, not exempt (${memberPrinted.join(" ") || "none printed"}; exit ${afterMemberRemedy.code}; ${superMember.code}: ${superMember.err.trim().slice(0, 100)})`);
+        await xsql.unsafe(`DROP ROLE ob1_live_monitor_member; GRANT pg_read_all_data TO ${MROLE}`);
+        const other = loginRole("--member-of", "pg_monitor");
+        await xsql.unsafe(`REVOKE pg_read_all_data FROM ${MROLE}`);
+        const without = loginRole();
+        assert(admin.code === 2 && /WITH ADMIN OPTION/.test(admin.err) && member.code === 2 && /ob1_live_monitor_member is a member of ob1_live_monitor, and would hold pg_monitor through it/.test(member.err) && other.code === 2 && /is a member of pg_read_all_data/.test(other.err) && without.code === 2 && /is a member of pg_monitor/.test(without.err),
+          `login-role.ts refuses the membership WITH ADMIN OPTION, a role with members, another membership, and pg_monitor's without --member-of, each exit 2 (${[admin, member, other, without].map((r) => `${r.code}: ${r.err.trim().slice(0, 90)}`).join(" | ")})`);
+        // A migrator that is no superuser, with CREATEROLE and pg_monitor WITH ADMIN OPTION (a managed Postgres's shape): on Postgres 16 it is made an ADMIN-only member of each role it creates, which holds nothing through it, and its re-run was refused for that row (review pass 2).
+        if (MGR_URL === URL_) {
+          skip("a CREATEROLE migrator that is no superuser runs login-role.ts --member-of twice", "DATABASE_URL carries no credentials to swap for the role's");
+        } else {
+          await xsql.unsafe(`CREATE ROLE ob1_live_mgr LOGIN CREATEROLE PASSWORD 'ob1-live-mgr-password-0123'; GRANT pg_monitor TO ob1_live_mgr WITH ADMIN OPTION`);
+          const mgd1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgd2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          const mgdInherits = await inherits("ob1_live_monitor_mgd");
+          assert(mgd1.code === 0 && /created/.test(mgd1.out) && mgd2.code === 0 && /updated/.test(mgd2.out) && mgdInherits,
+            `a CREATEROLE migrator that is no superuser creates the role and runs again, its own ADMIN-only row on it no refusal (exit ${mgd1.code}/${mgd2.code}: ${(mgd2.err || mgd2.out).trim().slice(0, 120)}; inherits ${mgdInherits})`);
+          // Another role's ADMIN-only row is not the creator's: it can grant itself the role, and pg_monitor's reads with it (review pass 3: a filter on INHERIT and SET let it through).
+          await xsql.unsafe(`CREATE ROLE ob1_live_monitor_adm NOLOGIN; GRANT ob1_live_monitor_mgd TO ob1_live_monitor_adm WITH ${pg16 ? "ADMIN TRUE, INHERIT FALSE, SET FALSE" : "ADMIN OPTION"}`);
+          const mgdAdm = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd", "--member-of", "pg_monitor");
+          await xsql.unsafe("DROP ROLE ob1_live_monitor_adm");
+          // A creator whose createrole_self_grant makes its own row INHERIT and SET (Postgres 16's setting for the old behaviour) runs again too (review pass 3: refused from the second run on).
+          await xsql.unsafe(`ALTER ROLE ob1_live_mgr SET createrole_self_grant = 'set, inherit'`);
+          const self1 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          const self2 = loginRoleAs(MGR_URL, "ob1_live_monitor_mgd2", "--member-of", "pg_monitor");
+          assert(mgdAdm.code === 2 && /ob1_live_monitor_adm is a member of ob1_live_monitor_mgd/.test(mgdAdm.err) && self1.code === 0 && self2.code === 0 && /updated/.test(self2.out),
+            `another role holding ADMIN OPTION on the role is refused, and a creator's own row, under createrole_self_grant too, never is (exit ${mgdAdm.code}: ${mgdAdm.err.trim().slice(0, 100)} | ${self1.code}/${self2.code}: ${(self2.err || self2.out).trim().slice(0, 100)})`);
+        }
+      } finally {
+        await dropM();
+      }
+    }
+  } finally {
+    await xsql.close();
   }
 }
 

@@ -273,9 +273,30 @@ const entries = sources.filter((f) => {
   ok(noGroups.code === 2 && /none was given/.test(noGroups.err), `migrate.ts --groups with no group in it is refused (exit ${noGroups.code})`);
   // SMD-2289: login-role.ts refuses what it would not make, before connecting, and never echoes the password.
   const noPw = run("login-role.ts", "--role", "ob1_x", "--password-env", "OB1_TEST_UNSET_PW", "--url", "postgres://u@127.0.0.1:1/db");
-  ok(noPw.code === 2 && /OB1_TEST_UNSET_PW is not set: run `bun deploy\/orchestration\/provision.ts --init`/.test(noPw.err), `login-role.ts refuses an unset password variable, naming --init (exit ${noPw.code})`);
+  ok(noPw.code === 2 && /OB1_TEST_UNSET_PW is not set: set 24 or more of .* in deploy\/\.env \(openssl rand -hex 32\)/.test(noPw.err) && !/provision\.ts/.test(noPw.err), `login-role.ts refuses an unset password variable, sending no script's word where none writes it (exit ${noPw.code}: ${noPw.err.slice(0, 160)})`);
+  // The runner's is the one provision.ts --init writes, so that one alone is sent there (SMD-1849 PR 3b review pass 1: OB1_MONITOR_DB_PASSWORD was sent too).
+  const runnerEnv = { ...env };
+  delete runnerEnv.OB1_RUNNER_DB_PASSWORD;
+  const noRunnerPw = Bun.spawnSync(["bun", "--no-env-file", "login-role.ts", "--role", "ob1_x", "--password-env", "OB1_RUNNER_DB_PASSWORD", "--url", "postgres://u@127.0.0.1:1/db"], { cwd: HERE, env: runnerEnv });
+  ok(noRunnerPw.exitCode === 2 && /OB1_RUNNER_DB_PASSWORD is not set: run `bun deploy\/orchestration\/provision.ts --init`/.test(noRunnerPw.stderr.toString()), `login-role.ts sends an unset OB1_RUNNER_DB_PASSWORD to provision.ts --init (exit ${noRunnerPw.exitCode})`);
+  // By name, the variable pass 1 found sent there, unset and malformed; and the runner's malformed one still is (review pass 2: an OB1_TEST_ name pinned neither).
+  const pwRun = (name: string, value: string | undefined) => {
+    const e: Record<string, string> = { ...env };
+    delete e[name];
+    if (value !== undefined) e[name] = value;
+    const child = Bun.spawnSync(["bun", "--no-env-file", "login-role.ts", "--role", "ob1_x", "--password-env", name, "--url", "postgres://u@127.0.0.1:1/db"], { cwd: HERE, env: e });
+    return { code: child.exitCode, err: child.stderr.toString() };
+  };
+  const monUnset = pwRun("OB1_MONITOR_DB_PASSWORD", undefined), monShort = pwRun("OB1_MONITOR_DB_PASSWORD", "short"), runnerShort = pwRun("OB1_RUNNER_DB_PASSWORD", "short");
+  ok(monUnset.code === 2 && /OB1_MONITOR_DB_PASSWORD is not set: set 24 or more/.test(monUnset.err) && !/provision\.ts/.test(monUnset.err)
+     && monShort.code === 2 && /OB1_MONITOR_DB_PASSWORD must be 24 or more .*\(openssl rand -hex 32 makes one\)/.test(monShort.err) && !/provision\.ts/.test(monShort.err)
+     && runnerShort.code === 2 && /OB1_RUNNER_DB_PASSWORD must be 24 or more .*\(provision\.ts --init writes one\)/.test(runnerShort.err) && !/short/.test(runnerShort.err.replace(/OB1_RUNNER_DB_PASSWORD/g, "")),
+     `login-role.ts names provision.ts for the runner's password alone, unset or malformed, and never echoes one (${[monUnset, monShort, runnerShort].map((r) => `${r.code}: ${r.err.trim().slice(0, 80)}`).join(" | ")})`);
   const badName = run("login-role.ts", "--role", "Postgres; DROP", "--password-env", "PATH");
   ok(badName.code === 2 && /must be a lower-case identifier/.test(badName.err), `login-role.ts refuses a role name that is not a plain identifier (exit ${badName.code})`);
+  // SMD-1849 PR 3b: --member-of takes pg_monitor alone, refused before connecting otherwise.
+  const memberBad = run("login-role.ts", "--role", "ob1_x", "--password-env", "PATH", "--member-of", "postgres", "--url", "postgres://u@127.0.0.1:1/db");
+  ok(memberBad.code === 2 && /--member-of "postgres" is not one this step grants \(pg_monitor\)/.test(memberBad.err), `login-role.ts refuses a --member-of outside its allow-list before connecting (exit ${memberBad.code}: ${memberBad.err.slice(0, 160)})`);
   const onlyRole = run("login-role.ts", "--role", "ob1_x");
   ok(onlyRole.code === 2 && /needs --role <name> and --password-env <VAR>/.test(onlyRole.err), `login-role.ts needs both flags (exit ${onlyRole.code})`);
   const glued = run("migrate.ts", "--urlpostgres://u:s3cret@h/db");

@@ -10,7 +10,7 @@
  * `--register` registers a client by DCR and prints its id and registration
  * token; `--read` reads it back with that token (RFC 7592), which answers 200
  * only when the store kept the client and the token. The memory adapter forgot
- * both on every restart. CI's full-stack job runs it (fork-checks.yml). Each
+ * both on every restart. CI's deploy-stack-auth job runs it (fork-checks.yml). Each
  * `--register` leaves a client in the store, so it is for a test stack, not a
  * running deploy.
  *

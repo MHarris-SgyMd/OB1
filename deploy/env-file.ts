@@ -45,6 +45,38 @@ export function setEnvValues(given: string, values: Record<string, string>): voi
   renameSync(tmp, file);
 }
 
+/**
+ * The CLI deploy/canary.sh writes the canary's own settings with (SMD-2874):
+ * `bun --no-env-file deploy/env-file.ts set FILE`, the values as one JSON
+ * object of strings on stdin, never on argv, since they include the canary's
+ * keys. Exit 2 on a usage error or a value the file cannot carry.
+ */
+if (import.meta.main) {
+  const [verb, file, ...rest] = process.argv.slice(2);
+  if (verb !== "set" || !file || rest.length) {
+    console.error('usage: bun --no-env-file deploy/env-file.ts set FILE < {"KEY": "value", …}');
+    process.exit(2);
+  }
+  let values: unknown;
+  try {
+    values = JSON.parse(await Bun.stdin.text());
+  } catch {
+    console.error("env-file.ts set: stdin is not one JSON object");
+    process.exit(2);
+  }
+  if (!values || typeof values !== "object" || Array.isArray(values) || Object.entries(values).some(([k, v]) => typeof v !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k))) {
+    console.error("env-file.ts set: stdin must be one JSON object of setting names to strings");
+    process.exit(2);
+  }
+  try {
+    setEnvValues(file, values as Record<string, string>);
+  } catch (e) {
+    // The setting's name, never its value.
+    console.error(`env-file.ts set: ${(e as Error).message}`);
+    process.exit(2);
+  }
+}
+
 /** Is KEY's line in the env file single-quoted? Compose interpolates a bare or double-quoted value, and a bcrypt hash's `$`s are then read as variables. */
 export function singleQuoted(file: string, key: string): boolean {
   // The LAST such line, as parseEnv and compose read it (review pass 3: the first was read, and a later bare line won).

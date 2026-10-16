@@ -21,6 +21,11 @@ token.json
 gmail-sync-log.json
 sync-log.json
 
+# The edge proxy's registry and the route table rendered from it (SMD-2876):
+# the operator's, written by deploy/edge/edge.ts.
+deploy/edge/brains.local.yaml
+deploy/edge/dynamic/
+
 # Build artifacts
 deno.lock
 docs/walkthroughs/*/public/
