@@ -3130,8 +3130,8 @@ read+capture one into two services, one scope each (like for like:
 its new secret (`--init` writes it) and its line in `deploy/compose.yaml`.
 
 A service gets its token from `<origin>/auth/token` by client credentials,
-naming the REST core and its scope, and sends it as `Authorization: Bearer`
-to `/api`:
+with its secret (`OB1_AUTH_SECRET_<ID>` in `deploy/.env`), naming the REST
+core and its scope, and sends it as `Authorization: Bearer` to `/api`:
 
 ```bash
 curl -s -u "runner:$OB1_AUTH_SECRET_RUNNER" -d grant_type=client_credentials \
@@ -3158,13 +3158,17 @@ refused there; it reaches the REST core only exchanged by the MCP server.
 - **Classify it** as you would a key, or its writes carry no kind and a
   `said_by` filter misses them:
   `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator', 'agent')"`,
-  then `SELECT backfill_thought_audit_events()` for the rows written before.
+  then `SELECT backfill_thought_actors()` so the thoughts it wrote before
+  carry the kind `said_by` reads (and `SELECT backfill_thought_audit_events()`
+  for their audit rows).
   `agent` is the cautious kind while every connector shares the name:
   `operator` would give every connector the operator signs in the
   operator's trust.
 - **Revoking it in the registry bans the subject for good.** Its digest is
   fixed, so no new sign-in escapes it: every token of it is refused 401
-  `REVOKED` (`credential: "token"`), and there is no function to undo it.
+  `REVOKED` (`credential: "token"`), and there is no function to undo it. (The
+  digest is of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives the
+  subject a new one, and lifts the ban with it.)
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The

@@ -229,6 +229,9 @@ export function checkerOver(settings: TokenSettings, keys: JWTVerifyGetKey): Tok
     }
     const claimedAud = claimed.aud;
     if (claimed.iss !== settings.issuer) return { status: "invalid", why: "iss is not this REST core's issuer" };
+    // An expired token, or one with no expiry, is refused here too, so a forged one naming a key the set lacks is told
+    // 503 at most for the rest of its claimed life, and an old token after a key change is sent to sign in, not to retry.
+    if (typeof claimed.exp !== "number" || claimed.exp <= Math.floor(Date.now() / 1000)) return { status: "invalid", why: "expired, or no exp" };
     if (!(claimedAud === settings.audience || (Array.isArray(claimedAud) && claimedAud.length === 1 && claimedAud[0] === settings.audience))) return { status: "invalid", why: "aud names more than this REST core" };
     let payload: Record<string, unknown>;
     try {

@@ -664,7 +664,15 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
       const got = await cold(await made);
       assert(got.status === "invalid" && hits === before, `no keys to be had, ${label}: 401 on its claims, no key read for it (${got.status}, ${hits - before})`);
     }
-    assert((await cold(await mint())).status === "unavailable", "…while this REST core's own token is a 503 there");
+    for (const [label, made] of [
+      ["expired", mint({}, { exp: Math.floor(Date.now() / 1000) - 60 })],
+      ["no exp", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid: "ob1-nowhere" }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().sign(privateKey)],
+    ] as const) {
+      const before = hits;
+      const got = await cold(await made);
+      assert(got.status === "invalid" && hits === before, `no keys to be had, a token ${label}: 401 on its claims, no key read (${got.status}, ${hits - before})`);
+    }
+    assert((await cold(await mint())).status === "unavailable", "…while this REST core's own live token is a 503 there");
     status = 200;
     body = { keys: [] };
     let C3 = 0;
