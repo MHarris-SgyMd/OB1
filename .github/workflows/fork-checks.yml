@@ -1453,15 +1453,17 @@ jobs:
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
           # SMD-1849 PR 3a: the observability profile's collector publishes
-          # nothing and joins the internal mesh alone (check 28 holds the rest of
+          # nothing and joins the internal mesh, and since PR 3b the internal
+          # telemetry network, where it scrapes pg-exporter, which publishes
+          # nothing and is on data and telemetry alone (check 28 holds the rest of
           # it, LGTM_SERVICE); with compose.grafana-port.yaml, Grafana's port on
           # loopback, a network of its own and its origin that port. The two servers take the ten
           # OpenTelemetry settings, each empty unless deploy/.env sets it, and no
           # service name; no other service takes any, under every profile.
           docker compose -f compose.yaml --profile observability config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh", "telemetry"])) and (.services["pg-exporter"] | (has("ports") | not) and ((.networks | keys) == ["data", "telemetry"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
           docker compose -f compose.yaml -f compose.grafana-port.yaml --profile observability config --format json \
-            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
           # SMD-2583, the network move, as compose renders each stack with
           # every profile: no service on compose's default network (a service
           # that names none is put there); Postgres on the internal `data`
@@ -1482,14 +1484,14 @@ jobs:
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
-              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server", "sleep"])
+              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"])
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"])'
+            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"])'
           docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
@@ -2142,6 +2144,9 @@ jobs:
       # the brain under its service name and its container name is one
       # database, and a refresh the wrong way round lands on a brain with no
       # tier stamp. Both are refused, and the brain still holds its thought.
+      # The restore, without privileges, gives pg_stat_statements' views back
+      # to PUBLIC, and the refresh's own migrate run takes them back
+      # (SMD-1849 PR 3b review pass 2): the copy holds them from PUBLIC.
       - name: The tier refresh runs from deploy/tier.sh
         working-directory: deploy
         run: |
@@ -2160,6 +2165,8 @@ jobs:
           [ "$STABLE" = "$COPY" ] || { echo "the refreshed copy differs from stable" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT count(embedding) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the probe thought or its vector did not arrive" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the copy is not stamped tier=working" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "the copy has no pg_stat_statements" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "the copy's pg_stat_statements is PUBLIC's: the refresh's migrate did not take back what its restore gave" >&2; exit 1; }
           # SMD-2037: the dump carries no database-level settings; the refresh
           # copies them, so the copy walks HNSW under 014's bounds as stable does.
           SETTINGS="SELECT coalesce(string_agg(c, ',' ORDER BY c), '') FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c NOT LIKE 'ob1.refresh_target=%'"
@@ -2377,9 +2384,10 @@ jobs:
           # dummies (nothing here runs board-sync), so the check below has a
           # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
           # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
-          # SMD-1849 PR 3a: the observability profile's Grafana password too,
-          # a dummy (nothing here runs the profile).
-          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
+          # SMD-1849 PR 3a and 3b: the observability profile's Grafana and
+          # database-monitor passwords too, dummies (nothing here runs the
+          # profile).
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
           # SMD-2875: through the first up's refresh, every 0.2 s, the tier
           # halves' containers, found by the label tier.sh gives each (both are
           # made before either runs; the source's lasts until its hand-off has
@@ -2436,7 +2444,8 @@ jobs:
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
           # SMD-2873: the file names the canary's own project, so compose given it
           # alone acts on the canary; one naming another is refused at an up.
@@ -2834,6 +2843,29 @@ jobs:
           docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
           loaded "with the overlay dropped"
           answers404 "with the overlay dropped"
+
+      # SMD-1849 PR 3b: the stack's Postgres loads pg_stat_statements at its
+      # start, with utility statements untracked and I/O timed (compose.yaml's
+      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 096 created
+      # the extension out of PUBLIC's reach, so the view answers and counts the
+      # brain's own statements by now — the server's calls of thought_stats'
+      # and keyword search's functions above, in the brain's database (the
+      # tier step's replay calls one in its copy), which no migration calls — and
+      # holds no role statement, whose text an ALTER ROLE … PASSWORD would
+      # carry. The exporter that reads it runs under the observability
+      # profile, which CI does not start.
+      - name: Postgres counts the brain's statements in pg_stat_statements
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -Atc "$1"; }
+          [ "$(q "SHOW shared_preload_libraries")" = pg_stat_statements ] || { echo "Postgres did not start with pg_stat_statements preloaded" >&2; exit 1; }
+          [ "$(q "SHOW pg_stat_statements.track_utility")" = off ] || { echo "Postgres tracks utility statements, whose text a role's password would be in" >&2; exit 1; }
+          [ "$(q "SHOW track_io_timing")" = on ] || { echo "Postgres does not time I/O: pg_stat_statements' block times read 0" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "096 did not create pg_stat_statements" >&2; exit 1; }
+          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 096's revoke did not hold" >&2; exit 1; }
+          n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
+          [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes

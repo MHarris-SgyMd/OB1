@@ -136,7 +136,7 @@ client that resolves `localhost` to `::1` first without falling back is refused
 
 The stack above builds `server` and `migrate` from the checkout, pins
 `postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
-`compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder`, `n8n` and `lgtm` by digest in
+`compose.yaml`, shared by `ollama-pull`), and `proxy`, `forwarder`, `n8n`, `lgtm` and `pg-exporter` by digest in
 `compose.yaml` itself, which the overlay leaves as they are. A release pins everything: the job
 `.github/workflows/release.yml` (SMD-1860) runs on the tag a cut is named by —
 `v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
@@ -272,7 +272,8 @@ nothing is on compose's default network:
   own (`compose.canary.yaml`).
 - `data`, internal: Postgres, and only what connects to it — the migrator,
   the two servers, board-sync, the workers, the sleep scheduler, the import
-  runner and its role's one-shot. No other project joins it.
+  runner and its role's one-shot, and the observability profile's exporter
+  and its role's one-shot. No other project joins it.
 - `egress`, outward: whatever calls a model provider or a vendor (the two
   servers, board-sync, the workers, the sleep scheduler, the import runner,
   n8n), and the stack's
@@ -281,6 +282,9 @@ nothing is on compose's default network:
 - `auth-egress`, outward: the authorization server's alone.
 - `front`, internal: the forwarder and the proxy alone, where the forwarder
   reaches the proxy as `proxy.ob1.internal`.
+- `telemetry`, internal: the observability profile's collector and its
+  Postgres exporter alone, where the collector scrapes it as
+  `pg-exporter.ob1.internal` (SMD-1849 PR 3b).
 - `edge`, outward: the forwarder's alone, where the stack's port is
   published. The proxy is on internal networks alone (`front` and `mesh`),
   so a name it looks up that nothing holds is never asked of the host's
@@ -306,7 +310,8 @@ network of its own, `postgres-port`, for its loopback port, and
 | `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name, all on `egress`. Not the mesh, where a tier of another project's server is `server` too | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network alone: the two servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing by itself — a data source its admin adds reaches any name on `mesh` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
+| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the two servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers, though `pg-exporter`'s `/probe` dials Postgres for whoever on `telemetry` names it a target (SMD-3023) | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
+| `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it; it dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). Its port answers on `data` too, and its `/probe` dials any target and credentials its caller names (SMD-3023). It shares no network with the model providers or the mesh | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
@@ -827,8 +832,8 @@ restarts is each container's restart policy; compose is not involved. In
 `compose.yaml` what serves is `unless-stopped`: Postgres, the two servers,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
-profile's `lgtm`. What runs once is `"no"`: the migrator, `ollama-pull` and the
-runner's role job. `board-sync`, the two workers, the sleep scheduler and `jev` are
+profile's `lgtm` and `pg-exporter`. What runs once is `"no"`: the migrator,
+`ollama-pull`, the runner's role job and the exporter's. `board-sync`, the two workers, the sleep scheduler and `jev` are
 `on-failure:3`, so that a configuration a restart does not fix stops them
 rather than loops; count on neither runtime to start those at boot. The
 servers can need one of them: with `OB1_JEV_BASE_URL` naming the `jev`
@@ -1190,7 +1195,8 @@ for a call that failed, its `error.type`: the provider's status (`503`;
 Each operation the core calls on the store is a client span named for the
 operation (`matchThoughts`, `captureThought`) — one span per operation, not
 per query: no query's text is read, so a span cannot name its SQL, and
-`pg_stat_statements` (PR 3b) times each SQL function — with `db.system.name`
+`pg_stat_statements` times each SQL statement (the observability profile's
+exporter, below) — with `db.system.name`
 (`postgresql`), `db.operation.name` and `ob1.store` (`sql` or `postgrest`),
 and a point on `db.client.operation.duration` labelled with the same, on
 bounds finer than the conventions advise and on to 60 s. On the SQL store a
@@ -1216,8 +1222,9 @@ a failed delivery's undoing of it (`discard`) runs before its 500, so it is
 that request's child. The stop ends whatever of these is still open as `cut`,
 with its request — after a drain that finished too, for work the drain does
 not count (a store call outside any request). The pool's connections in use
-are not counted here: Bun's client does not say them, and PR 3b's Postgres
-exporter reads them from the database. Nor is the workers' traffic: `db/`'s
+are not counted here: Bun's client does not say them, and the observability
+profile's Postgres exporter reads them from the database
+(`pg_stat_activity_count` by state). Nor is the workers' traffic: `db/`'s
 passes (entity extraction, the consolidation judge, the re-embeds) make the
 heaviest provider and database calls, and install no OpenTelemetry, so a
 provider-latency panel shows the servers' calls alone (SMD-2910).
@@ -1296,15 +1303,18 @@ every line is still written. Cloudflare Workers runs the API's no-ops alone —
 
 ### The observability profile
 
-The `observability` profile (SMD-1849 PR 3a) runs one more container, `lgtm`:
-Grafana's otel-lgtm image, pinned by digest — an OpenTelemetry collector
-taking OTLP on 4318, and Prometheus, Tempo, Loki, Pyroscope and Grafana behind
-it — on the stack's machine, on the internal `mesh` network alone. Three lines
-in `deploy/.env` turn it on:
+The `observability` profile (SMD-1849 PR 3a) runs two more containers and a
+one-shot: `lgtm`, Grafana's otel-lgtm image, pinned by digest — an
+OpenTelemetry collector taking OTLP on 4318, and Prometheus, Tempo, Loki,
+Pyroscope and Grafana behind it — on the stack's machine, on the internal
+`mesh` network and the internal `telemetry` one; `pg-exporter`, which reads
+Postgres's own numbers into it; and `pg-monitor-role`, the one-shot that sets
+its role (PR 3b). Four lines in `deploy/.env` turn it on:
 
 ```
 COMPOSE_PROFILES=observability      # beside any already there on this one line (auth,observability): a second line replaces the first
 GRAFANA_ADMIN_PASSWORD=<openssl rand -hex 24>
+OB1_MONITOR_DB_PASSWORD=<openssl rand -hex 32>
 OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318
 ```
 
@@ -1392,6 +1402,48 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   a pipeline tier's `deployment_environment_name` its tier.
 - **Log records** in Loki: each request's, its body the line's fields, under
   `service_name`.
+- **The database's own numbers** in Prometheus under `job` `postgres`, from
+  `pg-exporter` (postgres_exporter, pinned by digest) every 30 s:
+  `pg_stat_statements_calls_total`, `_seconds_total`, `_rows_total` and the
+  block read and write seconds for the 100 statements that took the most time
+  (of those above the tenth percentile of total time: the exporter's own query
+  leaves out the rest), each by `queryid`, `user` and `datname`, with
+  `pg_stat_statements_query_id` naming each `queryid`'s normalized text cut to
+  120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c FROM
+  match_thoughts($1 ::vector, …)`, measured); connections by state,
+  `pg_stat_activity_count` by database and state — the servers' pool among
+  them, which their client cannot count — and the exporter's default
+  collectors (`pg_up`, locks, database sizes, the WAL). The statements are the
+  server's, the workers' and the migrator's alike; the exporter's own are left
+  out. Postgres starts with `pg_stat_statements` preloaded on every stack and
+  tier, with utility statements untracked, so an `ALTER ROLE … PASSWORD` is
+  never recorded with its text, and with `track_io_timing` on, which the block
+  times need (CI's "Postgres counts the brain's statements" holds all three).
+  Those are `-c` flags on Postgres's command, which outrank `postgresql.conf`
+  and `ALTER SYSTEM`: a library of your own to preload goes in
+  `POSTGRES_PRELOAD_LIBRARIES` in `deploy/.env`, beside `pg_stat_statements`,
+  which the list must keep
+  (`POSTGRES_PRELOAD_LIBRARIES=pg_stat_statements,auto_explain`). The image
+  ships Postgres's contrib modules (`auto_explain` among them) and pgvector,
+  not `pg_cron` or another extension: a library it does not have stops
+  Postgres at its start, on every tier that copies the setting. Migration 096
+  creates the extension only as a superuser may: a migrator that is not one
+  leaves it out and says so. Its views are `pg_monitor`'s alone, and each
+  plain migrate run takes back a grant to `PUBLIC` that a restore without
+  privileges gives back (a tier refresh's). `pg-exporter` reads as
+  `ob1_monitor`, a member of Postgres's read-only `pg_monitor` alone, which
+  `pg-monitor-role` sets from `OB1_MONITOR_DB_PASSWORD` (24 or more of A–Z a–z
+  0–9 _ -) at each `up`: unset or short, `up -d` fails naming
+  `pg-monitor-role`, whose log (`compose logs pg-monitor-role`) says what to
+  set, and `pg-exporter` is created but never started; the rest of the stack
+  comes up (measured). It is on `data`, where Postgres is, and on the internal
+  `telemetry`, where the collector scrapes it; it publishes nothing, is
+  read-only, holds no capability. Two gaps are open (SMD-3023): every
+  container on `data` reads its `/metrics`, and its `/probe`, which
+  postgres_exporter cannot turn off, dials whatever Postgres target and
+  credentials its caller names — so a caller on `telemetry` (lgtm, or a data
+  source its admin adds) can try passwords against Postgres through it, each
+  failure in Postgres's log.
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1411,9 +1463,9 @@ was ready 4 s after it started (measured on podman 6, macOS); its image is
 It calls out to nothing by itself: what it would call is off — Grafana's
 plugin fetches, signing keys and preinstalled apps (so no Drilldown apps),
 usage reports, update checks, news feed, gravatars, cloud migration and
-external snapshots, and the backends' usage reports. On `mesh` alone it has no
-outward network; with `compose.grafana-port.yaml` its port's network reaches
-out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
+external snapshots, and the backends' usage reports. On `mesh` and
+`telemetry`, both internal, it has no outward network; with
+`compose.grafana-port.yaml` its port's network reaches out, as Postgres's does in `compose.host-ports.yaml` (measured), and the
 switches are what keep it quiet. Snapshots, public dashboards and Grafana's
 own `/metrics` are off: each would show data without a sign-in. On `mesh` only
 Grafana (3000), the collector's OTLP (4317, 4318) and its health check (13133,
@@ -1429,8 +1481,7 @@ too, through the port's network — on Docker Desktop and a podman machine by
 `host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
 port with the host-ports file); on Linux the host's other listeners, by the
 network's gateway. The image's own sample dashboards (RED metrics, JVM) read
-other names; this stack's dashboard (PR 3c) and the database's own numbers
-(`pg_stat_statements`, PR 3b) are the next cuts.
+other names; this stack's dashboard is PR 3c's.
 
 A canary at `/canary/mcp` (`deploy/canary.sh`) joins stable's `mesh`, and its
 env file is made from stable's at its first `up`: with the endpoint in
@@ -1440,22 +1491,28 @@ canary by an edit to the canary's own file, which `up` names as a difference.
 One on a `--port` of its own is not on stable's mesh, and says `ENOTFOUND`
 until the endpoint is out of its file (`OTEL_EXPORTER_OTLP_ENDPOINT=
 deploy/canary.sh --port <n> up`, an empty one in the shell, keeps it out of
-the canary's servers without an edit); `up` says so. `GRAFANA_*` is never
-carried. The three-brain stack (`compose.tiers.yaml`) runs no collector and
-passes the servers none of these variables.
+the canary's servers without an edit); `up` says so. `GRAFANA_*` and
+`OB1_MONITOR_*` are never carried. The three-brain stack
+(`compose.tiers.yaml`) runs no collector and passes the servers none of these
+variables.
 
 **Turning it off**: take `observability` and the endpoint out of
 `deploy/.env` and `compose up -d` without the Grafana `-f` files, then
-`compose rm -sf lgtm` (measured: it takes `lgtm` with the profile no longer
-named) — `up` leaves a service of a profile no longer named running, as it
+`compose rm -sf lgtm pg-exporter pg-monitor-role` (measured: it takes `lgtm`
+with the profile no longer named, and the role step's exited container;
+`ob1_monitor` stays, a login with no grant but `pg_monitor`,
+`DROP ROLE ob1_monitor` to remove it) — `up` leaves a service of a profile no longer named running, as it
 does the workers' — and `docker network rm
-<project>_grafana-port`, which outlives the file (measured); remove its volume
+<project>_grafana-port <project>_telemetry`, which outlive the file and the
+services (measured); remove its volume
 by its exact name
 when its data should go too, `docker volume rm <project>_lgtm-data` (never a
 prune), which takes Grafana's password with it: the next start reads
 `GRAFANA_ADMIN_PASSWORD` afresh, the way to start over from a forgotten one.
 **Rolling back** to a release from before it needs `up -d --remove-orphans`,
-or `lgtm` runs on as an orphan, on `mesh` and on its port.
+or `lgtm` and `pg-exporter` run on as orphans, `lgtm` on `mesh` and its port,
+`pg-exporter` on `data` signed in to Postgres; `ob1_monitor` stays either way
+(`DROP ROLE ob1_monitor`, as above).
 
 ## Keeping the board in the brain
 
@@ -3064,7 +3121,10 @@ so the profile builds from a checkout.
 
 ## What this does not cover
 
-- **TLS, backups, resource limits, log shipping.** Reference topology only. One
+- **TLS, backups, resource limits, log shipping.** Reference topology only.
+  Postgres's command sets three things on every stack and tier:
+  `pg_stat_statements` preloaded (`POSTGRES_PRELOAD_LIBRARIES`), utility
+  statements untracked, I/O timed ("The observability profile"). One
   limit is set because the stack met it: the postgres service's `shm_size`
   (`POSTGRES_SHM_SIZE`, 1 GB), since a parallel HNSW index build keeps its whole
   graph in `/dev/shm` and a container's default 64 MB fails the rebuild after a
