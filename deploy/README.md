@@ -262,10 +262,10 @@ of its own: `http://<name>.localhost:8090/mcp`. curl and browsers resolve
 system's resolver, which answers it on macOS and under systemd-resolved. On
 another Linux resolver, give each name a hosts line (`127.0.0.1
 stable.localhost`), or the name goes to upstream DNS. The edge is a compose
-project of its own, `ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
-published port, as any client on the host does, and joins no brain's network.
-Because each brain is served at the root of its own host, its `/mcp`, its
-discovery documents and its authorization server stay its own.
+project of its own, `ob1-edge` (`deploy/edge/`). It reaches each brain
+through the brain's published port, as any client on the host does, and
+joins no brain's network. Each brain is served at the root of a host of its
+own. Access keys pass through; sign-in waits for TLS at the edge (below).
 
 ```bash
 cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by git
@@ -293,12 +293,12 @@ there.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
 - **Sign-in (OAuth) is not served through the edge yet. Keys are.** Each
-  brain's host on the edge is the root of an origin of its own, so its
-  challenge, its discovery documents and its authorization server would be
-  its own. But MCP clients send a token request over plain HTTP only to
-  exactly `localhost`, `127.0.0.1` or `::1`, never to a name under
-  `localhost`. This was measured on MCP SDK v2, and the same rule is read in
-  Claude Code 2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
+  brain's host on the edge would be its origin, with its challenge, its
+  discovery documents and its authorization server its own. But MCP SDK v2
+  and Claude Code send a token request over plain HTTP only to exactly
+  `localhost`, `127.0.0.1` or `::1`, never to a name under `localhost`. This
+  was measured on MCP SDK v2, and the same rule is read in Claude Code
+  2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
   TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only after
   SMD-2286; the brain's origin will then be its host on the edge.
 
