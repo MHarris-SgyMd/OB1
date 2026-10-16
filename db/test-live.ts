@@ -3557,6 +3557,14 @@ if (want("10")) {
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /**
+   * An outage paced by probes, not the clock (SMD-3048): while set, every
+   * request answers `down` and each probe counts one off, and the probe after
+   * the last is answered, which ends it. However slow the runner, the outage
+   * is probed that many times while down, and the calls stay down until a
+   * probe answers.
+   */
+  let downProbes: number | null = null;
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
   const modelsNamed: string[] = [];
   const model = Bun.serve({
@@ -3566,7 +3574,16 @@ if (want("10")) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-escalate:latest" }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       modelsNamed.push(body.model ?? "");
-      if (Date.now() < downUntil) {
+      const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      let probeDown = false;
+      if (downProbes !== null) {
+        if (isProbe && downProbes === 0) downProbes = null;
+        else {
+          probeDown = true;
+          if (isProbe) downProbes--;
+        }
+      }
+      if (probeDown || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
@@ -3888,10 +3905,11 @@ if (want("10")) {
   // poll sleep and restored after the first check; the stop sent as the
   // "answers again" line is written. The outage schedule starts at 1 s here
   // (SMD-3048): the poll at 2 s fails, the check at 3 s finds it still cut,
-  // and the one at 5 s finds it back.
+  // and a later one finds it back. Bounded, so a cut no poll meets fails the
+  // case rather than hanging the suite.
   {
-    const restoreOutage = shortenOutage();
     const relay = await cuttableRelay(URL_!);
+    const restoreOutage = shortenOutage();
     const lines: string[] = [];
     const ac = new AbortController();
     const write = (l: string) => {
@@ -3902,9 +3920,9 @@ if (want("10")) {
     try {
       await Bun.sleep(1000);
       await relay.cut();
-      await Bun.sleep(3000);
+      await Bun.sleep(4000);
       await relay.restore();
-      const code = await running;
+      const code = await Promise.race([running, Bun.sleep(30_000).then(() => -1)]);
       assert(code === 0 && lines.some((l) => /the database answers again/.test(l)) && !lines.some((l) => /stopped while the database was not answering/.test(l)) && lines.some((l) => /^  after: \d+ thoughts/.test(l)),
              `a follower stopped just after the database answers again reads its counts and exits 0 (exit ${code}; ${lines.filter((l) => /answers again|stopped while|after:/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
     } finally {
@@ -3982,8 +4000,8 @@ if (want("10")) {
   // extracts it, and ends there. The outage schedule starts at 1 s here
   // (SMD-3048).
   {
-    const restoreOutage = shortenOutage();
     const relay = await cuttableRelay(URL_!);
+    const restoreOutage = shortenOutage();
     const lines: string[] = [];
     const ac = new AbortController();
     let code = -1;
@@ -4032,8 +4050,8 @@ if (want("10")) {
       const ac = new AbortController();
       let settled = false;
       let followCode = -1;
-      // Deadlines past the waits: a 503 for 3 s is probed about 1 s into the
-      // outage, still down, and again 2 s later, answering.
+      // Each outage is paced by probes (downProbes): down until the follower's
+      // probes have found it down that many times, however slow the runner.
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
         .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
       try {
@@ -4042,30 +4060,29 @@ if (want("10")) {
         const startProbes = probes;
         // A 503 past the pauses.
         down = "503";
-        downUntil = Date.now() + 3000;
+        downProbes = 1;
         const busy = await seed("Tess wired the outage pager into grafana.");
         created.push(busy);
         const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
         const during = await claimRow(busy);
         const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
-        assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
+        assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled && probes - startProbes >= 1,
                `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${probes - startProbes} probe(s) answered)`);
         assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 1 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
                "…and says when the provider stopped answering, how it waits, and when it answered again");
         // The model missing, as while Ollama pulls it: no pauses, an outage at once.
         down = "404";
-        downUntil = Date.now() + 3000;
+        downProbes = 1;
         const pulled = await seed("Uma rebuilt the grafana alerts after the model was pulled again.");
         created.push(pulled);
         const pulledDone = await pollUntil(async () => (await claimRow(pulled))?.status === "succeeded" && (await extractedNow(pulled)), 20_000);
         assert(pulledDone && (await claimRow(pulled))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*404 \{"error":\{"message":"model \\"stub-meta\\" not found/.test(l)),
                `the model missing mid-run is an outage, not the provider's refusal: no exit, and the thought is extracted once the model answers (extracted ${pulledDone}, settled ${settled})`);
         // A hung provider: the call times out at 2 s, and the probe gets no
-        // answer either. 4.5 s: the call starts within the poll's 1 s and the
-        // probe after its timeout hangs too, and the outage's first probe, 1 s
-        // after that one's own 2 s, finds it back.
+        // answer either. Two probes hang: the one after the timeout, and the
+        // outage's first; the next answers.
         down = "hang";
-        downUntil = Date.now() + 4500;
+        downProbes = 2;
         const hung = await seed("Vic moved the grafana panels while the provider hung.");
         created.push(hung);
         const hungDone = await pollUntil(async () => (await claimRow(hung))?.status === "succeeded" && (await extractedNow(hung)), 25_000);
@@ -4082,6 +4099,7 @@ if (want("10")) {
         assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
       } finally {
         downUntil = 0;
+        downProbes = null;
         ac.abort();
         await running;
       }
@@ -4130,13 +4148,13 @@ if (want("10")) {
       // refused there rather than waited on for ever (review pass 2).
       {
         down = "503";
-        downUntil = Date.now() + 3000;
+        downProbes = 1;
         const lateOut: string[] = [];
         const stopLate = new AbortController();
         const lateGuard = setTimeout(() => stopLate.abort(), 20_000);
         const lateCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopLate.signal, writer: { out: (l) => lateOut.push(l), err: (l) => lateOut.push(l) } });
         clearTimeout(lateGuard);
-        downUntil = 0;
+        downProbes = null;
         assert(lateCode === 2 && lateOut.some((l) => /the provider is not answering at start \(503 [^)]*\) — the follower claims nothing until it does/.test(l)) && lateOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 /.test(l)),
                `a follower whose provider was down at start and then answers that it does not serve the model is refused, exit 2 (exit ${lateCode}: ${lateOut.filter((l) => /at start/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
       }
@@ -4153,14 +4171,14 @@ if (want("10")) {
         try {
           await Bun.sleep(1000);
           down = "404";
-          downUntil = Date.now() + 3000;
+          downProbes = 1;
           const counted = await seed("Xan paged the on-call while the model was pulled.");
           created.push(counted);
           const ended = await pollUntil(async () => limitedCode !== -1, 20_000);
           assert(ended && (await claimRow(counted))?.status === "succeeded" && limitLines.some((l) => /the provider answers again/.test(l)),
                  `a follower of --limit 1 whose thought an outage returned extracts it once the provider answers, and ends there (ended ${ended}, exit ${limitedCode}, claim ${(await claimRow(counted))?.status})`);
         } finally {
-          downUntil = 0;
+          downProbes = null;
           stopLimited.abort();
           await limited;
         }
@@ -5755,6 +5773,8 @@ if (want("16")) {
   /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
   let judgeDownUntil = 0;
   let judgeDown: "503" | "hang" = "503";
+  /** An outage paced by probes, as [10]'s downProbes (SMD-3048): every request answers judgeDown until a probe past this many refused is answered. */
+  let judgeDownProbes: number | null = null;
   /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
   let rotaAnswer = "duplicate";
   let rotaConfidence = 0.85;
@@ -5764,10 +5784,19 @@ if (want("16")) {
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
+      const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      let probeDown = false;
+      if (judgeDownProbes !== null) {
+        if (isProbe && judgeDownProbes === 0) judgeDownProbes = null;
+        else {
+          probeDown = true;
+          if (isProbe) judgeDownProbes--;
+        }
+      }
       // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
-      if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      if (probeDown || Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       // A follower's one-token probe, answered apart: no judge call counted.
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (isProbe) return Response.json({ choices: [{ message: { content: "OK" } }] });
       calls++;
       modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -6796,9 +6825,10 @@ if (want("16")) {
 
   // A consolidate follower outlasts its provider going away (SMD-2599), as
   // extract's does in [10]: in this process, the pauses cut to 100 ms and the
-  // outage schedule to 1 s first (SMD-3048), the judge answering 503 for 3 s
-  // while a newer thought of a pair is judged, then hanging for 4.5 s past a
-  // 2 s --timeout while another is.
+  // outage schedule to 1 s first (SMD-3048), the judge answering 503 while a
+  // newer thought of a pair is judged, then hanging past a 2 s --timeout while
+  // another is, each until the follower's probes have found it down
+  // (judgeDownProbes), however slow the runner.
   {
     const restorePauses = shortenPauses();
     const restoreOutage = shortenOutage();
@@ -6811,7 +6841,7 @@ if (want("16")) {
     const claimOf = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
     try {
       await Bun.sleep(1000);
-      judgeDownUntil = Date.now() + 3000;
+      judgeDownProbes = 1;
       await seed("The outage runbook pages the on-call by phone.", 9, 3, ["outage-runbook"]);
       const newer = await seed("The outage runbook pages the on-call by chat now.", 9, 0, ["outage-runbook"]);
       const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*503/.test(l)) && (await claimOf(newer))?.status === "pending", 8000);
@@ -6820,9 +6850,9 @@ if (want("16")) {
       assert(pooled && during?.attempt_count === 0 && during.last_error === null && judgedAfter && !settled && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
-      // 4.5 s, as [10]'s: the probe after the timeout hangs, the outage's first answers.
+      // Two probes hang, as [10]'s: the one after the timeout, and the outage's first.
       judgeDown = "hang";
-      judgeDownUntil = Date.now() + 4500;
+      judgeDownProbes = 2;
       await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
       const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
       const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
@@ -6832,6 +6862,7 @@ if (want("16")) {
     } finally {
       judgeDown = "503";
       judgeDownUntil = 0;
+      judgeDownProbes = null;
       ac.abort();
       await running;
       restoreOutage();
@@ -11775,12 +11806,13 @@ if (want("38")) {
     // A stop that lands while the scheduler reads, with a pass waiting at its
     // start (its probe held): the pass settles at once (130) and the read then
     // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
-    // itself", 130 and the row failed (review pass 1). A probe held 3 s: the
-    // start's check holds both passes' probes first, and the read lands
-    // within a poll of the sleep, the pass's own probe still held (8 s until
-    // SMD-3048, 16 s of check).
+    // itself", 130 and the row failed (review pass 1). A probe held 4 s, 8 s
+    // until SMD-3048, which the start's check paid twice. The stop lands at
+    // the sleep's first wake read: at 8 s as at 4 s no probe was held then
+    // (SMD-3048 PR 2's review pass 1 counted), so the hold paces the start's
+    // check and not the race (SMD-3106).
     try {
-      probeHold = 3000;
+      probeHold = 4000;
       lines.length = 0;
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       const acRace = new AbortController();
