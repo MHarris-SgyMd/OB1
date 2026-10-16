@@ -13,9 +13,11 @@
 # setting, each value as compose read it, but the database password, which is
 # a fresh one of the canary's, the secrets of the profiles the canary
 # never runs (the authorization server's, n8n's, the import runner's, the
-# workers' key, Linear's), and the settings that make it the canary: its
-# port, loopback as its address, its tier and its profiles (none), which
-# compose is also handed in the shell. It refuses a stable setting that carries stable's
+# workers' key, Linear's), stable's keys and the secrets that go with them,
+# and the settings that make it the canary: its port, loopback as its
+# address, its tier and its profiles (none), which compose is also handed in
+# the shell; its own access key, minted, and its own plugin role password
+# where stable sets one (SMD-2874, SMD-3032). It refuses a stable setting that carries stable's
 # database password in its value. From then on the file is the canary's: a
 # change to stable's does not reach it, and `up` names the settings that
 # differ (names, never values). Edit it to carry one across, or delete it to
@@ -23,17 +25,30 @@
 # own password, and stable's (12 characters or more; a shorter one would match
 # ordinary text) in none of its values, which every `up` checks. The
 # database password comes from that file alone: one set only in the shell is
-# unset here, since compose would let it win. It does hold stable's access
-# keys, as it always has (a client reaches it with them). `down` acts on that
-# project alone, so it cannot reach stable. SMD-1806 calls the running stack
-# stable, the record the canary is refreshed from.
+# unset here, since compose would let it win.
+#
+# Its keys are its own (SMD-2874): MCP_ACCESS_KEYS holds a write key `up`
+# mints, named for the canary's project, and none of stable's, so no key of
+# stable's opens it and its key opens nothing of stable's. The raw key is the
+# file's OB1_CANARY_KEY, which `up` smokes and registers the connector with,
+# and which no container is handed. Mint another for a client with
+# server-portable/keygen.ts and add its line to the file's MCP_ACCESS_KEYS. A
+# file made before this holds stable's keys: `up` takes them out, mints the
+# canary's, clears a raw key or webhook secret of stable's, and gives the
+# plugin role a password of its own, and says so. A refresh copies stable's
+# ob1_agents and ob1_agent_keys rows, which grant nothing: a key is accepted
+# by MCP_ACCESS_KEYS alone, and those rows can only refuse one.
+# `down` acts on the canary's project alone, so it cannot reach stable.
+# SMD-1806 calls the running stack stable, the record the canary is
+# refreshed from.
 #
 # Where it answers (SMD-2874): at /mcp behind a proxy of its own, on
 # 127.0.0.1 and a port of its own, as any brain does on its own port
 # (docs/one-brain-per-stack.md). Its networks are its own project's; it joins
 # none of stable's. The port is --port, which the first `up` needs, and from
 # then on the canary's env file's SERVER_PORT: a --port that differs is
-# written to the file, appended as its last SERVER_PORT, which compose reads.
+# written to the file (deploy/env-file.ts: its old line removed, the new one
+# at the file's end), read back through compose.
 # A canary stood up at /canary/mcp on stable's origin, its servers on stable's
 # mesh (SMD-2294 to SMD-2874), moves to its port at its next `up --port N`:
 # its servers are recreated on its own networks alone, on the same volume, and
@@ -89,8 +104,7 @@
 #      refreshed database. Standing servers are stopped before the refresh, so
 #      nothing serves or writes a half-restored copy. The canary's own proxy
 #      and forwarder are (re)started, its port published on loopback;
-#   5. smoke-tests it with OB1_SMOKE_KEY, a raw write key whose hash is in the
-#      env file's MCP_ACCESS_KEYS (the canary accepts stable's keys; smoke.sh
+#   5. smoke-tests it with its own key, OB1_CANARY_KEY (a write key: smoke.sh
 #      checks the whole tool surface, which a read key does not see). The keyed
 #      /health must report tier canary, deploy/smoke.sh must pass, and
 #      search_thoughts, given a thought's own text with its literals (SMD
@@ -99,7 +113,7 @@
 #      candidates. A canary with no thought to probe is not checked, unless
 #      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
-#      the same key, at http://127.0.0.1:<port>/mcp; without it, names a
+#      its own key, OB1_CANARY_KEY, at http://127.0.0.1:<port>/mcp; without it, names a
 #      connector left at another of the canary's ports or at /canary/mcp on
 #      stable's origin, and one at its port's
 #      root, which still answers, deprecated, until v2.0.0.
@@ -139,8 +153,8 @@
 #                         open-brain-canary for the default stable)
 #   names                 print stable's project, the canary's, the connector
 #                         and the canary's env file, and change nothing
-#   up --connect          register the connector after the smoke passes
-#   up --no-smoke         skip step 5 (no key needed; the connector needs one)
+#   up --connect          register the connector (after the smoke, unless --no-smoke)
+#   up --no-smoke         skip step 5
 #   down --volumes        delete the canary's database as well
 #
 # The server image is built from this checkout, as compose.yaml builds stable's,
@@ -156,7 +170,7 @@ unset CDPATH
 trap 'exit 130' INT
 # …and so are a hangup and a TERM, so the EXIT trap below runs and removes
 # what is half-made: the canary's env file in the making holds stable's
-# settings, its keys among them (review pass 1). Not left to bash's own
+# settings, its provider keys among them (review pass 1). Not left to bash's own
 # handling: bash 5 skipped the EXIT trap on a hangup to the process group (a
 # closed terminal) in up to 12 runs of 20 and left the finished temporary
 # file, where with these traps it ran in 20 of 20 (review pass 4, measured;
@@ -167,7 +181,9 @@ trap 'exit 129' HUP
 trap 'exit 143' TERM
 CONFIG_ERR=""
 CANARY_TMP=""
-cleanup() { rm -f ${CONFIG_ERR:+"$CONFIG_ERR"} ${CANARY_TMP:+"$CANARY_TMP"}; }
+# deploy/env-file.ts writes its own temporary file beside the one it is
+# given, <file>.<pid>.tmp, which no .gitignore pattern names (review pass 1).
+cleanup() { rm -f ${CONFIG_ERR:+"$CONFIG_ERR"} ${CANARY_TMP:+"$CANARY_TMP"}; [ -z "$CANARY_TMP" ] || rm -f "$CANARY_TMP".*.tmp; }
 trap cleanup EXIT
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -218,7 +234,6 @@ is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
 [ -z "$PORT" ] || is_port "$PORT" || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
-[ $CONNECT = 0 ] || [ $SMOKE = 1 ] || { echo "--connect needs the smoke's key; drop --no-smoke." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
 # The canary's own env file (SMD-2583) is placed once stable's project is
@@ -227,6 +242,11 @@ ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
 # The canary's database password is its env file's. A value in the shell would
 # win over that file in compose, and hand the canary stable's.
 unset POSTGRES_PASSWORD
+# …and so are its keys and the secrets that go with them (SMD-2874 PR 2): a
+# shell holding stable's settings (`set -a; . deploy/.env`) would otherwise
+# hand the canary's servers stable's MCP_ACCESS_KEYS over the canary's own
+# (review pass 1).
+unset MCP_ACCESS_KEYS MCP_ACCESS_KEY OB1_FORWARDER_KEY OB1_HOOK_SECRETS OB1_PLUGIN_DB_PASSWORD OB1_CANARY_KEY
 
 if [ -z "$RUNTIME" ]; then
   if command -v docker >/dev/null 2>&1; then RUNTIME=docker
@@ -314,7 +334,13 @@ canary_compose() {
 # COMPOSE_PROJECT_NAME never reads as a setting here, since every read is under
 # the canary's -p, which compose reports as the name; the file names the
 # canary's own project instead (SMD-2873, env_file write).
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*'
+#
+# …and stable's keys and the secrets that go with them (SMD-2874 PR 2,
+# SMD-3032): its access keys (MCP_ACCESS_KEYS, the legacy MCP_ACCESS_KEY),
+# the forwarder's key, the plugins' webhook secrets and their role's database
+# password. The canary's own are written in their place (env_file own-fix),
+# so they are no drift either.
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift. The file is written with the canary's own
 # values of these (env_file write), OB1_GIT_SHA aside, a build's.
@@ -370,11 +396,17 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
 #   env_file values OUT NAME…   each NAME's value on a line of its own, a
 #                               backslash and a line feed in it escaped, so
 #                               one value is one line
-#   env_file own OUT            the names of CANARY_SET's whose values in OUT are
-#                               not the canary's own (SERVER_PORT $CANARY_PORT),
-#                               on one line; `own-lines` the settings that
-#                               would make them so, one a line, quoted as
-#                               `write` quotes
+#   env_file own-fix STABLE OUT what OUT must be given to be the canary's own,
+#                               as JSON {"values": {NAME: value}, "said": [...]}
+#                               ("said" names values, never a secret's): its
+#                               CANARY_SET (SERVER_PORT $CANARY_PORT), no
+#                               access key of STABLE's in MCP_ACCESS_KEYS and a
+#                               write key of its own (minted when it has none,
+#                               the raw key in OB1_CANARY_KEY), no raw key or
+#                               webhook secret of STABLE's, and a plugin role
+#                               password of its own when STABLE sets one
+#                               (SMD-2874, SMD-3032). Empty values when OUT
+#                               already is
 #   env_file project OUT        the project OUT names (COMPOSE_PROJECT_NAME, read
 #                               without -p), or nothing
 # A refusal names the setting, never its value.
@@ -392,7 +424,7 @@ STRONG = 12
 # The canary'"'"'s own values of what canary_compose sets in the shell (CANARY_SET,
 # but OB1_GIT_SHA, a build'"'"'s), which env_file write puts in its file.
 OWN = {"SERVER_PORT": os.environ.get("CANARY_PORT", ""), "SERVER_BIND": "127.0.0.1", "OB1_TIER": "canary", "COMPOSE_PROFILES": ""}
-if mode in ("write", "made", "own", "own-lines") and not OWN["SERVER_PORT"].isdigit():
+if mode in ("write", "made", "own-fix") and not OWN["SERVER_PORT"].isdigit():
     sys.exit("no CANARY_PORT, the canary'"'"'s port, for %s" % mode)
 def compose(env_file, text, *cmd, env=bare):
     # On the shell'"'"'s environment, a variable of the shell'"'"'s that is not
@@ -482,12 +514,109 @@ if mode == "project":
     sys.stdout.write(project_of(args[0]) or "")
     sys.exit(0)
 quote = lambda v: "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("\n", "\\n") + "\""
-if mode in ("own", "own-lines"):
-    got = values(args[0], list(OWN))
-    off = [n for n, v in OWN.items() if got[n] != v]
-    print(" ".join(off) if mode == "own" else "\n".join("%s=%s" % (n, quote(OWN[n])) for n in off))
-    sys.exit(0)
 stable, out = args
+if mode == "own-fix":
+    import hashlib, secrets
+    sha = lambda raw: hashlib.sha256(raw.encode()).hexdigest()
+    def entries(spec):
+        # MCP_ACCESS_KEYS as server-portable/auth.ts parseKeyRecords reads it:
+        # name:scope:sha256, by commas or newlines, blanks and comments skipped.
+        got = []
+        for e in re.split(r"[,\n]", spec or ""):
+            e = e.strip()
+            if not e or e.startswith("#"):
+                continue
+            parts = [x.strip() for x in e.split(":")]
+            got.append((e, parts[0] if len(parts) == 3 else "", parts[1] if len(parts) == 3 else "", parts[2].lower() if len(parts) == 3 else ""))
+        return got
+    s = values(stable, ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"])
+    c = values(out, list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"])
+    # deploy/env-file.ts replaces a setting by its line: one whose quote opens
+    # on its line and closes on a later one would leave its continuation
+    # behind (review pass 1). Read off the file'"'"'s own lines, not its value: a
+    # value holding \n written on one line (canary.sh'"'"'s own `write` escapes a
+    # line break so) is replaced whole (review pass 2).
+    file_lines = open(out, encoding="utf-8", errors="replace").read().split("\n")
+    def spans_lines(name):
+        for line in file_lines:
+            m = re.match(r"\s*(?:export\s+)?%s\s*=\s*(.*)$" % name, line)
+            if not m or m.group(1)[:1] not in ("\"", "'"'"'"):
+                continue
+            q, rest, i = m.group(1)[0], m.group(1)[1:], 0
+            while i < len(rest):
+                if q == "\"" and rest[i] == "\\":
+                    i += 2
+                    continue
+                if rest[i] == q:
+                    break
+                i += 1
+            else:
+                return True
+        return False
+    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(n)]
+    stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set())
+    fix, said = {}, []
+    # The canary'"'"'s port, address, tier and profiles (SMD-2874 PR 1).
+    for n, v in OWN.items():
+        if c[n] != v:
+            fix[n] = v
+            said.append("%s=%s%s" % (n, quote(v), " (it said %s)" % c[n] if n == "SERVER_PORT" and c[n] else ""))
+    # Its access keys (SMD-2874 PR 2): none of stable'"'"'s, and one of its own,
+    # minted here, its raw key in OB1_CANARY_KEY for the smoke and the
+    # connector. Acceptance is MCP_ACCESS_KEYS alone, so a key stable accepts
+    # opens the canary only through it.
+    have = entries(c["MCP_ACCESS_KEYS"])
+    kept = [x for x in have if x[3] not in stable_digests]
+    raw = c["OB1_CANARY_KEY"] or ""
+    own_ok = bool(raw) and sha(raw) not in stable_digests and any(d == sha(raw) and scope == "write" for _, _, scope, d in kept)
+    if len(kept) < len(have):
+        said.append("removed %d of stable'"'"'s access keys from MCP_ACCESS_KEYS" % (len(have) - len(kept)))
+    if not own_ok:
+        raw = secrets.token_hex(32)
+        # Under a name no kept entry holds (parseKeyRecords refuses one twice):
+        # an operator'"'"'s own entry under the canary'"'"'s name stays (code review).
+        taken = {x[1] for x in kept}
+        name = os.environ["OWN_PROJECT"]
+        n = 2
+        while name in taken:
+            name = "%s-%d" % (os.environ["OWN_PROJECT"], n)
+            n += 1
+        kept = kept + [("%s:write:%s" % (name, sha(raw)), name, "write", sha(raw))]
+        fix["OB1_CANARY_KEY"] = raw
+        said.append("minted the canary'"'"'s own write key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_CANARY_KEY)" % name)
+    if len(kept) < len(have) or not own_ok:
+        fix["MCP_ACCESS_KEYS"] = ",".join(e for e, _, _, _ in kept)
+    # Raw keys and secrets of stable'"'"'s the canary never needs.
+    for n in ("MCP_ACCESS_KEY", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"):
+        if c[n] and (sha(c[n]) in stable_digests or c[n] == s.get(n)):
+            fix[n] = ""
+            said.append("cleared %s (a key of stable'"'"'s)%s" % (n, "; a canary worker needs one of its own: bun server-portable/keygen.ts --name canary-workers --scope capture, its line in MCP_ACCESS_KEYS and its key here" if n == "OB1_WORKER_KEY" else ""))
+    # plugin=secret pairs separated by spaces, the first = the separator, as
+    # server-portable/core/plugins.ts hookSecrets reads them: any secret of
+    # stable'"'"'s, under any plugin'"'"'s name (review pass 1: split on commas, it
+    # matched only the whole value).
+    hooks = lambda v: {x.split("=", 1)[1] for x in (v or "").split() if "=" in x and x.split("=", 1)[0] and x.split("=", 1)[1]}
+    stable_hooks = hooks(s["OB1_HOOK_SECRETS"])
+    pairs = (c["OB1_HOOK_SECRETS"] or "").split()
+    own_pairs = [x for x in pairs if not ("=" in x and x.split("=", 1)[1] in stable_hooks)]
+    if len(own_pairs) < len(pairs):
+        # Stable'"'"'s pairs out, the canary'"'"'s own kept.
+        fix["OB1_HOOK_SECRETS"] = " ".join(own_pairs)
+        said.append("cleared OB1_HOOK_SECRETS of stable'"'"'s webhook secrets (%d); a webhook OB1_HOOKS serves with no secret of the canary'"'"'s answers 503 until it has one" % (len(pairs) - len(own_pairs)))
+    # The plugin role'"'"'s password (SMD-3032): its own wherever stable sets one;
+    # the canary'"'"'s migrate sets the role to it.
+    sp, cp = s["OB1_PLUGIN_DB_PASSWORD"], c["OB1_PLUGIN_DB_PASSWORD"]
+    if sp and (not cp or cp == sp or (len(sp) >= STRONG and sp in cp)):
+        fix["OB1_PLUGIN_DB_PASSWORD"] = secrets.token_hex(24)
+        said.append("OB1_PLUGIN_DB_PASSWORD, a fresh one (up sets the plugin role to it before the refresh)")
+    # A setting spanning lines is refused only when it must be rewritten: one
+    # the server reads (parseKeyRecords takes entries a line each) and that
+    # needs nothing is left as it is (code review).
+    blocked = [n for n in spans if n in fix]
+    if blocked:
+        sys.exit("%s in %s spans lines: write it on one line, its entries separated by commas" % (", ".join(blocked), os.environ.get("SHOWN") or out))
+    print(json.dumps({"values": fix, "said": said}))
+    sys.exit(0)
 if mode == "write":
     cand = file_names(stable)
     s = values(stable, cand)
@@ -549,7 +678,10 @@ if problems:
 make_canary_env() {
   local pw
   pw="$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
-  CANARY_TMP="$(dirname "$CANARY_ENV")/.env.canary-$$-$RANDOM.local"
+  # In the directory the file's path resolves to, as deploy/env-file.ts
+  # resolves it to name its own temporary file, so the EXIT trap's glob
+  # finds that one too (code review).
+  CANARY_TMP="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(dirname "$CANARY_ENV")")/.env.canary-$$-$RANDOM.local"
   (umask 077 && set -o noclobber && : > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not create a temporary file beside $CANARY_ENV." >&2; exit 1; }
   local why=""
   if ! why="$(CANARY_PW="$pw" CANARY_PORT="$PORT" env_file write "$ENV_FILE" "$CANARY_TMP" 2>&1 && CANARY_PW="$pw" CANARY_PORT="$PORT" env_file made "$ENV_FILE" "$CANARY_TMP" 2>&1)"; then
@@ -558,42 +690,60 @@ make_canary_env() {
     echo "could not make the canary's env file from $ENV_FILE: ${why:-compose did not answer} (read back through compose). Write $CANARY_ENV yourself — stable's settings with a POSTGRES_PASSWORD and a SERVER_PORT of the canary's own and without the other profiles' secrets — and re-run up." >&2
     exit 2
   fi
+  apply_own "$CANARY_TMP" || { rm -f "$CANARY_TMP"; CANARY_TMP=""; echo "could not give the canary's env file its own keys and settings (deploy/env-file.ts, read back through compose): $(head -c 300 <<<"$OWN_WHY")" >&2; exit 2; }
   mv "$CANARY_TMP" "$CANARY_ENV"
   CANARY_TMP=""
 }
 
-# Writes the canary's own port (PORT), address, tier and profiles to its env
-# file where it holds other values (SMD-2874): a `--port` that differs, or a
-# file made before SMD-2874, which holds stable's. A copy of the file with
-# those settings appended, since compose reads the last setting of a name
-# (measured, Compose 5.5.1), is read back through compose before it takes the
-# file's place, written mode 600. The rest of the file, the operator's edits
-# included, is kept as it was. Says what it wrote, by name and value (none of
-# them a secret).
+# Gives FILE, a copy being made ready, what env_file own-fix says it lacks to
+# be the canary's own (SMD-2874, SMD-3032): its port, address, tier and
+# profiles, its own access key, none of stable's keys or webhook secrets, and
+# a plugin role password of its own. Written by deploy/env-file.ts's
+# setEnvValues, one line a setting: its old lines removed and the new one at
+# the file's end, the rest of the file as it was; the values reach
+# it on stdin, never argv. Then read back through compose, which must find
+# nothing left to fix. OWN_SAID says what was written (names, and the values
+# that are no secret); empty when there was nothing to write. Returns 1, with
+# OWN_WHY, when it could not.
+OWN_SAID=""
+OWN_WHY=""
+apply_own() {
+  local fix left
+  OWN_SAID=""
+  # SHOWN names the canary's env file in a refusal, not the copy (review pass 2).
+  fix="$(SHOWN="$CANARY_ENV" CANARY_PORT="$PORT" env_file own-fix "$ENV_FILE" "$1" 2>&1)" || { OWN_WHY="$fix"; return 1; }
+  # One parse: what was said on the first line (joined, so one line), the
+  # values as JSON on the second, held in the shell and piped, never argv.
+  local said_values values
+  said_values="$(printf '%s' "$fix" | python3 -c 'import json, sys; d = json.load(sys.stdin); print("; ".join(d["said"])); print(json.dumps(d["values"]))')" || { OWN_WHY="env_file own-fix gave no answer"; return 1; }
+  OWN_SAID="$(printf '%s\n' "$said_values" | head -n 1)"
+  [ -n "$OWN_SAID" ] || return 0
+  values="$(printf '%s\n' "$said_values" | sed -n 2p)"
+  OWN_WHY="$(printf '%s' "$values" | bun --no-env-file "$HERE/env-file.ts" set "$1" 2>&1)" || return 1
+  left="$(CANARY_PORT="$PORT" env_file own-fix "$ENV_FILE" "$1" 2>&1 | python3 -c 'import json, sys; print(" ".join(json.load(sys.stdin)["values"]))' 2>&1)" || { OWN_WHY="compose could not read it back"; return 1; }
+  [ -z "$left" ] || { OWN_WHY="compose read $left otherwise back"; return 1; }
+}
+
+# The same for the canary's standing env file, on every `up`: a `--port` that
+# differs, or a file made before SMD-2874 (stable's port, address, tier,
+# profiles and keys) or before SMD-3032 (stable's plugin role password). Made
+# ready on a copy beside the file it names, through a symlink (code review),
+# written mode 600, and put in its place only once read back.
 set_canary_own() {
-  local lines
-  lines="$(CANARY_PORT="$PORT" env_file own-lines "$CANARY_ENV")" || { echo "could not read $CANARY_ENV through compose." >&2; exit 2; }
-  [ -n "$lines" ] || return 0
-  # Through a symlink, to the file it names, so the link stays a link and
-  # the file it names is the one written (code review; deploy/env-file.ts's
-  # setEnvValues does the same).
   local target
   target="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$CANARY_ENV")"
   CANARY_TMP="$(dirname "$target")/.env.canary-$$-$RANDOM.local"
   (umask 077 && set -o noclobber && cat "$target" > "$CANARY_TMP") || { CANARY_TMP=""; echo "could not copy $target beside it." >&2; exit 1; }
-  [ -z "$(tail -c 1 "$CANARY_TMP")" ] || echo >> "$CANARY_TMP"
-  printf '# deploy/canary.sh up, %s: the canary'"'"'s own settings\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lines" >> "$CANARY_TMP"
-  if [ -n "$(CANARY_PORT="$PORT" env_file own "$CANARY_TMP" 2>&1)" ]; then
+  if ! apply_own "$CANARY_TMP"; then
     rm -f "$CANARY_TMP"
     CANARY_TMP=""
-    echo "could not write $(tr '\n' ' ' <<<"$lines")to $CANARY_ENV (compose could not read the copy, or read other values back): set them there yourself and re-run up." >&2
+    echo "could not give the canary's env file, $CANARY_ENV, its own keys and settings: $(head -c 300 <<<"$OWN_WHY") — set them there yourself (its own SERVER_PORT, SERVER_BIND, OB1_TIER, COMPOSE_PROFILES, and an MCP_ACCESS_KEYS holding none of stable's keys), and re-run up." >&2
     exit 2
   fi
+  if [ -z "$OWN_SAID" ]; then rm -f "$CANARY_TMP"; CANARY_TMP=""; return 0; fi
   mv "$CANARY_TMP" "$target"
   CANARY_TMP=""
-  local was=""
-  case "$lines" in *SERVER_PORT=*) was="${FILE_PORT_SAID:+ (its SERVER_PORT was $FILE_PORT_SAID)}" ;; esac
-  say "wrote $(tr '\n' ' ' <<<"$lines")to the canary's env file, $CANARY_ENV$was"
+  say "wrote to the canary's env file, $CANARY_ENV: $OWN_SAID"
 }
 
 # Sets the canary database's postgres password to its env file's, through
@@ -601,15 +751,29 @@ set_canary_own() {
 # environment, never on a command line. Every `up` runs it: a canary volume
 # made before SMD-2583 holds stable's password, and the one written later
 # is the file's own.
+#
+# The plugins' login role (db/config.mjs PLUGIN_LOGIN_ROLE, ob1_plugins) the
+# same way, where the canary's Postgres has one and its file sets
+# OB1_PLUGIN_DB_PASSWORD (SMD-3032): migrate.ts makes the role with that
+# password when it is absent and never changes it after (its "keeps the
+# password it was made with"), so a canary whose role was made on stable's
+# password, and whose file now holds one of its own, would fail its plugins'
+# logins (review pass 1). A role is the cluster's, which the refresh leaves.
 set_canary_password() {
-  local pw
+  local pw plugin_pw
   # By value: a value spanning lines in the file could hold a line that reads
   # POSTGRES_PASSWORD= in `config --environment`'s output (review pass 3).
   pw="$(env_file value "$CANARY_ENV" POSTGRES_PASSWORD)"
   [ -n "$pw" ] || { echo "$CANARY_ENV sets no POSTGRES_PASSWORD." >&2; exit 1; }
-  OB1_CANARY_PW="$pw" "$RUNTIME" exec -i -e OB1_CANARY_PW "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null <<'SQL'
+  plugin_pw="$(env_file value "$CANARY_ENV" OB1_PLUGIN_DB_PASSWORD)"
+  OB1_CANARY_PW="$pw" OB1_CANARY_PLUGIN_PW="$plugin_pw" "$RUNTIME" exec -i -e OB1_CANARY_PW -e OB1_CANARY_PLUGIN_PW "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null <<'SQL'
 \getenv pw OB1_CANARY_PW
 ALTER ROLE postgres PASSWORD :'pw';
+\getenv plugin_pw OB1_CANARY_PLUGIN_PW
+SELECT :'plugin_pw' <> '' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_plugins') AS set_plugin \gset
+\if :set_plugin
+ALTER ROLE ob1_plugins PASSWORD :'plugin_pw';
+\endif
 SQL
 }
 GIT_SHA="${OB1_GIT_SHA:-$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)}"
@@ -670,12 +834,22 @@ relations_in() {
 # that wins for this directory, so a local one hides a user one behind it.
 CONN_URL=""
 CONN_SCOPE=""
+#
+# CONN_KEY is the key the connector sends, its `x-brain-key` header or its
+# URL's ?key=, or nothing: held in memory, never printed or written (piped
+# through builtins, not a here-string, which bash 3.2 keeps in a temporary
+# file), so `up` can say when the connector holds a key the canary does not
+# take, however long ago that began (code review).
+CONN_KEY=""
 read_connector() {
-  CONN_URL=""; CONN_SCOPE=""
+  CONN_URL=""; CONN_SCOPE=""; CONN_KEY=""
   command -v claude >/dev/null 2>&1 || return 0
-  local got scope
-  got="$({ claude mcp get "$NAME" 2>/dev/null || true; } | sed -nE 's/^ *(URL|Scope): */\1 /p')"
+  local all got scope
+  all="$({ claude mcp get "$NAME" 2>/dev/null || true; })"
+  got="$(printf '%s\n' "$all" | sed -nE 's/^ *(URL|Scope): */\1 /p')"
+  CONN_KEY="$(printf '%s\n' "$all" | sed -nE 's/^ *[Xx]-[Bb]rain-[Kk]ey: *//p' | head -n 1 | tr -d '\r' | sed 's/[[:space:]]*$//')"
   CONN_URL="$(sed -n 's/^URL //p' <<<"$got" | head -n 1)"
+  [ -n "$CONN_KEY" ] || CONN_KEY="$(printf '%s\n' "$CONN_URL" | sed -nE 's/.*[?&]key=([^&]*).*/\1/p')"
   scope="$(sed -n 's/^Scope //p' <<<"$got" | head -n 1)"
   case "$scope" in
     "") CONN_SCOPE="" ;;
@@ -890,8 +1064,8 @@ if [ -z "$PORT" ]; then
 fi
 ! stable_port "$PORT" || { echo "port $PORT is stable's (SERVER_PORT in $ENV_FILE, or compose.yaml's 8000, or the port its forwarder publishes): the canary answers on one of its own." >&2; exit 2; }
 
-KEY="${OB1_SMOKE_KEY:-}"
-[ $SMOKE = 0 ] || [ -n "$KEY" ] || { echo "up smoke-tests the canary with OB1_SMOKE_KEY — a raw write key whose hash is in MCP_ACCESS_KEYS. Set it, or pass --no-smoke." >&2; exit 2; }
+# The canary's env file is written with deploy/env-file.ts (SMD-2874 PR 2).
+command -v bun > /dev/null 2>&1 || { echo "up needs bun on PATH: deploy/env-file.ts writes the canary's own keys and settings to its env file." >&2; exit 2; }
 
 # Where the canary's server would send its model calls, as compose resolves
 # them for it (the fallbacks included). A bare name is a service on the
@@ -983,15 +1157,19 @@ esac
 # only), since a change to stable's no longer reaches the canary.
 if [ ! -f "$CANARY_ENV" ]; then
   make_canary_env
-  say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password and its port, $PORT, are its own"
+  say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password, its port, $PORT, and its access key are its own — $OWN_SAID"
 else
   drift="$(env_file drift "$ENV_FILE" "$CANARY_ENV" 2>/dev/null)" || drift=""
   [ -z "$drift" ] || say "note: the canary's env file ($CANARY_ENV) differs from stable's on $drift — it is the canary's own since its first up; edit it to carry a change across"
   # A --port that is not the file's is the canary's port from now on, and a
-  # file made before SMD-2874 takes the canary's own address, tier and
-  # profiles where it held stable's.
+  # file made before SMD-2874 takes the canary's own address, tier, profiles
+  # and keys where it held stable's.
   set_canary_own
 fi
+# The canary's own write key (SMD-2874 PR 2), for the smoke and the
+# connector: stable's keys open it no more.
+KEY="$(env_file value "$CANARY_ENV" OB1_CANARY_KEY)"
+[ -n "$KEY" ] || { echo "the canary's env file, $CANARY_ENV, holds no OB1_CANARY_KEY after it was given one." >&2; exit 1; }
 
 if [ -z "$stable_stamp" ]; then
   psql_in "$STABLE_PG" "INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO NOTHING" >/dev/null
@@ -1208,6 +1386,28 @@ else
       # Another port, the canary's until this run: from the next one it is
       # not, so --connect there refuses it (review pass 1).
       say "connector $NAME still points at $(shown "$CONN_URL"), a port this canary no longer answers on: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect (an up that changes the port with --connect moves it)"
+    fi
+    # A key minted this run (a file made before SMD-2874 PR 2, or one whose
+    # key was taken out of MCP_ACCESS_KEYS): the connector holds another one,
+    # which the canary no longer takes (review pass 1).
+    # Only at the canary's own URL: one elsewhere is told to move, and the
+    # --connect that moves it gives it the key (review pass 2). By the key it
+    # sends, on every run, so a run that failed after giving the canary its
+    # own keys does not leave it unsaid (code review); by this run's changes
+    # when the connector's key cannot be read.
+    if [ "$at" = "$(endpoint_of "$BASE")" ]; then
+      if [ -n "$CONN_KEY" ]; then
+        # Taken when its digest is in the canary's MCP_ACCESS_KEYS: a key the
+        # operator minted and added for it is the connector's to keep (code
+        # review). The key reaches shasum on stdin, never argv.
+        conn_sha="$(printf '%s' "$CONN_KEY" | shasum -a 256 | cut -d' ' -f1)"
+        case ",$(env_file value "$CANARY_ENV" MCP_ACCESS_KEYS | tr '\n' ',' | tr -d ' ' | tr '[:upper:]' '[:lower:]')," in
+          *":$conn_sha,"*) ;;
+          *) say "connector $NAME sends a key this canary does not take (none in its MCP_ACCESS_KEYS): re-run with --connect to give it OB1_CANARY_KEY" ;;
+        esac
+      else
+        case "$OWN_SAID" in *"minted the canary"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run with --connect to give it OB1_CANARY_KEY" ;; esac
+      fi
     fi
   elif [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
     say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect"

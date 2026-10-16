@@ -27,7 +27,9 @@
  *    classified `ingested` on the stable brain, so its sync writes do not
  *    wake it; an unclassified key's do — reembed.ts's, ingest-records.ts's, a
  *    migration's backfill — until set_agent_kind(<name>, 'ingested') says
- *    they are background.
+ *    they are background. The servers' vector mender marks its own writes
+ *    background in the audit row (actor_context.background, SMD-2889), and
+ *    they do not wake it either.
  *  - The passes it runs write no thought_audit row (extraction writes the
  *    entity tables; consolidation writes proposals and, since 084, relation
  *    facets with their lineage) and call no server, so its own work never
@@ -368,7 +370,9 @@ async function heldBack(sql: SQL, job: string, sig: string): Promise<SleepHeld> 
  * The newest live event after `after` — a timestamp, or a number of seconds
  * before now() — and the database's now(). A read is a query_log row (when
  * `readsLog`); a write is a thought_audit row whose actor_kind is not
- * 'ingested' (NULL counts as live). Bounded below, so a brain whose newest
+ * 'ingested' (NULL counts as live) and that no server's background work wrote
+ * (actor_context.background — the vector mender's, SMD-2889), as these
+ * passes' own writes are not live. Bounded below, so a brain whose newest
  * audit rows are all sync writes is not read back to its last live one.
  */
 async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
@@ -376,7 +380,8 @@ async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Pr
   const read = readsLog ? sql`(SELECT max(logged_at) FROM query_log WHERE logged_at > ${since})` : sql`NULL::timestamptz`;
   const [r] = await sql`
     SELECT now() AS now, ${read} AS read,
-           (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested') AS write`;
+           (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested'
+              AND (actor_context->>'background') IS NULL) AS write`;
   return { now: new Date(r.now), read: r.read ? new Date(r.read) : null, write: r.write ? new Date(r.write) : null };
 }
 
@@ -529,7 +534,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
-  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested')${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
+  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background)${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
   if (logState === "denied") err("  query_log: this role cannot read it — only writes wake the brain; grant it the sleep group (bun db/migrate.ts --grant <role> --groups sleep) or run as the owner for reads to wake it");
   else if (logState === "missing") err("  query_log: no such table (migration 034 not applied) — only writes wake the brain");
   else {
@@ -606,7 +611,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const at = new Date(now);
     const [last] = await sql`
       SELECT ${readsLog ? sql`(SELECT max(logged_at) FROM query_log)` : sql`NULL::timestamptz`} AS read,
-             (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' ORDER BY created_at DESC LIMIT 1) AS write`;
+             (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' AND (actor_context->>'background') IS NULL ORDER BY created_at DESC LIMIT 1) AS write`;
     const read = last.read ? new Date(last.read) : null;
     const write = last.write ? new Date(last.write) : null;
     const newest = newer(read, write);
