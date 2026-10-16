@@ -116,7 +116,8 @@
 # forwarder since SMD-2583, its proxy before — running or stopped, and from
 # the canary's env file.
 #
-# Options, all optional but --port on the first `up`:
+# Options, all optional but --port on the first `up` (and on one whose env
+# file was made before SMD-2874):
 #   --env-file PATH       the running stack's env file (default deploy/.env beside
 #                         this script — which a branch worktree does not have)
 #   --canary-env-file PATH  the canary's own env file (default .env.<canary>.local
@@ -209,10 +210,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || usage
-if [ -n "$PORT" ]; then
-  case "$PORT" in *[!0-9]*|0*) echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2 ;; esac
-  [ "$PORT" -le 65535 ] || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
-fi
+# Whether a value is a port number, 1-65535, as --port and the env file's
+# SERVER_PORT must be.
+is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
+[ -z "$PORT" ] || is_port "$PORT" || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
 [ $CONNECT = 0 ] || [ $SMOKE = 1 ] || { echo "--connect needs the smoke's key; drop --no-smoke." >&2; exit 2; }
@@ -364,6 +365,9 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
 #   env_file drift STABLE OUT   the names whose values differ, CANARY_DROPPED's
 #                               and CANARY_SET's aside, on one line
 #   env_file value OUT NAME     OUT's NAME, exactly, on stdout (nothing when unset)
+#   env_file values OUT NAME…   each NAME's value on a line of its own, a
+#                               backslash and a line feed in it escaped, so
+#                               one value is one line
 #   env_file own OUT            the names of CANARY_SET's whose values in OUT are
 #                               not the canary's own (SERVER_PORT $CANARY_PORT),
 #                               on one line; `own-lines` the settings that
@@ -467,6 +471,10 @@ def guard(stable, out):
     return problems
 if mode == "value":
     sys.stdout.write(values(args[0], [args[1]])[args[1]] or "")
+    sys.exit(0)
+if mode == "values":
+    got = values(args[0], args[1:])
+    print("\n".join((got[n] or "").replace("\\", "\\\\").replace("\n", "\\n") for n in args[1:]))
     sys.exit(0)
 if mode == "project":
     sys.stdout.write(project_of(args[0]) or "")
@@ -760,10 +768,9 @@ ours() {
 FILE_PORT=""
 FILE_PORT_SAID=""
 if [ -f "$CANARY_ENV" ]; then
-  FILE_PORT_SAID="$(env_file value "$CANARY_ENV" SERVER_PORT 2>/dev/null)" || FILE_PORT_SAID=""
-  if [ "$(env_file value "$CANARY_ENV" OB1_TIER 2>/dev/null || true)" = canary ]; then FILE_PORT="$FILE_PORT_SAID"; fi
-  case "$FILE_PORT" in *[!0-9]*|0*) FILE_PORT="" ;; esac
-  [ -z "$FILE_PORT" ] || [ "$FILE_PORT" -le 65535 ] || FILE_PORT=""
+  file_tier=""
+  { IFS= read -r FILE_PORT_SAID || true; IFS= read -r file_tier || true; } < <(env_file values "$CANARY_ENV" SERVER_PORT OB1_TIER 2>/dev/null || true)
+  if [ "$file_tier" = canary ] && is_port "$FILE_PORT_SAID"; then FILE_PORT="$FILE_PORT_SAID"; fi
 fi
 # Stable's port: the one stable's env file names (SERVER_PORT, else
 # compose.yaml's 8000). `up` refuses it as the canary's, and no connector at it
