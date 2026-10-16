@@ -317,13 +317,13 @@
  *      compose.tiers.yaml (check 27's), no control, format or separator
  *      character but space and line feed, no `!!`, named-handle, verbatim or
  *      percent-escaped YAML tag, no !reset or !override and no directive;
- *      compose.yaml's proxy as held, its observability collector whole
- *      (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
+ *      compose.yaml's proxy as held, its observability collector whole but its
+ *      labels, which are check 37's (LGTM_SERVICE, and compose.grafana-port.yaml's one key of its
  *      environment, SMD-1849), its Postgres exporter and that one's role
  *      step whole (PG_EXPORTER_SERVICE, PG_MONITOR_ROLE_SERVICE), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
  *      deploy/forwarder.ts; an overlay's only its own table's mount,
- *      no config but the file's own table's (compose.yaml's forwarder's too), no name compose takes with no -f
+ *      no config but the file's own table's (compose.yaml's BASE_CONFIGS too: the forwarder's script, the dashboard and its provider), each service's configs as held (SERVICE_CONFIGS), no name compose takes with no -f
  *      and none outside printable ASCII; every overlay declared with the keys
  *      it sets, compose.yaml's services setting only keys that act inside
  *      their own container (no shared namespace, privilege or hook), each
@@ -402,9 +402,23 @@
  *      for byte: a router by host per brain, its header strip and its 404 for
  *      a brain that is down, its service at the shape's dial host; each rule
  *      the sole catch of a probe
+ *  37. the provisioned dashboard reads what the stack writes (SMD-1849 PR
+ *      3c): compose.yaml's `grafana-dashboard` config is
+ *      deploy/observability/dashboard.json with each `$` doubled, as its
+ *      content alone, and its provider DASHBOARD_PROVIDER byte for byte; lgtm
+ *      carries each one's sha256 as a label, so a change recreates it; the
+ *      dashboard parses, is uid ob1 and not editable, with no id twice; every
+ *      data source is one the pinned image provisions; every Prometheus name a
+ *      query or variable reads, a collapsed row's panels' included, is an
+ *      instrument server-portable/'s code records (in its unit) or one of
+ *      DASHBOARD_IMAGE_SERIES, measured on the pins, and every label it reads
+ *      one that name carries; every variable a query names is defined, and
+ *      none in the old `[[…]]` form; no top-level panel overlaps another, and
+ *      none leaves the 24 columns; each rule is the only catch of one of its
+ *      probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35 and 36 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36 and 37 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -417,6 +431,7 @@ import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, class
 import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
+import { inlined as inlinedDashboard } from "./inline-dashboard.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
 import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
 import type { Family, Problem, Registry, Tree } from "./connector-registry.ts";
@@ -6271,8 +6286,12 @@ const FORWARDER_SERVICE = {
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
+/** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 37's DASHBOARD_PROVIDER names the first. */
+const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
+const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
 /**
- * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) aside: the image by its digest,
+ * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
+ * PR 3c) aside: the image by its digest,
  * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
  * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
  * exposure; a change to it is made here too, on purpose (review pass 1).
@@ -6318,7 +6337,8 @@ const LGTM_SERVICE = {
     GF_ANALYTICS_CHECK_FOR_UPDATES: "false",
     GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false",
     GF_CLOUD_MIGRATION_ENABLED: "false",
-    PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090",
+    GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: DASHBOARD_PATH,
+    PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090 --enable-feature=created-timestamp-zero-ingestion",
     LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h",
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
@@ -6326,6 +6346,8 @@ const LGTM_SERVICE = {
     OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
+  // The provisioned dashboard and its provider (PR 3c), check 37's.
+  configs: [{ source: "grafana-dashboard", target: DASHBOARD_PATH }, { source: "grafana-dashboard-provider", target: DASHBOARD_PROVIDER_PATH }],
   networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
   healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
   restart: "unless-stopped",
@@ -6333,8 +6355,9 @@ const LGTM_SERVICE = {
 /**
  * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
  * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
- * which statements it names and how much of their text, and its own queries left out. Held whole because CI never starts the profile:
- * a superuser's DSN, an image by tag or a dropped --member-of passed every other check (review pass 1).
+ * which statements it names and how much of their text, and its own queries left out. Held whole because what CI's one run of the profile
+ * reads is the series (PR 3c), not how they are made: a superuser's DSN, an image by tag or a dropped --member-of passed every other
+ * check (review pass 1).
  */
 const PG_EXPORTER_SERVICE = {
   image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
@@ -6381,8 +6404,10 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
-/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build` and `volumes` SERVICE_BUILDS' and SERVICE_MOUNTS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
-const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "networks", "ports", "x-env"];
+/** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583) and the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 37's), each its content alone; where each lands is SERVICE_CONFIGS'. */
+const BASE_CONFIGS = ["forwarder", "grafana-dashboard", "grafana-dashboard-provider"];
+/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build`, `volumes` and `configs` SERVICE_BUILDS', SERVICE_MOUNTS' and SERVICE_CONFIGS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
+const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "configs", "networks", "ports", "x-env"];
 /** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
@@ -6403,6 +6428,10 @@ const SERVICE_MOUNTS: Record<string, unknown[]> = {
   "orchestration-runner": [{ type: "bind", source: "${IMPORTS_DIR:-./imports}", target: "/imports", read_only: true, bind: { selinux: "z" } }, "./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z"],
   auth: ["auth-data:/data"],
   lgtm: ["lgtm-data:/data"],
+};
+/** Each compose.yaml service's `configs:`, exactly, beside the proxy's and the forwarder's (held whole): lgtm's dashboard and provider (SMD-1849 PR 3c); a service not named here mounts none. A config's content is fixed (BASE_CONFIGS, check 37), but where it lands — a path, a mode, an owner — is a mount, so it is held as SERVICE_MOUNTS holds those (review pass 1: a runner mounting the forwarder's script over an init path passed). */
+const SERVICE_CONFIGS: Record<string, unknown[]> = {
+  lgtm: LGTM_SERVICE.configs,
 };
 const SERVICE_BUILDS: Record<string, unknown> = {
   migrate: { context: "..", dockerfile: "db/Dockerfile" },
@@ -6491,7 +6520,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];
-    pathDiffs(JSON.parse(JSON.stringify(omitKeys(lgtm, ["logging"]))), LGTM_SERVICE, "services.lgtm", ldiffs);
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(lgtm, ["logging", "labels"]))), LGTM_SERVICE, "services.lgtm", ldiffs);
     if (ldiffs.length) flag("proxy", `${ldiffs.slice(0, 6).join("; ")}${ldiffs.length > 6 ? `; and ${ldiffs.length - 6} more` : ""} — compose.yaml's lgtm is check 28's LGTM_SERVICE: Grafana's anonymous access, its admin password's refusal, the backends' loopback and every call out are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3a)`);
     // The Postgres exporter and its role's step, whole (SMD-1849 PR 3b review pass 1): the role it reads as and what it names are their keys.
     for (const [name, held, lit] of [["pg-exporter", PG_EXPORTER_SERVICE, "PG_EXPORTER_SERVICE"], ["pg-monitor-role", PG_MONITOR_ROLE_SERVICE, "PG_MONITOR_ROLE_SERVICE"]] as const) {
@@ -6512,8 +6541,8 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     if (sdiffs.length) flag("table", `${sdiffs.join("; ")} — the forwarder's config and its label are each deploy/forwarder.ts, byte for byte (FORWARDER_SCRIPT): the script that chooses where every client's bytes go is changed there, where CI runs its --self-check (SMD-2583)`);
   }
   const configs = Object.keys(isMapping(doc.configs) ? doc.configs : {});
-  const foreign = configs.filter((c) => c !== spec?.[1] && !(base && c === "forwarder"));
-  if (foreign.length) flag("proxy", `defines config${foreign.length > 1 ? "s" : ""} ${foreign.join(", ")} — each file defines only its own table's config (ROUTE_FILES: ${ROUTE_FILES.map(([f, c]) => `${f}: ${c}`).join("; ")}), so an overlay cannot replace another's table in a combination CI does not render`);
+  const foreign = configs.filter((c) => c !== spec?.[1] && !(base && BASE_CONFIGS.includes(c)));
+  if (foreign.length) flag("proxy", `defines config${foreign.length > 1 ? "s" : ""} ${foreign.join(", ")} — each file defines only its own table's config (ROUTE_FILES: ${ROUTE_FILES.map(([f, c]) => `${f}: ${c}`).join("; ")}; compose.yaml's ${BASE_CONFIGS.join(", ")} too), so an overlay cannot replace another's table in a combination CI does not render`);
   if (proxy && spec && !base) {
     const [, config, target] = spec;
     if (canonJson(proxy.configs) !== canonJson([{ source: config, target }])) flag("proxy", `mounts ${JSON.stringify(proxy.configs ?? null)} on the proxy where it should mount only its table: [{"source":"${config}","target":"${target}"}]`);
@@ -6544,6 +6573,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const confinement = Object.fromEntries(CONFINEMENT_KEYS.filter((k) => k in svc).map((k) => [k, svc[k]]));
     if (canonJson(confinement) !== canonJson(CONFINEMENT[name] ?? {})) flag("keys", `services.${name}'s confinement is ${JSON.stringify(confinement)} where check 28's CONFINEMENT holds ${JSON.stringify(CONFINEMENT[name] ?? {})} — a capability added, or a drop or no-new-privileges removed, is a change there on purpose (a security_opt beyond no-new-privileges lifts seccomp, AppArmor or SELinux)`);
     if (canonJson(svc.build ?? null) !== canonJson(SERVICE_BUILDS[name] ?? null)) flag("keys", `services.${name}.build is ${JSON.stringify(svc.build ?? null)} where check 28's SERVICE_BUILDS holds ${JSON.stringify(SERVICE_BUILDS[name] ?? null)} — a build's network, privileges, entitlements, secrets and contexts act on the host's builder, so one is changed there on purpose`);
+    if (canonJson(svc.configs ?? null) !== canonJson(SERVICE_CONFIGS[name] ?? null)) flag("keys", `services.${name}.configs is ${JSON.stringify(svc.configs ?? null)} where check 28's SERVICE_CONFIGS holds ${JSON.stringify(SERVICE_CONFIGS[name] ?? null)} — a config lands where its entry says, at its mode and owner, over any file there, so one is mounted there on purpose`);
     if (canonJson(svc.volumes ?? null) !== canonJson(SERVICE_MOUNTS[name] ?? null)) flag("keys", `services.${name}.volumes is ${JSON.stringify(svc.volumes ?? null)} where check 28's SERVICE_MOUNTS holds ${JSON.stringify(SERVICE_MOUNTS[name] ?? null)} — a mount is changed there on purpose: an engine's socket hands the service every container, the proxy's included, and a writable checkout or .git runs code on the host`);
   }
   // Who joins which network, under which names.
@@ -6589,6 +6619,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   // What a file may do to the proxy (pass 2, each run against compose's render).
   ["a setting on compose.yaml's proxy by a variable CI renders as its default", "compose.yaml", "      TRAEFIK_PING: \"true\"\n", "      TRAEFIK_PING: \"true\"\n      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ${OB1_PROXY_ADDRESS:-:8000}\n"],
   ["compose.grafana-port.yaml turning Grafana's anonymous access on beside its origin (review passes 3, 6)", "compose.grafana-port.yaml", "      LGTM_ORIGIN: \"${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}\"\n", "      LGTM_ORIGIN: \"${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}\"\n      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
+  ["compose.yaml's authorization server mounting the forwarder's script over a file of its own (SMD-1849 PR 3c review pass 1)", "compose.yaml", "      - auth-data:/data\n", "      - auth-data:/data\n    configs: [{source: forwarder, target: /app/server.ts, mode: 0777}]\n"],
   ["compose.host-ports.yaml mounting a second route file on the proxy", "compose.host-ports.yaml", "\nservices:\n", "\nservices:\n  proxy:\n    configs: [{source: proxy-routes, target: /etc/traefik/dynamic/zz.yaml}]\n"],
   ["compose.api-public.yaml giving the proxy a root hook that writes a route file (measured, pass 2)", "compose.api-public.yaml", "    depends_on:\n      api:\n", "    post_start: [{command: [sh, -c, \"echo > /etc/traefik/dynamic/x.yaml\"], user: root}]\n    depends_on:\n      api:\n"],
   ["compose.api-public.yaml mounting its table over compose.yaml's", "compose.api-public.yaml", "        target: /etc/traefik/dynamic/api.yaml\n", "        target: /etc/traefik/dynamic/routes.yaml\n"],
@@ -7763,6 +7794,348 @@ async function checkEdgeTree(files: string[], compose: string, edgeTs: string, e
   if (!problems.length) for (const rule of EDGE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 36's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
 }
 await checkEdge();
+// ── 37. The provisioned dashboard reads what the stack writes (SMD-1849 PR 3c) ──
+//
+// The observability profile's Grafana loads one dashboard at its start and
+// opens on it: deploy/observability/dashboard.json, which compose.yaml carries
+// inline as the `grafana-dashboard` config (each `$` doubled, since compose
+// reads one as a variable) beside its provider, the
+// `grafana-dashboard-provider` config, both mounted on `lgtm` (check 28's
+// LGTM_SERVICE and SERVICE_CONFIGS), which carries each one's sha256 as a
+// label: compose recreates a container when a label changes and not when only
+// an inline config does (docker/compose#11900). A panel naming a metric or a
+// label nothing writes shows "No data" for ever and looks like a quiet stack,
+// so every Prometheus name a query reads is one the servers' instruments
+// write (read from server-portable/'s code: an instrument `x.y.duration` in
+// seconds is `x_y_duration_seconds_bucket`, `_count` and `_sum` under the
+// pinned image's translation, PR 3a's measurement), or one PR 3b's exporter
+// or the image's collector writes (DASHBOARD_IMAGE_SERIES, measured on the
+// pins), and every label it reads is one that name carries. Each data source
+// is one the image provisions; each variable a query names is defined; no two
+// panels overlap. CI's "The observability profile's dashboard reads every
+// series it names" runs each query on a running profile; this holds what can
+// be read without one.
+/** The data sources the pinned otel-lgtm image provisions that a panel here may name, uid → type (measured on 0.36.0's grafana-datasources.yaml; its fourth, Pyroscope, holds no series the servers send). */
+const DASHBOARD_DATASOURCES: Record<string, string> = { prometheus: "prometheus", loki: "loki", tempo: "tempo" };
+/** The labels every series under the pinned image's Prometheus carries, from the resource: `job` and `instance`, and the attributes its OTLP receiver promotes (measured on 0.36.0; a tier's `deployment_environment_name`, `service_namespace` where set). */
+const DASHBOARD_RESOURCE_LABELS = ["job", "instance", "service_name", "service_instance_id", "service_version", "service_namespace", "deployment_environment_name"];
+/** The labels each instrument's points carry beside the resource's (its histogram's `le` aside), by its name in Prometheus, held here and measured on a scratch stack: the request's are telemetry.ts's METRIC_KEYS, which checkDashboard holds this list to; the provider's, the store's and a job's are spans.ts's and jobs.ts's labels with `error.type` (and, for a store fault with a SQLSTATE, `db.response.status_code`), held by hand. */
+const DASHBOARD_INSTRUMENT_LABELS: Record<string, string[]> = {
+  http_server_request_duration_seconds: ["http_request_method", "http_route", "http_response_status_code", "error_type", "mcp_method_name", "ob1_door", "ob1_rpc", "ob1_tool", "ob1_outcome"],
+  gen_ai_client_operation_duration_seconds: ["gen_ai_operation_name", "gen_ai_request_model", "server_address", "server_port", "error_type", "ob1_probe"],
+  db_client_operation_duration_seconds: ["db_system_name", "db_operation_name", "ob1_store", "error_type", "db_response_status_code"],
+  ob1_job_duration_seconds: ["ob1_job_kind", "error_type"],
+};
+const COLLECTOR_EXPORTER = ["exporter", "server_address", "server_port", "url_path"];
+const COLLECTOR_RECEIVER = ["receiver", "transport"];
+/** Prometheus series that are not the servers' instruments, each with its labels beside the resource's, measured on the pins (where not, said): postgres_exporter v0.20.1 with PR 3b's flags (`up` the collector's scrape of it), and otel-lgtm 0.36.0's collector about itself (its send_failed series appear at a first failure, with no zero before it: they come by the collector's scrape of itself, not OTLP). */
+const DASHBOARD_IMAGE_SERIES: Record<string, string[]> = {
+  up: [], pg_up: [], pg_database_size_bytes: ["datname"],
+  pg_stat_activity_count: ["datname", "state", "usename", "backend_type", "wait_event", "wait_event_type"],
+  pg_stat_database_blks_hit_total: ["datid", "datname"], pg_stat_database_blks_read_total: ["datid", "datname"], pg_stat_database_numbackends: ["datid", "datname"],
+  pg_stat_statements_calls_total: ["datname", "queryid", "user"], pg_stat_statements_seconds_total: ["datname", "queryid", "user"],
+  pg_stat_statements_rows_total: ["datname", "queryid", "user"], pg_stat_statements_query_id_total: ["query", "queryid"],
+  otelcol_exporter_sent_spans_total: COLLECTOR_EXPORTER, otelcol_exporter_sent_metric_points_total: COLLECTOR_EXPORTER, otelcol_exporter_sent_log_records_total: COLLECTOR_EXPORTER,
+  otelcol_exporter_send_failed_spans_total: COLLECTOR_EXPORTER, otelcol_exporter_send_failed_metric_points_total: COLLECTOR_EXPORTER, otelcol_exporter_send_failed_log_records_total: COLLECTOR_EXPORTER,
+  otelcol_receiver_refused_spans_total: COLLECTOR_RECEIVER, otelcol_receiver_refused_metric_points_total: COLLECTOR_RECEIVER, otelcol_receiver_refused_log_records_total: COLLECTOR_RECEIVER,
+  otelcol_receiver_failed_spans_total: COLLECTOR_RECEIVER, otelcol_receiver_failed_metric_points_total: COLLECTOR_RECEIVER, otelcol_receiver_failed_log_records_total: COLLECTOR_RECEIVER,
+  // A queue-full drop's: born at a first one (none seen), the collector's own name for it on this pin, with the queue's own labels
+  // (exporter, data_type: measured on its otelcol_exporter_queue_size beside it), not the sender's (review passes 4, 5; the names unmeasured).
+  otelcol_exporter_enqueue_failed_spans_total: ["exporter", "data_type"], otelcol_exporter_enqueue_failed_metric_points_total: ["exporter", "data_type"], otelcol_exporter_enqueue_failed_log_records_total: ["exporter", "data_type"],
+  otelcol_process_uptime_total: [],
+};
+/** compose.yaml's `grafana-dashboard-provider` config, byte for byte: the one file (DASHBOARD_PATH), its folder, Grafana's UI refused a save of it, and kept, unprovisioned, should the file go. */
+const DASHBOARD_PROVIDER = [
+  "apiVersion: 1\n",
+  "providers:\n",
+  "  - name: open-brain-dashboard\n",
+  "    type: file\n",
+  "    folder: Open Brain\n",
+  "    disableDeletion: true\n",
+  "    allowUiUpdates: false\n",
+  "    options:\n",
+  `      path: ${DASHBOARD_PATH}\n`,
+  "      foldersFromFilesStructure: false\n",
+].join("");
+const DASHBOARD_FILE = "deploy/observability/dashboard.json";
+const DASHBOARD_UNITS: Record<string, string> = { s: "_seconds", ms: "_milliseconds", By: "_bytes" };
+/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds; a name whose spec it cannot find, or whose unit it does not know, is named with no unit, which no query here reads. */
+function instrumentNamesIn(texts: string[]): Map<string, string[]> {
+  const all = texts.join("\n");
+  const names = new Map<string, string[]>();
+  for (const m of all.matchAll(/(?:histogram\(|name: )"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*\.duration)",\s*(?:spec:\s*)?([A-Z][A-Z0-9_]*)/g)) {
+    const spec = new RegExp(`const ${m[2]}\\b[^=\\n]*=\\s*\\{([^}]{0,600})\\}`).exec(all);
+    const unit = spec ? /\bunit:\s*"([^"]+)"/.exec(spec[1])?.[1] : undefined;
+    const base = `${m[1].replace(/\./g, "_")}${(unit && DASHBOARD_UNITS[unit]) ?? ""}`;
+    const labels = DASHBOARD_INSTRUMENT_LABELS[base] ?? [];
+    names.set(`${base}_bucket`, [...labels, "le"]);
+    for (const suffix of ["_count", "_sum"]) names.set(base + suffix, labels);
+  }
+  return names;
+}
+const PROMQL_KEYWORDS = new Set(["by", "without", "on", "ignoring", "group_left", "group_right", "bool", "offset", "or", "and", "unless", "atan2", "inf", "nan"]);
+/** The expression with each string's content blanked to `~`, its quotes and length kept: a regex run on it sees no `by (` or `{` inside a matcher's value, and an index into it is one into the expression. */
+function maskStrings(expr: string): string {
+  return expr.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (q) => q[0] + "~".repeat(q.length - 2) + q[0]);
+}
+/** A grouping list's labels, a quoted one (Prometheus 3) unquoted. */
+function groupingList(list: string): string[] {
+  return list.split(",").map((l) => l.trim().replace(/^"(.*)"$|^'(.*)'$/, "$1$2")).filter(Boolean);
+}
+const SELECTING_AGGREGATIONS = new Set(["topk", "bottomk", "limitk", "limit_ratio"]);
+/**
+ * The labels an expression's result keeps where its outermost operation is an aggregation: its `by` list,
+ * or every label its names carry but its `without` list, or none (a selecting one — topk — keeps its input's);
+ * undefined where the outermost operation is anything else (a function, a binary operation), which this reading
+ * does not follow: a legend there is held to every label the expression's names carry (review pass 5).
+ */
+function outermostGrouping(expr: string, carried: Set<string>): Set<string> | undefined {
+  const masked = maskStrings(expr);
+  const head = /^\s*([a-z_]+)\s*(?:(by|without)\s*\(([^)]*)\)\s*)?\(/i.exec(masked);
+  if (!head || !/^(sum|min|max|avg|group|stddev|stdvar|count|count_values|quantile|topk|bottomk|limitk|limit_ratio)$/i.test(head[1])) return undefined;
+  let depth = 0, close = -1;
+  for (let i = head[0].length - 1; i < masked.length; i++) {
+    if (masked[i] === "(") depth++;
+    else if (masked[i] === ")" && --depth === 0) { close = i; break; }
+  }
+  if (close < 0) return undefined;
+  const rest = masked.slice(close + 1);
+  const trailing = /^\s*(by|without)\s*\(([^)]*)\)\s*$/i.exec(rest);
+  if (rest.trim() !== "" && !trailing) return undefined;
+  if (SELECTING_AGGREGATIONS.has(head[1].toLowerCase())) return carried;
+  const kind = (head[2] ?? trailing?.[1])?.toLowerCase();
+  const at = head[2] ? head.index + head[0].lastIndexOf("(", head[0].length - 2) : close + 1 + rest.indexOf("(");
+  const list = kind ? groupingList(expr.slice(at + 1, expr.indexOf(")", at))) : [];
+  const kept = kind === "by" ? new Set(list) : kind === "without" ? new Set([...carried].filter((l) => !list.includes(l))) : new Set<string>();
+  if (head[1].toLowerCase() === "count_values") { const v = /\(\s*["']([^"']*)["']/.exec(expr.slice(head[0].length - 1)); if (v) kept.add(v[1]); }
+  return kept;
+}
+/** What a PromQL expression (or a `label_values(metric, label)` variable query) reads: the metric names — what is left once strings, matchers, ranges, offsets, numbers, grouping lists, functions and keywords are taken out, and each `__name__="…"` matcher's — any `__name__` matched by regex (which this cannot hold), each selector's matcher labels by the name it selects (null where it names none), the labels its grouping lists and label_replace sources read, and those label_replace and count_values make. */
+function promqlReads(expr: string): { names: string[]; nameRegex: boolean; selectors: [string | null, string[]][]; labels: string[]; made: string[] } {
+  const lv = /^\s*label_values\(\s*(?:(.+?)\s*,\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$/s.exec(expr);
+  if (lv) { const inner = lv[1] ? promqlReads(lv[1]) : { names: [], nameRegex: false, selectors: [], labels: [], made: [] }; return { ...inner, labels: [...inner.labels, lv[2]] }; }
+  const labels: string[] = [];
+  const made: string[] = [];
+  const names: string[] = [];
+  const selectors: [string | null, string[]][] = [];
+  let nameRegex = false;
+  for (const block of expr.matchAll(/([A-Za-z_:][A-Za-z0-9_:]*)?\s*\{((?:[^{}"]|"(?:[^"\\]|\\.)*")*)\}/g)) {
+    let name: string | null = block[1] && !PROMQL_KEYWORDS.has(block[1].toLowerCase()) ? block[1] : null;
+    const read: string[] = [];
+    for (const el of block[2].match(/(?:[^,"']|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')+/g) ?? []) {
+      const bare = /^\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*$/.exec(el);
+      if (bare) { const n = bare[1] ?? bare[2]; names.push(n); name ??= n; continue; }
+      const m = /^\s*(?:([A-Za-z_][A-Za-z0-9_]*)|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*(=~|!~|!=|=)\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*$/.exec(el);
+      if (!m) continue;
+      const label = m[1] ?? m[2] ?? m[3];
+      const value = m[5] ?? m[6];
+      if (label === "__name__") { if (m[4] === "=") { names.push(value); name ??= value; } else nameRegex = true; } else read.push(label);
+    }
+    selectors.push([name, read]);
+  }
+  const masked = maskStrings(expr);
+  for (const m of masked.matchAll(/\b(?:by|without|on|ignoring|group_left|group_right)\s*\(([^)]*)\)/gi)) labels.push(...groupingList(expr.slice(m.index! + m[0].length - 1 - m[1].length, m.index! + m[0].length - 1)));
+  // label_replace's dst is made only where it is not its own src: one that relabels a label in place (an empty value named) needs the series to carry it (review pass 3).
+  for (const m of expr.matchAll(/,\s*"([^"]*)"\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*"([^"]*)"\s*,\s*"(?:[^"\\]|\\.)*"\s*\)/g)) { if (m[1] !== m[2]) made.push(m[1]); if (m[2]) labels.push(m[2]); }
+  for (const m of expr.matchAll(/\bcount_values\s*(?:\b(?:by|without)\s*\([^)]*\)\s*)?\(\s*"([^"]*)"/g)) made.push(m[1]);
+  let e = expr.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""');
+  e = e.replace(/\{[^}]*\}/g, " ").replace(/\[[^\]]*\]/g, " ");
+  e = e.replace(/\boffset\s+-?[0-9][0-9a-z.]*/gi, " ").replace(/@\s*[^\s)]+/g, " ");
+  e = e.replace(/\b0x[0-9a-f]+\b/gi, " ").replace(/\b[0-9]+(?:\.[0-9]*)?(?:e[+-]?[0-9]+)?\b/gi, " ");
+  e = e.replace(/\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)/gi, " ");
+  for (const m of e.matchAll(/[A-Za-z_:][A-Za-z0-9_:]*/g)) {
+    if (e.slice(m.index! + m[0].length).trimStart().startsWith("(")) continue;
+    if (PROMQL_KEYWORDS.has(m[0].toLowerCase())) continue;
+    names.push(m[0]);
+  }
+  return { names, nameRegex, selectors, labels, made };
+}
+type DashboardRule = "copy" | "provider" | "recreate" | "json" | "identity" | "datasource" | "name" | "label" | "variable" | "layout";
+const sha256Of = (text: string) => `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`;
+/** Every way the dashboard, its inline copy, its provider or lgtm's labels stray: [the rule, what is wrong]. `inline` and `provider` are the configs' mappings and `labels` lgtm's, as Bun.YAML reads compose.yaml; `written` each name the stack writes, with its labels. */
+function dashboardProblems(fileText: string, inline: unknown, provider: unknown, labels: unknown, written: Map<string, string[]>): [DashboardRule, string][] {
+  const out: [DashboardRule, string][] = [];
+  const contentOf = (c: unknown) => isMapping(c) ? c.content : undefined;
+  if (!isMapping(inline) || contentOf(inline) !== fileText.replace(/\$/g, "$$$$") || canonJson(Object.keys(inline)) !== canonJson(["content"])) out.push(["copy", `compose.yaml's configs.grafana-dashboard is not ${DASHBOARD_FILE} with each \`$\` doubled, as its content alone: compose reads a single \`$\` as a variable, so the dashboard Grafana loads would not be the file — run \`bun scripts/inline-dashboard.ts\`, which writes it and lgtm's labels`]);
+  if (!isMapping(provider) || contentOf(provider) !== DASHBOARD_PROVIDER || canonJson(Object.keys(provider)) !== canonJson(["content"])) out.push(["provider", `compose.yaml's configs.grafana-dashboard-provider is not check 37's DASHBOARD_PROVIDER byte for byte, as its content alone: it decides which file Grafana loads and whether its UI may save a change`]);
+  const wantLabels = { "ob1.grafana-dashboard": sha256Of(fileText), "ob1.grafana-dashboard-provider": sha256Of(DASHBOARD_PROVIDER) };
+  if (canonJson(labels ?? null) !== canonJson(wantLabels)) out.push(["recreate", `compose.yaml's services.lgtm.labels is ${JSON.stringify(labels ?? null)} where it is ${JSON.stringify(wantLabels)}: compose recreates lgtm when a label changes and not when only an inline config does (docker/compose#11900), so without each config's sha256 an upgrade's \`up -d\` leaves Grafana on the old dashboard — \`bun scripts/inline-dashboard.ts\` writes them`]);
+  let d: unknown;
+  try { d = JSON.parse(fileText); } catch (e) { out.push(["json", `does not parse as JSON, so Grafana loads no dashboard: ${(e as Error).message}`]); return out; }
+  if (!isMapping(d) || !Array.isArray(d.panels)) { out.push(["json", "is not a dashboard: no `panels` array"]); return out; }
+  if (d.uid !== "ob1" || d.editable !== false || d.title !== "Open Brain") out.push(["identity", `has uid ${JSON.stringify(d.uid)}, editable ${JSON.stringify(d.editable)} and title ${JSON.stringify(d.title)} where they are "ob1" (the address deploy/README.md names, /grafana/d/ob1), false (Grafana's UI may not save a provisioned dashboard) and "Open Brain" (the home page's address is its slug): a copy saved in Grafana and exported has its own uid, "… Copy" and true`]);
+  const vars = isMapping(d.templating) && Array.isArray(d.templating.list) ? d.templating.list.filter(isMapping) : [];
+  const defined = new Set(vars.map((v) => String(v.name)));
+  const ids = new Set<unknown>();
+  const boxes: [string, number, number, number, number][] = [];
+  const queries: [string, string, string][] = []; // [where, datasource uid, text]
+  const legends = new Map<string, string[]>(); // where → the labels its legend shows
+  const checkSource = (where: string, ds: unknown) => {
+    if (!isMapping(ds) || typeof ds.uid !== "string" || DASHBOARD_DATASOURCES[ds.uid] === undefined || DASHBOARD_DATASOURCES[ds.uid] !== ds.type) out.push(["datasource", `${where} names data source ${JSON.stringify(ds ?? null)}, not one the pinned image provisions (${Object.entries(DASHBOARD_DATASOURCES).map(([u, t]) => `${t} "${u}"`).join(", ")}): its panel would say the data source was not found`]);
+    return isMapping(ds) ? String(ds.uid) : "";
+  };
+  for (const v of vars) {
+    const uid = checkSource(`variable ${v.name}`, v.datasource);
+    const q = isMapping(v.query) ? v.query.query : v.query;
+    if (typeof q === "string") queries.push([`variable ${v.name}`, uid, q]);
+  }
+  // A collapsed row holds its panels in its own `panels` (Grafana's model): read them too, placed by their own gridPos.
+  const top = d.panels.filter(isMapping);
+  const all = top.flatMap((p) => [p, ...(Array.isArray(p.panels) ? p.panels.filter(isMapping) : [])]);
+  for (const p of all) {
+    const where = `panel ${JSON.stringify(p.title)}`;
+    if (ids.has(p.id)) out.push(["identity", `${where} reuses id ${JSON.stringify(p.id)}: Grafana keeps one of the two`]);
+    ids.add(p.id);
+    const g = isMapping(p.gridPos) ? p.gridPos : {};
+    const [x, y, w, h] = [g.x, g.y, g.w, g.h].map(Number);
+    if (![x, y, w, h].every(Number.isInteger) || x < 0 || w < 1 || h < 1 || x + w > 24) out.push(["layout", `${where} has gridPos ${JSON.stringify(p.gridPos ?? null)}, not whole numbers inside Grafana's 24 columns`]);
+    else if (top.includes(p)) {
+      for (const [other, ox, oy, ow, oh] of boxes) if (x < ox + ow && ox < x + w && y < oy + oh && oy < y + h) out.push(["layout", `${where} overlaps panel ${other}: Grafana moves one of them down`]);
+      boxes.push([JSON.stringify(p.title), x, y, w, h]);
+    }
+    if (p.type === "row") continue;
+    checkSource(where, p.datasource);
+    for (const t of (Array.isArray(p.targets) ? p.targets : []).filter(isMapping)) {
+      const uid = checkSource(`${where} query ${t.refId}`, t.datasource);
+      const text = typeof t.expr === "string" ? t.expr : typeof t.query === "string" ? t.query : "";
+      queries.push([`${where} query ${t.refId}`, uid, text]);
+      if (uid === "prometheus" && typeof t.legendFormat === "string") legends.set(`${where} query ${t.refId}`, [...t.legendFormat.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)].map((m) => m[1]));
+    }
+  }
+  for (const [where, uid, text] of queries) {
+    for (const m of text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) if (!m[1].startsWith("__") && !defined.has(m[1])) out.push(["variable", `${where} names $${m[1]}, which the dashboard does not define: Grafana sends it as written`]);
+    if (/\[\[[A-Za-z_][A-Za-z0-9_]*(?::[^\]]*)?\]\]/.test(text)) out.push(["variable", `${where} names a variable in the old \`[[…]]\` form, which this check does not read: write it \`$name\``]);
+    if (uid !== "prometheus") continue;
+    const reads = promqlReads(text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"));
+    const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
+    if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so the panel would show "No data" for ever — the names there are: the servers' \`*.duration\` histograms in server-portable/*.ts (instrumentNamesIn reads those alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
+    const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
+    const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
+    for (const [name, read] of reads.selectors) {
+      const own = new Set([...DASHBOARD_RESOURCE_LABELS, ...(name === null ? [...carried] : written.get(name) ?? [])]);
+      for (const l of read) if (!own.has(l) && !stray.includes(l)) stray.push(l);
+    }
+    // A legend shows a label its result keeps: the outermost aggregation's, where that is the outermost operation (review pass 5), else one its names carry or label_replace makes (review pass 4).
+    const kept = outermostGrouping(text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"), carried) ?? carried;
+    for (const l of legends.get(where) ?? []) if (l !== "__name__" && !kept.has(l) && !stray.includes(l)) stray.push(l);
+    if (stray.length && !unknown.length) out.push(["label", `${where} reads label${stray.length > 1 ? "s" : ""} ${stray.join(", ")}, which the name it selects (a matcher) or none of ${reads.names.length ? [...new Set(reads.names)].join(", ") : "the names it reads (it reads none)"} (a grouping) carries (DASHBOARD_INSTRUMENT_LABELS, DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS): a matcher on it matches nothing, and a grouping by it is one series`]);
+  }
+  return out;
+}
+const DASHBOARD_PROBE = {
+  uid: "ob1", editable: false, title: "Open Brain",
+  templating: { list: [{ name: "service", datasource: { type: "prometheus", uid: "prometheus" }, query: { query: "label_values(http_server_request_duration_seconds_count, service_name)" } }] },
+  panels: [
+    { type: "row", id: 1, title: "r", gridPos: { x: 0, y: 0, w: 24, h: 1 }, datasource: undefined as unknown, targets: [] as { refId: string; datasource: { type: string; uid: string }; expr: string }[], panels: [] as unknown[], collapsed: false },
+    { type: "timeseries", id: 2, title: "a", datasource: { type: "prometheus", uid: "prometheus" } as unknown, gridPos: { x: 0, y: 1, w: 12, h: 8 }, targets: [{ refId: "A", datasource: { type: "prometheus", uid: "prometheus" }, expr: 'histogram_quantile(0.99, sum by (le, ob1_tool) (rate(http_server_request_duration_seconds_bucket{service_name=~"$service"}[$__rate_interval] offset 1h)))' }], panels: [] as unknown[], collapsed: false },
+    { type: "logs", id: 3, title: "b", datasource: { type: "loki", uid: "loki" } as unknown, gridPos: { x: 12, y: 1, w: 12, h: 8 }, targets: [{ refId: "A", datasource: { type: "loki", uid: "loki" }, expr: '{service_name=~"$service"} | json' }], panels: [] as unknown[], collapsed: false },
+  ],
+};
+/** The probe dashboard's text, changed by `mutate`. */
+function dashboardProbe(mutate?: (d: typeof DASHBOARD_PROBE) => void): string {
+  const d = structuredClone(DASHBOARD_PROBE);
+  mutate?.(d);
+  return JSON.stringify(d, null, 1);
+}
+const DASHBOARD_PROBE_CODE = 'const REQUEST_DURATION: HistogramSpec = {\n  unit: "s",\n  bounds: [1],\n};\nhistogram("http.server.request.duration", REQUEST_DURATION)';
+const DASHBOARD_PROBE_WRITTEN = new Map([...instrumentNamesIn([DASHBOARD_PROBE_CODE]), ["pg_stat_statements_seconds_total", ["datname", "queryid", "user"]], ["pg_stat_statements_query_id_total", ["query", "queryid"]]]);
+const inlined = (text: string) => ({ content: text.replace(/\$/g, "$$$$") });
+const HELD = { content: DASHBOARD_PROVIDER };
+const labelled = (text: string, provider = DASHBOARD_PROVIDER) => ({ "ob1.grafana-dashboard": sha256Of(text), "ob1.grafana-dashboard-provider": sha256Of(provider) });
+/** [what, the file's text, its inline config, the provider config, lgtm's labels, the rules reported]. */
+const DASHBOARD_PROBES: [string, string, unknown, unknown, unknown, DashboardRule[]][] = [
+  ["the dashboard as held", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe()), []],
+  ["an inline copy whose dollar signs compose would read as variables", dashboardProbe(), { content: dashboardProbe() }, HELD, labelled(dashboardProbe()), ["copy"]],
+  ["an inline copy from an older file", dashboardProbe((d) => { d.panels[1].title = "a2"; }), inlined(dashboardProbe()), HELD, labelled(dashboardProbe((d) => { d.panels[1].title = "a2"; })), ["copy"]],
+  ["an inline copy mounted from a file instead", dashboardProbe(), { ...inlined(dashboardProbe()), file: "./observability/dashboard.json" }, HELD, labelled(dashboardProbe()), ["copy"]],
+  ["a provider letting the UI save a change", dashboardProbe(), inlined(dashboardProbe()), { content: DASHBOARD_PROVIDER.replace("allowUiUpdates: false", "allowUiUpdates: true") }, labelled(dashboardProbe()), ["provider"]],
+  ["a provider reading a directory", dashboardProbe(), inlined(dashboardProbe()), { content: DASHBOARD_PROVIDER.replace(DASHBOARD_PATH, "/otel-lgtm") }, labelled(dashboardProbe()), ["provider"]],
+  ["lgtm's label naming an older dashboard, so an upgrade's up -d keeps it", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe((d) => { d.panels[1].title = "a0"; })), ["recreate"]],
+  ["lgtm with no labels, as before review pass 1", dashboardProbe(), inlined(dashboardProbe()), HELD, undefined, ["recreate"]],
+  ["lgtm's provider label naming an older provider (review pass 2)", dashboardProbe(), inlined(dashboardProbe()), HELD, labelled(dashboardProbe(), DASHBOARD_PROVIDER.replace("folder: Open Brain", "folder: Old")), ["recreate"]],
+  ["a third label on lgtm (review pass 2)", dashboardProbe(), inlined(dashboardProbe()), HELD, { ...labelled(dashboardProbe()), "ob1.extra": "x" }, ["recreate"]],
+  ["a file that is not JSON", "{", inlined("{"), HELD, labelled("{"), ["json"]],
+  ...([
+    ["another uid", (d) => { d.uid = "x"; }, ["identity"]],
+    ["an editable dashboard", (d) => { d.editable = true as false; }, ["identity"]],
+    ["a copy's title (review pass 4)", (d) => { (d as Record<string, unknown>).title = "Open Brain Copy"; }, ["identity"]],
+    ["two panels with one id", (d) => { d.panels[2].id = 2; }, ["identity"]],
+    ["a data source the image does not provision", (d) => { d.panels[2].datasource = { type: "loki", uid: "loki2" }; }, ["datasource"]],
+    ["a query's data source of another type than its uid's", (d) => { d.panels[1].targets[0].datasource = { type: "loki", uid: "prometheus" }; }, ["datasource"]],
+    ["a variable on a data source the image does not provision", (d) => { d.templating.list[0].datasource = { type: "prometheus", uid: "mimir" }; }, ["datasource"]],
+    ["a metric nothing writes", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace("duration_seconds_bucket", "duration_bucket"); }, ["name"]],
+    ["a metric named by an exact __name__ matcher that nothing writes", (d) => { d.panels[1].targets[0].expr = 'sum(rate({__name__="ghost_metric_total"}[5m]))'; }, ["name"]],
+    ["a metric named by a regex on __name__", (d) => { d.panels[1].targets[0].expr = 'sum(rate({__name__=~"http_.+"}[5m]))'; }, ["name"]],
+    ["a variable query on a metric nothing writes", (d) => { d.templating.list[0].query.query = "label_values(ob1_request_duration_count, service_name)"; }, ["name"]],
+    ["a panel in a collapsed row reading a metric nothing writes", (d) => { d.panels[0].collapsed = true; d.panels[0].panels = [{ type: "timeseries", id: 9, title: "hidden", datasource: { type: "prometheus", uid: "prometheus" }, gridPos: { x: 0, y: 1, w: 12, h: 8 }, targets: [{ refId: "A", datasource: { type: "prometheus", uid: "prometheus" }, expr: "sum(rate(ghost_metric_total[5m]))" }] }]; }, ["name"]],
+    ["a grouping by a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace("by (le, ob1_tool)", "by (le, ob1_tools)"); }, ["label"]],
+    ["a matcher on a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace('service_name=~"$service"', 'ob1_outcomes="error"'); }, ["label"]],
+    ["a matcher on a label another name in the expression carries but its own does not (review pass 2)", (d) => { d.panels[1].targets[0].expr = 'sum(rate(pg_stat_statements_seconds_total[5m])) * on (queryid) group_left (query) max by (queryid, query) (pg_stat_statements_query_id_total{datname="x"})'; }, ["label"]],
+    ["a label_replace relabelling a label in place that its series does not carry (review pass 3)", (d) => { d.panels[1].targets[0].expr = 'label_replace(sum by (ob1_tools) (rate(http_server_request_duration_seconds_count[5m])), "ob1_tools", "(none)", "ob1_tools", "")'; }, ["label"]],
+    ["a label_replace whose source its series does not carry", (d) => { d.panels[1].targets[0].expr = 'label_replace(sum(rate(http_server_request_duration_seconds_count[5m])), "door", "$1", "ob1_doors", "(.*)")'; }, ["label"]],
+    ["a label_replace making a new label, grouped by after", (d) => { d.panels[1].targets[0].expr = 'sum by (door) (label_replace(rate(http_server_request_duration_seconds_count[5m]), "door", "$1", "ob1_door", "(.*)"))'; }, []],
+    ["a quoted metric name nothing writes (Prometheus 3's selector)", (d) => { d.panels[1].targets[0].expr = 'min({"ghost_up", job="postgres"})'; }, ["name"]],
+    ["a quoted metric name nothing writes, after a matcher (review pass 4)", (d) => { d.panels[1].targets[0].expr = 'min({job="postgres", "ghost_up"})'; }, ["name"]],
+    ["a quoted label name the metric does not carry", (d) => { d.panels[1].targets[0].expr = 'sum(rate(http_server_request_duration_seconds_count{"ghost.label"="x"}[5m]))'; }, ["label"]],
+    ["a quoted grouping label the metric carries", (d) => { d.panels[1].targets[0].expr = 'sum by ("ob1_tool") (rate(http_server_request_duration_seconds_count[5m]))'; }, []],
+    ["a legend showing a label the query does not keep", (d) => { (d.panels[1].targets[0] as Record<string, unknown>).legendFormat = "{{ob1_tools}}"; }, ["label"]],
+    ["a legend showing a label a without list keeps (review pass 5)", (d) => { d.panels[1].targets[0].expr = 'sum without (le, instance) (rate(http_server_request_duration_seconds_bucket[5m]))'; (d.panels[1].targets[0] as Record<string, unknown>).legendFormat = "{{ob1_tool}}"; }, []],
+    ["a legend showing the label a without list drops", (d) => { d.panels[1].targets[0].expr = 'sum without (ob1_outcome) (rate(http_server_request_duration_seconds_count[5m]))'; (d.panels[1].targets[0] as Record<string, unknown>).legendFormat = "{{ob1_outcome}}"; }, ["label"]],
+    ["a `by (x)` inside a matcher's value is no grouping", (d) => { d.panels[1].targets[0].expr = 'rate(http_server_request_duration_seconds_count{ob1_tool=~"by (x)"}[5m])'; (d.panels[1].targets[0] as Record<string, unknown>).legendFormat = "{{ob1_tool}}"; }, []],
+    ["a single-quoted matcher on a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = "sum(rate(http_server_request_duration_seconds_count{ghost_label='x'}[5m]))"; }, ["label"]],
+    ["a single-quoted value holding a comma is one matcher, on a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = "sum(rate(http_server_request_duration_seconds_count{ghost_label='a,b'}[5m]))"; }, ["label"]],
+    ["a single-quoted metric name nothing writes", (d) => { d.panels[1].targets[0].expr = "min({'ghost_up', job=\"postgres\"})"; }, ["name"]],
+    ["a legend showing the label a grouping dropped", (d) => { d.panels[1].targets[0].expr = 'sum by (ob1_door) (rate(http_server_request_duration_seconds_count[5m]))'; (d.panels[1].targets[0] as Record<string, unknown>).legendFormat = "{{ob1_tool}}"; }, ["label"]],
+    ["a matcher beside an exact __name__ on a label that name does not carry", (d) => { d.panels[1].targets[0].expr = 'max by (queryid) (pg_stat_statements_seconds_total) * on (queryid) group_left (query) max by (queryid, query) ({__name__="pg_stat_statements_query_id_total", datname="x"})'; }, ["label"]],
+    ["a regex class in a log query is no variable", (d) => { d.panels[2].targets[0].expr = '{service_name=~"$service"} |~ "[[:alpha:]]+"'; }, []],
+    ["atan2, offset, a number and count_values' label read as none of the names", (d) => { d.panels[1].targets[0].expr = 'count_values by (v) ("v", http_server_request_duration_seconds_count offset 1h) atan2 1e3'; }, []],
+    ["a variable the dashboard does not define", (d) => { d.panels[2].targets[0].expr = '{service_name=~"$server"}'; }, ["variable"]],
+    ["a variable in the old [[…]] form", (d) => { d.panels[2].targets[0].expr = '{service_name=~"[[service]]"}'; }, ["variable"]],
+    ["two panels on one place", (d) => { d.panels[2].gridPos.x = 6; }, ["layout"]],
+    ["a panel past the 24 columns", (d) => { d.panels[2].gridPos.x = 13; }, ["layout"]],
+  ] as [string, (d: typeof DASHBOARD_PROBE) => void, DashboardRule[]][]).map(([what, mutate, rules]): [string, string, unknown, unknown, unknown, DashboardRule[]] => [what, dashboardProbe(mutate), inlined(dashboardProbe(mutate)), HELD, labelled(dashboardProbe(mutate)), rules]),
+];
+/** [what, code, a name instrumentNamesIn must read (or, led by "!", must not)]. */
+const INSTRUMENT_PROBES: [string, string, string][] = [
+  ["an instrument in seconds", DASHBOARD_PROBE_CODE, "http_server_request_duration_seconds_count"],
+  ["an instrument whose unit became milliseconds is not the seconds name", DASHBOARD_PROBE_CODE.replace('unit: "s"', 'unit: "ms"'), "!http_server_request_duration_seconds_count"],
+  ["a span's metric by its spec", 'const JOB_DURATION: HistogramSpec = {\n  unit: "s",\n};\nmetric: { name: "ob1.job.duration", spec: JOB_DURATION, labels }', "ob1_job_duration_seconds_bucket"],
+];
+function checkDashboard() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 37 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1849)`);
+    return;
+  }
+  for (const [what, text, inline, provider, labels, expected] of DASHBOARD_PROBES) {
+    const got = dashboardProblems(text, inline, provider, labels, DASHBOARD_PROBE_WRITTEN).map(([rule]) => rule);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 37 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [what, code, name] of INSTRUMENT_PROBES) {
+    const has = instrumentNamesIn([code]).has(name.replace(/^!/, ""));
+    if (has === name.startsWith("!")) fail(SELF, `check 37's instrument reading no longer holds its probe "${what}" (${name})`);
+  }
+  const code = readdirSync(join(ROOT, "server-portable")).filter((f) => f.endsWith(".ts") && !f.startsWith("test-")).map((f) => readFileSync(join(ROOT, "server-portable", f), "utf8"));
+  const instruments = instrumentNamesIn(code);
+  const metricKeys = /const METRIC_KEYS = \[([^\]]*)\]/.exec(readFileSync(join(ROOT, "server-portable/telemetry.ts"), "utf8"));
+  const requestLabels = metricKeys ? [...metricKeys[1].matchAll(/"([a-z0-9_.]+)"/g)].map((m) => m[1].replace(/\./g, "_")) : [];
+  if (!requestLabels.length) { fail(SELF, "check 37 reads no METRIC_KEYS from server-portable/telemetry.ts — the reading is broken, or the request's labels moved: the dashboard reads them"); return; }
+  if (canonJson([...requestLabels].sort()) !== canonJson([...DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds].sort())) fail(SELF, `check 37's DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds is ${JSON.stringify(DASHBOARD_INSTRUMENT_LABELS.http_server_request_duration_seconds)} where telemetry.ts's METRIC_KEYS give ${JSON.stringify(requestLabels)}: a label the request's point no longer carries leaves a panel's legend blank, and the dashboard reads them (SMD-1849 PR 3c review pass 2)`);
+  // Were these missed, the reading is broken, not the dashboard.
+  for (const n of Object.keys(DASHBOARD_INSTRUMENT_LABELS)) if (!instruments.has(`${n}_count`)) { fail(SELF, `check 37 reads no ${n} from server-portable/'s code, in seconds — the reading is broken, or the instrument moved: the dashboard reads it`); return; }
+  const composeText = readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8");
+  const doc = Bun.YAML.parse(composeText);
+  const configs = isMapping(doc) && isMapping(doc.configs) ? doc.configs : {};
+  const lgtm = isMapping(doc) && isMapping(doc.services) && isMapping(doc.services.lgtm) ? doc.services.lgtm : {};
+  let fileText: string;
+  try { fileText = readFileSync(join(ROOT, DASHBOARD_FILE), "utf8"); } catch { fail(DASHBOARD_FILE, "missing — compose.yaml's lgtm loads it as the observability profile's dashboard (check 37, SMD-1849)"); return; }
+  // The generator the README and these messages name, run on the tree: where it can no longer write compose.yaml's copy, it says so here (review pass 5).
+  try { inlinedDashboard(composeText, fileText); } catch (e) { fail("scripts/inline-dashboard.ts", `can no longer write compose.yaml's inline copy of the dashboard: ${(e as Error).message} — the README sends an operator to it (check 37, SMD-1849)`); }
+  const written = new Map([...instruments, ...Object.entries(DASHBOARD_IMAGE_SERIES)]);
+  for (const [rule, detail] of dashboardProblems(fileText, configs["grafana-dashboard"], configs["grafana-dashboard-provider"], lgtm.labels, written)) {
+    fail(rule === "copy" || rule === "provider" || rule === "recreate" ? "deploy/compose.yaml" : DASHBOARD_FILE, `${detail} (check 37, SMD-1849)`);
+  }
+}
+checkDashboard();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
