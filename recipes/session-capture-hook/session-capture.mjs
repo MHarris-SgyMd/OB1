@@ -1448,11 +1448,13 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
     // The proxy's legacy root route marks every answer it carries; --check
     // reads it off the config to say the url must move to /mcp (SMD-2686).
     // Its tier routes mark theirs too, with a Link to the canary's section
-    // rather than /mcp's, where /mcp would be stable's (SMD-3057).
+    // rather than /mcp's, where /mcp would be stable's (SMD-3057). The url's
+    // own tier path counts as well, so a moved anchor never sends a tier's
+    // hook to stable.
     const deprecation = r.headers.get("deprecation");
     if (deprecation) {
       cfg.deprecation = deprecation;
-      cfg.deprecatedTier = /#a-canary-beside-the-stack>/.test(r.headers.get("link") ?? "");
+      cfg.deprecatedTier = /#a-canary-beside-the-stack>/.test(r.headers.get("link") ?? "") || /^\/(canary|working)\/mcp(\/|$)/i.test(new URL(cfg.url).pathname);
     }
     // Every url this prints is masked (SMD-2743): a message lands in the log.
     const at = shownUrl(cfg.url);
@@ -2417,9 +2419,9 @@ export async function main(argv) {
     // An answer from the root through the proxy's legacy route works until
     // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
     // A tier's route through stable's proxy closes then too (SMD-3057), and
-    // its /mcp is stable's: the tier's own port is the url to set.
+    // its /mcp is stable's: the tier itself is the url to set.
     if (cfg.deprecation && cfg.deprecatedTier) {
-      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to the tier's own port in ${urlSource()}, not stable's /mcp (deploy/README.md, "A canary beside the stack")`);
+      console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
     } else if (cfg.deprecation) {
       let to = "its /mcp";
       const u = new URL(cfg.url); // endpointOf made it, so it parses

@@ -2200,16 +2200,25 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(onEnv.code === 0 && onEnv.err.includes(`set the url to its /mcp in OB1_BRAIN_URL (`), `…a url off the root is told its /mcp, and one from OB1_BRAIN_URL names the variable, not the file (${onEnv.err.trim().slice(0, 120)})`);
   assert(!/deprecated/.test(ok.err) && !/deprecated/.test(wide.err), "…and no such warning where the answer carries no Deprecation header");
   // The proxy's tier routes: deprecated too, with a Link to the canary's section; their /mcp would be stable's (SMD-3057).
+  let tierLink = true;
   const tierRoute = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     const r = await fetch(URL_, { method: "POST", headers: req.headers, body: await req.text() });
-    return new Response(await r.text(), { status: r.status, headers: { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1792108800", Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"' } });
+    const headers = { "Content-Type": r.headers.get("content-type") ?? "application/json", Deprecation: "@1792108800" };
+    if (tierLink) headers.Link = '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"';
+    return new Response(await r.text(), { status: r.status, headers });
   } });
   const TIER = `http://127.0.0.1:${tierRoute.port}/canary/mcp`;
+  const tierWarned = (err, url, source) => err.includes(`warning: ${url}/ answered through the proxy's deprecated tier route (Deprecation: @1792108800), which stops answering at v2.0.0 — set the url in ${source} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (`) && !/legacy route|set the url to its \/mcp/.test(err);
   writeFileSync(CONFIG, JSON.stringify({ url: TIER, key: "cap-key" }), { mode: 0o600 });
   const onTier = await spawnScript(["--check"]);
+  assert(onTier.code === 0 && tierWarned(onTier.err, TIER, CONFIG),
+    `…a tier route's url is told the tier itself, never stable's /mcp (SMD-3057; ${onTier.err.trim().slice(0, 160)})`);
+  const onTierEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: TIER.replace("/canary/", "/working/") } });
+  assert(onTierEnv.code === 0 && tierWarned(onTierEnv.err, TIER.replace("/canary/", "/working/"), "OB1_BRAIN_URL"), `…one from OB1_BRAIN_URL names the variable (${onTierEnv.err.trim().slice(0, 160)})`);
+  tierLink = false;
+  const onTierBare = await spawnScript(["--check"]);
   tierRoute.stop(true);
-  assert(onTier.code === 0 && onTier.err.includes(`warning: ${TIER}/ answered through the proxy's deprecated tier route (Deprecation: @1792108800), which stops answering at v2.0.0 — set the url to the tier's own port in ${CONFIG}, not stable's /mcp (`) && !/legacy route|set the url to its \/mcp/.test(onTier.err),
-    `…a tier route's url is told the tier's own port, never stable's /mcp (SMD-3057; ${onTier.err.trim().slice(0, 160)})`);
+  assert(onTierBare.code === 0 && tierWarned(onTierBare.err, TIER, CONFIG), `…and a tier path whose answer has no tier Link is still a tier route, so a moved anchor never sends it to stable's /mcp (${onTierBare.err.trim().slice(0, 160)})`);
   // A query on the url: the warning names the url and suggests its /mcp with the query's names kept and its values masked; the request itself carries the query unmangled (SMD-2743: it went as `?tenant=<value>/`).
   writeFileSync(CONFIG, JSON.stringify({ url: `${LEGACY}?tenant=SEKRET-Q`, key: "cap-key" }), { mode: 0o600 });
   const onRootQ = await spawnScript(["--check"]);
