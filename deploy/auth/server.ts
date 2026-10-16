@@ -94,7 +94,7 @@ import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
-import { ACCESS_TOKEN_TYPE, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { ACCESS_TOKEN_TYPE, chainRotates, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
@@ -188,11 +188,13 @@ const provider = new Provider(L.issuer, {
   },
   // Every refresh spends the token and issues a new one (OAuth 2.1 §4.3.1 for a
   // client whose tokens are not sender-bound, which none here are: DPoP is off).
-  // A spent one presented again within 60 s rotates once more, since the MCP
-  // SDK refreshes without a lock (store.ts, layout.ts REFRESH_REUSE_GRACE_S);
-  // later, it is a replay, and the library revokes the whole grant, the new
-  // tokens with it.
-  rotateRefreshToken: true,
+  // A spent one presented again within 10 s rotates again, each time, since
+  // the MCP SDK refreshes without a lock; inside that window a replay forks
+  // the chain undetected (store.ts, layout.ts REFRESH_REUSE_GRACE_S). Later, it
+  // is a replay, and the library revokes the whole grant, every token with it.
+  // A chain 30 days old rotates no more (layout.ts chainRotates), so none
+  // outlives the lifetime refreshTtl gives it.
+  rotateRefreshToken: (ctx) => chainRotates((ctx.oidc.entities.RefreshToken as { iiat?: number } | undefined)?.iiat, Math.floor(Date.now() / 1000)),
   // The one signing key is P-256, so a registered client's ID token defaults to ES256 (the library's default is RS256).
   clientDefaults: { id_token_signed_response_alg: "ES256" },
   enabledJWA: { idTokenSigningAlgValues: ["ES256"] },

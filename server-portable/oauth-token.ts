@@ -27,11 +27,11 @@
  *
  * Configured, the issuer check never drops (cachedKeys has the rules): the
  * keys are read on the mesh, kept 600 s, and read again after that or for a
- * key they lack. When a read fails, the keys read last go on serving for 600 s
- * from that first failure, which is every token issued before the outage to
- * its end, since none lives longer; and no read is tried again for 30 s. With
- * no keys to check a token against, it is answered unavailable (503), never
- * let through and never refused as bad.
+ * key they lack, at most once in 30 s. Once the set is stale and reads fail,
+ * the keys read last go on serving for 600 s from then, which is every token
+ * issued before the outage to its end, since none lives longer. With no keys
+ * to check a token against, it is answered unavailable (503), never let
+ * through and never refused as bad.
  *
  * A token whose scopes name no key scope is a valid token without the scope
  * any operation needs: answered `scope` (403 `insufficient_scope`, RFC 6750
@@ -47,12 +47,12 @@ import { edgeSettings, OAUTH_SCOPES } from "./oauth-edge.ts";
 export const AUTH_JWKS_URL = "http://auth.ob1.internal.:3000/auth/jwks";
 /**
  * How long a read key set is used before it is read again, and how long the
- * keys read last go on serving once a read fails: the authorization server's
+ * keys read last go on serving once it is stale and reads fail: the authorization server's
  * access-token lifetime (deploy/auth/server.ts ACCESS_TTL), so a token issued
  * before an outage is served to its end.
  */
 export const JWKS_CACHE_MAX_AGE_MS = 600_000;
-/** The least time between two reads: after a read, a token naming a key the set lacks waits this long for the next; after a failed one, every token does. */
+/** The least time between two reads tried, whatever asked for them: a token naming a key the set lacks, a stale set, a failing server. */
 export const JWKS_COOLDOWN_MS = 30_000;
 export const JWKS_TIMEOUT_MS = 2_000;
 
@@ -132,34 +132,42 @@ function guarded(keys: JWTVerifyGetKey): JWTVerifyGetKey {
 
 /**
  * The authorization server's key set, kept (the header's rules). `read`
- * fetches it; `now` is the clock, in ms. Each token's key is looked up as:
- * - a set read within JWKS_CACHE_MAX_AGE_MS that holds the token's `kid`: used;
- * - no set, a set that old, or one lacking the `kid`: read again, unless a read
- *   was tried within JWKS_COOLDOWN_MS (after a successful read, only a missing
- *   `kid` waits; after a failed one, everything does). One read at a time;
- * - the read failed or was not tried: the set read last serves until
- *   JWKS_CACHE_MAX_AGE_MS past the first failure since the last success;
- * - a `kid` the set lacks right after a successful read: the token's fault
- *   (invalid); one it lacks with no read possible: unavailable, since the
- *   authorization server may have a new key this set has not seen.
+ * fetches it; `now` is the clock, in ms (monotonic by default, so a wall-clock
+ * step cannot freeze or stretch it). For each token:
+ * - **Needs a read** when there is no set, the set is JWKS_CACHE_MAX_AGE_MS
+ *   old (stale), or it lacks the token's `kid`. A read already in flight is
+ *   joined; otherwise one is made unless one was tried within
+ *   JWKS_COOLDOWN_MS. That one gate holds a missing-`kid` flood and a failing
+ *   server alike to a read in 30 s.
+ * - **Serves** while the set is fresh. Once it is stale with reads failing,
+ *   the outage is counted from the first moment both were true, and the set
+ *   serves JWKS_CACHE_MAX_AGE_MS from then: every token issued before the
+ *   outage, to its end, however long the set sat idle or whatever failed
+ *   while it was fresh. A success ends the outage.
+ * - **A `kid` the set lacks** after a successful read (this request's or one
+ *   it joined) is the token's fault (invalid); one it lacks with no read made
+ *   is unavailable, since the authorization server may have a new key.
  */
-export function cachedKeys(read: () => Promise<JSONWebKeySet>, now: () => number = Date.now): JWTVerifyGetKey {
+export function cachedKeys(read: () => Promise<JSONWebKeySet>, now: () => number = () => performance.now()): JWTVerifyGetKey {
   let local: JWTVerifyGetKey | null = null;
-  let readAt = 0;
+  let readAt = -Infinity;
   let triedAt = -Infinity;
-  let failingSince: number | null = null;
+  let lastFailed = false;
+  let outageSince: number | null = null;
   let inflight: Promise<boolean> | null = null;
   const tryRead = () =>
     (inflight ??= (async () => {
       triedAt = now();
       try {
-        const set = await read();
+        // Through a resolved promise, so a reader that throws at once still settles after `inflight` is set.
+        const set = await Promise.resolve().then(read);
         local = createLocalJWKSet(set);
         readAt = now();
-        failingSince = null;
+        lastFailed = false;
+        outageSince = null;
         return true;
       } catch {
-        failingSince ??= now();
+        lastFailed = true;
         return false;
       } finally {
         inflight = null;
@@ -175,19 +183,18 @@ export function cachedKeys(read: () => Promise<JSONWebKeySet>, now: () => number
       throw e;
     }
   };
+  const stale = () => now() - readAt >= JWKS_CACHE_MAX_AGE_MS;
   return async (header, token) => {
-    const fresh = local !== null && now() - readAt < JWKS_CACHE_MAX_AGE_MS;
-    const has = await holds(header, token);
-    let readNow = false;
-    if (!fresh || !has) {
-      // A missing kid on a fresh set waits out the cooldown since the last read; anything after a failure waits since the try.
-      const since = fresh && failingSince === null ? readAt : triedAt;
-      if (now() - since >= JWKS_COOLDOWN_MS || local === null && failingSince === null) readNow = await tryRead();
+    let readOk = false;
+    if (local === null || stale() || !(await holds(header, token))) {
+      if (inflight) readOk = await inflight;
+      else if (now() - triedAt >= JWKS_COOLDOWN_MS) readOk = await tryRead();
     }
-    const serving = local !== null && (readNow || now() - readAt < JWKS_CACHE_MAX_AGE_MS || (failingSince !== null && now() - failingSince < JWKS_CACHE_MAX_AGE_MS));
+    if (local !== null && stale() && lastFailed) outageSince ??= now();
+    const serving = local !== null && (!stale() || (outageSince !== null && now() - outageSince < JWKS_CACHE_MAX_AGE_MS));
     if (!serving) throw new KeysUnavailable("no key set to check the token against");
     if (!(await holds(header, token))) {
-      if (readNow) throw new jose.JWKSNoMatchingKey();
+      if (readOk) throw new jose.JWKSNoMatchingKey();
       throw new KeysUnavailable("the token names a key the set lacks, and the set cannot be read again yet");
     }
     return local!(header, token);

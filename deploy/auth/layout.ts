@@ -69,13 +69,24 @@ export const REFRESH_IDLE_S = 14 * 86_400;
 
 /**
  * How long a spent refresh token is still honoured (SMD-2286, the maintainer's
- * choice): the MCP SDK refreshes without a lock, so two calls meeting an
- * expired access token both refresh with the same token, and a replay read
+ * choice): the MCP SDK refreshes without a lock, so calls meeting an expired
+ * access token together all refresh with the same token, and a replay read
  * strictly revokes the grant, signing the user out (measured, 10 of 10 runs).
- * Within 60 s of its first spend a token rotates again (store.ts find); after
- * it, a replay revokes the grant.
+ * Within 10 s of its first spend, each presentation rotates it again
+ * (store.ts find); after that, a replay revokes the grant. The cost, stated:
+ * a token presented again inside the window, a thief's included, forks the
+ * chain undetected, the fork living as any chain does. 10 s, not more,
+ * because the SDK's race takes milliseconds (10 bursts of 10 parallel
+ * refreshes took 0.42 s, measured) and the window is the theft's.
  */
-export const REFRESH_REUSE_GRACE_S = 60;
+export const REFRESH_REUSE_GRACE_S = 10;
+
+/**
+ * Whether a refresh chain begun at `iiat` may still rotate: under GRANT_TTL_S
+ * old. Past it a refresh issues no new refresh token, so no chain outlives the
+ * 30 days refreshTtl gives it, even when its grant is saved again later.
+ */
+export const chainRotates = (iiat: number | undefined, now: number) => iiat === undefined || now - iiat < GRANT_TTL_S;
 
 /**
  * A refresh token's lifetime (SMD-2286, the maintainer's choice: rotate, 14

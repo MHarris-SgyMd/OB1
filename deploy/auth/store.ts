@@ -20,10 +20,12 @@
  *   library spots a replayed code or rotated refresh token;
  *
  * and departs from it once (SMD-2286): a refresh token spent less than
- * REFRESH_REUSE_GRACE_S (60 s) ago is found unspent, so the library rotates it
- * again rather than revoking its grant, and a second consume keeps the first
- * time, so the grace runs from the first spend and never extends. Past it, a
- * replay revokes the grant as the library intends;
+ * REFRESH_REUSE_GRACE_S (10 s) ago is found unspent, so the library rotates it
+ * again, each time it is presented, rather than revoking its grant, and a
+ * later consume keeps the first time, so the grace runs from the first spend
+ * and never extends. Past it, a replay revokes the grant as the library
+ * intends. Inside it, a replay forks the chain undetected (layout.ts says why
+ * that is the price);
  * - `revokeByGrantId` removes every grantable row of the grant, whichever
  *   model's adapter is asked (the library asks each in turn);
  * - `find`, `findByUid` and `findByUserCode` return a payload or `undefined`.
@@ -180,8 +182,8 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
     },
     async find(id: string) {
       const found = parsed(q.find.get({ model, id, now: clock() }));
-      // A refresh token spent less than REFRESH_REUSE_GRACE_S ago reads as unspent, so the library rotates it once more
-      // instead of revoking the grant: a client refreshing twice at once (the MCP SDK has no lock) is not signed out.
+      // A refresh token spent less than REFRESH_REUSE_GRACE_S ago reads as unspent, so the library rotates it again
+      // instead of revoking the grant: a client refreshing several times at once (the MCP SDK has no lock) is not signed out.
       if (model === "RefreshToken" && typeof found?.consumed === "number" && clock() - found.consumed < REFRESH_REUSE_GRACE_S) delete found.consumed;
       return found;
     },
@@ -297,16 +299,19 @@ async function selfCheck(): Promise<number> {
 
     await code.upsert("same", { accountId: "code" }, 60);
     await refresh.upsert("same", { accountId: "refresh" }, 60);
-    // A refresh token's reuse grace (SMD-2286): unspent to find for 60 s after its first spend, a second spend keeping the first time.
+    // A refresh token's reuse grace (SMD-2286): unspent to find for 10 s after its first spend, however often presented, a later spend keeping the first time.
     await refresh.upsert("rg", { grantId: "g4" }, 3600);
     await refresh.consume("rg");
     const spentAt = t;
-    t += REFRESH_REUSE_GRACE_S - 1;
-    expect("a refresh token spent 59 s ago reads as unspent (the reuse grace)", (await refresh.find("rg"))?.consumed === undefined);
+    t += 4;
+    expect("a refresh token spent 4 s ago reads as unspent (the reuse grace)", (await refresh.find("rg"))?.consumed === undefined);
+    await refresh.consume("rg");
+    t += REFRESH_REUSE_GRACE_S - 5;
+    expect(`at ${REFRESH_REUSE_GRACE_S - 1} s, after a second spend, still unspent: the grace runs from the first`, (await refresh.find("rg"))?.consumed === undefined);
     await refresh.consume("rg");
     t += 1;
     const late = await refresh.find("rg");
-    expect("at 60 s it reads as spent, stamped with its first spend, which a second consume kept", late?.consumed === spentAt, JSON.stringify(late));
+    expect(`at ${REFRESH_REUSE_GRACE_S} s it reads as spent, stamped with its first spend, which the later consumes kept`, late?.consumed === spentAt && REFRESH_REUSE_GRACE_S === 10, JSON.stringify(late));
     await code.upsert("kg", { grantId: "g4" }, 60);
     await code.consume("kg");
     expect("a code spent a second ago reads as spent: the grace is a refresh token's alone", (await code.find("kg"))?.consumed === t);

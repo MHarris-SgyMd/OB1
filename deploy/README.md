@@ -3123,7 +3123,9 @@ client named in `OB1_AUTH_SERVICES` needs its secret's line added to the
 pass a variable it does not name: `provision.ts` says which line. A service's
 id may not be `operator`, the account every sign-in's token names, and its
 scopes must be one access key's: `brain:read+brain:capture` without
-`brain:write` is refused, as `brain:write` already reads and captures. A
+`brain:write` is refused, as `brain:write` already reads and captures. Either
+stops the server starting, so a deploy that lists such a service changes it
+before upgrading (to `brain:write`, or one scope; another id). A
 service names its scope in each token request (`scope=brain:capture`): a
 request without one gets a token with no scope, which the REST core refuses.
 
@@ -3144,17 +3146,19 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   this one name for now (SMD-3064).
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
-  key it lacks. When a read fails, the keys it read last go on serving for
-  ten minutes from that failure, so a token issued before an outage works to
-  its end, and it tries again every 30 s. With no keys at all, a token gets
+  key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
+  the keys it read last go on serving for ten minutes from then, so a token
+  issued before an outage works to its end. With no keys at all, a token gets
   503 with `Retry-After: 30`. Not configured, a token is an unknown key.
 - **Lifetimes:** an access token lasts 600 s. A client that asked for
   `offline_access` gets a refresh token that lasts 14 days unused. Each use
   replaces it with a new one, and no chain outlives the 30-day grant behind
   it, so a connector signs in again at least monthly. A replaced token used
-  again within 60 s is honoured once more, since MCP clients may refresh
-  twice at once; used again later, it is taken as stolen: the grant is
-  revoked, and the client signs in again.
+  again within 10 s is honoured, as often as it comes, since MCP clients
+  refresh several times at once; each use gets a new token. Used again
+  later, it is taken as stolen: the grant is revoked, and the client signs in
+  again. The price of the 10 s: a stolen token replayed inside them forks the
+  chain undetected.
 
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps

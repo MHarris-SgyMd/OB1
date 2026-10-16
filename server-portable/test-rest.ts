@@ -24,7 +24,7 @@ import { openApiDocument } from "./rest/openapi.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
 import { OAUTH_SCOPES } from "./oauth-edge.ts";
-import { AUTH_JWKS_URL, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
+import { AUTH_JWKS_URL, cachedKeys, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -545,6 +545,95 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   check = remoteChecker(settings, at, clock);
   const gone = await call("/v1/whoami", await mint());
   assert(gone.status === 503 && gone.headers.get("retry-after") === "30", `…nothing listening: 503 all the same (${gone.status})`);
+  // The cells review pass 2 enumerated, on a reader of the suite's own (no HTTP): concurrency, a blip while
+  // fresh, a long idle, recovery, the exact boundaries, and a reader that throws at once.
+  {
+    let reads = 0;
+    let mode: "ok" | "fail" | "sync" = "ok";
+    let gate: Promise<void> | null = null;
+    let C = 0;
+    const read = () => {
+      reads++;
+      if (mode === "sync") throw new Error("thrown at once");
+      return (async () => {
+        if (gate) await gate;
+        if (mode === "fail") throw new Error("down");
+        return jwks as never;
+      })();
+    };
+    const fresh = () => checkerOver(settings, cachedKeys(read, () => C * S));
+    const ok = async (k: TokenCheck, token?: string) => (await k(token ?? await mint())).status;
+    const tok = await mint();
+    // 20 first requests at once: one read, all served.
+    let k = fresh();
+    let open: () => void = () => {};
+    gate = new Promise<void>((done) => { open = done; });
+    const burst = Array.from({ length: 20 }, () => k(tok));
+    open();
+    gate = null;
+    const outs = await Promise.all(burst);
+    assert(reads === 1 && outs.every((o) => o.status === "ok"), `20 first requests at once: one read, all served (${reads} read(s), ${outs.filter((o) => o.status === "ok").length} ok)`);
+    // A stale set being read again: a request arriving during that read joins it, and is served (not a 503).
+    C = 600;
+    gate = new Promise<void>((done) => { open = done; });
+    const first = k(tok);
+    await Bun.sleep(5);
+    const second = k(tok);
+    open();
+    gate = null;
+    const [a, b] = await Promise.all([first, second]);
+    assert(reads === 2 && a.status === "ok" && b.status === "ok", `a request arriving while the stale set is read again joins that read: both served, one read (${a.status} ${b.status}, ${reads})`);
+    assert(C * S - 600 * S === 0, "…the set is stale at exactly 600 s (read again at the boundary)");
+    // A blip while the set is fresh (a missing kid's read fails at 660), then a real outage once stale (1201):
+    // the old keys serve 600 s from 1201, not from the blip.
+    const stranger = await mint({}, { kid: "ob1-stranger", key: k2.privateKey });
+    mode = "fail";
+    C = 660;
+    assert((await ok(k, stranger)) === "unavailable" && reads === 3, `a blip while fresh: the missing kid's read fails, 503 (${reads})`);
+    C = 1201;
+    assert((await ok(k)) === "ok" && reads === 4, `stale at 1200 and failing: the old keys serve (${reads})`);
+    C = 1700;
+    assert((await ok(k)) === "ok", "…500 s into the outage, still served: counted from when stale and failing met, not from the blip");
+    C = 1800;
+    assert((await ok(k)) === "ok", "…599 s into it, served");
+    C = 1801;
+    assert((await ok(k)) === "unavailable", "…600 s into it (exactly), 503");
+    // Recovery ends the outage; a second one, after the set goes stale again, gets its own 600 s.
+    mode = "ok";
+    C = 1830;
+    assert((await ok(k)) === "ok", "the server back: read, served");
+    mode = "fail";
+    C = 2430;
+    assert((await ok(k)) === "ok", "a second outage once stale again: the keys read at recovery serve");
+    C = 3029;
+    assert((await ok(k)) === "ok", "…599 s into the second outage, still served");
+    // A long idle: read at 0, nothing asked until 3600, when the server is down: served 600 s from 3600.
+    mode = "ok";
+    C = 0;
+    k = fresh();
+    await ok(k);
+    mode = "fail";
+    C = 3600;
+    assert((await ok(k)) === "ok", "idle for an hour, then the server down: the old keys serve from the first request that found it so");
+    C = 4199;
+    assert((await ok(k)) === "ok", "…599 s later, still served");
+    // The cooldown boundary: a read tried exactly 30 s after the last one.
+    const before = reads;
+    C = 4229;
+    await ok(k, stranger);
+    C = 4259;
+    await ok(k, stranger);
+    assert(reads === before + 2, `a read is tried again at exactly 30 s (${reads - before} reads at 4229 and 4259)`);
+    // A reader that throws at once does not wedge the set: the next read, 30 s on, is made and served.
+    mode = "sync";
+    C = 0;
+    k = fresh();
+    const r1 = await ok(k);
+    mode = "ok";
+    C = 30;
+    const r2 = await ok(k);
+    assert(r1 === "unavailable" && r2 === "ok", `a reader that throws at once: 503, then a read 30 s on serves (${r1}, ${r2})`);
+  }
   assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000 && JWKS_COOLDOWN_MS === 30_000,
     "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s, with 30 s between reads");
   answer = async () => ok({});

@@ -89,7 +89,7 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto"
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
-import { GRANT_TTL_S, keyScopeOf, layoutFromEnv, noKeysScope, REFRESH_IDLE_S, refreshTtl } from "../deploy/auth/layout.ts";
+import { chainRotates, GRANT_TTL_S, keyScopeOf, layoutFromEnv, noKeysScope, REFRESH_IDLE_S, refreshTtl } from "../deploy/auth/layout.ts";
 import { answerProbes, guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
 import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TIERS, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
@@ -619,7 +619,7 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
   // The deploy's refresh policy (SMD-2286, deploy/auth/server.ts and store.ts),
   // not a criterion of the comparison, so the winner's alone: every refresh
   // rotates, and two refreshes at once with one token (the MCP SDK has no
-  // lock) both succeed inside the 60 s reuse grace, rather than the second
+  // lock) both succeed inside the 10 s reuse grace, rather than the second
   // revoking the grant; the chain goes on after them. (A replay after the
   // grace revokes the grant: store.ts's self-check holds the boundary.) And
   // the consent page says what brain:read is in an access key's words.
@@ -1024,6 +1024,7 @@ async function selfCheck(): Promise<number> {
     [T + 60, 14 * DAY, "an iiat a minute ahead (a clock step): 14 days, not more"],
   ] as const) expect(`refreshTtl: ${what} (${refreshTtl(iiat, T)})`, refreshTtl(iiat, T) === want);
   expect("the grant lives 30 days and a refresh token 14 idle", GRANT_TTL_S === 30 * DAY && REFRESH_IDLE_S === 14 * DAY);
+  expect("a chain rotates until 30 days old and no further (so the 1 s floor never stretches it)", chainRotates(undefined, T) && chainRotates(T - 30 * DAY + 1, T) && !chainRotates(T - 30 * DAY, T) && !chainRotates(T - 31 * DAY, T));
   expect("the GUI stays the GUI beside services", W?.clients.gui?.kind === "gui");
   const id64 = `r${"0-9".repeat(20)}abz`;
   const E = accepted("the id rule's edges", { OB1_AUTH_SERVICES: `${id64}=brain:read@stable a1=brain:read@stable q=brain:read@stable` });
