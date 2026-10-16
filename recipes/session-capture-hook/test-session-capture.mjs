@@ -17,7 +17,7 @@
  * without provenance; a dead endpoint keeps the payload for a later run; the
  * printed hook carries no key; --check tells a capture key from a wider one,
  * and warns on a url the proxy's legacy route answers (SMD-2686), or a tier
- * route, sent to the tier's own port and not stable's /mcp (SMD-3057); the url's
+ * route, sent to the tier itself and not stable's /mcp (SMD-3057); the url's
  * slash goes on its path, a `?key=` on it is refused, every url printed has
  * its query values masked, and a config that does not parse is named without
  * quoting it (SMD-2743).
@@ -2216,7 +2216,6 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const onTier = await checkAt(TIER, {});
   assert(onTier.code === 0 && tierWarned(onTier.err, TIER, CONFIG),
     `…a tier route's url is told the tier itself, never stable's /mcp (SMD-3057; ${onTier.err.trim().slice(0, 160)})`);
-  tierAnswer = {};
   const onTierEnv = await spawnScript(["--check"], { env: { OB1_BRAIN_URL: TIER.replace("/canary/", "/working/") } });
   assert(onTierEnv.code === 0 && tierWarned(onTierEnv.err, TIER.replace("/canary/", "/working/"), "OB1_BRAIN_URL"), `…one from OB1_BRAIN_URL names the variable (${onTierEnv.err.trim().slice(0, 160)})`);
   const onMoved = await checkAt(TIER, { link: TIER_LINK.replace("#a-canary-beside-the-stack", "#a-renamed-heading") });

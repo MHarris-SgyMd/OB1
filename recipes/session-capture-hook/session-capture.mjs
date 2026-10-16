@@ -59,7 +59,7 @@
  *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste (SessionEnd + PreCompact); installs nothing
  *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
- *   bun session-capture.mjs --check                      # config + endpoint (warned if on the legacy root) + key scope; writes nothing
+ *   bun session-capture.mjs --check                      # config + endpoint (warned if on the legacy root or a tier route) + key scope; writes nothing
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
@@ -1447,8 +1447,8 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
     const text = await r.text();
     // The proxy's legacy root route marks every answer it carries; --check
     // reads it off the config to say the url must move to /mcp (SMD-2686).
-    // Its tier routes mark theirs too, with a Link to the canary's section
-    // rather than /mcp's, where /mcp would be stable's (SMD-3057).
+    // Its tier routes mark theirs too, with a date of their own; the Link is
+    // --check's fallback for a date neither route sent (SMD-3057).
     const deprecation = r.headers.get("deprecation");
     if (deprecation) {
       cfg.deprecation = deprecation;
