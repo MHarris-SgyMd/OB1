@@ -103,17 +103,22 @@ actor `vector-mender` (marked `background` on the audit row, which
 `db/sleep.ts` reads past, as it reads past an ingested write), the row's own
 stamp (who wrote the text, its trust) kept, the egress decision recorded, and
 its `updated_at` moved, as any event moves it — an agent holding the old stamp
-for `if_unchanged_since` re-reads. The provider away is one rule, kept in the
-holds: a call that meets an outage before any call of the tick was answered
-stops the tick, one call spent, and holds the row as an outage's (1, 2, 4, up
-to 8 sweeps), so an outage costs a call a tick at most, fewer as its rows'
-holds grow, and is said once; after an answer an outage is the row's own
-failure, and a second in a row stops the tick and makes the first an outage's
-too. When the provider answers again the outage's holds are let go at once,
-the rows marked: one whose next call meets an outage again, with nothing to
-say the provider is away, failed alone and is held as its own. A sweep's end
-drops the holds of rows no longer waiting (mended by another writer, or
-deleted), and with no outage's hold left the outage is over. A row whose call
+for `if_unchanged_since` re-reads. The provider away is decided by two calls:
+an outage on a row makes it pending and the next call decides — answered, the
+provider is up and the row failed alone (held as its own, marked so its
+outages never speak for the provider again); an outage too, the provider is
+away (both rows held as an outage's, 1, 2, 4, up to 8 sweeps, and the tick
+stops, two calls spent, said once); no next call, alone if the provider
+answered this tick or the last, else away. When the provider answers again the
+outage's holds are let go at once — and if it answers the tick right after the
+stop, the rows that stopped it are marked as failing alone (an outage of one
+tick is two such texts side by side). Only an HTTP status counts as the
+provider answering; an egress refusal or a body that is not JSON is the row's
+failure. A sweep's end drops the holds of rows no longer waiting (mended by
+another writer, or deleted), and with no outage's hold still running the
+outage is over. The only row waiting through an outage has no other row's
+answer to show the provider back, so it waits out its hold: up to 8 sweeps,
+about 10 intervals. A row whose call
 or write fails otherwise (a 4xx, the wrong width, a write the database refuses)
 is held for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a
 restart tries every row again. A database not there to answer stops the tick, and the loop
@@ -127,7 +132,10 @@ deny term keeps the row home; any other row — an import's, board-sync's — as
 `actor_name` may be a label the tool chose, and again with that `actor_name`,
 so a deny term naming it (board-sync's own gate asked with its name) keeps it
 home. Blurbs the gate refuses for a row are left off and its windows go in
-bare, as a capture's do. A row edited between the read and the write is left
+bare, as a capture's do. The door and actor the mender trusts are the ones the
+capture's own session declared (046, 050): a database role in the capture
+group can name a server's door and a key, as it can name any actor today, so
+such roles are trusted as the servers are. A row edited between the read and the write is left
 for the next sweep (`STALE_READ`). `brain_info` (its `Vectors` row) and a keyed
 `/health` (`database.vectorless`) count the thoughts that wait. The cost lands
 as rows do: an import written bare for a later `db/reembed.ts`, or a backlog

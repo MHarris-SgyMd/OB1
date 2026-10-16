@@ -27,25 +27,27 @@
 // doubles with each failure. The write carries the stamp it read, so
 // update_thought's guard refuses it over an edit made since (STALE_READ).
 //
-// The provider away, one rule, its state the holds alone (review pass 3
-// replaced pass 2's bookkeeping, which three seams in a row showed wrong):
-// - an outage (providerDown) before any call of the tick was answered stops
-//   the tick, one call spent, and holds the row as an outage's — doubling,
-//   up to MAX_OUTAGE_HOLD_SWEEPS — so the provider away costs a call a tick
-//   at most, falling as the rows' holds grow, and a text the provider fails
-//   alone, or several, are held like any;
-// - after an answer, an outage is the row's own failure; a second in a row
-//   means the provider went away mid-tick: it stops the tick, and the first
-//   is re-held as an outage's;
-// - the provider answering after an outage lets every outage's hold go at
-//   once, the rows marked released: a released row whose next call meets an
-//   outage again, with nothing to say the provider is away, failed alone —
-//   held as its own, and the tick goes on;
-// - a sweep's end drops the holds of rows no longer waiting (mended by
-//   another writer, or deleted), and with no outage's hold left the outage
-//   is over as far as this mender knows.
+// The provider away, decided by two calls, not one (review pass 4: passes 2
+// and 3 each read one outage-shaped failure as the provider's, or as the
+// row's, and each way broke): an outage (providerDown) on a row makes it
+// pending, and the next call decides —
+// - answered: the provider is up, and the pending row failed alone — held as
+//   its own and marked `alone`, so its outages never speak for the provider;
+// - an outage too: the provider is away — both rows held as an outage's (1,
+//   2, 4, up to MAX_OUTAGE_HOLD_SWEEPS) and the tick stops, two calls spent;
+// - no next call this tick: alone if the provider answered this tick or the
+//   last, else the provider away, as above.
+// The provider answering after an outage lets the outage's holds go, and if
+// it answers the tick right after the one that stopped, the rows that stopped
+// it are marked `alone`: an outage of one tick is two texts that fail alone
+// side by side. A row marked `alone` is held as its own on an outage, the tick
+// going on. A sweep's end drops the holds of rows no longer waiting (mended by
+// another writer, or deleted), and with no outage's hold still running the
+// outage is over as far as this mender knows. Only an HTTP status counts as
+// the provider answering: an egress refusal or a body that is not JSON is the
+// row's failure and says nothing of the provider.
 
-import { createEmbedder, providerDown, type Embedder } from "../embed.ts";
+import { createEmbedder, providerDown, ProviderError, type Embedder } from "../embed.ts";
 import { hostOf, mayLeaveBox, refusesEverything, type EgressRecord, type EgressSubject } from "../egress.ts";
 import { chunkRecipe } from "../lineage.ts";
 import type { VectorlessRow } from "../store.ts";
@@ -124,8 +126,12 @@ export type MendTick = {
   sweepEnded: boolean;
 };
 
-/** A held row: how often it failed, the sweep it waits for, whether an outage held it, and whether the provider's return let it go. */
-type Hold = { failures: number; until: number; outage: boolean; released: boolean };
+/**
+ * A held row: how often it failed, the sweep it waits for, whether an outage
+ * held it (the provider's return lets it go), and whether it fails alone —
+ * its outages are its own, never the provider's.
+ */
+type Hold = { failures: number; until: number; outage: boolean; alone: boolean };
 
 /** What a mender carries from tick to tick. */
 export type MendState = {
@@ -133,8 +139,12 @@ export type MendState = {
   cursor: string | null;
   sweep: number;
   held: Map<string, Hold>;
-  /** An outage stopped a tick, and nothing has said it is over: no call answered, and an outage's hold stands. */
+  /** An outage stopped a tick, and nothing has said it is over: no call answered, and an outage's hold still runs. */
   down: boolean;
+  /** The rows the last tick stopped on, when it stopped on an outage: marked alone if the next tick's call is answered. */
+  stoppedOn: string[];
+  /** The last tick's calls included one the provider answered. */
+  answeredLastTick: boolean;
   /** The ids read this sweep, so its end drops the holds of rows no longer waiting. */
   seen: Set<string>;
   /** The most rows held at once (MAX_HELD_ROWS; a suite asks for fewer). */
@@ -143,7 +153,8 @@ export type MendState = {
   bare?: Embedder;
 };
 
-export const newMendState = (maxHeld = MAX_HELD_ROWS): MendState => ({ cursor: null, sweep: 0, held: new Map(), down: false, seen: new Set(), maxHeld });
+export const newMendState = (maxHeld = MAX_HELD_ROWS): MendState =>
+  ({ cursor: null, sweep: 0, held: new Map(), down: false, stoppedOn: [], answeredLastTick: false, seen: new Set(), maxHeld });
 
 const actorName = (row: VectorlessRow): string | undefined => {
   const name = row.metadata?.actor_name;
@@ -171,9 +182,12 @@ const actorName = (row: VectorlessRow): string | undefined => {
  * `embeddings` is the answer for the embedding call; `blurbs` whether the
  * chat endpoint may take the text too, for the windows' blurbs under
  * OB1_CHUNK_CONTEXT — refused, the windows go in bare, as a capture's do.
- * `subject` is what the embedder's own gate is asked with, and `record` the
- * decision for the audit row: the endpoints the call goes to that are not
- * declared local, the chat one only where blurbs are asked for.
+ * `subject` is what the embedder's own gate is asked with — the first
+ * subject only, so that gate alone would miss a row's `topic:` deny term; it
+ * never sees a text this check refused, both reading the policy fixed at
+ * start (review pass 4). `record` is the decision for the audit row: the
+ * endpoints not declared local, the chat one where blurbs were asked for,
+ * allowed or not.
  */
 export function mendAllowed(ctx: Ctx, row: VectorlessRow): { embeddings: boolean; blurbs: boolean; subject: EgressSubject; record: EgressRecord | undefined } {
   const cfg = ctx.embedConfig();
@@ -192,7 +206,8 @@ export function mendAllowed(ctx: Ctx, row: VectorlessRow): { embeddings: boolean
   const blurbs = chat === null || chat.allowed;
   const record: EgressRecord = { policy: cfg.egress.mode };
   if (!cfg.embeddings.local) record.embeddings = { to: hostOf(cfg.embeddings.base), allowed: emb.allowed, rule: emb.rule };
-  if (chat && chat.allowed && !cfg.chat.local) record.chat = { to: hostOf(cfg.chat.base), allowed: true, rule: chat.rule };
+  // A refused blurb is recorded too, as a capture's decideCalls records a refused call.
+  if (chat && !cfg.chat.local) record.chat = { to: hostOf(cfg.chat.base), allowed: chat.allowed, rule: chat.rule };
   return { embeddings: emb.allowed, blurbs, subject: subjects[0], record: record.embeddings || record.chat ? record : undefined };
 }
 
@@ -210,15 +225,28 @@ const databaseAnswered = (e: unknown): boolean => {
   return typeof errno === "string" && /^[0-9A-Z]{5}$/.test(errno) && !/^(08|53|57|58)/.test(errno);
 };
 
+/** A provider fault in words that carry nothing of the text: its status or kind, never its body (review pass 4: a provider echoing its input put the text in the log). */
+const faultWords = (e: unknown): string => {
+  if (e instanceof ProviderError) {
+    if (e.kind === "http") return `the provider answered ${e.status}`;
+    if (e.kind === "timeout") return "the request timed out (OB1_LLM_TIMEOUT)";
+    if (e.kind === "body") return "the provider's answer was not JSON";
+    return e.message; // egress: the gate's words, its rule and host
+  }
+  const code = typeof e === "object" && e !== null ? (e as { code?: unknown }).code : undefined;
+  return typeof code === "string" ? `${(e as Error).name ?? "Error"} ${code}` : cut(e instanceof Error ? e.message : String(e));
+};
+
 /**
  * One tick: under the leader lock, vectorless rows in id order from the
  * cursor, each embedded by the capture's path and written through
- * update_thought with the stamp it read, until MEND_BATCH rows embedded,
- * MEND_SCAN rows read, or the end. `stopped` is read before each row and
- * before each write: a stop starts no further call, and writes nothing the
- * call it cut short answered. A database that stops answering throws out of
- * the tick (the loop backs off); a write it refuses holds the row. A policy
- * that refuses every call to the embedding endpoint reads nothing.
+ * update_thought with the stamp it read, until MEND_BATCH rows embedded (one
+ * more to decide a pending row), MEND_SCAN rows read, or the end. `stopped`
+ * is read before each row and before each write: a stop starts no further
+ * call, and writes nothing the call it cut short answered. A database that
+ * stops answering throws out of the tick (the loop backs off); a write it
+ * refuses holds the row. A policy that refuses every call to the embedding
+ * endpoint reads nothing.
  */
 export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolean = () => false): Promise<MendTick> {
   const tick: MendTick = { skipped: false, refusedAll: null, mended: 0, degraded: 0, refused: 0, failed: 0, held: 0, raced: 0, down: null, recovered: false, lockKept: false, firstError: null, sweepEnded: false };
@@ -229,43 +257,70 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
   // A suite's fake store may hold no lock: it acts alone.
   const release = store.mendLock ? await store.mendLock() : async () => true;
   if (!release) return { ...tick, skipped: true };
-  const hold = (id: string, words: string, outage: boolean) => {
-    const prior = state.held.get(id)?.failures ?? 0;
+  const prevStoppedOn = state.stoppedOn;
+  const prevAnswered = state.answeredLastTick;
+  state.stoppedOn = [];
+  const hold = (id: string, words: string, outage: boolean, alone = false) => {
+    const prior = state.held.get(id);
+    const failures = (prior?.failures ?? 0) + 1;
     // Re-set, not updated, so the map's order is the order of the latest failures and the cap drops the stalest.
     state.held.delete(id);
     // Held for 1, 2, 4 … sweeps: the first failure skips the next sweep.
-    state.held.set(id, { failures: prior + 1, until: state.sweep + 1 + Math.min(2 ** prior, outage ? MAX_OUTAGE_HOLD_SWEEPS : MAX_HOLD_SWEEPS), outage, released: false });
+    state.held.set(id, { failures, until: state.sweep + 1 + Math.min(2 ** (failures - 1), outage ? MAX_OUTAGE_HOLD_SWEEPS : MAX_HOLD_SWEEPS), outage, alone: alone || (prior?.alone ?? false) });
     if (state.held.size > state.maxHeld) state.held.delete(state.held.keys().next().value as string);
     tick.failed++;
-    tick.firstError ??= cut(`${id}: ${words}`);
-  };
-  const stopDown = (id: string, down: { reason: string; detail: string }) => {
-    hold(id, down.detail, true);
-    tick.down = down;
-    state.down = true;
+    tick.firstError ??= `${id}: ${words}`;
   };
   let answered = false;
-  /** The row held as its own after an answer this tick, on an outage: re-held as an outage's if the next call meets one too. */
-  let outageAfterAnswer: string | null = null;
-  // The provider answered a call of this tick: an outage it was away for is over, and its holds go.
+  /** The row whose outage the next call decides, and the outage it met. */
+  let pending: { id: string; down: { reason: string; detail: string } } | null = null;
+  const stopDown = (ids: string[], down: { reason: string; detail: string }) => {
+    for (const id of ids) hold(id, down.detail, true);
+    tick.down = down;
+    state.down = true;
+    state.stoppedOn = ids;
+  };
+  // The provider answered a call of this tick: a pending row failed alone, and an outage it was away for is over.
   const answer = () => {
     answered = true;
-    outageAfterAnswer = null;
+    if (pending) {
+      hold(pending.id, `${pending.down.detail}, while the provider answered the next call`, false, true);
+      pending = null;
+    }
     if (state.down) {
       state.down = false;
       tick.recovered = true;
-      // Let go now, their failures kept, and marked: a released row that meets an outage again with nothing to say the provider is away failed alone.
-      for (const h of state.held.values()) if (h.outage) Object.assign(h, { until: state.sweep, outage: false, released: true });
+      for (const [id, h] of state.held) {
+        if (!h.outage) continue;
+        // An outage of one tick is the two texts that stopped it failing alone.
+        if (prevStoppedOn.includes(id)) Object.assign(h, { outage: false, alone: true });
+        else h.until = state.sweep;
+      }
     }
+  };
+  // The tick ends with a row pending and no call after it: alone if the
+  // provider answered this tick or the last, else the provider away.
+  const settle = () => {
+    if (!pending) return;
+    if (answered || prevAnswered) hold(pending.id, `${pending.down.detail}, while the provider answered other calls`, false, true);
+    else stopDown([pending.id], pending.down);
+    pending = null;
   };
   try {
     let embeddedRows = 0;
     let scanned = 0;
-    while (embeddedRows < MEND_BATCH && scanned < MEND_SCAN) {
+    const room = () => (embeddedRows < MEND_BATCH || pending !== null) && scanned < MEND_SCAN;
+    while (room()) {
       const rows = await store.listVectorless({ limit: MEND_BATCH, after: state.cursor });
       for (const row of rows) {
-        if (stopped()) return tick;
-        if (embeddedRows >= MEND_BATCH || scanned >= MEND_SCAN) return tick;
+        if (stopped()) {
+          pending = null;
+          return tick;
+        }
+        if (!room()) {
+          settle();
+          return tick;
+        }
         scanned++;
         state.cursor = row.id;
         state.seen.add(row.id);
@@ -289,31 +344,26 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         } catch (e) {
           const down = providerDown(e);
           if (!down) {
-            // The provider answered — with a refusal of this input.
-            answer();
-            hold(row.id, e instanceof Error ? e.message : String(e), false);
+            // An HTTP status is the provider answering, with a refusal of this
+            // input; any other fault (an egress refusal, a body that is not
+            // JSON) is the row's, and says nothing of the provider.
+            if (e instanceof ProviderError && e.kind === "http") answer();
+            hold(row.id, faultWords(e), false);
             continue;
           }
-          if (answered) {
-            if (outageAfterAnswer === null) {
-              // Answered earlier this tick: this row's own failure, so far.
-              hold(row.id, down.detail, false);
-              outageAfterAnswer = row.id;
-              continue;
-            }
-            // A second in a row: the provider went away mid-tick. The first is an outage's too.
-            const first = state.held.get(outageAfterAnswer);
-            if (first) first.outage = true;
-            stopDown(row.id, down);
+          if (h?.alone) {
+            // It fails alone: its outage is its own.
+            hold(row.id, down.detail, false, true);
+            continue;
+          }
+          if (pending) {
+            // A second outage in a row: the provider is away.
+            stopDown([pending.id, row.id], down);
+            pending = null;
             return tick;
           }
-          if (h?.released) {
-            // Let go at the provider's return, and an outage again with nothing to say it is away: this text fails alone.
-            hold(row.id, `${down.detail} — again after the provider's return`, false);
-            continue;
-          }
-          stopDown(row.id, down);
-          return tick;
+          pending = { id: row.id, down };
+          continue;
         }
         answer();
         // The stop came while the provider answered: the pool is closing, and
@@ -337,7 +387,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
           // thrown, the loop backs off. One it answered with a refusal (a
           // vector it cannot read) holds the row.
           if (!databaseAnswered(e)) throw e;
-          hold(row.id, `update_thought: ${e instanceof Error ? e.message : String(e)}`, false);
+          hold(row.id, `update_thought: ${cut(e instanceof Error ? e.message : String(e))}`, false);
           continue;
         }
         if (result.ok) {
@@ -352,10 +402,11 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         } else hold(row.id, `update_thought ${result.error}`, false);
       }
       if (rows.length < MEND_BATCH) {
+        settle();
         // The sweep's end: the holds of rows no longer waiting go, and with
-        // no outage's hold left nothing says the provider is away.
+        // no outage's hold still running nothing says the provider is away.
         for (const id of state.held.keys()) if (!state.seen.has(id)) state.held.delete(id);
-        if (![...state.held.values()].some((x) => x.outage)) state.down = false;
+        if (![...state.held.values()].some((x) => x.outage && x.until > state.sweep)) state.down = false;
         state.seen = new Set();
         state.cursor = null;
         state.sweep++;
@@ -363,8 +414,10 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         break;
       }
     }
+    settle();
     return tick;
   } finally {
+    state.answeredLastTick = answered;
     // A release that throws went with its connection, and the lock with it.
     const letGo = await release().catch(() => true);
     if (!letGo) tick.lockKept = true;
