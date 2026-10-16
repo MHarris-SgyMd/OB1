@@ -63,13 +63,13 @@ export const MEND_BATCH = 8;
 /** Rows a tick may read, refused and held ones included, before it stops: a brain of refused rows is walked a few hundred a tick, not eight. */
 export const MEND_SCAN = 256;
 /** Seconds between ticks when OB1_VECTOR_MEND_INTERVAL is unset. */
-export const DEFAULT_MEND_INTERVAL_S = 60;
+const DEFAULT_MEND_INTERVAL_S = 60;
 /** The longest interval the knob takes: a day. */
-export const MAX_MEND_INTERVAL_S = 86_400;
+const MAX_MEND_INTERVAL_S = 86_400;
 /** The first tick's delay after start, so a restart with the provider back mends soon. */
-export const FIRST_MEND_DELAY_MS = 5_000;
+const FIRST_MEND_DELAY_MS = 5_000;
 /** The most sweeps a failing row is held for; it doubles from one with each failure. */
-export const MAX_HOLD_SWEEPS = 32;
+const MAX_HOLD_SWEEPS = 32;
 /** The most sweeps a row an outage held waits: the provider's return lets it go anyway, once another row's call shows it. */
 export const MAX_OUTAGE_HOLD_SWEEPS = 4;
 /** Ticks running, each making calls that met outages and none answered, that are the provider away: one is a blip, a rate limit or a text the provider fails alone. */
@@ -77,9 +77,9 @@ export const OUTAGE_TICKS = 2;
 /** A row that has failed this many times speaks no more for the provider: a tick whose outages all met such rows counts toward no outage (review pass 6: two texts the provider fails alone, coming due together, declared one each time). */
 export const SPENT_FAILURES = 3;
 /** The most a run of ticks that throw (the database away) stretches the interval, as a multiple of it. */
-export const MAX_TICK_BACKOFF = 32;
+const MAX_TICK_BACKOFF = 32;
 /** The rows held at once; past it the hold that has stood longest unrenewed is dropped (the row is tried again). */
-export const MAX_HELD_ROWS = 10_000;
+const MAX_HELD_ROWS = 10_000;
 /** setTimeout's ceiling: a longer delay fires at once (Bun, as Node), so every delay is clamped to it. */
 const MAX_TIMER_MS = 2_147_483_647;
 /** The actor the mender's writes record (thought_audit.actor_name): not a key, as db/reembed.ts's `reembed` is not. */
@@ -191,7 +191,7 @@ const actorName = (row: VectorlessRow): string | undefined => {
  * endpoints not declared local, the chat one where blurbs were asked for,
  * allowed or not.
  */
-export function mendAllowed(ctx: Ctx, row: VectorlessRow): { embeddings: boolean; blurbs: boolean; subject: EgressSubject; record: EgressRecord | undefined } {
+function mendAllowed(ctx: Ctx, row: VectorlessRow): { embeddings: boolean; blurbs: boolean; subject: EgressSubject; record: EgressRecord | undefined } {
   const cfg = ctx.embedConfig();
   const asRow: EgressSubject = { kind: "re-embed", ...(row.metadata ? { metadata: row.metadata } : {}), content: row.content };
   const actor = actorName(row);
@@ -316,7 +316,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
           continue;
         }
         // Blurbs refused: the windows go in bare, as a capture's do, and the recipe says no blurb was asked for.
-        const cfg = gate.blurbs ? ctx.embedConfig() : { ...ctx.embedConfig(), chunkContext: false };
+        const cfg = gate.blurbs ? cfg0 : { ...cfg0, chunkContext: false };
         const embedder = gate.blurbs ? ctx.embedder : (state.bare ??= createEmbedder(() => ({ ...ctx.embedConfig(), chunkContext: false })));
         embeddedRows++;
         let embedded;
@@ -349,6 +349,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         // The stop came while the provider answered: the pool is closing, and
         // the row stays vectorless for the next start.
         if (stopped()) return tick;
+        const egress = egressRecord(gate.record, embedded.chunks.length > 0);
         let result;
         try {
           result = await store.updateThought({
@@ -358,7 +359,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
             chunks: embedded.chunks,
             ifUnchangedSince: row.updatedAt,
             // `background`: db/sleep.ts reads past it; `egress`: the decision that let the text go, as a capture's audit row carries it.
-            actor: { name: MENDER_ACTOR, via: ctx.door, background: MENDER_ACTOR, ...(egressRecord(gate.record, embedded.chunks.length > 0) ? { egress: egressRecord(gate.record, embedded.chunks.length > 0) } : {}) },
+            actor: { name: MENDER_ACTOR, via: ctx.door, background: MENDER_ACTOR, ...(egress ? { egress } : {}) },
             embeddingModel: embedded.model,
             lineage: embedded.chunks.length ? { chunks: chunkRecipe(cfg, embedded) } : undefined,
           });
