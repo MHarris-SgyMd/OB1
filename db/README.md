@@ -2943,7 +2943,8 @@ with the opt-in `sleep` group as well for a search to wake it (below). It
 has no `--job`.
 
 **What wakes it.** A write the audit recorded through a key not classified
-`ingested`, and — only under the server's `OB1_QUERY_LOG=on` (off by default),
+`ingested` — the servers' vector mender's writes, marked background on the
+audit row, do not (SMD-2889) — and — only under the server's `OB1_QUERY_LOG=on` (off by default),
 and only for a role that may read `query_log`: the owner, or one granted the
 opt-in `sleep` group, `migrate.ts --grant <role> --groups <its groups>,sleep`
 ("Grants for a capturing role"; the log holds every search's text, so a

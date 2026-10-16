@@ -27,7 +27,9 @@
  *    classified `ingested` on the stable brain, so its sync writes do not
  *    wake it; an unclassified key's do — reembed.ts's, ingest-records.ts's, a
  *    migration's backfill — until set_agent_kind(<name>, 'ingested') says
- *    they are background.
+ *    they are background. The servers' vector mender marks its own writes
+ *    background in the audit row (actor_context.background, SMD-2889), and
+ *    they do not wake it either.
  *  - The passes it runs write no thought_audit row (extraction writes the
  *    entity tables; consolidation writes proposals and, since 084, relation
  *    facets with their lineage) and call no server, so its own work never
@@ -394,7 +396,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
-  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested')${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
+  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background)${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
   if (logState === "denied") err("  query_log: this role cannot read it — only writes wake the brain; grant it the sleep group (bun db/migrate.ts --grant <role> --groups sleep) or run as the owner for reads to wake it");
   else if (logState === "missing") err("  query_log: no such table (migration 034 not applied) — only writes wake the brain");
   else {

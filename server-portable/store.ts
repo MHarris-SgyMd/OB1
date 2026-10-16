@@ -431,8 +431,9 @@ export type ThoughtIdPage = {
 };
 
 /**
- * A thought saved without a vector — the provider did not answer, or the
- * egress gate refused the call — as the vector mender reads it (SMD-2889).
+ * A thought saved without a vector — the provider did not answer, the egress
+ * gate refused the call, or an import wrote it bare — as the vector mender
+ * reads it (SMD-2889).
  * `updatedAt` is `COALESCE(updated_at, created_at)`, the stamp
  * update_thought's guard compares against, so the mender's write never lands
  * over an edit made since this read.

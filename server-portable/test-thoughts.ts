@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture } from "./core/writes.ts";
-import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMendState, SERVER_DOORS, startVectorMender, type MendState } from "./core/mend.ts";
+import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMendState, RELEASE_BELOW, SERVER_DOORS, startVectorMender, type MendState } from "./core/mend.ts";
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
@@ -1107,9 +1107,22 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       assert(t.down?.reason === "provider_unreachable" && t.refused === 1 && t.failed === 2 && t.mended === 0 && writes.length === 0 && state.down, `an outage: two calls, the tick stopped, nothing written (${JSON.stringify({ ...t, firstError: undefined })})`);
       assert(state.cursor === id(3) && state.held.get(id(2))?.outage === true && state.held.get(id(3))?.outage === true && !state.held.has(id(4)), `the cursor past the second row; both held as an outage's, the row behind untouched (${state.cursor})`);
     }
+    // The provider away for many ticks over many rows, some of them failed
+    // before: two calls a tick at most, whatever the rows' history.
+    {
+      bad.set("", 503);
+      const rows = Array.from({ length: 30 }, (_, i) => row(i + 1, "writer"));
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      for (let i = 1; i <= 6; i++) state.held.set(id(i), { failures: 2, until: 0, outage: false });
+      const perTick: number[] = [];
+      for (let i = 0; i < 12; i++) { const before = calls; await mendOnce(ctx, state); perTick.push(calls - before); }
+      bad.delete("");
+      assert(perTick.every((n) => n <= 2) && state.down, `the provider away over 30 rows: at most two calls a tick (${JSON.stringify(perTick)}), the outage standing`);
+    }
     // A text the provider fails alone with an outage's answer (a 500 for that
-    // input): the next call is answered, so it failed alone — held as its own,
-    // marked alone, and the tick goes on; first in the page or in the middle.
+    // input), first in the page or in the middle: held, the tick goes on (one
+    // outage is no stop), the rest mended, nothing said.
     {
       bad.set("poison-500", 500);
       for (const at0 of [0, 1]) {
@@ -1119,7 +1132,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
         const state = newMendState();
         const t = await mendOnce(ctx, state);
         const h = state.held.get(id(at0 + 1));
-        assert(t.down === null && !t.recovered && t.mended === 2 && t.failed === 1 && h?.alone === true && h.outage === false && !state.down, `a 500 for one text at row ${at0 + 1}: the next call answered, so it failed alone — held as its own, marked, the rest mended (${JSON.stringify({ ...t, firstError: undefined, h })})`);
+        assert(t.down === null && t.mended === 2 && t.failed === 1 && h?.failures === 1 && !state.down, `a 500 for one text at row ${at0 + 1}: held, the rest mended, nothing said (${JSON.stringify({ ...t, firstError: undefined, h })})`);
       }
       bad.delete("poison-500");
     }
@@ -1283,9 +1296,18 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
     {
       const { ctx } = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(closedNow()), OB1_LLM_LOCAL: "1" });
       const state = newMendState();
-      state.held.set(id(1), { failures: 6, until: 0, outage: true, alone: false });
+      state.held.set(id(1), { failures: 6, until: 0, outage: true });
       await mendOnce(ctx, state);
       assert(state.held.get(id(1))?.until === 1 + 8, `a seventh outage: held 8 sweeps, not 64 (until ${state.held.get(id(1))?.until})`);
+    }
+    // An answer between two failing texts ends the run: outage, answer, outage is no stop.
+    {
+      bad.set("gap-500", 500);
+      const rows = [row(1, "writer", {}, "open-brain", "gap-500 a"), row(2, "writer"), row(3, "writer", {}, "open-brain", "gap-500 b"), row(4, "writer"), row(5, "writer")];
+      const { ctx } = harness(rows, local());
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.down === null && t.mended === 3 && t.failed === 2, `outage, answer, outage, answer: no stop, the good rows mended (${JSON.stringify({ ...t, firstError: undefined })})`);
+      bad.delete("gap-500");
     }
     // Two texts the provider fails alone, nothing else waiting: read as the provider away, both held, their calls falling away.
     {
@@ -1299,44 +1321,48 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       assert(pair <= 8 && state.held.get(id(1))?.outage === true && state.held.get(id(2))?.outage === true, `two failing rows alone: both held, ${pair} calls in 20 ticks`);
       bad.delete("pair-500");
     }
-    // Two such texts side by side, good rows behind them: they read as an
-    // outage and stop the tick; the next tick's call is answered — an outage of
-    // one tick — so they are marked alone, and never stop a tick again.
+    // Two such texts side by side, good rows behind them: tried together they
+    // read as the provider away; each answer lets them go until their third
+    // failure, after which they wait out their growing holds — the stops
+    // falling away to one every few sweeps.
     {
       bad.set("side-500", 500);
       const rows = [row(1, "writer", {}, "open-brain", "side-500 a"), row(2, "writer", {}, "open-brain", "side-500 b"), row(3, "writer"), row(4, "writer")];
       const { ctx } = harness(rows, local());
       const state = newMendState();
       const downs: number[] = [];
-      for (let i = 0; i < 12; i++) {
-        if (i === 6) rows.push(row(5, "writer"));
+      for (let i = 0; i < 30; i++) {
+        if (i % 4 === 0) rows.push(row(10 + i, "writer"));
         const t = await mendOnce(ctx, state);
         if (t.down) downs.push(i);
       }
-      assert(JSON.stringify(downs) === "[0]" && state.held.get(id(1))?.alone === true && state.held.get(id(2))?.alone === true && rows.slice(2).every((r) => r.vector), `side by side: one stop, then marked alone, never again; the good rows mended (stops at ${JSON.stringify(downs)})`);
+      // The gaps between their stops grow as their holds do (up to 8 sweeps): a line pair every few sweeps at most.
+      const gaps = downs.slice(1).map((d, k) => d - downs[k]);
+      assert(downs.length <= 6 && gaps.every((g, k) => k === 0 || g >= gaps[k - 1]) && (state.held.get(id(1))?.failures ?? 0) >= RELEASE_BELOW && rows.slice(2).every((r) => r.vector), `side by side: ${downs.length} stop(s), the gaps growing (stops at ${JSON.stringify(downs)}); the good rows mended`);
       bad.delete("side-500");
     }
-    // One failing text and a stream of good rows: at most the first try reads
-    // as an outage; once a good row answers next it is alone, and no false
-    // "unavailable" follows.
+    // One failing text and a stream of good rows: it is released by answers
+    // until its third failure, then waits out its own growing hold — its calls
+    // and any stops fall away.
     {
       bad.set("stream-500", 500);
       const rows = [row(1, "writer", {}, "open-brain", "stream-500 text")];
       const { ctx } = harness(rows, local());
       const state = newMendState();
-      let downs = 0;
+      const before = callsFor.get("stream-500 text") ?? 0;
+      const downs: number[] = [];
       for (let i = 0; i < 40; i++) {
         if (i % 2 === 1) rows.push(row(100 + i, "writer"));
         const t = await mendOnce(ctx, state);
-        if (t.down) downs++;
+        if (t.down) downs.push(i);
       }
-      assert(downs <= 1 && state.held.get(id(1))?.alone === true, `a failing text in a stream of good rows: ${downs} stop(s) in 40 ticks, then alone`);
+      const calls40 = (callsFor.get("stream-500 text") ?? 0) - before;
+      assert(calls40 <= 8 && downs.filter((d) => d >= 20).length <= 1 && (state.held.get(id(1))?.failures ?? 0) >= RELEASE_BELOW, `a failing text in a stream of good rows: ${calls40} calls in 40 ticks, stops at ${JSON.stringify(downs)}, held as its own past its third failure`);
       bad.delete("stream-500");
     }
-    // A real outage after a mend this tick: the next two rows read as the
-    // provider away and stop the tick; the provider back — the tick right
-    // after — they are marked alone (an outage of one tick reads as theirs);
-    // after an outage of two ticks the earlier stop's rows are let go at once.
+    // A real outage after a mend this tick: the next two rows' outages stop
+    // the tick; another tick down holds two more; the provider back, its first
+    // answer lets every one of them go at once.
     {
       let served = 0;
       let down = false;
@@ -1356,32 +1382,19 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
         down = false;
         served = -100;
         const t3 = await mendOnce(ctx, state);
-        assert(t3.recovered && t3.mended >= 1 && !state.down && (state.held.get(id(2))?.until ?? 99) <= state.sweep && state.held.get(id(4))?.alone === true && state.held.get(id(4))?.outage === false,
-          `the provider back: recovered; the first stop's rows let go at once, the last stop's marked alone (${JSON.stringify({ two: state.held.get(id(2)), four: state.held.get(id(4)), sweep: state.sweep })})`);
+        assert(t3.recovered && t3.mended >= 1 && !state.down && (state.held.get(id(2))?.until ?? 99) <= state.sweep && (state.held.get(id(4))?.until ?? 99) <= state.sweep,
+          `the provider back: recovered; every outage hold let go at once (${JSON.stringify({ two: state.held.get(id(2)), four: state.held.get(id(4)), sweep: state.sweep })})`);
       } finally {
         flaky.stop(true);
       }
     }
-    // A pending row with no call after it: alone if the provider answered the
-    // last tick — a page of mends, then the failing text alone — not the
-    // provider away.
-    {
-      bad.set("after-page", 500);
-      const rows = [...Array.from({ length: MEND_BATCH }, (_, i) => row(i + 1, "writer")), row(MEND_BATCH + 1, "writer", {}, "open-brain", "after-page text")];
-      const { ctx } = harness(rows, local());
-      const state = newMendState();
-      const t1 = await mendOnce(ctx, state);
-      const t2 = await mendOnce(ctx, state);
-      assert(t1.mended === MEND_BATCH && t2.down === null && state.held.get(id(MEND_BATCH + 1))?.alone === true, `a page mended, then the failing text alone: the last tick's answers say it failed alone (${JSON.stringify({ down: t2.down, h: state.held.get(id(MEND_BATCH + 1)) })})`);
-      bad.delete("after-page");
-    }
-    // A row pending at the batch cap gets one more call to decide it.
+    // A failing row at the batch cap: held, and no call past the cap.
     {
       bad.set("at-cap", 500);
       const rows = [...Array.from({ length: MEND_BATCH - 1 }, (_, i) => row(i + 1, "writer")), row(MEND_BATCH, "writer", {}, "open-brain", "at-cap text"), row(MEND_BATCH + 1, "writer")];
       const { ctx } = harness(rows, local());
       const t = await mendOnce(ctx, newMendState());
-      assert(t.mended === MEND_BATCH && t.failed === 1 && t.down === null, `a row pending as the ${MEND_BATCH}th: one more call, answered, decides it alone (${JSON.stringify({ ...t, firstError: undefined })})`);
+      assert(t.mended === MEND_BATCH - 1 && t.failed === 1 && t.down === null, `a row failing as the ${MEND_BATCH}th: held, no call past the cap (${JSON.stringify({ ...t, firstError: undefined })})`);
       bad.delete("at-cap");
     }
     // A 4xx during an outage is the provider answering: the outage is over, its holds let go.
@@ -1390,7 +1403,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       const { ctx } = harness([row(1, "writer", {}, "open-brain", "four-oh-oh text")], local());
       const state = newMendState();
       state.down = true;
-      state.held.set(id(9), { failures: 1, until: 99, outage: true, alone: false });
+      state.held.set(id(9), { failures: 1, until: 99, outage: true });
       const t = await mendOnce(ctx, state);
       assert(t.recovered && !state.down && !state.held.has(id(9)), `a 400 during an outage: recovered, the outage's hold let go (the row it held, no longer waiting, dropped at the sweep's end) (${JSON.stringify({ recovered: t.recovered, nine: state.held.get(id(9)) })})`);
       bad.delete("four-oh-oh");
@@ -1402,7 +1415,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       const { ctx } = harness(rows, local());
       const state = newMendState();
       state.down = true;
-      state.held.set(id(9), { failures: 1, until: 99, outage: true, alone: false });
+      state.held.set(id(9), { failures: 1, until: 99, outage: true });
       const t = await mendOnce(ctx, state);
       assert(!t.recovered && t.failed === 1 && state.held.get(id(1))?.outage === false && /not JSON/.test(t.firstError ?? ""), `a 200 that is not JSON: the row held, no recovery read into it (${JSON.stringify({ ...t, firstError: t.firstError })})`);
       bad.delete("html-body");
@@ -1474,7 +1487,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       bad.delete("cap-400");
       const raced = harness([row(1, "writer")], local(), { answer: () => ({ ok: false, error: "STALE_READ" }) });
       const rs = newMendState();
-      rs.held.set(id(1), { failures: 1, until: 0, outage: false, alone: false });
+      rs.held.set(id(1), { failures: 1, until: 0, outage: false });
       await mendOnce(raced.ctx, rs);
       assert(!rs.held.has(id(1)), "a held row whose write raced: its hold let go, the next sweep reads it afresh");
     }

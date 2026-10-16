@@ -103,23 +103,26 @@ actor `vector-mender` (marked `background` on the audit row, which
 `db/sleep.ts` reads past, as it reads past an ingested write), the row's own
 stamp (who wrote the text, its trust) kept, the egress decision recorded, and
 its `updated_at` moved, as any event moves it — an agent holding the old stamp
-for `if_unchanged_since` re-reads. The provider away is decided by two calls:
-an outage on a row makes it pending and the next call decides — answered, the
-provider is up and the row failed alone (held as its own, marked so its
-outages never speak for the provider again); an outage too, the provider is
-away (both rows held as an outage's, 1, 2, 4, up to 8 sweeps, and the tick
-stops, two calls spent, said once); no next call, alone if the provider
-answered this tick or the last, else away. When the provider answers again the
-outage's holds are let go at once — and if it answers the tick right after the
-stop, the rows that stopped it are marked as failing alone (an outage of one
-tick is two such texts side by side). Only an HTTP status counts as the
-provider answering; an egress refusal or a body that is not JSON is the row's
-failure. A sweep's end drops the holds of rows no longer waiting (mended by
-another writer, or deleted), and with no outage's hold still running the
-outage is over. The only row waiting through an outage has no other row's
-answer to show the provider back, so it waits out its hold: up to 8 sweeps,
-about 10 intervals. A row whose call
-or write fails otherwise (a 4xx, the wrong width, a write the database refuses)
+for `if_unchanged_since` re-reads. The provider away needs no rule about which
+row is to blame: every failure holds its row — an outage-shaped one (refused,
+reset, timed out, 5xx, 408, 429) for 1, 2, 4, up to 8 sweeps — and two
+outage-shaped failures in a row stop the tick, so the provider away costs two
+calls a tick at most. A tick whose calls all met an outage is the provider
+away, said once; the first call the provider answers after — a vector, or an
+HTTP status that is not an outage's — says it is back, and the first answer of
+any tick lets go the outage holds of rows that have failed fewer than three
+times, so an outage's rows are tried again at once. A text the provider fails
+alone with an outage's answer is held like any: answers let it go until its
+third failure, after which it waits out its own hold; tried as the only call
+of a tick, it reads as the provider away until then, and two such texts side
+by side read so each time their holds end, every few sweeps at most. An egress
+refusal or a body that is not JSON is the row's failure and says nothing
+either way. A sweep's end drops the holds of rows no longer waiting (mended by
+another writer, or deleted), and with no outage hold left the outage is over.
+The only row waiting through a long outage has failed more than twice by the
+provider's return, so it waits out its hold: up to 8 sweeps, about 9
+intervals. A row whose call
+or write fails otherwise (a 4xx other than 408 or 429, the wrong width, a write the database refuses)
 is held for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a
 restart tries every row again. A database not there to answer stops the tick, and the loop
 waits twice as long each time, up to 32 times the interval. The egress gate is
