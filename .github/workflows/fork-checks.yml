@@ -1679,20 +1679,6 @@ jobs:
           [ "$(superuser "SELECT has_table_privilege('ci_prior', 'ob1_agent_keys', 'UPDATE') OR EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE r.rolname = 'ci_prior')")" = "f" ] || { echo "ci_prior kept a privilege or a setting"; exit 1; }
           superuser "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM ci_defacl; DROP SCHEMA ci_owned; DROP SCHEMA ci_plant; DROP SCHEMA ci_cols CASCADE; DROP OWNED BY ci_prior; DROP ROLE ci_super, ci_member, ci_owner, ci_defacl, ci_prior; DROP PROCEDURE ci_proc();"
 
-      # Where the authorization server's step ran when the full-stack checks
-      # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
-      # deploy/.env configured for the authorization server
-      # (.github/ci/auth-settings.sh) and the MCP server recreated on it, with
-      # no authorization server running. The steps after this meet the stack
-      # they met then — smoke.sh's note for a server configured but not
-      # advertising, a canary.sh that must leave the OB1_AUTH_ lines out — and
-      # every compose call after it names its services.
-      - name: The server is configured for an authorization server that is not running
-        working-directory: deploy
-        run: |
-          ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server
-
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
       # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
@@ -1708,6 +1694,21 @@ jobs:
           ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
+
+      # Where the authorization server's step ran when the full-stack checks
+      # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
+      # deploy/.env configured for the authorization server
+      # (.github/ci/auth-settings.sh) and the MCP server recreated on it, with
+      # no authorization server running. The REST core, the plugin webhook, the
+      # daemon restart and the SIGTERM stop after it meet the server they met
+      # then; the smoke just before holds a stack configured for none, which
+      # no job held before (deploy-stack-brains' smoke holds this one). Every
+      # compose call after it names its services.
+      - name: The server is configured for an authorization server that is not running
+        working-directory: deploy
+        run: |
+          ../.github/ci/auth-settings.sh
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
@@ -2255,10 +2256,10 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server recreated on it, with
-      # no authorization server running. The steps after this meet the stack
-      # they met then — smoke.sh's note for a server configured but not
-      # advertising, a canary.sh that must leave the OB1_AUTH_ lines out — and
-      # every compose call after it names its services.
+      # no authorization server running. The steps after it meet the stack
+      # they met then: smoke.sh takes its branch for a server configured but
+      # not advertising, and canary.sh has OB1_AUTH_ lines to leave out of the
+      # canary's env file. Every compose call after it names its services.
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |

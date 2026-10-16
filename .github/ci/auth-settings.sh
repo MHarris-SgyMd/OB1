@@ -13,9 +13,12 @@
 # authorization server is not running, and a deploy/.env holding OB1_AUTH_
 # lines, which canary.sh must leave out of the canary's file.
 #
-# CI only: it appends to deploy/.env. Under bash -e -o pipefail, the workflow's
-# default shell.
+# CI only: it appends a made-up origin, the auth profile and fresh secrets to
+# deploy/.env, which on an operator's checkout is the brain's own file, so it
+# refuses outside Actions (no GITHUB_ENV), as full-stack-up.sh does. Under
+# bash -e -o pipefail, the workflow's default shell.
 set -eo pipefail
+: "${GITHUB_ENV:?GITHUB_ENV is not set: this runs as a GitHub Actions step, and appends to deploy/.env}"
 cd "$(dirname "$0")/../../deploy"
 printf 'OB1_PUBLIC_ORIGIN=https://brain.example.test\nOB1_AUTH_MAX_CLIENTS=3\nCOMPOSE_PROFILES=auth\nOB1_AUTH_TRUSTED_PROXY=127.0.0.1\n' >> .env
 bun auth/provision.ts --init

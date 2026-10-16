@@ -36,8 +36,9 @@ FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # No OPENROUTER_API_KEY: the provider is a local endpoint, which
 # needs no credential (preflight decides). Preflight dials it
-# (GET /models, SMD-1875), and deploy-stack-brains' canary step embeds through
-# it (POST /v1/embeddings); smoke.sh captures nothing and preflight
+# (GET /models, SMD-1875), and the steps that seed or search thoughts
+# embed through it (POST /v1/embeddings: deploy-stack-brains' tier and
+# canary steps, deploy-stack-auth's stream probe); smoke.sh captures nothing and preflight
 # runs without --deep, so a listener on the runner answering those
 # two is the whole provider: the runner is the container's
 # host.docker.internal (compose.yaml's extra_hosts host-gateway), and
