@@ -11916,7 +11916,7 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   }
 }
 
-console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694)");
+console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep (SMD-3008)");
 {
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -11928,8 +11928,10 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   // pass's start would refuse: set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
-  /** Each extraction call's window ("whole" for a one-window thought) and the text's marker; each judgement's time. */
-  const extracts: { marker: string; part: string }[] = [];
+  /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
+  const extracts: { marker: string; part: string; at: number }[] = [];
+  /** Run as each extraction call begins, before its answer: a write the test makes mid-sleep at a known point (SMD-3008). */
+  let onExtract: ((marker: string) => Promise<void>) | null = null;
   const judged: number[] = [];
   /** When each judgement's answer went back, and when each call for the stuck window began: the slot's order (review pass 5). */
   const judgedEnd: number[] = [];
@@ -11962,8 +11964,9 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
         judgedEnd.push(Date.now());
         return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" }) } }] });
       }
-      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : "short";
-      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole" });
+      const marker = /longdoc/.test(prompt) ? "long" : /stuckdoc/.test(prompt) ? "stuck" : /midnote-one/.test(prompt) ? "mid1" : /midnote-two/.test(prompt) ? "mid2" : /We bill/.test(prompt) ? "pair" : "short";
+      extracts.push({ marker, part: /\[Part (\d+) of \d+/.exec(prompt)?.[1] ?? "whole", at: Date.now() });
+      await onExtract?.(marker);
       if (marker === "stuck") stuckStarts.push(Date.now());
       if (marker === "stuck") {
         // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
@@ -12170,13 +12173,79 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
     assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
 
+    // Work that lands during a sleep — a sync's capture, which wakes nothing —
+    // goes ahead of a stalled thought (SMD-3008). One written before it is
+    // claimed is dated ahead of it, the stalled thought dated forward as the
+    // sleep began; one pending beside it in hand restarts extraction, the
+    // stalled thought moved behind it, and consolidation still joins past it
+    // in the same sleep. With neither, a capture waited behind it, the pool
+    // was never all stalled, and the join waited out the window too.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    extracts.length = 0;
+    judged.length = 0;
+    stuckCalls.length = 0;
+    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
+    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
+    const held3 = await capture("The stuckdoc note, held: one window the model takes eight seconds over.", 0, 15);
+    const [{ fp3 }] = await sql`SELECT content_fingerprint AS fp3 FROM thoughts WHERE id = ${held3}::uuid`;
+    await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${held3}::uuid, ${EX}, ${fp3}, ${sig}, 3, 3)`;
+    await capture("We bill monthly, decided in March.", 3, 0);
+    await capture("We bill annually now.", 0, 0);
+    const syncNote = async (text: string, axis: number) =>
+      ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    // Both notes as the pair's first call begins. The second stands for one
+    // that lands between the stalled thought's claim and the next poll, held
+    // there: dated just behind it — as a thought reclaimed from a lapsed lease
+    // with its old date would be — it is pending beside the thought in hand at
+    // every poll until a restart moves the thought behind it. Written as the
+    // stalled call began, it raced the join's poll (review pass 1).
+    let mid1 = "", mid2 = "";
+    onExtract = async (marker) => {
+      if (marker !== "pair" || mid1) return;
+      mid1 = await syncNote("The midnote-one, written by a sync during the sleep.", 16);
+      mid2 = await syncNote("The midnote-two, written by a sync during the sleep and queued behind the stalled thought.", 17);
+      await sql`UPDATE thought_work_claims SET enqueued_at = (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${held3}::uuid AND work_type = ${EX}) + interval '1 microsecond'
+                 WHERE thought_id = ${mid2}::uuid AND work_type = ${EX}`;
+    };
+    const midLines: { l: string; at: number }[] = [];
+    let stopMid: PassStop | null = null;
+    wakeReads.length = 0;
+    const midRun = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (st) => { stopMid = st; }, writer: { out: (l) => midLines.push({ l, at: Date.now() }), err: (l) => midLines.push({ l, at: Date.now() }) } });
+    let held3At: string | undefined;
+    let prog3: { stops: number; stalled: number } | undefined;
+    const midJoined = await pollUntil(async () => {
+      if (judged.length === 0 || !midLines.some((x) => /consolidating first/.test(x.l))) return false;
+      held3At = await status(held3);
+      return true;
+    }, 45_000);
+    // Stopped hard: a soft stop would let the stalled thought in hand finish.
+    (stopMid as PassStop | null)?.();
+    await (stopMid as PassStop | null)?.();
+    await Promise.race([midRun, Bun.sleep(15_000)]);
+    onExtract = null;
+    [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as typeof prog3[];
+    const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
+    // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
+    const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
+    const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
+    const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
+    const restartAt = midLines.find((x) => /extraction restarts, the stalled thought\(s\) after them/.test(x.l))?.at ?? Infinity;
+    const joinAtMid = midLines.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
+    assert(mid1 !== "" && firstAt("mid1") < firstAt("stuck"),
+      `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
+    // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
+    const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+      `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
+    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
+      `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+
     // A kept row speaks for the thought only at its text and windowing now:
     // one of other text (an edit since) or another windowing is not counted
     // stalled, nor named — the dry run reads the scheduler's own gate.
     await sql`DELETE FROM thoughts`;
-    const { resolveEmbedConfig: resolveLong } = await import("../server-portable/embed.ts");
-    const { windowingFor: windowingLong } = await import("../server-portable/entities.ts");
-    const sig = JSON.stringify(windowingLong(resolveLong(env as Record<string, string>)));
     const planted = await capture("The stuckdoc note, planted.", 0, 8);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${planted}::uuid])`;
     const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${planted}::uuid`;
