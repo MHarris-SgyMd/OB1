@@ -400,7 +400,8 @@ a leak of it can add a thought and cannot read one
 A fourth, `--scope forward`, grants nothing at all: every server refuses it as a
 caller. It is for the MCP server's own use when it forwards a client's key to the
 REST core, which reads it in a header of its own (`x-brain-forwarder`) and
-records it as who carried the request (SMD-2284). Give it to no client.
+records it as who carried the request (SMD-2284), continuing that request's
+`traceparent` (SMD-2287). Give it to no client.
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
 custom connectors are URL-only, so this fork keeps that form — but query strings

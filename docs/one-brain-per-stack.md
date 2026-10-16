@@ -26,9 +26,9 @@ The canary was coupled to stable at runtime for one convenience, a URL on stable
   - Neither is a boundary.
 - **Stable carries the canary's routes.** Stable's route table in `compose.yaml` has the routers `canary`, `working` and `tier-off`, the middleware `tier-absent`, and the services `canary` and `working` (SMD-2294 PR 1, #314). Every stable release ships routes for brains it doesn't run.
 - **The canary depends on stable.** Its URL needs stable's proxy, stable's mesh and a stable release that carries the route. It is also exposed wherever stable is: the LAN under stable's `SERVER_BIND`, or a tunnel.
-- **The tier tool joins both brains.**
-  - `deploy/tier.sh` runs `db/tier.ts` in one container, connected to each network it is given. `canary.sh`'s refresh gives it both brains' data networks. tier.sh's documented `--diff` adds stable's egress.
-  - It builds each database URL with the superuser, so that one container holds both brains' passwords.
+- **The tier tool joined both brains** (until SMD-2875).
+  - `deploy/tier.sh` ran `db/tier.ts` in one container, connected to each network it was given. `canary.sh`'s refresh gave it both brains' data networks, and tier.sh's documented `--diff` added stable's egress.
+  - It built each database URL with the superuser, so that one container held both brains' passwords.
 - **Guarding it costs.** Check 28 holds `compose.canary.yaml`'s networks and names exactly, with eight probes of its own. SMD-2685 added holds against a second key into stable's mesh. CI renders the overlay in two steps and stands it up through `canary.sh` in two more, and `canary.sh` checks stable's proxy and mesh before it joins.
 - **`deploy/compose.tiers.yaml` goes furthest** (SMD-2294 PR 3, #320): three brains in one project, with one proxy, one Ollama, shared networks and one `down`. Check 27 generates the stack it should be from `compose.yaml` (`tierStack()`) and holds the file to it, value for value.
 
@@ -46,7 +46,7 @@ Validation needs a second brain to compare against. Federation needs brains that
 | 6 | **The edge reaches each brain through the brain's published port.** | proposed; SMD-2876 settles it (open question 1) | the edge joining the brains' networks |
 | 7 | **The edge holds no key and injects no credential or identity.** A client's own key passes through, unchanged, to the brain the client names. | proposed; SMD-2876 | the edge as an authenticating gateway for several brains |
 | 8 | **An instance is its env file**: `COMPOSE_PROJECT_NAME`, `SERVER_PORT`/`SERVER_BIND` and the profile ports, all in the one file. `compose.yaml` stays one file for every instance. | proposed; SMD-2873 (measured to work today) | a compose file per instance; `name:` edited per copy |
-| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump streamed from stable's project into the canary's; replay, diff and promote by the means SMD-2875 settles. | proposed; SMD-2875 | the joined container |
+| 9 | **Tier tools reach each brain through its own project.** Refresh by a dump passed from a container on stable's network to one on the canary's; replay and diff over HTTP; promote's read through the canary's project and its write through stable's. | built: replay and diff over HTTP (SMD-2875 PR 1), refresh and promote one half per project (PR 2) | the joined container |
 | 10 | **Each brain has its own access keys.** A brain calling another is an HTTP client with a key the other issued, and a canary is an instance with its own port and keys. | proposed here; SMD-2874 for the canary. It doesn't follow from row 1: the canary takes stable's keys because `canary.sh` copies them into its env file, which needs no shared network. | the canary accepting stable's keys |
 
 Some answers to the open questions would amend a row:
@@ -128,11 +128,12 @@ So no loopback-only binding works for an edge in a container on both runtimes. B
   - `tier-off` is a bare 404 for any path starting with `/canary` or `/working`, in any case. It keeps a changed tier URL from reaching stable through the legacy route and writing with the same key. A connector left at `…/canary/mcp` must not write into stable.
   - In CI's "The tier routes reach a tier on the mesh…", the tier-off probes stay; its tier-absent and tier stand-up probes go.
 - **The canary's keys are its own.** The dogfood connector `open-brain-canary` gets the new port and a new key.
+- **As built (SMD-2874 PR 1):** path mode and `compose.canary.yaml` are gone. The canary answers at `/mcp` on its own loopback port, and its env file now holds its own port, address, tier and profiles. The first `up` takes `--port`, and later runs read the port from the file. Check 28's probes of the overlay moved to `compose.grafana-port.yaml`, so each rule they caught still has a catch. The canary's own keys are PR 2, and stable's tier routes PR 3.
 
-**The tier tools (SMD-2875):** today one container joins both data networks and holds both superuser passwords. Under this decision each brain is reached through its own project:
-- **Refresh:** a dump streamed from stable's project into the canary's. Its re-migrate and refresh mark run in the canary's own project.
-- **Replay and diff** run today over Postgres, with a hybrid arm keyed on `OB1_EVAL_EMBED`. SMD-2875 settles whether they move onto HTTP (`db/brain-compare.ts`) or keep Postgres through each brain's own project. Moving them changes what is measured.
-- **Promote** reads the canary's `schema_version` and writes stable's `tier`, `promoted_schema_version` and `promoted_at`. The read runs through the canary's project, the write through stable's.
+**The tier tools (SMD-2875):** until SMD-2875 one container joined both data networks and held both superuser passwords. Under this decision each brain is reached through its own project:
+- **Refresh** (built, SMD-2875 PR 2): `deploy/tier.sh` runs `tier.ts --refresh` as two halves, each in a container on one project's data network with that project's password. Stable's half dumps, as `pg_read_all_data`; the dump passes container to container through the runtime's `cp`. The canary's half runs the guards, the restore, the re-migrate and the refresh mark. Each half is its own brain's superuser, inside its own project.
+- **Replay and diff** moved onto HTTP (SMD-2875 PR 1, the maintainer's choice over keeping the Postgres engine split across the two projects). `db/tier.ts --diff` replays stable's logged searches on both brains through `db/brain-compare.ts`, each at its own URL with its own key, so no container reaches either database. What is measured changed: the canary is diffed against stable as it answers now, not against the ids stable logged, and each brain embeds its own query.
+- **Promote** (built, SMD-2875 PR 2) reads the canary's `schema_version` and writes stable's `tier`, `promoted_schema_version` and `promoted_at`. The read runs in a container on the canary's network, the write in one on stable's.
 
 **New:**
 - the edge proxy: `deploy/edge/`, its own project and port (SMD-2876);

@@ -32,6 +32,7 @@ import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
+import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 
 export type ThoughtMatch = {
@@ -712,10 +713,32 @@ export type SupersessionProposal = {
   /** While accepted: the thought whose supersedes column the acceptance wrote. */
   supersedingId: string | null;
   /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
-  older: { id: string; content: string; created_at: string | null; edited: boolean };
-  newer: { id: string; content: string; created_at: string | null; edited: boolean };
+  older: ProposalSide;
+  newer: ProposalSide;
   /** Since migration 070 (SMD-2313): one side's `derived_from` names the other — a derivation and its input (a page and its evidence), a pair 066's candidate filter never proposes; a standing one is a reviewer's to reject; false when the column is absent from a row. */
   lineage: boolean;
+  /** Since migration 094 (SMD-2707): one agent captured both sides (ob1_capturer_of); false on a brain short of 094. */
+  sameCapturer: boolean;
+};
+
+/**
+ * Who wrote a proposal's side (094, SMD-2707): the keys 050 and 073 stamp on
+ * the row — the read tools' `By:` line — and whether its text is still a
+ * capture-only key's alone (ob1_capture_only_text: captured under that scope,
+ * and no key that can read has re-captured or moved it since).
+ */
+export type ProposalWriter = { name: string | null; kind: string | null; trust: string | null; captureOnly: boolean };
+
+/** One side of a proposal. `writer` is null, `supersededBy` null and `lapses` empty on a brain short of 094, whose listing returns none of them. */
+export type ProposalSide = {
+  id: string; content: string; created_at: string | null; edited: boolean;
+  writer: ProposalWriter | null;
+  /** The first thought superseding the side (by capture time). */
+  supersededBy: string | null;
+  /** Whether an accept making this side stand would take it from its capturer (ob1_accept_takes: 092's taken read with the new pointer); false when unread. */
+  takes: boolean;
+  /** The pointers an accept making this side stand over the other would clear (ob1_accept_lapses: 092's lapse, read): `id`'s pointer onto `onto`. None on an accepted row, or for an accept 029 would refuse or that writes nothing. */
+  lapses: { id: string; onto: string }[];
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
@@ -736,9 +759,50 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     reviewedAt: isoTimestampOrNull(r.reviewed_at),
     reviewNote: r.review_note == null ? null : String(r.review_note),
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
-    older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
-    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
+    older: proposalSide(r, "older"),
+    newer: proposalSide(r, "newer"),
     lineage: r.lineage === true,
+    sameCapturer: r.same_capturer === true,
+  };
+}
+
+/**
+ * The listing's rows with list_proposal_writers' columns beside each (094,
+ * SMD-2707), by proposal id. When the writers were read, a row they did not
+ * return is a proposal gone between the two statements (a side's thought
+ * deleted: 029 cascades) and is dropped — not shown as a brain short of 094
+ * (review pass 4). When they were not read, every row keeps none, and
+ * normaliseProposal reads it as unread.
+ */
+export function withWriters(rows: Record<string, unknown>[], writers: Record<string, unknown>[], read: boolean): Record<string, unknown>[] {
+  const by = new Map(writers.map((w) => [String(w.id), w]));
+  return (read ? rows.filter((r) => by.has(String(r.id))) : rows).map((r) => ({ ...(by.get(String(r.id)) ?? {}), ...r }));
+}
+
+/** The error a brain short of 094 answers list_proposal_writers with — the driver's and PostgREST's schema cache's. */
+export const WRITERS_MISSING = /(list_proposal_writers|ob1_capture_only_text|ob1_accept_lapses).*(does not exist|Could not find)|Could not find the function public\.list_proposal_writers/;
+
+/** The lapses column, a jsonb array of {id, onto} — parsed by either driver, or its text; anything else is none. */
+function lapseList(v: unknown): { id: string; onto: string }[] {
+  let a: unknown = v;
+  if (typeof v === "string") { try { a = JSON.parse(v); } catch { return []; } }
+  return Array.isArray(a)
+    ? a.filter((x): x is { id: unknown; onto: unknown } => x !== null && typeof x === "object").map((x) => ({ id: String(x.id), onto: String(x.onto) }))
+    : [];
+}
+
+/** One side of a listing row; the 094 columns read only when the row carries them. */
+function proposalSide(r: Record<string, unknown>, side: "older" | "newer"): ProposalSide {
+  const text = (v: unknown) => (v == null ? null : String(v));
+  const by = r[`${side}_superseded_by`];
+  return {
+    id: String(r[`${side}_id`]), content: String(r[`${side}_content`]), created_at: isoTimestampOrNull(r[`${side}_created_at`]), edited: r[`${side}_edited`] === true,
+    writer: `${side}_capture_only` in r
+      ? { name: text(r[`${side}_actor_name`]), kind: text(r[`${side}_actor_kind`]), trust: text(r[`${side}_trust`]), captureOnly: r[`${side}_capture_only`] === true }
+      : null,
+    supersededBy: by == null ? null : String(by),
+    lapses: lapseList(r[`${side}_lapses`]),
+    takes: r[`${side}_takes`] === true,
   };
 }
 
@@ -790,6 +854,59 @@ export type ChangeFilters = {
   actions?: string[] | null;
   limit: number;
 };
+
+/**
+ * What migration 095's ticket_status_inputs gives the stated-status label
+ * (SMD-2540): the hits with a lifecycle of their own (never labelled), and per
+ * ticket its status now and every status its rows held, in the log's order.
+ */
+export type TicketStatusInputs = { lifecycle: Set<string>; heads: Map<string, Status>; history: Map<string, Change[]> };
+
+/** A ticket key as a store sends it: 077's TEAM-123 shape, each once. */
+export function ticketList(tickets: string[]): string[] {
+  return [...new Set(tickets.filter((t) => /^[A-Z][A-Z0-9]+-[0-9]+$/.test(t)))];
+}
+
+/**
+ * ticket_status_inputs's rows → TicketStatusInputs; both stores map through
+ * here so neither drifts. A history row's elements are the ticket's statuses
+ * in the log's order, kept in it; `at` is ms since the epoch. Never throws:
+ * a kind it does not know is skipped, and a head or a history it cannot read
+ * leaves that ticket out (no label for it) — so a server older than its
+ * brain's function, an ordinary state through an upgrade, loses labels and
+ * never a search (SMD-2540 PR 2a's third review pass; the label is an
+ * enhancement, as supersededAmong's).
+ */
+export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
+  const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  // A later function may answer one object, a scalar or a list holding nulls
+  // over PostgREST (SMD-2540 PR 2a's fourth review pass): no list is no rows,
+  // no object no row.
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as Record<string, unknown>[]) {
+    if (!r || typeof r !== "object") continue;
+    const kind = r.kind, issue = text(r.issue);
+    if (kind === "lifecycle") { const id = text(r.thought_id); if (id) out.lifecycle.add(id.toLowerCase()); }
+    else if (kind === "head") {
+      const name = text(r.status), type = text(r.status_type);
+      if (issue && name && type) out.heads.set(issue, { name, type });
+    } else if (kind === "history" && issue) {
+      let h: unknown = r.history;
+      if (typeof h === "string") { try { h = JSON.parse(h); } catch { h = null; } }
+      if (!Array.isArray(h)) continue;
+      const list: Change[] = [];
+      for (const e of h as { at?: unknown; status?: unknown; status_type?: unknown }[]) {
+        const name = text(e?.status), type = text(e?.status_type);
+        if (typeof e?.at !== "number" || !Number.isFinite(e.at) || !name || !type) break;
+        list.push({ at: e.at, name, type });
+      }
+      if (list.length === h.length) out.history.set(issue, list);
+    }
+    // Any other kind: a later function's, skipped.
+  }
+  return out;
+}
 
 const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
 
@@ -1660,6 +1777,18 @@ export interface ThoughtStore {
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   /**
+   * What the stated-status label reads (migration 095, SMD-2540): which of
+   * these hits carry a lifecycle of their own, and each named ticket's status
+   * now and history in the log's order. One query, none when no ticket is
+   * named (nothing to label). Best-effort, as supersededAmong: a database
+   * before 095, or a role without the order's ob1_config grant, returns null —
+   * the hits go unlabelled and the search goes on. Never throws: a row 095
+   * does not return is skipped (normaliseTicketStatusInputs), so a server
+   * older than its brain's function loses labels, not searches.
+   */
+  ticketStatusInputs(ids: string[], tickets: string[]): Promise<TicketStatusInputs | null>;
+
+  /**
    * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
    * judged to conflict, in one status (null for every status), most confident
    * first, each with both thoughts. Read-only — accepting or rejecting is the
@@ -1849,7 +1978,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 

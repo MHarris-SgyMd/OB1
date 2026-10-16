@@ -87,7 +87,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
       # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, and db/ci-parity.sh running what CI runs
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -136,6 +136,18 @@ jobs:
       # beside a stack and a second brain.
       - name: The host-port check's reading of settings and holders
         run: bun deploy/instance.ts --self-check
+      # SMD-2876: deploy/edge/edge.ts reads the edge proxy's registry, refusing
+      # a name or domain that is no host name, renders the table, and picks the
+      # shape for each runtime measured; the deploy-stack job runs the edge in
+      # front of the stack and a second brain.
+      - name: The edge proxy's registry, table and shape
+        run: bun deploy/edge/edge.ts --self-check
+      # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
+      # side's password per half, the target's settings by name, the source
+      # container gone before the target starts, each refusal it tries
+      # before anything is made. The deploy-stack job runs it against a stack.
+      - name: tier.sh's two halves against a stub runtime
+        run: bun deploy/test-tier-sh.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -246,8 +258,8 @@ jobs:
         run: bun test-plugins.ts
 
       # The real server's suite through the MCP server as a REST client
-      # (SMD-2287 PR 4b): its request lines, its refusals, its mirrors and its
-      # stop's count of tool calls — [22]'s spans are PR 4c's, skipped till then.
+      # (SMD-2287 PR 4b and 4c): its request lines, its refusals, its mirrors,
+      # its stop's count of tool calls, and its spans, one trace per tool call.
       - name: Test against the real server, through the MCP server as a REST client
         working-directory: server-portable
         env:
@@ -598,6 +610,19 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun ingest-linear.ts --self-check && bun ingest-markdown.ts --self-check && bun ingest-items.ts --self-check && bun ingest-records.ts --self-check
+
+      # The latency harness's pure parts (SMD-3024): the answer reader (a reply
+      # that never parses, an answer to another request), the ok rule against
+      # the server's own capture replies built by renderCapture (saved without
+      # a vector, tagging that failed or was refused, a re-capture), the probe
+      # match its cleanup deletes by (never a thought that quotes a probe), the
+      # call schedule and the tier guard. Its flags are cli.ts's, held by the
+      # flag scanner's suite. No network, no database, no provider: main's
+      # cleanup, deadlines and signals are not run here.
+      - name: Latency harness rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: db
+        run: bun bench-live.ts --self-check
 
   replay-gate:
     name: Retrieval replay gate
@@ -1403,12 +1428,11 @@ jobs:
           # file its label, Grafana by its rooted mesh name, no wait on it.
           docker compose -f compose.yaml -f compose.grafana-public.yaml --profile observability config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.proxy.labels["ob1.proxy-grafana-route"] == .configs["proxy-grafana-route"].content) and ([.configs["proxy-grafana-route"].content | scan("url: \"([^\"]*)\"")[]] == ["http://lgtm.ob1.internal.:3000"]) and (.services.proxy.depends_on | has("lgtm") | not)'
-          # The canary's overlay (SMD-2294), as canary.sh runs it: its server and
-          # REST core join stable's mesh under the canary's names alone, the
-          # canary's own `mesh` stays its own, and it adds no port (the one the
-          # config lists is the canary's own proxy, started only with --port).
-          CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml config --format json \
-            | jq -e '(.services.server.networks["stable-mesh"].aliases == ["mcp.canary.ob1.internal"]) and (.services.api.networks["stable-mesh"].aliases == ["api.canary.ob1.internal"]) and (.networks["stable-mesh"] | .external == true and .name == "open-brain_mesh") and (.networks.mesh.name == "open-brain-canary_mesh") and ([.services[] | select(.networks["stable-mesh"] != null)] | length == 2) and ([.services[].ports[]?] | length == 1)'
+          # The canary as canary.sh runs it (SMD-2874): compose.yaml alone under
+          # its own project, every network its own and none external, and one
+          # port, its forwarder's, on loopback.
+          SERVER_PORT=8011 SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES='' docker compose -p open-brain-canary -f compose.yaml config --format json \
+            | jq -e '(.networks | length > 0) and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true)) and ([.services[].ports[]?] | length == 1) and (.services.forwarder.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "8011")'
           # The three-brain stack (SMD-2294) publishes its forwarder alone, on
           # loopback, the proxy on compose.yaml's pinned image behind it
           # (SMD-2583), as compose renders it.
@@ -1434,21 +1458,24 @@ jobs:
           docker compose -f compose.yaml --profile auth config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
           # SMD-1849 PR 3a: the observability profile's collector publishes
-          # nothing and joins the internal mesh alone (check 28 holds the rest of
+          # nothing and joins the internal mesh, and since PR 3b the internal
+          # telemetry network, where it scrapes pg-exporter, which publishes
+          # nothing and is on data and telemetry alone (check 28 holds the rest of
           # it, LGTM_SERVICE); with compose.grafana-port.yaml, Grafana's port on
           # loopback, a network of its own and its origin that port. The two servers take the ten
           # OpenTelemetry settings, each empty unless deploy/.env sets it, and no
           # service name; no other service takes any, under every profile.
           docker compose -f compose.yaml --profile observability config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh", "telemetry"])) and (.services["pg-exporter"] | (has("ports") | not) and ((.networks | keys) == ["data", "telemetry"])) and all(.services.server, .services.api; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
           docker compose -f compose.yaml -f compose.grafana-port.yaml --profile observability config --format json \
-            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
           # SMD-2583, the network move, as compose renders each stack with
           # every profile: no service on compose's default network (a service
           # that names none is put there); Postgres on the internal `data`
           # alone, beside only what connects to it; the outward networks'
           # members held, the authorization server's and the proxy's each
-          # alone; and the same of the three-brain stack and the canary.
+          # alone; and the same of the three-brain stack and the canary, every
+          # network of which is its own (SMD-2874).
           # check-fork-consistency.ts 28 holds the files to the same networks;
           # this holds what compose makes of them, and the full-stack job
           # runs a container on `egress` against Postgres.
@@ -1463,18 +1490,18 @@ jobs:
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
-              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "postgres", "server", "sleep"])
+              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"])
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "proxy", "server"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "server"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh"])'
+            | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"])'
           docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
-          CANARY_STABLE_MESH=open-brain_mesh docker compose -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${all[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and (on("stable-mesh") == ["api", "server"])'
+          docker compose -p open-brain-canary -f compose.yaml "${all[@]}" config --format json \
+            | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true))'
           # SMD-2424: the workers profile's two followers publish nothing,
           # keep the key list the worker names itself by (board-sync blanks
           # it), are handed the worker key, mount the checkout read-only,
@@ -1590,8 +1617,8 @@ jobs:
       # compose.yaml's own proxy reads its routes from one file provider
       # directory, with no command (a command makes Traefik drop every
       # TRAEFIK_* setting, measured on the pin), volume or other provider.
-      # Then for each -f combination (compose.canary.yaml under the canary's
-      # project name, the three-brain stack, the release's overlay):
+      # Then for each -f combination (compose.yaml under the canary's project
+      # name, the three-brain stack, the release's overlay):
       # - compose renders it exactly as it renders Bun.YAML's reading of each
       #   file, so a character, a tag or a number the two read apart
       #   (`!!binary`, !reset, U+2028, 012) fails here whichever file carries
@@ -1631,15 +1658,13 @@ jobs:
             and ([.environment | keys[] | select(startswith("TRAEFIK_PROVIDERS"))] == ["TRAEFIK_PROVIDERS_FILE_DIRECTORY"])
             and .environment.TRAEFIK_PROVIDERS_FILE_DIRECTORY == "/etc/traefik/dynamic"' <<<"$base" >/dev/null
           # What each overlay may change in a render, as jq paths, beside the
-          # proxy and the configs (held below): check 28's OVERLAYS. The
-          # canary's network and aliases are held by value in "Every published
-          # port binds loopback"; the ports by it and by check 13.
+          # proxy and the configs (held below): check 28's OVERLAYS. The ports
+          # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
               compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
-              compose.canary.yaml) printf '%s\n' '["services","server","networks","stable-mesh"]' '["services","api","networks","stable-mesh"]' '["networks","stable-mesh"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
@@ -1727,7 +1752,7 @@ jobs:
           proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-          CANARY_STABLE_MESH=open-brain_mesh proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml -f compose.canary.yaml "${profiles[@]}"
+          proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
           proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
@@ -1760,12 +1785,13 @@ jobs:
       # it), and an env file's COMPOSE_FILE without the same files as -f; and
       # passes ob1b on its own. ob1b comes up healthy on that port, and no
       # container of either brain is on the other's networks. Then the check
-      # reads ob1b's port as ob1b's own, and ob1b goes, its volume with it (its
-      # logs first, when the step failed).
+      # reads ob1b's port as ob1b's own. ob1b stays for the next step, the edge
+      # proxy's, which removes it; when this step fails it goes here, its
+      # volume with it (its logs first).
       - name: A second brain beside the stack, from its own env file
         working-directory: deploy
         run: |
-          trap 'rc=$?; [ "$rc" = 0 ] || docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -f .env.ob1b.local; fi; rm -f .env.ob1b-clash.local .env.ob1b-squat.local .env.ob1b-held.local .env.noname.local .env.ob1b-files.local; docker rm -f ob1-ci-port-held > /dev/null 2>&1 || true; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
           # Run from deploy/, whose .env Bun would load into the check: refused without --no-env-file, naming it.
           rc=0; bun instance.ts check > /tmp/instance-bunenv.out 2>&1 || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'Run it as: bun --no-env-file' /tmp/instance-bunenv.out; then cat /tmp/instance-bunenv.out >&2; echo "the check ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
@@ -1812,6 +1838,96 @@ jobs:
           if grep -v '^ob1b_' <<<"$ob1b_nets"; then echo "an ob1b container is on a network not ob1b's" >&2; exit 1; fi
           if grep -v '^open-brain_' <<<"$stack_nets"; then echo "a stack container is on a network not the stack's" >&2; exit 1; fi
           bun --no-env-file instance.ts check --env-file .env.ob1b.local | grep -F "127.0.0.1:8040: SERVER_PORT (forwarder's port; SERVER_BIND its address) — held by this brain's forwarder"
+
+      # SMD-2876. The edge proxy in front of the stack (8010) and ob1b (8040),
+      # the step above's: on Docker Engine on Linux, edge.ts picks the host
+      # shape, and names the container publishing each brain's port. Each
+      # brain answers at its host through the edge, on 127.0.0.1 and [::1],
+      # and still on its own port; an MCP call goes through with the client's
+      # own key, as a header and as ?key=, a call with none gets the server's
+      # refusal, and the key is in no line of the edge's log; an unknown host
+      # is the edge's 404. The edge is on the host's network and on no
+      # network of either brain. Refused: edge.ts run where Bun would load
+      # deploy/.env; a new edge port a host process holds on 127.0.0.1 or
+      # [::1] while the edge runs, which keeps serving; a file beside the
+      # table. A changed registry (ob1b's port renamed ob1c) is served after
+      # an up under umask 077 with the table's directory made afresh. With
+      # ob1b's forwarder stopped, its host is a
+      # bare 404 and the stack's still answers. Then the edge goes, and ob1b
+      # with its volume (logs first, when the step failed).
+      - name: The edge proxy reaches both brains through their published ports
+        working-directory: deploy
+        run: |
+          # A throwaway key, masked: a failure below dumps the edge's log, which would print it were it there.
+          echo "::add-mask::$OB1_SMOKE_KEY"
+          trap 'rc=$?; if [ "$rc" != 0 ]; then docker compose --env-file /dev/null -p ob1-edge -f edge/compose.yaml --profile host logs --no-color --tail 60 2>/dev/null || true; docker compose --env-file .env.ob1b.local -f compose.yaml logs --no-color --tail 30 forwarder proxy 2>/dev/null || true; fi; bun --no-env-file edge/edge.ts down > /dev/null 2>&1 || true; docker compose --env-file .env.ob1b.local -f compose.yaml down -v --remove-orphans > /dev/null 2>&1 || true; rm -rf .env.ob1b.local edge/brains.local.yaml /tmp/edge-held.yaml /tmp/edge-next.yaml edge/dynamic; [ -z "${SQUAT:-}" ] || kill "$SQUAT" 2>/dev/null || true' EXIT
+          printf 'edge:\n  port: 8090\nbrains:\n  stable:\n    port: 8010\n  ob1b:\n    port: 8040\n' > edge/brains.local.yaml
+          bun --no-env-file edge/edge.ts check | tee /tmp/edge-check.out
+          grep -F 'Docker Engine on Linux, rootful: the host shape' /tmp/edge-check.out
+          grep -F 'stable: 127.0.0.1:8010 is published by open-brain-forwarder-1, of project open-brain' /tmp/edge-check.out
+          grep -F 'ob1b: 127.0.0.1:8040 is published by ob1b-forwarder-1, of project ob1b' /tmp/edge-check.out
+          bun --no-env-file edge/edge.ts up
+          # Each brain at its host, on each loopback: the edge holds its port on both, so no other process takes the clients that try ::1 first.
+          for b in stable ob1b; do
+            [ "$(curl -s -4 --max-time 10 "http://$b.localhost:8090/health" || true)" = ok ] || { echo "$b does not answer at its host through the edge on 127.0.0.1" >&2; exit 1; }
+            [ "$(curl -s -g --max-time 10 -H "Host: $b.localhost:8090" 'http://[::1]:8090/health' || true)" = ok ] || { echo "$b does not answer at its host through the edge on [::1]" >&2; exit 1; }
+          done
+          if ! { [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health || true)" = ok ] && [ "$(curl -s --max-time 10 http://127.0.0.1:8040/health || true)" = ok ]; }; then echo "a brain stopped answering on its own port beside the edge" >&2; exit 1; fi
+          list='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+          got="$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" -d "$list" http://stable.localhost:8090/mcp || true)"
+          grep -qF '"search_thoughts"' <<<"$got" || { echo "an MCP call with a header key did not reach the stack through the edge" >&2; exit 1; }
+          got="$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$list" "http://ob1b.localhost:8090/mcp?key=$OB1_SMOKE_KEY" || true)"
+          grep -qF '"search_thoughts"' <<<"$got" || { echo "an MCP call with ?key= did not reach ob1b through the edge" >&2; exit 1; }
+          # No key: the server's own refusal, HTTP 200 with JSON-RPC -32001 as smoke.sh holds (no OAuth on this stack), and no tool list.
+          c="$(curl -s --max-time 10 -o /tmp/edge-nokey.body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$list" http://stable.localhost:8090/mcp || true)"
+          if ! { [ "$c" = 200 ] && grep -qF -- '-32001' /tmp/edge-nokey.body && ! grep -qF '"search_thoughts"' /tmp/edge-nokey.body; }; then echo "a call with no key through the edge answered $c, not the server's refusal" >&2; exit 1; fi
+          [ "$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' http://other.localhost:8090/health || true)" = 404 ] || { echo "an unknown host was not the edge's 404" >&2; exit 1; }
+          edge="$(docker ps -q --filter label=com.docker.compose.project=ob1-edge)"
+          [ -n "$edge" ] || { echo "no edge container is running" >&2; exit 1; }
+          [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$edge")" = host ] || { echo "the edge is not on the host's network" >&2; exit 1; }
+          id="$(docker inspect -f '{{.Id}}' "$edge")"
+          brain_nets="$(docker network ls --format '{{.Name}}' | grep -E '^(open-brain|ob1b)_' || true)"
+          [ -n "$brain_nets" ] || { echo "found no network of either brain" >&2; exit 1; }
+          for n in $brain_nets; do
+            members="$(docker network inspect -f '{{range $id, $c := .Containers}}{{$id}}{{"\n"}}{{end}}' "$n")"
+            if grep -qx "$id" <<<"$members"; then echo "the edge is on $n, a brain's network" >&2; exit 1; fi
+          done
+          docker logs "$edge" > /tmp/edge.log 2>&1
+          [ -s /tmp/edge.log ] || { echo "the edge logged nothing, so its log says nothing of the key" >&2; exit 1; }
+          if grep -qF "$OB1_SMOKE_KEY" /tmp/edge.log; then echo "the edge's access log holds the key" >&2; exit 1; fi
+          # Run from deploy/, whose .env (a brain's secrets) Bun would load into it: refused without --no-env-file, naming it.
+          rc=0; bun edge/edge.ts check > /tmp/edge-bunenv.out 2>&1 || rc=$?
+          if [ "$rc" != 2 ] || ! grep -qF 'Run it as: bun --no-env-file' /tmp/edge-bunenv.out; then cat /tmp/edge-bunenv.out >&2; echo "the edge ran on Bun's load of deploy/.env (exit $rc)" >&2; exit 1; fi
+          # A new edge port a host process holds, on either loopback, while the edge runs on its old one: refused before anything changes.
+          for squat in "127.0.0.1 8092" "::1 8094"; do
+            read -r addr port <<<"$squat"
+            shown="$addr:$port"
+            if [ "$addr" = ::1 ]; then shown="[::1]:$port"; fi
+            python3 -m http.server "$port" --bind "$addr" > /dev/null 2>&1 &
+            SQUAT=$!
+            for _ in $(seq 1 40); do if curl -s -g -o /dev/null --max-time 1 "http://$shown/"; then break; fi; sleep 0.25; done
+            sed "0,/  port: 8090/s//  port: $port/" edge/brains.local.yaml > /tmp/edge-held.yaml
+            rc=0; bun --no-env-file edge/edge.ts up --registry /tmp/edge-held.yaml > /tmp/edge-held.out 2>&1 || rc=$?
+            kill "$SQUAT"; SQUAT=""
+            if [ "$rc" != 2 ] || ! grep -qF "$shown (edge.port) already answers, and not as this edge" /tmp/edge-held.out; then cat /tmp/edge-held.out >&2; echo "an edge port held on $shown was not refused while the edge ran (exit $rc)" >&2; exit 1; fi
+            [ "$(curl -s --max-time 10 http://stable.localhost:8090/health || true)" = ok ] || { echo "the refused up stopped the running edge" >&2; exit 1; }
+          done
+          # A file beside the table, which Traefik would load: refused.
+          touch edge/dynamic/extra.yaml
+          rc=0; bun --no-env-file edge/edge.ts up > /tmp/edge-stray.out 2>&1 || rc=$?
+          rm -f edge/dynamic/extra.yaml
+          if [ "$rc" != 2 ] || ! grep -qF 'holds extra.yaml beside routes.yaml' /tmp/edge-stray.out; then cat /tmp/edge-stray.out >&2; echo "a stray file beside the table was not refused (exit $rc)" >&2; exit 1; fi
+          # A changed registry is served after up: ob1b's port under the name ob1c, and ob1b gone (Traefik's router miss).
+          # Under umask 077, with the table's directory made afresh: the edge's user (65534) still reads it.
+          sed 's/^  ob1b:$/  ob1c:/' edge/brains.local.yaml > /tmp/edge-next.yaml && cp /tmp/edge-next.yaml edge/brains.local.yaml
+          (umask 077 && rm -rf edge/dynamic && bun --no-env-file edge/edge.ts up)
+          [ "$(curl -s --max-time 10 http://ob1c.localhost:8090/health || true)" = ok ] || { echo "the changed registry's ob1c is not served after up" >&2; exit 1; }
+          [ "$(curl -s --max-time 10 http://ob1b.localhost:8090/health || true)" = "404 page not found" ] || { echo "ob1b, gone from the registry, is still routed after up" >&2; exit 1; }
+          docker compose --env-file .env.ob1b.local -f compose.yaml stop forwarder
+          rm -f /tmp/edge-down.body
+          down="$(curl -s --max-time 10 -o /tmp/edge-down.body -w '%{http_code}' http://ob1c.localhost:8090/health || true)"
+          if ! { [ "$down" = 404 ] && [ ! -s /tmp/edge-down.body ]; }; then echo "ob1b (as ob1c) down gave $down with $(wc -c < /tmp/edge-down.body 2>/dev/null || echo 0) bytes through the edge, not a bare 404" >&2; exit 1; fi
+          [ "$(curl -s --max-time 10 http://stable.localhost:8090/health || true)" = ok ] || { echo "the stack stopped answering through the edge while ob1b was down" >&2; exit 1; }
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
@@ -2105,23 +2221,27 @@ jobs:
       # SMD-2036. db/tier.ts --refresh runs under Bun and shells to pg_dump /
       # pg_restore, which no image in the stack carries together, so the
       # snapshot half of the tier pipeline ran nowhere in CI (db-live's runner
-      # has a pg14 client, which refuses a pg16 server; test-live [20] drives the
-      # replay engine, the guards, and a refresh whose stand-in pg_restore
-      # fails, never a real one). deploy/tier.sh builds db/tier.Dockerfile
-      # and runs this checkout's tier.ts on the stack's network. The brain is
-      # given something to carry first: smoke.sh captures nothing, so one thought
-      # with a vector goes in through upsert_thought, and one keyword search that
-      # finds it goes through the server, which logs it. Then the refresh into a
-      # second database on the server, read back one test per line (a test inside
-      # an && list does not trip set -e: a schema-only copy passed that way in
-      # review), the tier stamp, a --replay that replays that search, a --diff
-      # that finds it unmoved and one over the empty window after the refresh
-      # that exits 3, and a retry over a copy left stamped stable, as a
-      # refresh that died after its restore leaves it. Then the two guards the
+      # has a pg14 client, which refuses a pg16 server; test-live [20] drives
+      # the guards and a refresh whose stand-in pg_restore fails, never a real
+      # one). deploy/tier.sh builds db/tier.Dockerfile and runs this checkout's
+      # tier.ts in it, each half of a verb in a container of its own
+      # (SMD-2875), both on the stack's network here. The brain is given something to carry
+      # first: smoke.sh captures nothing, so one thought with a vector goes in
+      # through upsert_thought, and one keyword search that finds it goes
+      # through the server, which logs it (the canary step's --diff replays
+      # it, over HTTP since SMD-2875). Then the refresh into a second database
+      # on the server, read back one test per line (a test inside an && list
+      # does not trip set -e: a schema-only copy passed that way in review),
+      # the tier stamp, tier.sh's refusal of a --diff, and a retry over a copy
+      # left stamped stable, as a refresh that died after its restore leaves
+      # it. Then the two guards the
       # wrapper runs under, since from its container every database is remote:
       # the brain under its service name and its container name is one
       # database, and a refresh the wrong way round lands on a brain with no
       # tier stamp. Both are refused, and the brain still holds its thought.
+      # The restore, without privileges, gives pg_stat_statements' views back
+      # to PUBLIC, and the refresh's own migrate run takes them back
+      # (SMD-1849 PR 3b review pass 2): the copy holds them from PUBLIC.
       - name: The tier refresh runs from deploy/tier.sh
         working-directory: deploy
         run: |
@@ -2140,6 +2260,8 @@ jobs:
           [ "$STABLE" = "$COPY" ] || { echo "the refreshed copy differs from stable" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT count(embedding) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the probe thought or its vector did not arrive" >&2; exit 1; }
           [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the copy is not stamped tier=working" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "the copy has no pg_stat_statements" >&2; exit 1; }
+          [ "$(q ob1_tier_ci "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "the copy's pg_stat_statements is PUBLIC's: the refresh's migrate did not take back what its restore gave" >&2; exit 1; }
           # SMD-2037: the dump carries no database-level settings; the refresh
           # copies them, so the copy walks HNSW under 014's bounds as stable does.
           SETTINGS="SELECT coalesce(string_agg(c, ',' ORDER BY c), '') FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c WHERE d.datname = current_database() AND s.setrole = 0 AND c NOT LIKE 'ob1.refresh_target=%'"
@@ -2148,18 +2270,10 @@ jobs:
           echo "database settings: stable $STABLE_SET, refreshed $COPY_SET"
           grep -q 'hnsw.max_scan_tuples=' <<<"$STABLE_SET" || { echo "stable has no HNSW bound to copy (014 seeds one)" >&2; exit 1; }
           [ "$STABLE_SET" = "$COPY_SET" ] || { echo "the refreshed copy's database settings differ from stable's" >&2; exit 1; }
-          ./tier.sh --replay --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-replay.out
-          grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
-          ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
-          grep -F 'what moved: nothing' /tmp/tier-diff.out
-          # SMD-2182: with no --since the window starts at the copy's refresh,
-          # and stable has logged nothing since, so a --diff compares nothing:
-          # exit 3 through the wrapper, not the pass it used to be.
-          empty_rc=0
-          ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci > /tmp/tier-empty.out || empty_rc=$?
-          cat /tmp/tier-empty.out
-          [ "$empty_rc" = 3 ] || { echo "a --diff that compared nothing exited $empty_rc, not 3" >&2; exit 1; }
-          grep -F 'nothing to compare: stable logged no searches' /tmp/tier-empty.out
+          # SMD-2875: a replay or diff reaches the brains over HTTP and needs no
+          # container, so the wrapper refuses one, before it builds or joins anything.
+          rc=0; ./tier.sh --diff --from postgres --to postgres/ob1_tier_ci 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--diff runs over HTTP now' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not refuse a --diff (exit $rc)" >&2; exit 1; fi
           # A refresh that dies after its restore leaves the source's ob1_config
           # behind — the brain's, here no tier; the dogfood's, tier=stable. The
           # mark the refresh set on the database before its reset lets the
@@ -2177,13 +2291,25 @@ jobs:
           refused postgres open-brain-postgres-1 'name the same database'
           refused postgres/ob1_tier_ci postgres 'holds thoughts and no tier stamp'
           # SMD-2873: the networks are the project's that the env file names (the
-          # runs above, on .env, which names none, joined open-brain's); and
-          # --project with --network is refused.
+          # runs above, on .env, which names none, joined open-brain's).
           (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
           rc=0; ./tier.sh --env-file /tmp/ob1x.env --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'no network ob1x_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not take ob1x's networks from an env file naming ob1x (exit $rc)" >&2; exit 1; fi
-          rc=0; ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
-          if [ "$rc" != 2 ] || ! grep -F -- '--project and --network both name the networks' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; exit 1; fi
+          # SMD-2875: the image is the project's, so a run for ob1x (on
+          # open-brain's network, by --network) builds ob1x-tier and leaves the
+          # tag open-brain's runs use where it was. The same Dockerfile builds
+          # the same id from cache, so the tag is first pointed at another
+          # image, which a run that re-tagged it would move; then put back. And
+          # a half joins one network, so a list is refused.
+          OLD_TIER="$(docker image inspect -f '{{.Id}}' open-brain-tier:latest)"
+          docker tag pgvector/pgvector:0.8.6-pg16 open-brain-tier:latest
+          ./tier.sh --project ob1x --network open-brain_data --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          docker image inspect ob1x-tier:latest > /dev/null || { echo "a run for project ob1x built no ob1x-tier image" >&2; exit 1; }
+          [ "$(docker image inspect -f '{{.Id}}' open-brain-tier:latest)" = "$(docker image inspect -f '{{.Id}}' pgvector/pgvector:0.8.6-pg16)" ] || { echo "a run for project ob1x moved open-brain-tier:latest" >&2; exit 1; }
+          docker tag "$OLD_TIER" open-brain-tier:latest
+          docker image rm ob1x-tier:latest > /dev/null
+          rc=0; ./tier.sh --network open-brain_data,open-brain_egress --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
+          if [ "$rc" != 2 ] || ! grep -F -- '--network takes one network name' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "tier.sh did not refuse a list of networks (exit $rc)" >&2; exit 1; fi
           rc=0; ./tier.sh --env-file /tmp/ob1x.env --project ob1y --refresh --from postgres --to postgres/ob1_tier_ci --tier working 2> /tmp/tier-refused.err || rc=$?
           if [ "$rc" != 2 ] || ! grep -F 'no network ob1y_data' /tmp/tier-refused.err; then cat /tmp/tier-refused.err >&2; echo "--project did not name the networks over the env file's project" >&2; exit 1; fi
           rm -f /tmp/ob1x.env
@@ -2192,16 +2318,15 @@ jobs:
       # SMD-2038. deploy/canary.sh stands a canary beside this stack and takes
       # it down again; this step is its refusals, each with exit 2 and nothing
       # started, stamped or registered:
-      # - a stable whose proxy routes no /canary/mcp (a release from before
-      #   SMD-2294, made here by recreating the proxy with that label), and
-      #   one whose proxy is off its mesh;
+      # - no port (SMD-2874): no --port and no canary env file, a canary env
+      #   file naming stable's port, and --port naming stable's;
       # - an empty --port, and a --stable-project no compose project could
       #   be named (a blank one would match every project's containers);
-      # - with --port, a port a container holds and one a host process
-      #   listens on;
+      # - a port a container holds and one a host process listens on;
       # - a stable stamped or marked as a copy;
       # - a provider only stable's network has;
-      # - another connector under the name.
+      # - another connector under the name, and one left at /canary/mcp on
+      #   stable's origin, which is named as such.
       # A stand-in `claude` on PATH answers `mcp get` (FAKE_URL at FAKE_SCOPE,
       # user by default) and logs every other call, the key cut; the next
       # step uses it too.
@@ -2227,14 +2352,22 @@ jobs:
             [ "$rc" = 2 ] || { cat /tmp/canary-refused.out >&2; echo "canary.sh ${*:2}: expected a refusal (exit 2), got $rc" >&2; exit 1; }
             grep -F "$1" /tmp/canary-refused.out || { cat /tmp/canary-refused.out >&2; exit 1; }
           }
-          printf 'services:\n  proxy:\n    labels:\n      ob1.proxy-routes: "a route table from before SMD-2294"\n' > /tmp/old-stable.yaml
-          docker compose -f compose.yaml -f /tmp/old-stable.yaml up -d --wait --wait-timeout 120 proxy
-          refused 'routes no /canary/mcp' up
-          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
-          # A stable proxy off its own mesh could not reach a canary there.
-          docker network disconnect open-brain_mesh "$(docker compose -f compose.yaml ps -q proxy)"
-          refused 'is not on open-brain_mesh' up
-          docker compose -f compose.yaml up -d --force-recreate --wait --wait-timeout 120 proxy
+          # SMD-2874: the canary answers on a port of its own, never stable's.
+          refused 'name it with --port N' up
+          refused "port 8010 is stable's" up --port 8010
+          # A canary env file made while the canary answered on stable's origin
+          # names stable's port as its own.
+          # Its provider an address, not a bare name, and its keys stable's, as
+          # such a file's were, so compose renders it and its refusals are the
+          # port's and the connector's.
+          (umask 077 && printf 'POSTGRES_PASSWORD="%s"\nCOMPOSE_PROJECT_NAME="open-brain-canary"\nSERVER_PORT="8010"\nOB1_LLM_BASE_URL="http://127.0.0.1:11434/v1"\nMCP_ACCESS_KEYS="%s"\n' "$(openssl rand -hex 24)" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d '"')" > /tmp/.env.canary-stableport.local)
+          refused 'names no port of its own' up --canary-env-file /tmp/.env.canary-stableport.local
+          # …and a connector at stable's port is not the canary's for it (review
+          # pass 1): refused at an up --connect, left by a down.
+          FAKE_URL='http://127.0.0.1:8010/canary/mcp?key=x' refused "where the canary answered on open-brain's origin before SMD-2874" up --canary-env-file /tmp/.env.canary-stableport.local --port 8011 --connect
+          FAKE_URL='http://127.0.0.1:8010/mcp?key=x' ./canary.sh --canary-env-file /tmp/.env.canary-stableport.local down > /tmp/canary-stableport-down.out 2>&1 || { cat /tmp/canary-stableport-down.out >&2; echo "down on a canary file naming stable's port failed" >&2; exit 1; }
+          grep -F "not this canary's" /tmp/canary-stableport-down.out || { cat /tmp/canary-stableport-down.out >&2; exit 1; }
+          rm -f /tmp/.env.canary-stableport.local
           refused 'takes a value' up --port ''
           refused 'takes a value' up --name ' '
           refused 'takes a compose project name' up --stable-project 'Open Brain'
@@ -2242,7 +2375,7 @@ jobs:
           # looks for that project's stack, and every name follows it; and a
           # canary's project is no stable.
           (umask 077 && { cat .env; echo COMPOSE_PROJECT_NAME=ob1x; } > /tmp/ob1x.env)
-          refused 'in compose project ob1x' up --env-file /tmp/ob1x.env
+          refused 'in compose project ob1x' up --env-file /tmp/ob1x.env --port 8011
           [ ! -e /tmp/.env.ob1x-canary.local ] || { echo "a refused up made ob1x's canary env file" >&2; exit 1; }
           # Exit 0 and nothing on stderr, so a `names` that went on to act fails here.
           names() {
@@ -2266,47 +2399,56 @@ jobs:
           refused 'already listens on 127.0.0.1:8011' up --port 8011
           kill "$SQUAT"
           q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
-          refused "is stamped tier 'working'" up
+          refused "is stamped tier 'working'" up --port 8011
           q "DELETE FROM ob1_config WHERE key = 'tier'"
           q "ALTER DATABASE openbrain SET ob1.refresh_target = 'canary'"
-          refused "carries the refresh mark 'canary'" up
+          refused "carries the refresh mark 'canary'" up --port 8011
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
-          OB1_LLM_BASE_URL=http://ollama:11434/v1 refused "a bare name" up
-          FAKE_URL=http://127.0.0.1:9999/ refused "is not this canary's at user scope" up --connect
+          OB1_LLM_BASE_URL=http://ollama:11434/v1 refused "a bare name" up --port 8011
+          FAKE_URL=http://127.0.0.1:9999/ refused "is not this canary's at user scope" up --port 8011 --connect
+          FAKE_URL='http://127.0.0.1:8010/canary/mcp?key=x' refused "where the canary answered on open-brain's origin before SMD-2874" up --port 8011 --connect
           [ -z "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "a refusal started canary containers" >&2; exit 1; }
           [ -z "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" ] || { echo "a refusal stamped stable" >&2; exit 1; }
           [ ! -s /tmp/fake-claude.log ] || { cat /tmp/fake-claude.log >&2; echo "a refusal touched the connector" >&2; exit 1; }
 
-      # SMD-2038, SMD-2294. The canary's life beside this stack, in four `up`s.
-      # canary.sh runs compose.yaml again as the project open-brain-canary:
-      # its Postgres, a refresh from this stack's through tier.sh on both
-      # networks, its server and REST core built from this checkout, then the
-      # smoke.
-      # - The first `up --connect` answers at /canary/mcp on this stack's own
-      #   origin. Its servers join open-brain_mesh under the canary's names
-      #   alone, and no canary proxy runs. It runs over a stable carrying the
+      # SMD-2038, SMD-2874. The canary's life beside this stack, in four `up`s.
+      # canary.sh runs compose.yaml again as the project open-brain-canary,
+      # behind a proxy of its own on a loopback port: its Postgres, a refresh
+      # from this stack's through tier.sh on both projects' database networks,
+      # its server and REST core built from this checkout, then the smoke. The
+      # refresh's two halves each run on one brain's data network with that
+      # brain's password (SMD-2875): sampled through the first up, no container
+      # is on both networks, and neither half holds the other side's password.
+      # - The first `up --port 8011 --connect` runs over a stable carrying the
       #   protective mark `stable` (not a refresh's). It stamps stable,
-      #   registers the connector at /canary/mcp, and reports tier canary with
-      #   OAuth not configured. Its vector probe must pass on the thought whose
-      #   text holds literals (SMD key, path), searched for without them.
+      #   registers the connector at 127.0.0.1:8011/mcp, and reports tier
+      #   canary with OAuth not configured. Every canary container is on the
+      #   canary's own networks alone, and stable's mesh holds none of them.
+      #   Stable's logged searches, replayed on both over HTTP (tier.ts --diff,
+      #   SMD-2875), move nothing, and a window after them compares nothing
+      #   (exit 3).
+      #   Its vector probe must pass on the thought whose text holds literals
+      #   (SMD key, path), searched for without them.
       #   It runs over a canary Postgres made the old way, on stable's env
       #   file (SMD-2583): it makes .env.canary.local from .env, mode 600, with a
-      #   database password of its own and no other profile's secret, and
-      #   sets the old canary's database to it. Neither password then opens
-      #   the other stack's database, and the canary's server holds none of
-      #   stable's.
-      # - The second `up` is the fallback, --port 8011 under
-      #   SERVER_BIND=0.0.0.0. Its own proxy is on loopback, its servers have
-      #   left stable's mesh, and /canary/mcp is the proxy's 404 again. The stub
-      #   serves another model: the thought put on stable just before it
-      #   reaches the canary, and the smoke fails on the 50% floor. A setting
-      #   added to stable's .env before it is named as one the canary's file
-      #   lacks, and neither run prints the canary's password.
-      # - A third `up`, on the same port with a connector at its root: named
-      #   as on the deprecated root, not as one the canary no longer answers,
-      #   and the root answers 200 with a Deprecation header (SMD-2661).
-      # - A fourth `up`, back on stable's origin: the canary's proxy is removed,
-      #   8011 is free, and a connector left at the old URL is named.
+      #   database password of its own, the canary's port, address, tier and
+      #   profiles, and no other profile's secret, and sets the old canary's
+      #   database to that password. Neither password then opens the other
+      #   stack's database, and the canary's server holds none of stable's.
+      # - The second `up` names no port, so takes its env file's, under
+      #   SERVER_BIND=0.0.0.0: its forwarder stays on loopback, and stable's
+      #   /canary/mcp is the proxy's 404. The stub serves another model: the
+      #   thought put on stable just before it reaches the canary, and the
+      #   smoke fails on the 50% floor. A setting added to stable's .env before
+      #   it is named as one the canary's file lacks, and neither run prints
+      #   the canary's password.
+      # - A third `up`, with a connector at the port's root: named as on the
+      #   deprecated root, not as one the canary no longer answers, and the
+      #   root answers 200 with a Deprecation header (SMD-2661).
+      # - A fourth `up`, on --port 8012, then one after 8013 is edited into the
+      #   file by hand, which names the connector left at 8012.
+      #   On --port 8012: the port is written to the canary's
+      #   env file, 8011 is free, and a connector left at 8011 is named.
       # - Then teardown:
       #   - `down --volumes` is refused on a canary stamped working;
       #   - an empty canary is deleted;
@@ -2314,7 +2456,10 @@ jobs:
       #     connector is left alone;
       #   - a volume by the canary's name that compose did not make, holding a
       #     table, is refused with nothing left running;
-      #   - a last `down` removes its own connector.
+      #   - a connector at /canary/mcp on stable's origin is stable's, and
+      #     left alone;
+      #   - a last `down` removes its own connector, read from the env file's
+      #     port.
       # The stack is the one it was: the same Postgres container, its thoughts,
       # its server.
       - name: A canary stands beside the stack from deploy/canary.sh
@@ -2325,9 +2470,12 @@ jobs:
           canary_left() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary; }
           vec() { curl -s http://127.0.0.1:11434/v1/embeddings -d "{\"input\": \"$1\"}" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["data"][0]["embedding"], separators=(",", ":")))'; }
           seed() { q "SELECT upsert_thought('$1', '{\"metadata\": {\"source\": \"ci-tier\"}}'::jsonb, '$(vec "$1")'::vector)" > /dev/null; q "SELECT id FROM thoughts WHERE content = '$1'"; }
-          # Each canary server's aliases on stable's mesh, one container a line.
-          on_stable_mesh() { docker inspect -f '{{with index .NetworkSettings.Networks "open-brain_mesh"}}{{join .Aliases " "}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q "$1")"; }
-          health() { curl -s --max-time 20 -H "x-brain-key: $OB1_SMOKE_KEY" "http://127.0.0.1:8010$1/health"; }
+          # Every network a canary container is on that is not the canary's own,
+          # and every canary container on stable's mesh (SMD-2874).
+          # shellcheck disable=SC2016 # a Go template's variables, not the shell's
+          off_own() { for c in $(canary_left); do docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$c" | grep -v '^open-brain-canary_' || true; done; }
+          on_stable_mesh() { docker network inspect -f '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' open-brain_mesh | grep '^open-brain-canary-' || true; }
+          health() { curl -s --max-time 20 -H "x-brain-key: $OB1_SMOKE_KEY" "http://127.0.0.1:$1/health"; }
           export PATH="/tmp/fake-bin:$PATH" FAKE_URL=""
           : > /tmp/fake-claude.log
           refused() {
@@ -2349,11 +2497,42 @@ jobs:
           # dummies (nothing here runs board-sync), so the check below has a
           # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
           # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
-          # SMD-1849 PR 3a: the observability profile's Grafana password too,
-          # a dummy (nothing here runs the profile).
-          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\n' >> .env
-          ./canary.sh up --connect 2>&1 | tee /tmp/canary-up.out
+          # SMD-1849 PR 3a and 3b: the observability profile's Grafana and
+          # database-monitor passwords too, dummies (nothing here runs the
+          # profile).
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
+          # SMD-2875: through the first up's refresh, every 0.2 s, the tier
+          # halves' containers, found by the label tier.sh gives each (both are
+          # made before either runs; the source's lasts until its hand-off has
+          # passed, the target's until tier.sh exits, so the sampling sees both
+          # however short a half runs). None may be
+          # on both brains' data networks, and each half's environment is kept
+          # (mode 700 directory), to be searched below for the other side's
+          # password.
+          mkdir -m 700 /tmp/tier-sample
+          sample_nets() {
+            while :; do
+              for n in $(docker ps -aq --filter label=ob1.tier-half 2>/dev/null); do
+                nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$n" 2>/dev/null)" || continue
+                side=""
+                case " $nets " in *" open-brain_data "*) side=stable ;; esac
+                case " $nets " in *" open-brain-canary_data "*) [ -z "$side" ] || echo "$n: $nets" >> /tmp/tier-sample/both; side=canary ;; esac
+                # Written only from an inspect that answered: tier.sh may remove
+                # the container between the two (review pass 1).
+                [ -z "$side" ] || { env_now="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$n" 2>/dev/null)" && printf '%s\n' "$env_now" > "/tmp/tier-sample/$side.$n"; } || true
+              done
+              sleep 0.2
+            done
+          }
+          # Off the step's output, and stopped however the step ends: a background
+          # loop holding the step's pipes keeps the step waiting (review pass 1).
+          sample_nets > /dev/null 2>&1 < /dev/null & SAMPLER=$!
+          trap 'kill "$SAMPLER" 2>/dev/null || true' EXIT
+          ./canary.sh --port 8011 up --connect 2>&1 | tee /tmp/canary-up.out
+          kill "$SAMPLER"
           q "ALTER DATABASE openbrain RESET ob1.refresh_target"
+          if [ -s /tmp/tier-sample/both ]; then echo "a container was on both brains' data networks: $(sort -u /tmp/tier-sample/both | tr '\n' ' ')" >&2; exit 1; fi
+          if ! compgen -G '/tmp/tier-sample/stable.*' > /dev/null || ! compgen -G '/tmp/tier-sample/canary.*' > /dev/null; then ls -la /tmp/tier-sample >&2; echo "the sampler saw no tier half on one side of the refresh" >&2; exit 1; fi
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
           # SMD-2583: the canary's own env file, made from stable's: mode 600,
           # every setting of stable's but its database password, which is a
@@ -2363,15 +2542,27 @@ jobs:
           # opens the other's database, and the canary's server holds no
           # credential of stable's.
           grep -F "made the canary's env file" /tmp/canary-up.out
+          # SMD-2874: the canary's port, address, tier and profiles, its own.
+          for line in 'SERVER_PORT="8011"' 'SERVER_BIND="127.0.0.1"' 'OB1_TIER="canary"' 'COMPOSE_PROFILES=""'; do
+            grep -qxF "$line" .env.canary.local || { echo "the canary's env file does not hold $line" >&2; exit 1; }
+          done
           [ "$(stat -c %a .env.canary.local)" = 600 ] || { echo ".env.canary.local is not mode 600: $(stat -c %a .env.canary.local)" >&2; exit 1; }
           git check-ignore -q .env.canary.local || { echo ".env.canary.local is not gitignored" >&2; exit 1; }
           PG_STABLE="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tr -d '"')" PG_CANARY="$(sed -n 's/^POSTGRES_PASSWORD=//p' .env.canary.local | tr -d '"')"
           export PG_STABLE PG_CANARY
           if [ -z "$PG_CANARY" ] || [ "$PG_CANARY" = "$PG_STABLE" ]; then echo "the canary's env file does not hold a password of its own" >&2; exit 1; fi
+          # SMD-2875: each tier half held its own side's password and not the
+          # other's (patterns from a file, so neither is on a command line).
+          grep -qFf <(printf '%s\n' "$PG_STABLE") /tmp/tier-sample/stable.* || { echo "stable's tier half held no stable password: the sample is not of the refresh" >&2; exit 1; }
+          grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/tier-sample/canary.* || { echo "the canary's tier half held no canary password: the sample is not of the refresh" >&2; exit 1; }
+          if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/tier-sample/stable.*; then echo "stable's tier half held the canary's database password" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_STABLE") /tmp/tier-sample/canary.*; then echo "the canary's tier half held stable's database password" >&2; exit 1; fi
+          rm -rf /tmp/tier-sample
           grep -q '^OB1_AUTH_' .env || { echo "the auth step left no OB1_AUTH_ line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
+          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
           [ "$(grep -v '^POSTGRES_PASSWORD=' .env.canary.local | grep -c '^MCP_ACCESS_KEYS=')" = 1 ] || { echo "the canary's env file lost stable's keys" >&2; exit 1; }
           # SMD-2873: the file names the canary's own project, so compose given it
           # alone acts on the canary; one naming another is refused at an up.
@@ -2402,27 +2593,32 @@ jobs:
           canary_server_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q server)")"
           grep -q '^DATABASE_URL=' <<<"$canary_server_env" || { echo "could not read the canary server's environment" >&2; exit 1; }
           if grep -qFf <(printf '%s\n' "$PG_STABLE") <<<"$canary_server_env"; then echo "the canary's server holds stable's database password" >&2; exit 1; fi
-          # The auth step left OB1_PUBLIC_ORIGIN in .env: the canary on stable's
-          # origin is reached wherever that origin is, and says so.
-          grep -F 'note: stable has a public origin (https://brain.example.test)' /tmp/canary-up.out
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
-          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8010/canary/mcp -H' /tmp/fake-claude.log
-          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy forwarder)" ] || { echo "a canary on stable's origin runs a proxy or forwarder of its own" >&2; exit 1; }
-          for svc in server:mcp api:api; do
-            got=$(on_stable_mesh "${svc%%:*}")
-            grep -qw "${svc#*:}.canary.ob1.internal" <<<"$got" || { echo "the canary's ${svc%%:*} is not on stable's mesh as ${svc#*:}.canary.ob1.internal: '$got'" >&2; exit 1; }
-            if grep -qwE '(mcp|api|auth)\.ob1\.internal' <<<"$got"; then echo "the canary's ${svc%%:*} claims one of stable's own names on stable's mesh: '$got'" >&2; exit 1; fi
-          done
-          jq -e '.tier == "canary" and .oauth.configured == false' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp/health is not the canary's, or it is configured for OAuth: $(health /canary/mcp | head -c 200)" >&2; exit 1; }
-          jq -e '.tier != "canary"' <<<"$(health /mcp)" > /dev/null || { echo "stable's /mcp answered as the canary" >&2; exit 1; }
+          grep -F 'mcp add --transport http --scope user open-brain-canary http://127.0.0.1:8011/mcp -H' /tmp/fake-claude.log
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own forwarder does not publish 127.0.0.1:8011" >&2; exit 1; }
+          [ -z "$(off_own)" ] || { echo "a canary container is on a network not the canary's: $(off_own | tr '\n' ' ')" >&2; exit 1; }
+          [ -z "$(on_stable_mesh)" ] || { echo "stable's mesh holds a canary container: $(on_stable_mesh | tr '\n' ' ')" >&2; exit 1; }
+          jq -e '.tier == "canary" and .oauth.configured == false' <<<"$(health 8011/mcp)" > /dev/null || { echo "127.0.0.1:8011/mcp/health is not the canary's, or it is configured for OAuth: $(health 8011/mcp | head -c 200)" >&2; exit 1; }
+          jq -e '.tier != "canary"' <<<"$(health 8010/mcp)" > /dev/null || { echo "stable's /mcp answered as the canary" >&2; exit 1; }
           [ "$(q "SELECT value FROM ob1_config WHERE key = 'tier'")" = stable ] || { echo "stable is not stamped tier=stable" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%quokka ledger%'")" = 1 ] || { echo "the canary did not get the tier step's thought" >&2; exit 1; }
+          # SMD-2875: the diff over HTTP. Stable's logged searches (the tier
+          # step's keyword search and smoke.sh's, both keyword: the hybrid and
+          # current arms are held by test-brain-compare.ts) replayed on stable
+          # at /mcp and on the canary at its own port's /mcp, each with the smoke key,
+          # which the canary takes: a canary just refreshed from stable answers
+          # as stable does. A window after every search compared nothing, exit 3.
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp > /tmp/tier-diff.out 2>&1 || rc=$?
+          if [ "$rc" != 0 ] || ! grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-diff.out || ! grep -F 'what moved: nothing' /tmp/tier-diff.out; then cat /tmp/tier-diff.out >&2; echo "the --diff of a canary just refreshed from stable did not pass (exit $rc)" >&2; exit 1; fi
+          rc=0; OB1_COMPARE_KEY="$OB1_SMOKE_KEY" bun --no-env-file ../db/tier.ts --diff --from http://127.0.0.1:8010/mcp --to http://127.0.0.1:8011/mcp --since 2999-01-01T00:00:00Z > /tmp/tier-empty.out 2>&1 || rc=$?
+          if [ "$rc" != 3 ] || ! grep -F 'logged no searches in the window' /tmp/tier-empty.out; then cat /tmp/tier-empty.out >&2; echo "a --diff that compared nothing exited $rc, not 3" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$OB1_SMOKE_KEY") /tmp/tier-diff.out /tmp/tier-empty.out; then echo "the --diff printed the key" >&2; exit 1; fi
           seed 'canary re-sync probe: the numbat almanac' > /dev/null
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
           echo 'OB1_QUERY_LOG_RETENTION_DAYS=31' >> .env
           touch /tmp/provider-stub-wrong
-          rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up --port 8011 > /tmp/canary-wrong.out 2>&1 || rc=$?
+          rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
           if grep -qFf <(printf '%s\n' "$PG_CANARY") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
@@ -2432,37 +2628,41 @@ jobs:
           grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
           grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own forwarder is not on loopback only" >&2; exit 1; }
-          [ -z "$(on_stable_mesh server)$(on_stable_mesh api)" ] || { echo "the canary behind its own proxy is still on stable's mesh" >&2; exit 1; }
-          [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "/canary/mcp still answers with the canary behind its own proxy" >&2; exit 1; }
+          if grep -F "to the canary's env file" /tmp/canary-wrong.out; then echo "an up with no --port wrote to the canary's env file" >&2; exit 1; fi
+          [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "stable's /canary/mcp answers with the canary on a port of its own" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
           # A connector at the root of the canary's own port is not lost: the
           # proxy's legacy route still hands a POST there to the canary,
           # deprecated, until v2.0.0 (SMD-2532), and `up` says so (SMD-2661).
-          FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --port 8011 --no-smoke | tee /tmp/canary-root.out
-          grep -F 'connector open-brain-canary points at http://127.0.0.1:8011/?…, the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --port 8011 --connect' /tmp/canary-root.out
+          FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
+          grep -F 'connector open-brain-canary points at http://127.0.0.1:8011/?…, the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --connect' /tmp/canary-root.out
           if grep -F 'no longer answers' /tmp/canary-root.out; then echo "up called the canary's root URL one it no longer answers" >&2; exit 1; fi
           root_h=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             http://127.0.0.1:8011/ | tr -d '\r')
           { grep -q '^HTTP/[0-9.]* 200' <<<"$root_h" && grep -qi '^deprecation: ' <<<"$root_h"; } || { echo "the canary's root did not answer 200 with a Deprecation header: $(head -n 1 <<<"$root_h")" >&2; exit 1; }
-          # Back on stable's origin, the way a canary stood up before SMD-2294
-          # moves over: its own proxy goes, its port is free, and a connector
-          # left at the old URL is named.
-          FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-back.out
-          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, where this canary no longer answers: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-back.out
-          # The proxy went last, after the health wait and the connector step
-          # (whose note prints after both): a run that failed before then would
-          # have kept it, and the connector at its port the canary's.
-          noted=$(grep -nF 'connector open-brain-canary still points at' /tmp/canary-back.out | cut -d: -f1)
-          removed=$(grep -nF 'canary proxy removed' /tmp/canary-back.out | cut -d: -f1)
-          if ! { [ -n "$noted" ] && [ -n "$removed" ] && [ "$noted" -lt "$removed" ]; }; then echo "the canary's own proxy was not removed after the connector step (noted at line ${noted:-?}, removed at ${removed:-?})" >&2; exit 1; fi
-          [ -z "$(docker compose -p open-brain-canary -f compose.yaml ps -aq proxy forwarder)" ] || { echo "the canary's own proxy or forwarder outlived the move to stable's origin" >&2; exit 1; }
-          if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary's proxy went" >&2; exit 1; fi
-          grep -qw mcp.canary.ob1.internal <<<"$(on_stable_mesh server)" || { echo "the canary back on stable's origin is not on stable's mesh" >&2; exit 1; }
+          # Another port (SMD-2874): written to the canary's env file, where
+          # compose reads it from then on, its old port freed, and a connector
+          # left there named.
+          FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh --port 8012 up --no-smoke | tee /tmp/canary-moved.out
+          grep -F "wrote SERVER_PORT=\"8012\" to the canary's env file, $PWD/.env.canary.local (its SERVER_PORT was 8011)" /tmp/canary-moved.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, a port this canary no longer answers on: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-moved.out
+          [ "$(stat -c %a .env.canary.local)" = 600 ] || { echo ".env.canary.local is not mode 600 after the port was written: $(stat -c %a .env.canary.local)" >&2; exit 1; }
+          # shellcheck disable=SC2016 # compose's variable, not the shell's
+          [ "$(printf 'services:\n  p:\n    image: p\n    environment: {P: "${SERVER_PORT}"}\n' | docker compose -p x --env-file .env.canary.local -f - config --format json | jq -r .services.p.environment.P)" = 8012 ] || { echo "compose does not read the canary's new port from its env file" >&2; exit 1; }
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8012 ] || { echo "the canary's forwarder did not move to 127.0.0.1:8012" >&2; exit 1; }
+          if (exec 3<>/dev/tcp/127.0.0.1/8011) 2>/dev/null; then echo "port 8011 still answers after the canary moved to 8012" >&2; exit 1; fi
           # The first keyed request to a server this --no-smoke run recreated:
           # a cold key registry answers plain `ok` (smoke.sh warms it the same way).
-          for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null 2>&1 && break; sleep 2; done
-          jq -e '.tier == "canary"' <<<"$(health /canary/mcp)" > /dev/null || { echo "/canary/mcp does not answer as the canary again: $(health /canary/mcp | head -c 120)" >&2; exit 1; }
+          for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null 2>&1 && break; sleep 2; done
+          jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "127.0.0.1:8012/mcp does not answer as the canary: $(health 8012/mcp | head -c 120)" >&2; exit 1; }
+          # A port edited into the file by hand: the next up (no --port) moves
+          # the forwarder there, and a connector left at the port it published
+          # when the run began is still named (code review).
+          echo 'SERVER_PORT="8013"' >> .env.canary.local
+          FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
+          [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8013 ] || { echo "the canary's forwarder did not move to the edited port, 127.0.0.1:8013" >&2; exit 1; }
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes
@@ -2476,13 +2676,16 @@ jobs:
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
           grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
-          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8010/canary/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
+          FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
           grep -F 'nothing to delete' /tmp/canary-down2.out
           grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a local-scope connector" >&2; exit 1; }
           FAKE_URL='http://127.0.0.1:8010/mcp?key=x' ./canary.sh down | tee /tmp/canary-down3.out
           grep -F "not this canary's" /tmp/canary-down3.out
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a connector at stable's own /mcp" >&2; exit 1; }
+          FAKE_URL='http://127.0.0.1:8010/canary/mcp?key=x' ./canary.sh down | tee /tmp/canary-down4.out
+          grep -F "on open-brain's origin, where the canary answered before SMD-2874 — stable's URL now, left as it is: claude mcp remove --scope user open-brain-canary removes it" /tmp/canary-down4.out
+          ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed a connector at /canary/mcp on stable's origin" >&2; exit 1; }
           docker volume create open-brain-canary_pgdata
           docker run -d --name ob1-volume-squat -e POSTGRES_PASSWORD=squat -e POSTGRES_DB=openbrain -v open-brain-canary_pgdata:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg16
           for _ in $(seq 1 60); do docker exec -e PGPASSWORD=squat ob1-volume-squat psql -h 127.0.0.1 -U postgres -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1 && break; sleep 1; done
@@ -2492,7 +2695,7 @@ jobs:
           [ -z "$(canary_left)" ] || { echo "the refused down left canary containers" >&2; exit 1; }
           docker volume inspect open-brain-canary_pgdata > /dev/null
           docker volume rm open-brain-canary_pgdata
-          FAKE_URL=http://127.0.0.1:8010/canary/mcp ./canary.sh down
+          FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down
           grep -F 'mcp remove --scope user open-brain-canary' /tmp/fake-claude.log
           [ -z "$(canary_left)" ] || { echo "canary containers remain" >&2; exit 1; }
           [ -z "$(docker volume ls -q --filter label=com.docker.compose.project=open-brain-canary)" ] || { echo "the canary's volume remains" >&2; exit 1; }
@@ -2526,10 +2729,11 @@ jobs:
       #   good second before the result. A buffering proxy delivers both
       #   together.
       # After the tier and canary steps: its search_thoughts is a semantic
-      # search the query log keeps, and the tier step's --replay re-embeds
-      # every logged query from tier.sh's container, which has no
+      # search the query log keeps, and until SMD-2875 the tier step's --replay
+      # re-embedded every logged query from tier.sh's container, which had no
       # host.docker.internal to reach the stub by (the first CI run, caught:
-      # getaddrinfo ENOTFOUND host.docker.internal).
+      # getaddrinfo ENOTFOUND host.docker.internal). The canary step's --diff,
+      # over HTTP since then, runs before this step's search is logged.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |
@@ -2757,6 +2961,29 @@ jobs:
           docker compose -f compose.yaml exec -T proxy test ! -e /etc/traefik/dynamic/grafana.yaml || { echo "the proxy kept the overlay's route file once it was dropped" >&2; exit 1; }
           loaded "with the overlay dropped"
           answers404 "with the overlay dropped"
+
+      # SMD-1849 PR 3b: the stack's Postgres loads pg_stat_statements at its
+      # start, with utility statements untracked and I/O timed (compose.yaml's
+      # command, POSTGRES_PRELOAD_LIBRARIES unset), and migration 096 created
+      # the extension out of PUBLIC's reach, so the view answers and counts the
+      # brain's own statements by now — the server's calls of thought_stats'
+      # and keyword search's functions above, in the brain's database (the
+      # tier step's replay calls one in its copy), which no migration calls — and
+      # holds no role statement, whose text an ALTER ROLE … PASSWORD would
+      # carry. The exporter that reads it runs under the observability
+      # profile, which CI does not start.
+      - name: Postgres counts the brain's statements in pg_stat_statements
+        working-directory: deploy
+        run: |
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -Atc "$1"; }
+          [ "$(q "SHOW shared_preload_libraries")" = pg_stat_statements ] || { echo "Postgres did not start with pg_stat_statements preloaded" >&2; exit 1; }
+          [ "$(q "SHOW pg_stat_statements.track_utility")" = off ] || { echo "Postgres tracks utility statements, whose text a role's password would be in" >&2; exit 1; }
+          [ "$(q "SHOW track_io_timing")" = on ] || { echo "Postgres does not time I/O: pg_stat_statements' block times read 0" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || { echo "096 did not create pg_stat_statements" >&2; exit 1; }
+          [ "$(q "SELECT has_table_privilege('public', 'pg_stat_statements', 'SELECT') OR has_function_privilege('public', 'pg_stat_statements(boolean)', 'EXECUTE')")" = f ] || { echo "PUBLIC reads pg_stat_statements: 096's revoke did not hold" >&2; exit 1; }
+          n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
+          [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
+          [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }
 
       # SMD-2294: a canary or working tier of its own compose project joins
       # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes

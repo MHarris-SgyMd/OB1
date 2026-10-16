@@ -25,10 +25,12 @@ import {
   freshnessVerdict,
   getBrainInfo,
   replayPlanFromLog,
+  replayVerdict,
   parseResultIds,
   renderComparison,
   resolveBrain,
   runCompare,
+  runTierReplay,
   splitKeyFromUrl,
   trimBase,
   unwrapRpc,
@@ -668,7 +670,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try {
     const c = await compareBrains(a.ep, b.ep, { queries: ["only"] });
     const out = renderComparison(c);
-    ok(/nothing compared — all 1 replay/.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
+    ok(/nothing compared — the one replay was skipped\./.test(out) && !/no delta — b returns/.test(out), `all-skipped retrieval reads "nothing compared", not "no delta"`);
   } finally { a.server.stop(true); b.server.stop(true); }
 }
 
@@ -866,6 +868,160 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(badSince.exitCode === 2 && /--since must be an ISO-8601 time/.test(badSince.stderr.toString()), `parseCompareArgs: a malformed --since is refused (${badSince.exitCode})`);
   const dupLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--from-log", "w"], { cwd: import.meta.dir });
   ok(dupLog.exitCode === 2 && /--from-log given twice/.test(dupLog.stderr.toString()), `parseCompareArgs: a duplicate single-value flag is refused (${dupLog.exitCode})`);
+}
+
+// ---------------------------------------------------------------------------
+// tier.ts --replay and --diff over HTTP (SMD-2875): stable's logged searches
+// replayed on both brains; --diff's exit is 1 moved, 3 nothing compared, 0
+// unmoved, and 1 when stable's log could not be read.
+// ---------------------------------------------------------------------------
+{
+  const gate = async (stableCfg: Partial<FakeConfig>, canaryCfg: Partial<FakeConfig>, opts: { since?: string; gate?: boolean; json?: boolean } = {}) => {
+    const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, ...stableCfg });
+    const b = startFake({ info: baseInfo({ tier: "canary" }), newest: "9/24/2026", hits: {}, ...canaryCfg });
+    const logFn = console.log;
+    const lines: string[] = [];
+    console.log = (...m: unknown[]) => { lines.push(m.join(" ")); };
+    let code = -1;
+    try {
+      code = await runTierReplay({ from: a.ep.base, to: b.ep.base, fromKey: KEY, toKey: KEY, since: opts.since, gate: opts.gate ?? true, json: opts.json ?? false });
+    } finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
+    return { code, out: lines.join("\n") };
+  };
+  const logged = (...qs: [string, "keyword" | "hybrid" | "current" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
+
+  const same = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1), uid(2)] } }, { hits: { q: [uid(1), uid(2)] } });
+  ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of localhost:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
+    `--diff: the canary answering as stable does passes, with the window and the counts (${same.code}: ${same.out.split("\n").slice(-2).join(" | ")})`);
+  ok(!same.out.includes(KEY), "--diff prints no key");
+
+  const moved = await gate({ log: logged(["q", "keyword"], ["r", "hybrid"]), hits: { q: [uid(1), uid(2)], r: [uid(3)] } }, { hits: { q: [uid(2), uid(1)], r: [uid(3)] } });
+  ok(moved.code === 1 && moved.out.includes("what moved: 1 of 2 replayed searches returned different ids") && /• \[keyword\] "q": reordered/.test(moved.out),
+    `--diff: a reordered ranking moves, exit 1, and is named under Retrieval (${moved.code}: ${moved.out.split("\n").slice(-1)})`);
+  const report = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(9)] } }, { gate: false });
+  ok(report.code === 0 && report.out.includes("what moved: 1 of 1"), `--replay reports the move and exits 0 (${report.code})`);
+  const reportSame = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] } }, { gate: false });
+  ok(reportSame.code === 0 && reportSame.out.includes("no ranking moved on the one replayed."), `--replay says no ranking moved (${reportSame.out.split("\n").slice(-1)})`);
+
+  const empty = await gate({ log: logged() }, {});
+  ok(empty.code === 3 && /logged no searches in the window\. A brain logs them only with OB1_QUERY_LOG=on\.$/m.test(empty.out),
+    `--diff over an empty log compared nothing: exit 3, not the pass (${empty.code}: ${empty.out.split("\n").slice(-1)})`);
+  const emptySince = await gate({ log: logged() }, {}, { since: "2026-10-01T00:00:00Z" });
+  ok(emptySince.code === 3 && emptySince.out.includes("replayed 0 of 0 distinct logged searches since 2026-10-01T00:00:00Z (--since) (0 skipped)") && emptySince.out.includes("and an earlier --since widens the window."),
+    `--diff over an empty --since window says so and offers an earlier one (${emptySince.code})`);
+  const emptyReplay = await gate({ log: logged() }, {}, { gate: false });
+  ok(emptyReplay.code === 0 && emptyReplay.out.includes("nothing to compare"), `--replay over an empty log says nothing was compared and exits 0 (${emptyReplay.code})`);
+
+  // A search both brains refuse is not compared; one only the canary fails,
+  // stable having answered it, fails the gate (review pass 1: a canary whose
+  // search broke passed as a skip).
+  const bothRefuse = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] }, refuse: ["q"] });
+  ok(bothRefuse.code === 3 && bothRefuse.out.includes("replayed 0 of 1 distinct logged searches") && bothRefuse.out.includes("nothing to compare: both brains failed every search in the window."),
+    `--diff whose every search both brains refused compared nothing: exit 3 (${bothRefuse.code})`);
+  const someSkipped = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
+  ok(someSkipped.code === 0 && someSkipped.out.includes("replayed 1 of 2 distinct logged searches") && someSkipped.out.includes("on the 1 replayed (1 skipped, not compared)."),
+    `--diff claims only the searches it compared (${someSkipped.out.split("\n").slice(-1)})`);
+  const canaryFails = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
+  ok(canaryFails.code === 1 && /failed: localhost:\d+ failed 1 that localhost:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
+    `--diff fails when the canary fails a search stable answered, the rest unmoved (${canaryFails.code}: ${canaryFails.out.split("\n").slice(-1)})`);
+  ok(canaryFails.out.includes("✗ [hybrid] \"q\": b failed, a answered") && canaryFails.out.includes("1 replay failed on one brain and answered on the other — a delta.") && !canaryFails.out.includes("no delta")
+      && !canaryFails.out.includes("~ [hybrid]") && canaryFails.out.includes("replayed 1 of 2 distinct logged searches in the most recent page of") && /\(0 skipped, 1 failed on one brain\)/.test(canaryFails.out) && !/localhost:(\d+): localhost:\1:/.test(canaryFails.out),
+    `the report shows the one-sided failure apart and does not call it no delta (${canaryFails.out.split("\n").filter((l) => l.includes("✗") || l.includes("delta")).join(" | ")})`);
+  // A one-sided failure beside a moved ranking: both are said.
+  const failedAndMoved = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2), uid(3)] } }, { hits: { q: [uid(1)], r: [uid(3), uid(2)] }, refuse: ["q"] });
+  ok(failedAndMoved.code === 1 && failedAndMoved.out.includes("what moved: 1 of 1 replayed searches returned different ids") && /^failed: /m.test(failedAndMoved.out),
+    `a one-sided failure beside a moved ranking says both (${failedAndMoved.out.split("\n").slice(-2).join(" | ")})`);
+  const canaryFailsReplay = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(1)] }, refuse: ["q"] }, { gate: false });
+  ok(canaryFailsReplay.code === 1, `--replay exits 1 on it too: a failed step, not a report (${canaryFailsReplay.code})`);
+  const stableFails = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] } });
+  const stableLine = stableFails.out.split("\n").find((l) => l.startsWith("failed:")) ?? "";
+  ok(stableFails.code === 1 && /^failed: localhost:(\d+) failed 1 that localhost:\d+ answered/.test(stableLine) && stableFails.out.includes("a failed, b answered — localhost:"),
+    `--diff fails, naming stable, when stable fails a search it logged (${stableFails.code}: ${stableLine})`);
+
+  // Searches logged with no arm (before migration 045) are counted, not lost.
+  const noArmOnly = await gate({ log: logged(["q", null], ["r", null], ["r", null]) }, {});
+  ok(noArmOnly.code === 3 && noArmOnly.out.includes("(0 skipped; 2 more logged with no arm, before migration 045, not replayed)") && noArmOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on."),
+    `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
+  const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
+  ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
+
+  // A page whose searches are not a list is a log not read, not an empty one.
+  const badPage = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, log: { searches: "nope" as unknown as [] } });
+  let badThrew = "";
+  try { await fetchLoggedSearches(badPage.ep, null); } catch (e) { badThrew = (e as Error).message; } finally { badPage.server.stop(true); }
+  ok(/returned no list of searches/.test(badThrew), `a page whose searches are not a list is refused, not read as empty (${badThrew})`);
+  const unread = await gate({}, {});
+  ok(unread.code === 1 && unread.out.includes("nothing replayed: the log of localhost:") && unread.out.includes("could not be read."), `--diff whose stable has no list_logged_searches is a failed step, exit 1 (${unread.code})`);
+  const unreadReplay = await gate({}, {}, { gate: false });
+  ok(unreadReplay.code === 1, `--replay whose stable log could not be read exits 1 too (${unreadReplay.code})`);
+
+  const json = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] } }, { hits: { q: [uid(2)] } }, { json: true });
+  let parsed: { gate?: string } = {};
+  try { parsed = JSON.parse(json.out); } catch { /* left empty */ }
+  ok(json.code === 1 && parsed.gate === "moved" && !json.out.includes(KEY), `--diff --json carries the verdict and no key (${json.code}, ${parsed.gate})`);
+
+  ok(replayVerdict({ rows: [], arms: [], queries: 0, source: "s", sourceError: "x" }) === "unread" && replayVerdict({ rows: [], arms: [], queries: 0, source: "s" }) === "empty", "replayVerdict: a log not read is unread, an empty one empty");
+  // --compare counts a search one brain failed and the other answered as a delta too.
+  {
+    const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] } });
+    const b = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] }, refuse: ["q"] });
+    const logFn = console.log;
+    console.log = () => {};
+    let code = -1;
+    try { code = await runCompare({ a: a.ep.base, b: b.ep.base, aKey: KEY, bKey: KEY, replay: true, hybrid: false, queries: ["q"], json: false }); }
+    finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
+    ok(code === 1, `--compare exits 1 when one brain fails a search the other answers (${code})`);
+  }
+
+  // The CLI, end to end, against the fakes in this process (an async spawn, so
+  // they can answer). A child gets the key from OB1_COMPARE_KEY, or none.
+  const cli = async (args: string[], key: string | null) => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.OB1_COMPARE_KEY;
+    if (key !== null) env.OB1_COMPARE_KEY = key;
+    const proc = Bun.spawn(["bun", "--no-env-file", "tier.ts", ...args], { cwd: import.meta.dir, env, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    return { code: await proc.exited, out, err };
+  };
+  const a = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: { q: [uid(1)] }, log: logged(["q", "keyword"]) });
+  const b = startFake({ info: baseInfo({ tier: "canary" }), newest: "9/24/2026", hits: { q: [uid(2)] } });
+  try {
+    const run = await cli(["--diff", "--from", a.ep.base, "--to", b.ep.base], KEY);
+    ok(run.code === 1 && run.out.includes("what moved: 1 of 1"), `tier.ts --diff over HTTP exits 1 on a move (${run.code}: ${run.err.trim()})`);
+    const noKey = await cli(["--diff", "--from", a.ep.base, "--to", b.ep.base], null);
+    ok(noKey.code === 1 && /tier\.ts: error: --diff: no read key for localhost:\d+\. Pass --from-key\/--to-key, set OB1_COMPARE_KEY/.test(noKey.err),
+      `tier.ts --diff with no key names its own flags, not --compare's (${noKey.code}: ${noKey.err.trim()})`);
+  } finally { a.server.stop(true); b.server.stop(true); }
+
+  // Its grammar, refused before any network.
+  const refused = (args: string[], re: RegExp, what: string) => {
+    const child = Bun.spawnSync(["bun", "--no-env-file", "tier.ts", ...args], { cwd: import.meta.dir });
+    ok(child.exitCode === 2 && re.test(child.stderr.toString()), `tier.ts ${what} is refused with exit 2 (${child.exitCode}: ${child.stderr.toString().split("\n")[0]})`);
+  };
+  refused(["--diff", "--from", "postgres://postgres:pw@stable:5432/openbrain", "--to", "http://127.0.0.1:1/mcp"], /--diff runs over HTTP now \(SMD-2875\): --from is a brain's MCP URL or connector name, not a database\./, "--diff given a database URL");
+  refused(["--replay", "--from", "open-brain", "--to", "postgresql://c/openbrain"], /--replay runs over HTTP now \(SMD-2875\): --to is/, "--replay given a database URL for --to");
+  refused(["--replay", "--diff", "--from", "a", "--to", "b"], /Give exactly one verb \(--refresh, --replay, --diff, --promote\), not 2\./, "--replay with --diff");
+  refused(["--diff", "--refresh", "--from", "a", "--to", "b"], /Give exactly one verb/, "--diff with --refresh");
+  refused(["--diff", "--from", "a"], /--diff needs --from and --to\./, "--diff with no --to");
+  refused(["--diff", "--from", "a", "--to", "b", "--since", "yesterday"], /--since must be an ISO-8601 time/, "--diff with a malformed --since");
+  // A redirect is not followed with the key (review pass 4): a 307 elsewhere is a failed read.
+  {
+    let elsewhere = 0;
+    const sink = Bun.serve({ port: 0, fetch() { elsewhere++; return new Response("ok"); } });
+    const hop = Bun.serve({ port: 0, fetch() { return new Response(null, { status: 307, headers: { location: `http://localhost:${sink.port}/health` } }); } });
+    let threw = "";
+    try { await getBrainInfo({ label: "hop", base: `http://localhost:${hop.port}`, key: KEY }); } catch (e) { threw = (e as Error).message; }
+    finally { sink.stop(true); hop.stop(true); }
+    ok(elsewhere === 0 && /hop: could not be reached/.test(threw), `a redirect to another host is not followed with the key (${elsewhere} request(s) reached it; ${threw.slice(0, 80)})`);
+  }
+  {
+    for (const ref of ["http://edge:s3cret-pw@bad host/mcp", "http://edge:s3c?ret-pw@bad host/mcp", "http://edge:s3c/ret-pw@bad host/mcp"]) {
+      const child = Bun.spawnSync(["bun", "--no-env-file", "tier.ts", "--diff", "--from", ref, "--to", "http://127.0.0.1:1/mcp"], { cwd: import.meta.dir, env: { ...process.env, OB1_COMPARE_KEY: "k" } });
+      const err = child.stderr.toString();
+      ok(!/s3c|ret-pw/.test(err) && /is not a valid URL/.test(err), `an invalid URL's user and password are not echoed, a raw ? or / in it included (${err.trim().slice(0, 100)})`);
+    }
+  }
+  refused(["--diff", "--from", "a", "--to", "b", "--tier", "canary"], /unknown argument 6: not a flag this script has/, "--diff with --tier, a --refresh flag");
 }
 
 console.log(`\ntest-brain-compare: ${pass} passed, ${fail} failed`);

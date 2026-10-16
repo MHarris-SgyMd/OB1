@@ -156,6 +156,8 @@ main() {
   nodb .                 dashboards/open-brain-dashboard/test-parsers.ts
   nodb .                 deploy/forwarder.ts --self-check
   nodb .                 deploy/instance.ts --self-check
+  nodb .                 deploy/edge/edge.ts --self-check
+  nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
   nodb server-portable    test-auth.ts
   nodb server-portable    test-rest.ts
@@ -190,6 +192,7 @@ main() {
   nodb db                 ingest-markdown.ts --self-check
   nodb db                 ingest-items.ts --self-check
   nodb db                 ingest-records.ts --self-check
+  nodb db                 bench-live.ts --self-check
   nodb db                 test-replay.ts
   nodb db                 test-brain-compare.ts
   nodb db                 test-cli.ts

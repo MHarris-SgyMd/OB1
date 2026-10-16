@@ -195,6 +195,51 @@ export interface WorkerHeartbeat {
   waiting?: ("extract" | "consolidate")[];
   /** The start refusal that ended the sleep scheduler, one of db/worker-bootstrap.ts's START_REFUSALS (SMD-2752); absent otherwise, and for the other workers. */
   refused?: SleepRefusal;
+  /**
+   * The thoughts extraction holds back across the sleep scheduler's wakes —
+   * pending or in flight with a hard stop counted on them (migration 093,
+   * SMD-2694): how many, and up to three, the most stalled first, each with
+   * its stops, the latest of them in a row that gained no window, and its
+   * windows kept of how many. Absent while none is, and for the other workers.
+   */
+  held?: SleepHeld;
+}
+
+/** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
+export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null };
+export type SleepHeld = { total: number; thoughts: HeldThought[] };
+
+/**
+ * The long hard stops in a row with no window saved between, and none since,
+ * after which the sleep scheduler lets consolidation join past a thought
+ * extraction still holds (db/sleep.ts, SMD-2694): a window that outlasts
+ * every sleep, or stops landing past its last. Here, as preflight's `sleep`
+ * row names such a thought by the same number.
+ */
+export const SLEEP_STALLED_JOIN = 3;
+/** The most held thoughts the scheduler's row names. */
+export const SLEEP_HELD_NAMED = 3;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A held thought in words, the scheduler's and preflight's: "<id>, 7 of 24 window(s) kept over 3 stop(s), the last 2 with none gained". */
+export function heldWords(t: HeldThought): string {
+  const kept = t.kept ? `${t.kept}${t.windows ? ` of ${t.windows}` : ""} window(s) kept` : "no window kept";
+  return `${t.id}, ${kept} over ${t.stops} stop(s)${t.stalled ? `, the last ${t.stalled} with none gained` : ""}`;
+}
+
+/** A `held` value as db/sleep.ts writes it, or undefined: every thought of the shape, at most SLEEP_HELD_NAMED and no more than the total. */
+function parseHeld(h: unknown): SleepHeld | undefined {
+  if (h === null || typeof h !== "object") return undefined;
+  const { total, thoughts } = h as { total?: unknown; thoughts?: unknown };
+  if (!count(total) || (total as number) < 1 || !Array.isArray(thoughts) || thoughts.length < 1 || thoughts.length > Math.min(SLEEP_HELD_NAMED, total as number)) return undefined;
+  const out: HeldThought[] = [];
+  for (const t of thoughts as Record<string, unknown>[]) {
+    if (t === null || typeof t !== "object" || typeof t.id !== "string" || !UUID.test(t.id)) return undefined;
+    if (!count(t.stops) || (t.stops as number) < 1 || !count(t.stalled, t.stops as number) || !count(t.kept)) return undefined;
+    if (!(t.windows === null || (count(t.windows) && (t.windows as number) > 1 && (t.kept as number) <= (t.windows as number)))) return undefined;
+    out.push({ id: t.id, stops: t.stops as number, stalled: t.stalled as number, kept: t.kept as number, windows: t.windows as number | null });
+  }
+  return { total: total as number, thoughts: out };
 }
 
 /**
@@ -223,8 +268,10 @@ const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number
  * write ob1_config, so a row counts only in full: a key naming a known worker
  * (board-sync without a job, the claim workers with one, of a bounded token
  * alphabet), a value of the version db/pass-stamp.ts writes, numbers that are
- * counts, the enums as written, and the database's own instant. Anything else
- * is counted in `ignored`, and its text goes nowhere.
+ * counts, the enums as written, the database's own instant, and the sleep
+ * scheduler's held thought ids, each held to a uuid (parseHeld; read-scoped
+ * as brain_info is, as list_thought_ids is). Anything else is counted in
+ * `ignored`, and its text goes nowhere.
  */
 export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown; total?: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
   const heartbeats: WorkerHeartbeat[] = [];
@@ -277,6 +324,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ? (w as ("extract" | "consolidate")[])
       : undefined;
     const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    // The thoughts its wakes hold back (SMD-2694), left off when not of the shape.
+    const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -293,6 +342,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(reads ? { reads } : {}),
       ...(waiting ? { waiting } : {}),
       ...(refused ? { refused } : {}),
+      ...(held ? { held } : {}),
     });
   }
   return { heartbeats, ignored };

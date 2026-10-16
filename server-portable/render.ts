@@ -19,7 +19,7 @@
 
 import { displayDate } from "./thoughts.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY, TRUST } from "./core/filter.ts";
@@ -36,7 +36,7 @@ export type Reply = { content: { type: "text"; text: string }[]; isError?: true;
 type Safe<T> = (v: T) => object;
 /** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
 const AS_JSON = Symbol("the value is the text's JSON");
-/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums and bounded tokens (parseHeartbeats). */
+/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums, bounded tokens and the sleep scheduler's held thought ids, each held to a uuid (parseHeartbeats, parseHeld). */
 const AS_RECORD = Symbol("the value is the server's own record");
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */
@@ -57,7 +57,7 @@ const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy)$|Id$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto)$|Id$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -157,9 +157,16 @@ const safeProposals: Safe<ProposalsResult> = (v) => ({
   proposals: v.proposals.map((p) => ({
     id: p.id, status: p.status, verdict: p.verdict, confidence: p.confidence, similarity: p.similarity,
     judgedAt: p.judgedAt, reviewedAt: p.reviewedAt, supersedingId: p.supersedingId, lineage: p.lineage,
-    older: { id: p.older.id, created_at: p.older.created_at, edited: p.older.edited },
-    newer: { id: p.newer.id, created_at: p.newer.created_at, edited: p.newer.edited },
+    older: safeSide(p.older), newer: safeSide(p.newer),
+    // SMD-2707: the flags are words and booleans; the writers' names are in the text.
+    sameCapturer: p.sameCapturer, writerFlags: standingFlags(p),
   })),
+});
+/** One side of a proposal in the value: its id, date and edit, and (094) its trust, whose text it is and what supersedes it. */
+const safeSide = (s: ProposalSide) => ({
+  id: s.id, created_at: s.created_at, edited: s.edited,
+  ...(s.writer ? { trust: oneOf(TRUST, s.writer.trust), captureOnly: s.writer.captureOnly } : {}),
+  supersededBy: s.supersededBy ?? null, lapses: s.lapses ?? [],
 });
 /** thought_stats: the totals and the date range — the breakdowns' keys are extracted words, in the text's top ten. */
 const safeStats: Safe<ThoughtStats> = (v) => ({ total: v.total, aggregated: v.aggregated, oldest: v.oldest, newest: v.newest });
@@ -293,6 +300,120 @@ export const INGESTED_NOTICE = "⚠ Ingested: captured from an external source; 
 export function ingestedNotice(m: Record<string, unknown> | null | undefined): string | null {
   return trustOf(m) === "ingested" ? INGESTED_NOTICE : null;
 }
+
+/** 074's ladder as a rank — operator 3, agent 2, ingested 1 — and 0 for no trust recorded or a word off it, below every word (filter.ts). */
+export function trustRank(t: string | null | undefined): number {
+  const i = (TRUST as readonly string[]).indexOf(t ?? "");
+  return i < 0 ? 0 : TRUST.length - i;
+}
+
+/**
+ * Why a proposal is flagged WRITER (SMD-2707): the side that stands, which of
+ * the two rules it meets, and how sure the side is — `stood` on an accepted
+ * row (its superseding_id), `would` when the verdict or --direction names it,
+ * `if` for each side an undirected verdict leaves to the reviewer.
+ */
+export type StandingFlag = { stands: "newer" | "older"; captureOnly: boolean; lowerTrust: boolean; how: "stood" | "would" | "if"; sameKey?: true };
+
+/**
+ * The WRITER flags on a proposal (SMD-2707). The side that stands is the
+ * superseding one: on an accepted row the one its superseding_id names;
+ * else `direction` when given (review_supersession_proposal takes it over
+ * the verdict, 029), else the verdict's, and both sides for an undirected
+ * verdict, each the reviewer may pick. It is flagged when its text is a
+ * capture-only key's and the accept would pass another's standing to it —
+ * the other side's capturer is another, or the accept would take the side
+ * (ob1_accept_takes) though one key captured both — or both sides have a
+ * trust recorded and its ranks below the other's — a side with none recorded
+ * is not flagged for it (the maintainer's choice, review pass 1: an
+ * unclassified key's, a raw write's or an unbackfilled row's is not a lower
+ * one). Nothing on a row from before 094, which carries no writer. One rule
+ * for the reply, `--list` and the CLI's accept guard.
+ */
+export function standingFlags(
+  p: { verdict: string; sameCapturer: boolean; status?: string; supersedingId?: string | null; older: { id?: string; writer: ProposalWriter | null; takes?: boolean }; newer: { id?: string; writer: ProposalWriter | null; takes?: boolean } },
+  direction?: "newer" | "older",
+): StandingFlag[] {
+  const stood = p.status === "accepted" && p.supersedingId ? (p.supersedingId === p.newer.id ? "newer" : p.supersedingId === p.older.id ? "older" : null) : null;
+  const named = stood ?? direction ?? (p.verdict === "newer_supersedes_older" ? "newer" : p.verdict === "older_supersedes_newer" ? "older" : null);
+  const how: StandingFlag["how"] = stood ? "stood" : named ? "would" : "if";
+  const sides: ("newer" | "older")[] = named ? [named] : ["newer", "older"];
+  return sides.flatMap((stands) => {
+    const me = p[stands].writer, other = p[stands === "newer" ? "older" : "newer"].writer;
+    if (!me || !other) return [];
+    // One capturer's two thoughts pass nobody's standing — unless the accept
+    // would take the side all the same: the other side taken since (a write
+    // key's edit, its chain accepted over a third's), as 092 reads it
+    // (review pass 4).
+    const captureOnly = me.captureOnly && (!p.sameCapturer || p[stands].takes === true);
+    const lowerTrust = trustRank(me.trust) > 0 && trustRank(other.trust) > 0 && trustRank(me.trust) < trustRank(other.trust);
+    // sameKey: flagged though one key captured both — said, or the two By:
+    // lines read alike with no reason shown (review pass 5).
+    return captureOnly || lowerTrust ? [{ stands, captureOnly, lowerTrust, how, ...(captureOnly && p.sameCapturer ? { sameKey: true as const } : {}) }] : [];
+  });
+}
+
+/** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
+export function standingFlagText(f: StandingFlag): string {
+  const why = [f.captureOnly && (f.sameKey ? "its text is a capture-only key's — the other side's key too, but the accept would take this side from it" : "its text is a capture-only key's"), f.lowerTrust && "its trust is below the other side's"].filter(Boolean).join(" and ");
+  const side = f.stands.toUpperCase();
+  return f.how === "stood" ? `the ${side} side stands: ${why}` : f.how === "would" ? `an accept would make the ${side} side stand: ${why}` : `with --direction ${f.stands}, an accept would make the ${side} side stand: ${why}`;
+}
+
+/**
+ * The WRITER line's flags in words, each with the pointers its accept would
+ * also clear — a second write the reviewer should not miss past --force
+ * (review pass 4). One wording for the reply and --list.
+ */
+export function writerFlagsText(flags: StandingFlag[], p: { older: { lapses?: unknown[] }; newer: { lapses?: unknown[] } }): string {
+  return flags.map((f) => {
+    const n = p[f.stands].lapses?.length ?? 0;
+    return standingFlagText(f) + (n ? `, and it clears ${n === 1 ? "a capture-only pointer" : `${n} capture-only pointers`} (listed under the ${f.stands.toUpperCase()} side)` : "");
+  }).join("; ");
+}
+
+/** What a reviewer reads after a pending row's WRITER flags: the accept they need. One wording for the reply and --list. */
+export function writerFlagAdvice(flags: StandingFlag[]): string {
+  const open = flags.filter((f) => f.how === "if").length;
+  return ` — read both writers before accepting; ${open > 1 ? "each direction's accept takes" : open ? "that direction's accept takes" : "the accept takes"} --force`;
+}
+
+/**
+ * A proposal side's writer (SMD-2707): the read tools' `By:` line (actorLine)
+ * and, when its text is a capture-only key's alone, that said beside it.
+ */
+export function proposalWriterLine(w: ProposalWriter): string {
+  const by = actorLine({ actor_name: w.name, actor_kind: w.kind, trust: w.trust }) ?? "By: not recorded";
+  return w.captureOnly ? `${by} · a capture-only key's text` : by;
+}
+
+/** What supersedes a proposal side (SMD-2707): the first thought, by capture time. */
+export function supersededLine(id: string): string {
+  return `superseded by ${id}`;
+}
+
+/**
+ * What an accept making a side stand would lapse (SMD-2707, ob1_accept_lapses):
+ * the accept takes the side (092), and 082's lapse clears its capturer's
+ * capture-only pointers onto it and up the chain — each pair the pointer's
+ * thought and the thought it pointed at, which that one no longer supersedes
+ * (review pass 2: "this side reads current again" was false for a pointer
+ * onto a row above it, and for a side another thought still supersedes).
+ */
+export function lapsesLine(lapses: { id: string; onto: string }[], side: string): string {
+  const pairs = lapses.map((l) => `${l.id} onto ${l.onto === side ? "this side" : l.onto}`).join(", ");
+  return lapses.length === 1
+    ? `an accept that makes this side stand clears a capture-only pointer, ${pairs}: it then no longer supersedes what it pointed at`
+    : `an accept that makes this side stand clears ${lapses.length} capture-only pointers, ${pairs}: each then no longer supersedes what it pointed at`;
+}
+
+/** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
+export function stoodSide(p: { status: string; supersedingId: string | null; older: { id: string }; newer: { id: string } }): string | null {
+  return p.status !== "accepted" || !p.supersedingId ? null : p.supersedingId === p.newer.id ? "NEWER" : p.supersedingId === p.older.id ? "OLDER" : null;
+}
+
+/** The line a listing from before 094 carries once: it returns no writer to show. */
+export const WRITERS_UNREAD = "Writers not shown: this brain's listing is from before migration 094 (db/migrations/094_listing_names_the_writers.sql).";
 
 /**
  * The line under a hit prefer_current demoted (059, SMD-2255): the weight it
@@ -597,8 +718,21 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
       : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
       : "one is out of date, which not stated — accepting needs --direction newer or older";
+    // SMD-2707: each side under its text — the ID line first, as before, then
+    // who wrote it (094) and what supersedes it. An ingested side's notice
+    // goes before its text (SMD-1724's rule), the text then behind a label
+    // of its own, so no line of it is an `ID:` line.
+    const side = (label: "newer" | "older", s: ProposalSide) => {
+      const notice = s.writer ? ingestedNotice({ trust: s.writer.trust }) : null;
+      const head = `   ${label} [${day(s.created_at)}]${s.edited ? " (edited since judged)" : ""}`;
+      return `\n${notice ? `${head} ${notice}\n      text: ${snip(s.content)}` : `${head}: ${snip(s.content)}`}\n      ID: ${s.id}` +
+        (s.writer ? `\n      ${proposalWriterLine(s.writer)}` : "") +
+        (s.supersededBy ? `\n      ${supersededLine(s.supersededBy)}` : "") +
+        (s.lapses?.length ? `\n      ${lapsesLine(s.lapses, s.id)}` : "");
+    };
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
+      const flags = standingFlags(p);
       const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
       // SMD-2533: the judge's reason and the review note on one line each, the
       // reason behind its label — a reason reading `ID: <uuid>` (a judge reads
@@ -607,23 +741,35 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       // keeps both whole (the value carries neither, safeProposals).
       const reason = p.reason === null ? "" : snipText(p.reason, PROPOSAL_TEXT_MAX);
       const note = p.reviewNote === null ? "" : snipText(p.reviewNote, PROPOSAL_TEXT_MAX);
-      // 070: the CLI refuses an accept on a lineage pair without --force.
+      // 070: the CLI refuses an accept on a lineage pair without --force;
+      // SMD-2707: and on a WRITER flag.
+      // An undirected verdict a flag splits: each direction its own accept,
+      // --force on the one that needs it (review pass 1).
+      const force = (d?: "newer" | "older") => (edited || p.lineage || flags.some((f) => !d || f.stands === d) ? " --force" : "");
+      const accept = p.verdict === "conflict_undirected" && flags.length
+        ? `--accept ${p.id} --direction newer${force("newer")}   or … --accept ${p.id} --direction older${force("older")}`
+        : `--accept ${p.id}${dir}${force()}`;
       const review = p.status === "pending"
-        ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited || p.lineage ? " --force" : ""}   reject: … --reject ${p.id}` +
+        ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL ${accept}   reject: … --reject ${p.id}` +
           (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
-        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${note ? `: ${note}` : ""}`;
+        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${stoodSide(p) ? ` — the ${stoodSide(p)} side stands` : ""}${note ? `: ${note}` : ""}`;
       // 070 (SMD-2313): a lineage pair — one side derived from the other
       // — is never proposed since 066; a row standing on one is the
       // reviewer's to reject, said with the command while it is theirs.
       const lineageLine = p.lineage
         ? `\n   LINEAGE PAIR: one side's derived_from names the other (a derivation and its input) — never proposed since migration 066${p.status === "pending" || p.status === "stale" ? `; reject it: cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} --note "lineage pair (066)"` : p.status === "accepted" ? `; accepted while the derivation names its input — cd db && bun consolidate.ts --url $DATABASE_URL --reject ${p.id} clears the pointer (029)` : ""}`
         : "";
-      return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}` +
-        `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
-        `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
+      // SMD-2707: the side to stand is a capture-only key's text or of lower
+      // trust — the reviewer reads both writers before an accept.
+      const writerLine = flags.length
+        ? `\n   WRITER: ${writerFlagsText(flags, p)}${p.status === "pending" ? writerFlagAdvice(flags) : ""}`
+        : "";
+      return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${flags.length ? "  WRITER" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}${writerLine}` +
+        side("newer", p.newer) + side("older", p.older) +
         `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
     });
-    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`;
+    const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
+    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;
   }, unknownRefusal, safeProposals);
 }
 
