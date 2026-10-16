@@ -14860,12 +14860,17 @@ console.log("\n[88] Migration 098: an unlink takes the review lock — update_th
   const repoint = await held(PROV, [t, JSON.stringify({ supersedes: u })]);
   const unlink = await held(PROV, [t, JSON.stringify({ supersedes: null })]);
   const unlinkAgain = await held(PROV, [t, JSON.stringify({ supersedes: null })]);
-  const patch = await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb)`, [t, JSON.stringify({ topic: "88" })]);
+  // With a change of text too — the fingerprint lock taken after it — the
+  // one call holds the review lock as well (review pass 1: a gate skipped
+  // when content arrives passed every other cell).
+  const unlinkText = await held(`update_thought($1::uuid, $2::text, p_provenance => $3::jsonb)`, [t, "[88] the row edited, unlinked with new text", JSON.stringify({ supersedes: null })]);
+  await db.query(`SELECT update_thought($1::uuid, $2::text)`, [t, "[88] the row edited"]);
+  const patch =await held(`update_thought($1::uuid, p_metadata_patch => $2::jsonb)`, [t, JSON.stringify({ topic: "88" })]);
   const derived = await held(PROV, [t, JSON.stringify({ derived_from: [u] })]);
   const text = await held(`update_thought($1::uuid, $2::text)`, [t, "[88] the row edited, new text"]);
   const pointer = (await one<{ s: string | null }>(`SELECT supersedes AS s FROM thoughts WHERE id = $1`, [t])).s;
-  assert(repoint.ok && repoint.n === 1 && unlink.ok && unlink.n === 1 && unlinkAgain.ok && unlinkAgain.n === 1 && pointer === null,
-    `a re-point, an unlink and an unlink of an unlinked row each hold the review lock to the end of the call's transaction (${[repoint, unlink, unlinkAgain].map((x) => x.n).join(", ")}), the pointer cleared`);
+  assert(repoint.ok && repoint.n === 1 && unlink.ok && unlink.n === 1 && unlinkAgain.ok && unlinkAgain.n === 1 && unlinkText.ok && unlinkText.n === 1 && pointer === null,
+    `a re-point, an unlink, an unlink of an unlinked row and an unlink with a change of text each hold the review lock to the end of the call's transaction (${[repoint, unlink, unlinkAgain, unlinkText].map((x) => x.n).join(", ")}), the pointer cleared`);
   assert(patch.ok && patch.n === 0 && derived.ok && derived.n === 0 && text.ok && text.n === 0,
     `…and an edit naming no supersedes takes none — a patch, a derived_from alone, a change of text (${[patch, derived, text].map((x) => x.n).join(", ")})`);
 

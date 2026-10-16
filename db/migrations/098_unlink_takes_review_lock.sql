@@ -14,8 +14,8 @@
 --   ob1_lapse_walk) and then clears what it found. An unlink committed in
 --   between moves a link out of that tree, and the lapse still clears the
 --   capture-only pointers above it: SMD-3035's review pass 2 raced it live
---   (a pg_sleep between the walk and the clears; the unlink returned 404 ms
---   into it, and the hook's pointer above the unlinked link lapsed, the
+--   (a pg_sleep between the walk and the clears; in that pass's run the
+--   unlink returned 404 ms in, and the hook's pointer above it lapsed, the
 --   accept ordered after an unlink it read before). The same pass found a
 --   40P01 that is the same gap: one transaction unlinked a row (its row
 --   lock, no review lock), then re-pointed it (the review lock, held by the
@@ -38,31 +38,41 @@
 --   unlink's too, as it is a re-point's and delete_thought's (036), so
 --   SMD-3035's 40P01 above has no crossing left: the unlink waits for the
 --   accept, or the accept for the unlink's transaction. Outside the order,
---   as before and now for an unlink as for a re-point: a writer's own
---   transaction of several calls that holds a row (a content edit, say) and
---   then writes a pointer — a clear now too — waits on the lock while an
---   accept holding it waits on that row, which Postgres breaks with 40P01
---   where an unlink used to pass. No shipped caller makes one (each store
---   call is a transaction of its own); taking the lock first, which is
---   re-entrant, or writing the pointer first, keeps one in the order.
+--   as before: a writer's own transaction of several calls that holds a row
+--   (a content edit, say) and then takes the review lock by any call — a
+--   pointer write, a clear now too, a delete, a citation, rebuild_derived,
+--   an accept — waits on the lock while a holder of it waits on that row,
+--   which Postgres breaks with 40P01. Since this file that holder can be a
+--   single-call unlink of the row, where under 088 the unlink waited on the
+--   row and then passed (a re-point there closed the same cycle under
+--   both; review pass 1, raced live). No shipped caller makes such a
+--   transaction (each store call is a transaction of its own); taking the
+--   lock first, which is re-entrant, keeps one in the order.
 --
 -- NOT HERE
 --   * 097's NOT HERE says that under an accept "only an unlink (which takes
---     none, 088) moves one" out from under the walk. Since this file none
---     does: every write of a pointer through update_thought, every delete
---     and the review path wait on the lock the accept holds. 097 stands as
---     written — migrations are append-only (migrate.ts checks each file's
---     sha256) — and db/README says it.
+--     none, 088) moves one" out from under the walk. Since this file no
+--     write function moves one out: every write of a pointer through
+--     update_thought, every delete and the review path wait on the lock the
+--     accept holds. Two writes still take none and move nothing out: a
+--     first capture naming supersedes (a new row, nothing above it; 092's
+--     check refuses or waits on a capture-only pointer onto the tree), and
+--     another taker's own lapse clears, which clear only what the accept's
+--     walk would and which its re-read under the lock then skips. 097
+--     stands as written — migrations are append-only (migrate.ts checks
+--     each file's sha256) — and db/README says it.
 --   * A taker that holds no review lock — a write key's re-capture, a text
---     move — still has the window between the walk's read and its clears:
---     SMD-3046.
+--     move, board-sync's adoption (082's takings) — still has the window
+--     between the walk's read and its clears: SMD-3046.
 --
 -- SAFETY
 --   One function redefined under its own signature; its comment. MINOR:
 --   nothing changes shape, no data step. EXECUTE as before. Re-applying 088
---   — or 060, 061 or 073, which also hold update_thought — puts an older
---   gate back; this file, applied after it, restores the lock — the
---   re-apply order. test-schema [88], test-live [6j], test-upgrade [20ar].
+--   — or 061 or 073, which also hold the 11-argument update_thought — puts
+--   the older gate back (060's 10-argument form lands beside it, which
+--   preflight refuses); this file, applied after it, restores the lock and
+--   drops an older form — the re-apply order. test-schema [88], test-live
+--   [6j], test-upgrade [20ar].
 --
 -- Prerequisites
 --   073 (ob1_declared_trust, ob1_actor_stamp; 088's body carries 073's).
