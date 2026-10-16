@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2833 assertions: 2833 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-three (93) migrations applied, and
+`bun test-schema.ts` prints `2874 assertions: 2874 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-five (95) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1486,6 +1486,85 @@ worker deletes it at a succeeded release; a failed release keeps it, so
 `--retry-failed` resumes. It needs 015 only. See **Long thoughts resume**
 under [`extract-entities.ts`](#extract-entitiests). test-schema [83], test-upgrade [20an],
 test-live [10] and [10g], server-portable/test-local-provider.ts.
+
+Migration 094 has a supersession proposal's review name who wrote each side
+(SMD-2707). `db/consolidate.ts --list` and the `list_supersession_proposals`
+tool showed both texts, cut at 160 or 200 characters, and nothing of their
+writers, so a capture-only key's near-copy proposed to stand over a write
+key's thought read as "keep either copy" (SMD-1873's review pass 3). The file
+adds four functions:
+
+- `ob1_capture_only_text` — the thought's first capture was under a
+  capture-only key and 082's log has not taken it (no re-capture by a key that
+  can read, no text move, no adoption; an accept's taking leaves it true).
+- `ob1_accept_takes(side, other)` — 092's taken read with the side's pointer
+  read as the other: whether an accept making the side stand takes it.
+- `ob1_accept_lapses(side, other)` — 092's lapse read and not written: the
+  pointers an accept making `side` stand over `other` would clear, each with
+  the thought it pointed at (none when the accept writes no event — the side
+  already points somewhere, or the pointer would loop or run past
+  `update_thought`'s 1,001-row walk — or the new pointer does not take the
+  side; then its capturer's capture-scoped pointers onto it and up the
+  chain).
+- `list_proposal_writers(uuid[])` — for the proposals named, each side's
+  `actor_name`, `actor_kind` and trust (050, 073), whether its text is a
+  capture-only key's alone, its first superseder, what an accept making it
+  stand would lapse (none on an accepted row), whether that accept would take
+  it, and whether one agent captured both sides.
+
+It is a companion, not a redefinition of 070's listing: a table-returning
+function cannot gain columns under `CREATE OR REPLACE`, and dropping and
+recreating 070's form with more columns broke every re-apply after it (070
+re-applied in order met a form it could not replace). The stores and `--list`
+call the listing, then `list_proposal_writers` with the page's ids (a row it
+does not return is a proposal gone in between, dropped); the CLI's accept
+guard calls it alone. Each listed proposal reads both sides' takes and lapses,
+so a page costs with its chains: 20-30 ms for a realistic page of 200, about
+7 s for 200 proposals each under a 1,000-link chain. Both listings print each
+side's `By:` line, the ingested notice before an ingested side's text
+(SMD-2480's proposals half), the superseder and what an accept would lapse. A proposal is flagged WRITER when the side that
+stands is a capture-only key's text and the accept would pass another's
+standing to it — the other side another capturer's, or one key's both and the
+accept would take the side (the other side taken since) — or when it carries
+a recorded trust below the other's (none recorded is not flagged: the
+maintainer's choice). The side that stands is the one an accepted row's
+superseding_id names, else `--direction`'s, else the verdict's, and each side
+an undirected verdict leaves open. `--accept` refuses a flagged row (pending,
+stale or rejected) without `--force`, naming both writers and any other check
+the `--force` would waive — the maintainer's choice, as for a lineage pair.
+The lineage guard now covers a rejected row too, and its refusal names a
+WRITER flag its `--force` would also waive. An undirected verdict with no
+`--direction` is asked for one first; an accept names each pointer its lapse
+cleared, read off its own transaction's events. A brain short of 094 lists
+without the writers and says so, and an accept there says the writer check did
+not run. It refuses to apply without
+016, 025, 029, 082 or 092. test-schema [84], test-upgrade [20ao], test-live
+[16], test-store-sql and test-store-postgrest [10], test-e2e-sql [13i],
+test-server [16l].
+
+Migration 095 gives the stated-status label its inputs in one call
+(SMD-2540): `ticket_status_inputs(p_ids, p_issues)` returns, tagged by
+`kind`, the hits with a lifecycle of their own (`node_state`'s open IS NOT
+NULL, never labelled), each named ticket's status now (`ob1_ticket_head`, a
+known lifecycle type, a head with no status left out), and one row per ticket
+with every status its rows held — one element per capture or update event,
+`at` in ms — in 060's `ob1_thought_events_in_order` order, never `seq` alone,
+which 046's backfill breaks. One row per ticket so PostgREST's db-max-rows
+cannot cut the newest statuses. A NULL or empty list of tickets reads no
+ticket, of ids no hit (`node_state(NULL)` would read every thought).
+
+It redefines 060's `ob1_thought_events_in_order` to the same rows in the same
+order, its list read by `thought_audit_thought_id_idx` whatever the plan: the
+old `p_thoughts IS NULL OR …` filter read the whole log when the body was not
+inlined. The label is read in the server (`server-portable/stated-status.ts`,
+the reading `evals/eval-stated-status.ts` measured and chose, held to it by the
+eval's self-check), so no search function changes and no rank moves. No grant:
+the server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
+`ob1_superseded_by` already, and a role without the order's `ob1_config` gets
+no label rather than a failed search (`node_state`'s `thought_sources` is not
+read when only `open` is). It refuses to apply without 068 or 060. test-schema
+[85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
+test-store-sql and test-store-postgrest [17].
 
 ## What changed relative to the guide
 
@@ -3189,6 +3268,112 @@ gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
 
+### bench-live.ts
+
+What a background pass costs a live call (SMD-3024). The sleep scheduler stops
+extraction and consolidation once it sees a live call recorded, to protect live
+latency; this measures that latency with and without a pass running. It times
+`search_thoughts` and `capture_thought` end to end, as a client calls them through a
+brain's MCP endpoint, with one client and each call waiting for the last. It also
+times a query embedding and a capture's metadata call directly, through the
+server's own `embed.ts` and `metadata.ts`, against the same provider. The call kinds
+are interleaved and never overlap, and one untimed call of each kind the run times
+comes first, so no timed call loads a model; a warm-up that fails is said.
+
+```bash
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
+OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
+  bun bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
+bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard; what CI runs
+```
+
+The five variables are the canary's model settings. For another brain, they, and
+any of `OB1_LLM_TIMEOUT`, `OB1_CHUNK_CONTEXT` and `OB1_JEV_*` it sets, must mirror
+its server's: the direct calls use them, and each MCP call ends at the server's own
+bound on a capture, computed from them, plus a minute (a call that makes no model
+call ends at 30 s). The banner prints what was resolved. `--mcp` names the
+endpoint. Its default is this Mac's canary on stable's origin
+(`http://127.0.0.1:8010/canary/mcp`); a stack's own endpoint is `/mcp` on its
+`SERVER_PORT` (8000 by default). The key is the stable connector's from
+`~/.claude.json`, which the canary also accepts; `--key-from` names another entry.
+
+Captures are real writes:
+- **Which brain:** it runs only against a brain whose `brain_info` says tier
+  `canary` or `working` (`OB1_TIER`). Stable (tier `stable`, or none) is refused
+  before any probe is written, and so is a plain stack. To bench one, run it with
+  `OB1_TIER=working`; its query-log rows and telemetry then carry that tier.
+- **Cleanup:** each probe starts `SMD-3024 latency probe (<label> #<i>, <instant>)`,
+  and its id is appended to `--ids` as it lands. Whatever ends the run (a normal
+  end, an error, or SIGINT, SIGTERM or SIGHUP), it deletes the probes it recorded.
+  Then it searches the brain for this run's probes whose ids never came back, since
+  a capture cut off at its deadline or whose connection dropped can still land, and
+  deletes those. It exits 1 if a probe is left, or if a capture got no answer and
+  was not found, since that one may land later; it then says how to search again.
+  A second signal stops at once and leaves the probes.
+- **After a run that died, or with `--keep-probes`:** delete the ids that run
+  appended to `--ids` (the file accumulates across runs) with `delete_thought`.
+  Then search with `search_thoughts_keyword` for `SMD-3024 latency probe (`, which
+  also finds a probe whose id never reached the file. The search ignores case,
+  returns 10 hits unless `limit` (up to 100) asks for more, and matches any thought
+  that quotes the phrase, this README and the change record included: delete only
+  a hit whose text starts with it. The audit trail keeps the probes' text, and the
+  query log their ids, until the brain's next refresh.
+- **The other brain on the same model server:** each brain's sleep yields only to
+  its own traffic (SMD-3034). Stop the other brain's sleep for the run
+  (`podman compose -p <project> --profile sleep stop sleep`, and start it after).
+  Or check that its pools are empty with the `workers` profile's one-off container:
+  `podman compose <its -f files and --env-file> -p <project> --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status`,
+  and the same with `consolidate` and `db/consolidate.ts`. Afterwards, read Ollama's
+  log (`/private/tmp/ollama-serve.log` on this Mac, where `ollama serve` writes
+  it). Every request in it comes from 127.0.0.1, the harness's direct calls and
+  both brains' servers alike, so requests are told apart only by count, prompt
+  size and latency; in the first run, the chats over 5 s were extraction's.
+
+The first run, on 2026-10-15:
+- **Setup:** the canary at 2,211 thoughts, with qwen2.5:7b at `-np 3` and
+  qwen3-embedding:4b on one Apple-silicon GPU.
+- **States:** the canary's sleep stopped, then the `workers` profile's `extract`
+  follower (which never yields) at one and two containers, against a baseline
+  taken before and after.
+- **Counts:** 40 searches, 12 captures, 30 embeds and 8 metadata calls per state;
+  the defaults are now 60, 30, 40 and 20.
+- **The figures:** each call against the mean of the same-index call in the two
+  baselines. The table gives the medians of those paired ratios for captures and
+  metadata calls, and of the paired differences for searches. Captures are 11
+  pairs: #0 is left out, because baseline's #0 loaded the model (the run predates
+  the warm-up). The bootstrap 95% intervals are in `changes/smd-3024.md`, computed
+  outside the harness.
+
+| beside | a capture | the 7B metadata call | a search |
+|---|---|---|---|
+| one extraction stream | +15% | +21% | +27 ms |
+| two | +58% | +90% | +22 ms |
+
+A capture is its own metadata call plus 10–12 ms at the median. Everything but the
+model stayed in a 4 ms band (10–14 ms) at the median across states. At this size,
+a pass costs a live call through the model, not the database.
+
+What the columns are not:
+- **Percentiles are of the ok calls.** A capture whose tagging timed out under
+  load, or a call cut off at its deadline, drops out of them; the `n` and `ok`
+  columns and the failures line show it.
+- **The direct embeds are not a search's own embedding time.** The provider keeps
+  each slot's last prompt cached (llama-server's prefix cache; the embedder has
+  one slot), so an embedding's time depends on the call before it. The direct
+  embeds use their own queries, so each is an embedding with a warm instruction
+  prefix. Ollama's log has a search's own embedding time per request.
+- **The direct metadata call is not the capture's own.** It is a separate call of
+  the same size: in the first run, about 0.1 s faster than the capture's at
+  baseline, and about 0.6 s slower beside two streams (8 samples).
+- **p95 prints only from 20 samples up.** Below that, nearest rank makes it the
+  single slowest call.
+- **The `workers` profile measures a pass that never yields.** Under the sleep
+  scheduler, a pass runs beside a burst until the scheduler's next poll sees the
+  burst's first recorded call: up to `--poll` (5 s) after that call ends. That is
+  a capture or two, or a few dozen searches. Reads wake it only with
+  `OB1_QUERY_LOG=on` and a sleep role that may read `query_log` (the owner, or a
+  role in the `sleep` grant group). That window was not measured here.
+
 ### bench-querylog.ts
 
 The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
@@ -3758,10 +3943,10 @@ verbs are the promotion pipeline:
 ```bash
 # snapshot stable into the canary (or a working copy) and migrate it forward
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
-# replay stable's logged searches against the canary and report the ranking
-bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# replay stable's logged searches on stable and the canary, over HTTP, and report the ranking
+bun tier.ts --replay  --from <stable> --to <canary> [--since <iso-ts>]
 # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
-bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
+bun tier.ts --diff    --from <stable> --to <canary> [--since <iso-ts>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
 ```
@@ -3774,9 +3959,12 @@ out (`ALTER DATABASE … SET` — migration 014's HNSW bounds, SMD-2037), then r
 `migrate.ts` forward with the merged tree. It is destructive to `--to`, so it
 guards the target five ways.
 
-- **It is not the `--from` database.** The source session is looked up in the
-  target's `pg_stat_activity`. Two names for one server are still one server,
-  and a copy that shares the source's `system_identifier` is still another.
+- **It is not the `--from` database.** Each half reads where its database is,
+  as the server says (`system_identifier`, the postmaster's start, the
+  database's name), and the target half compares the source's reading with its
+  own (SMD-2875). Two names for one server are still one server, and a copy
+  that shares the source's `system_identifier` started at another time, so it
+  is still another.
 - **It is a tier, or empty** (`targetRefusal`). A target is allowed when:
   - an earlier refresh marked it. Before its reset, each refresh sets
     `ALTER DATABASE … SET ob1.refresh_target`, which neither the reset nor the
@@ -3823,9 +4011,18 @@ servers' (the source's for the dump, `--to`'s for the probe), and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
 builds `db/tier.Dockerfile` (`oven/bun:1.4.3-alpine` + `postgresql16-client`, the
-stack server's major) and runs this checkout's `tier.ts` in it on the stack's
-network, so a refresh migrates forward with the tree it was run from —
-`deploy/README.md` has the commands. A host with Bun and `postgresql-client >=` the
+stack server's major) as `<project>-tier` and runs this checkout's `tier.ts` in
+it (the code as git lists it, copied in, never mounted), so a refresh migrates
+forward with the tree it was run from —
+`deploy/README.md` has the commands. `--refresh` and `--promote` each run as two halves that share a
+directory (`--handoff <dir>`), and tier.sh runs each in a container of its own
+on one brain's network with that brain's password (SMD-2875): the source half
+reads the source's facts and dumps it, as `pg_read_all_data` where the login
+may take that role; the target half runs every guard on `--to`, then the
+restore, the settings, the migration and the stamps. A promote's source half
+reads the canary, and its target half stamps stable. Given `--from` and `--to`,
+`tier.ts` runs both halves itself, the target's guards before anything is
+dumped. A host with Bun and `postgresql-client >=` the
 server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
@@ -3834,19 +4031,31 @@ path; without `--tier` the ingester stamps `stable`) — a real test of the
 re-embed path, not a cost.
 
 **`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
-`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
-each search stable logged since the canary's last refresh, the query is re-run
-against the canary through the shipped retrieval and the returned ids are diffed
-against the ids stable recorded — the measured per-PR **"what moved"**, in place of
-the hand-written control run. The **keyword** arm replays with no model (the arm
-`test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
-so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
-`evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
-before migration 045 carries a NULL arm and is skipped rather than guessed. Both
-verbs print the window and how many rows it held, replayed and skipped. A window
-that replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
-ranking that moved or a step that failed, 2 a usage error or a refusal (SMD-2182).
-A side that does not answer is named with its host and port.
+`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs), and
+they reach the two brains over HTTP, never Postgres (SMD-2875). `--from` and
+`--to` are each brain's MCP URL or connector name, read with a key as
+`--compare` reads one (`--from-key`/`--to-key`, else a connector's own header or
+a URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains).
+Stable's logged searches (`list_logged_searches`: the window `--since` names, else
+the most recent page) run on both brains, each on the arm that ran it and each
+query and arm once, and the ids the two return are diffed: the measured per-PR
+**"what moved"**, in place of the hand-written control run. Each brain embeds its
+own query, so the hybrid and current arms need no model here. A search both
+brains refuse is skipped; one only one brain fails, the other answering, fails
+the run (exit 1 on both verbs). Rows logged before migration 045 have no arm,
+and are counted apart, not replayed. Both verbs print `--compare`'s report, then
+the window and how many searches were replayed and skipped. A window that
+replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
+ranking that moved or a step that failed (stable's log unread, or a search one
+brain failed, or a refusal such as a missing key), 2 a malformed command line,
+a `postgres://` side included (SMD-2182).
+
+Until SMD-2875 they read both databases, from one container on both brains'
+networks holding both superuser passwords, and diffed the canary against the ids
+stable had logged. Now the canary is diffed against stable as it answers now: a
+thought stable gained since the refresh can read as a move, and the id-set line
+of the report says how many each holds that the other does not. The replays are
+real searches, which a brain running with `OB1_QUERY_LOG=on` logs.
 
 The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
 services, one shared Ollama, each tier's MCP server and REST core, and one proxy
@@ -3863,7 +4072,7 @@ claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working
 A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers the
 same way, at `/canary/mcp` on that stack's port ("A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
-key in `OB1_COMPARE_KEY` (or `--a-key`/`--b-key`, or `?key=` on a URL):
+key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`:
 `OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8000/canary/mcp`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as
@@ -3871,11 +4080,10 @@ Basic beside the key, on any Bun, and are in neither the label nor the
 request's URL (SMD-2894).
 
 **Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
-runs the refresh/replay/diff against the **published** images through the merge
-queue; straight after a refresh the default window is empty and `--diff` exits
-3, so the job replays a `--since` read before it or waits out a soak) and
-`--promote`'s image-repoint half. The engine, the compose stack and the
-end-to-end test ([20]) do not need them and are here now.
+runs the refresh and then the replay/diff against the **published** images
+through the merge queue) and `--promote`'s image-repoint half. The engine, the
+compose stack and the end-to-end tests ([20], and `test-brain-compare.ts` for the
+replay over HTTP) do not need them and are here now.
 
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
 server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
@@ -4342,8 +4550,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2833 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1332 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2874 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1355 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -4397,9 +4605,8 @@ parts:
 `OB1_ALLOW_REMOTE_DB` lifts the loopback host and the TCP requirement, and
 nothing else: the other refusals say which database would be dropped. The
 server's address is not compared with loopback, because through a container's
-published port it is the container's. `hnsw-graph.ts`,
-`graph-centrality.ts` and `tier.ts --replay/--diff` decide their exit code
-after connecting and return it from `closeThenExit`, which closes the pool and
+published port it is the container's. `hnsw-graph.ts` and
+`graph-centrality.ts` decide their exit code after connecting and return it from `closeThenExit`, which closes the pool and
 flushes their output first, as `migrate.ts`, `extract-entities.ts`,
 `consolidate.ts` and `reembed.ts` do with their `run()`'s code (SMD-2304).
 `test-connect.ts` holds the rule as a truth table, runs the door, and checks

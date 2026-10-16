@@ -62,7 +62,7 @@ import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { applyDatabaseSettings, databaseSettings, promote, refresh, refreshToolsReady, replayAndDiff, replayOne, settleRefreshed, targetRefusal, where } from "./tier.ts";
+import { applyDatabaseSettings, databaseSettings, parsePromoteSource, parseRefreshSource, promote, promoteSource, promoteTarget, refresh, refreshSource, refreshTarget, refreshToolsReady, sameDatabase, settleRefreshed, targetRefusal, where } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -6929,6 +6929,106 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     assert(stmt !== undefined && repooled.length === 0 && others > 0, `…and that statement clears exactly those claims (${others} other succeeded claim(s) kept)`);
   }
 
+  // SMD-2707 (migration 094): --list names who wrote each side. A capture-only
+  // key's text proposed to stand over an operator's is flagged WRITER and its
+  // accept refused without --force, naming both writers; the reverse is not.
+  // A side the hook has since superseded names the pointer an accept clears,
+  // and the accept says it cleared it.
+  {
+    const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+    const HOOK = { name: "hook-16", agent_id: await agentOf("a", "hook-16", "capture"), via: "test-door", scope: "capture" };
+    const OPER = { name: "oper-16", agent_id: await agentOf("b", "oper-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('hook-16', 'agent'), set_agent_kind('oper-16', 'operator')`;
+    const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+      ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(40)}::vector) AS r`)[0].r as { id: string }).id;
+    const propose = async (older: string, newer: string) =>
+      String((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.95::numeric, 'the rota changed', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const W = await cap("[16w] the rota is weekly, the operator's word", OPER);
+    const C = await cap("[16w] the rota is now daily, replacing the weekly one", HOOK);
+    const N = await cap("[16w] the hook's next word on the rota", HOOK, C);
+    const pw = await propose(W, C);
+    const C2 = await cap("[16w] the hook's older note on the on-call", HOOK);
+    const W2 = await cap("[16w] the operator's newer word on the on-call", OPER);
+    const pr = await propose(C2, W2);
+    const listW = await consolidate("--list");
+    const blk = (out: string, pid: string) => out.split("\n\n").find((b) => b.includes(`proposal ${pid}`)) ?? "";
+    const bw = blk(listW.out, pw), br = blk(listW.out, pr);
+    assert(bw.includes(`ID: ${C}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        superseded by ${N}\n        an accept that makes this side stand clears a capture-only pointer, ${N} onto this side: it then no longer supersedes what it pointed at`)
+        && bw.includes(`ID: ${W}\n        By: oper-16 (operator) · trust operator`),
+      `--list names each side's writer under its id, and the hook's own later pointer onto its side (${bw.replace(/\n/g, " ⏎ ").slice(0, 700)})`);
+    assert(/the NEWER thought supersedes the older {2}WRITER\n/.test(bw)
+        && bw.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side) — read both writers before accepting; the accept takes --force")
+        && bw.includes(`--accept ${pw} --force`),
+      "…flags the capture-only key's text proposed to stand, says why, and puts --force on its accept");
+    assert(br !== "" && !/WRITER|writer:/.test(br) && br.includes(`--accept ${pr}    --reject ${pr}`),
+      `…and the operator's text standing over the hook's is not flagged, its accept without --force (${br.replace(/\n/g, " ⏎ ").slice(0, 300)})`);
+    assert(same(await consolidateInProcess({ list: "pending" }), listW), "…and run() in-process lists it byte for byte");
+    const refusedW = await consolidate("--accept", pw);
+    const [{ status: stillPending }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${pw}::uuid`;
+    assert(refusedW.code === 1 && refusedW.out.includes(`accept refused: an accept would make the NEWER side stand: its text is a capture-only key's and its trust is below the other side's, and it clears a capture-only pointer (listed under the NEWER side). newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: oper-16 (operator) · trust operator. Read both with --list pending and pass --force if that side should stand, or --reject ${pw}`)
+        && stillPending === "pending" && (await supersedesOf(C)) === null && (await supersedesOf(N)) === C,
+      `accepting it without --force is refused, naming both writers, and nothing is written (${refusedW.out.trim().slice(0, 300)})`);
+    const forcedW = await consolidate("--accept", pw, "--force");
+    assert(forcedW.code === 0 && forcedW.out.includes(`accepted ${pw}: ${C} now supersedes ${W}`)
+        && forcedW.out.includes(`lapsed: ${N} no longer supersedes ${C} — its capturer's capture-only pointer, cleared by this accept`)
+        && (await supersedesOf(C)) === W && (await supersedesOf(N)) === null,
+      `with --force it is accepted, and the reply names the hook's pointer the accept cleared (${forcedW.out.trim().replace(/\n/g, " ⏎ ").slice(0, 400)})`);
+    // SMD-1873's case as it is met, at equal trust (review pass 4): a write
+    // key of agent kind — flagged for the capture scope alone, and refused.
+    const PEER = { name: "peer-16", agent_id: await agentOf("c", "peer-16", "write"), via: "test-door" };
+    await sql`SELECT set_agent_kind('peer-16', 'agent')`;
+    const W7 = await cap("[16w] an agent's note on the standup time", PEER);
+    const C7 = await cap("[16w] the hook's copy of the note on the standup time", HOOK);
+    const pe = await propose(W7, C7);
+    const be = blk((await consolidate("--list")).out, pe);
+    const refusedE = await consolidate("--accept", pe);
+    assert(be.includes("     writer: an accept would make the NEWER side stand: its text is a capture-only key's — read both writers before accepting; the accept takes --force")
+        && refusedE.code === 1 && refusedE.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's. newer By: hook-16 (agent) · trust agent · a capture-only key's text; older By: peer-16 (agent) · trust agent.")
+        && (await supersedesOf(C7)) === null,
+      `at equal trust the hook's copy proposed to stand is flagged for its capture scope alone, and refused without --force (${refusedE.out.trim().slice(0, 200)})`);
+    // Review pass 1: a rejected flagged row is guarded too — 029 accepts a
+    // rejected row, and the guard read pending and stale alone.
+    const C5 = await cap("[16w] the hook's note on the standup", HOOK);
+    const W5 = await cap("[16w] the operator's note on the standup", OPER);
+    const pj = await propose(W5, C5);
+    const rejected = await consolidate("--reject", pj);
+    const reaccept = await consolidate("--accept", pj);
+    assert(rejected.code === 0 && reaccept.code === 1 && reaccept.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's") && reaccept.out.includes("Read both with --list rejected and pass --force if that side should stand; left as it is, it stays rejected") && (await supersedesOf(C5)) === null,
+      `a rejected flagged proposal accepted again without --force is refused as a pending one is (${reaccept.out.trim().slice(0, 160)})`);
+    // A lineage pair also flagged WRITER: its refusal names the flag its
+    // --force would also waive (review pass 2).
+    const C9 = await cap("[16w] the hook's page drawn from the operator's note", HOOK);
+    const W9 = await cap("[16w] the operator's note the page is drawn from", OPER);
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${W9}::text) WHERE id = ${C9}::uuid`;
+    const pl = await propose(W9, C9);
+    const lin = await consolidate("--accept", pl);
+    assert(lin.code === 1 && lin.out.includes("one side's derived_from names the other") && lin.out.includes("— it also accepts over its WRITER flag: an accept would make the NEWER side stand: its text is a capture-only key's"),
+      `a lineage pair also flagged WRITER is refused as a lineage pair, naming the flag its --force would also waive (${lin.out.trim().slice(0, 200)})`);
+    // An undirected one: no --direction asks for one first; the flagged
+    // direction is refused, the other accepted plainly.
+    const C6 = await cap("[16w] the hook's note on the release", HOOK);
+    const W6 = await cap("[16w] the operator's note on the release", OPER);
+    const pu = String((await sql`SELECT record_supersession_proposal(${W6}::uuid, ${C6}::uuid, 'conflict_undirected', 0.95::numeric, 'which stands', 0.9, ${KEY}, NULL) AS id`)[0].id);
+    const listU = blk((await consolidate("--list")).out, pu);
+    const noDir = await consolidate("--accept", pu);
+    const newerDir = await consolidate("--accept", pu, "--direction", "newer");
+    const olderDir = await consolidate("--accept", pu, "--direction", "older");
+    assert(listU.includes(`--accept ${pu} --direction newer --force    --accept ${pu} --direction older    --reject ${pu}`)
+        && noDir.code === 1 && /pass --direction newer or --direction older/.test(noDir.out) && !/WRITER|would stand/.test(noDir.out)
+        && newerDir.code === 1 && newerDir.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's")
+        && olderDir.code === 0 && olderDir.out.includes(`accepted ${pu}: ${W6} now supersedes ${C6}`),
+      `an undirected flagged row lists an accept per direction, --force on the flagged one; no --direction asks for one, the flagged one is refused, the other accepted (${[noDir.out, newerDir.out, olderDir.out].map((o) => o.trim().slice(0, 80)).join(" | ")})`);
+    // A brain short of 094: the accept says the writer check did not run and
+    // the rest answers as before.
+    await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
+    const plainR = await consolidate("--accept", pr);
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") });
+    assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
+      `…and on a brain short of 094 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);
+    await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid)`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
+  }
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
@@ -7464,18 +7564,13 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806); the CLI reports its window, exits 3 on nothing compared, and names a side that does not answer (SMD-2182)");
+console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
 {
-  // The live replay gate (SMD-1295's live half): stable logs a search and the ids
-  // it returned; the canary, refreshed from stable, replays that search and its
-  // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
-  // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
-  // — the arm CI can run. A real pg_dump refresh needs client tools this job
-  // does not have: the deploy-stack job runs one through deploy/tier.sh
-  // (SMD-2036), and below, stand-in tools drive refresh() to its restore and
-  // the guards run before any tool is looked for. The hybrid arm needs a
-  // provider, the same split as eval-replay.ts vs test-replay.ts.
-  await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
+  // A real pg_dump refresh needs client tools this job does not have: the
+  // deploy-stack job runs one through deploy/tier.sh (SMD-2036), and below,
+  // stand-in tools drive refresh() to its restore and the guards run before
+  // any tool is looked for.
+  await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it
   const put = (s: SQL, id: string, content: string) =>
     s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
       VALUES (${id}::uuid, ${content}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${content}))`;
@@ -7489,19 +7584,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     { id: recordId("fork", "tier-d"), content: "zqdelta — unrelated content about pruning old rows" },
   ];
   for (const c of corpus) await put(sql, c.id, c.content);
-
-  // Log what STABLE returns for each needle — the answer the canary is diffed against.
-  const loggedFor = async (needle: string): Promise<string[]> => {
-    const rows = await sql`SELECT id FROM search_thoughts_keyword(${needle}, 25, 0, '{}'::jsonb)`;
-    const ids = rows.map((r: { id: string }) => r.id);
-    await sql`
-      INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm, tier)
-      VALUES ('search', 'search_thoughts_keyword', NULL, ${needle}, 25, NULL, NULL, '{}'::jsonb, ${`{${ids.join(",")}}`}::uuid[], NULL, 'keyword', 'stable')`;
-    return ids;
-  };
-  const canaryHits = await loggedFor("zqcanary");
-  await loggedFor("zqdelta");
-  assert(canaryHits.length === 3, `stable's "zqcanary" search returned the three matching rows (${canaryHits.length})`);
 
   // Build the canary as a genuinely separate database on this cluster, migrated
   // forward and given the identical corpus — the refresh's shape without pg_dump,
@@ -7518,111 +7600,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     canarySql = new SQL({ url: canaryUrl, max: 4 });
     for (const c of corpus) await put(canarySql, c.id, c.content);
 
-    // An identical canary reproduces stable's rankings — the diff is empty.
-    const clean = await replayAndDiff(sql, canarySql, { since: null });
-    assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
-    assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
-
-    // 059 (SMD-2255): a row logged as arm `current` — search_thoughts with
-    // prefer_current — replays through search_thoughts_current. The canary's
-    // first zqcanary row is stamped a completed ticket, so the two functions
-    // differ: the current replay moves it last, the hybrid keeps it where it
-    // was (first review pass: with nothing demotable the two agreed, and a
-    // replay sending `current` to the hybrid passed). A stub vector stands in
-    // for the provider (the rows carry none, so they rank on the quoted literal).
-    const stub = async () => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return v; };
-    const logged = { id: "00000000-0000-4000-8000-000000002255", query: "\"zqcanary\"", matchCount: 10, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [] };
-    const plainHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const settledId = plainHybrid.ids[0];
-    await canarySql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-9955", "status": "Done", "status_type": "completed"}'::jsonb WHERE id = ${settledId}::uuid`;
-    const asCurrent = await replayOne(canarySql, { ...logged, arm: "current" }, stub);
-    const asHybrid = await replayOne(canarySql, { ...logged, arm: "hybrid" }, stub);
-    const noModel = await replayOne(canarySql, { ...logged, arm: "current" });
-    await canarySql`UPDATE thoughts SET metadata = metadata - 'issue' - 'status' - 'status_type' WHERE id = ${settledId}::uuid`;
-    assert(asCurrent.ran && asCurrent.ids.length === 3 && asHybrid.ids[0] === settledId && asCurrent.ids[2] === settledId
-        && [...asCurrent.ids].sort().join() === [...asHybrid.ids].sort().join() && !noModel.ran && noModel.reason === "current needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)",
-      `a logged prefer_current search replays through search_thoughts_current — the completed row the hybrid ranks first comes last — and without a provider it is skipped with the arm named (${asCurrent.ids.indexOf(settledId) + 1} of ${asCurrent.ids.length}; ${noModel.reason})`);
-
-    // The CLI's report and verdict (SMD-2182), on the same canary. Both verbs
-    // print the window and the counts, and a window that replayed nothing is
-    // --diff's exit 3, where it used to be the pass "nothing moved".
-    // The replay embeds through the egress gate (SMD-2290): with the embeddings
-    // endpoint not declared local under the default deny, the hybrid/current arms
-    // are skipped before any request, so these CLI runs reach no provider. Start
-    // each run from a clean, refusing egress config (a stray OB1_LLM_LOCAL or
-    // OB1_EGRESS_* in the host's env would let it embed) and let a case opt back
-    // in through extraEnv; --no-env-file and OB1_ENV_FILES=off from a directory
-    // outside the checkout, as tier.sh does, keep a .env from declaring one local.
+    // The CLI as tier.sh runs it: --no-env-file and OB1_ENV_FILES=off from a
+    // directory outside the checkout, so no .env reaches it.
     const tierCli = async (args: string[], extraEnv: Record<string, string> = {}) => {
-      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off" };
-      for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete env[k];
-      Object.assign(env, extraEnv);
+      const env: Record<string, string | undefined> = { ...process.env, OB1_ENV_FILES: "off", ...extraEnv };
       const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "tier.ts"), ...args], { stdout: "pipe", stderr: "pipe", env, cwd: tmpdir() });
       const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
       return { code: await p.exited, out, err };
     };
-    const both = ["--from", URL_!, "--to", canaryUrl];
-    const all = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(all.code === 0 && /^replayed 2 of 2 logged searches since 1970-01-01T00:00:00Z \(--since\) \(0 skipped\)$/m.test(all.out) && all.out.includes("what moved: nothing — the canary reproduces stable's rankings on all 2 replayed."),
-      `--diff over both keyword searches prints the window and the counts, and passes (exit ${all.code}: ${all.out.trim()})`);
-    // The server's clock, which stamped the logged rows, not this host's.
-    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('last_refresh', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-    const fresh = await tierCli(["--diff", ...both]);
-    assert(fresh.code === 3 && /^replayed 0 of 0 logged searches since \S+ \(the canary's last refresh\)/m.test(fresh.out) && fresh.out.includes("nothing to compare: stable logged no searches") && fresh.out.includes("an earlier --since widens the window"),
-      `--diff right after a refresh, with no --since, compared nothing and exits 3, not 0 (exit ${fresh.code}: ${fresh.out.trim()})`);
-    const freshReplay = await tierCli(["--replay", ...both]);
-    assert(freshReplay.code === 0 && freshReplay.out.includes("nothing to compare"), `--replay, the report, says the same and exits 0 (exit ${freshReplay.code})`);
-    // A hybrid row, logged after the refresh: with the embeddings endpoint refused
-    // by the default deny it is skipped, and the report says so on both windows.
-    await sql`
-      INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, arm, tier, logged_at)
-      VALUES ('search', 'search_thoughts', 'zqcanary', 10, 0.2, 0, '{}'::jsonb, ${`{${canaryHits.join(",")}}`}::uuid[], 'hybrid', 'stable', now() + interval '1 hour')`;
-    const mixed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both]);
-    assert(mixed.code === 0 && /^replayed 2 of 3 logged searches .* \(1 skipped\)$/m.test(mixed.out) && mixed.out.includes("skipped 1: hybrid needs a provider (declare the embeddings endpoint local, or allow it in OB1_EGRESS_POLICY)") && mixed.out.includes("on the 2 replayed (1 skipped, not compared)."),
-      `--diff with a hybrid row and the endpoint refused reports it skipped, and claims only the rows it replayed (exit ${mixed.code}: ${mixed.out.trim()})`);
-    const skippedAll = await tierCli(["--diff", ...both]);
-    assert(skippedAll.code === 3 && /^replayed 0 of 1 logged searches/m.test(skippedAll.out) && skippedAll.out.includes("nothing to compare: every search in the window was skipped."),
-      `--diff whose every row was skipped compared nothing and exits 3 (exit ${skippedAll.code}: ${skippedAll.out.trim()})`);
-
-    // SMD-2290: the embed arms send the logged query text to the provider, so they
-    // pass through the egress gate now, like every other provider call in the fork.
-    // A stub records requests. The property that matters is the zero: no logged
-    // query text leaves under the default deny. It is held twice over — the up-front
-    // skip when the endpoint is not declared local, and, under that, getEmbedding's
-    // own per-call gate (a ProviderError before any request). The local case then
-    // embeds and the stub IS called, so the zero is a gate holding, not a broken
-    // embedder. (Dropping the up-front skip alone keeps the zero — the per-call gate
-    // still refuses — but turns the graceful skip into an exit-1 error, which the
-    // [20] skip assertions above catch.)
-    {
-      let stubReqs = 0;
-      const stub = Bun.serve({ port: 0, fetch() { stubReqs++; const v = new Array(EMBEDDING_DIM).fill(0); v[0] = 1; return Response.json({ data: [{ embedding: v }] }); } });
-      const stubUrl = `http://127.0.0.1:${stub.port}/v1`;
-      try {
-        stubReqs = 0;
-        const denied = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL });
-        assert(stubReqs === 0 && denied.out.includes("hybrid needs a provider"),
-          `the replay sends the stub nothing under the default deny — the logged query text does not leave (${stubReqs} request(s) to the stub; ${denied.out.trim().split("\n").pop()})`);
-        stubReqs = 0;
-        const allowed = await tierCli(["--diff", "--since", "1970-01-01T00:00:00Z", ...both], { OB1_LLM_BASE_URL: stubUrl, OB1_EMBEDDING_MODEL: EMBEDDING_MODEL, OB1_LLM_LOCAL: "1" });
-        assert(stubReqs >= 1 && /replayed 3 of 3 logged searches/.test(allowed.out),
-          `declared local, the replay embeds the hybrid query through the gate — the stub is called and all three rows replay, so the deny zero is a gate holding, not a dead embedder (${stubReqs} request(s); ${allowed.out.trim().split("\n")[0]})`);
-      } finally {
-        stub.stop(true);
-      }
-    }
-    await sql`DELETE FROM query_log WHERE arm = 'hybrid'`;
-    await canarySql`DELETE FROM ob1_config WHERE key = 'last_refresh'`;
-    // A window that is already all of the log: the canary as its own --from
-    // (its query_log is empty, and it records no refresh). No --since can
-    // widen that, so the hint does not offer one.
-    const unbounded = await tierCli(["--diff", "--from", canaryUrl, "--to", canaryUrl]);
-    assert(unbounded.code === 3 && /^replayed 0 of 0 logged searches in all of stable's log \(the canary records no refresh\)/m.test(unbounded.out) && unbounded.out.includes("only with OB1_QUERY_LOG=on.") && !unbounded.out.includes("--since"),
-      `--diff over all of an empty log exits 3 and offers no --since (exit ${unbounded.code}: ${unbounded.out.trim()})`);
-    // A side that does not answer is named, with its host, and never its password.
-    const deadTo = await tierCli(["--diff", "--from", URL_!, "--to", "postgres://postgres:s3cret-2182@127.0.0.1:1/ob1_nowhere"]);
-    assert(deadTo.code === 1 && deadTo.err.includes("could not connect to --to (canary) at 127.0.0.1:1/ob1_nowhere") && !deadTo.err.includes("s3cret"),
-      `--diff's connection failure names --to and its host, not its password (exit ${deadTo.code}: ${deadTo.err.trim()})`);
     // OB1_ALLOW_REMOTE_DB only so a test server off loopback still reaches the
     // connection check rather than the loopback refusal; nothing is reset, as
     // --from never answers.
@@ -7635,14 +7620,6 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     const unencoded = ["1234/s3cret", "/s3cret", "12#s3cret", "12?s3cret"].map((pw) => where(`postgres://postgres:${pw}@127.0.0.1:5432/openbrain`));
     assert(unencoded.every((w) => w === "a URL with an @ after its host — is its password percent-encoded?"), `where() shows nothing of a URL whose password was not encoded (got: ${JSON.stringify(unencoded)})`);
     assert(where("postgres://postgres:1234%2Fs3cret@db.internal:6543/openbrain") === "db.internal:6543/openbrain", "where() shows an encoded URL as host:port/db, without its password");
-
-    // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
-    // query — moves, and the diff names the dropped id. The gate has teeth.
-    await canarySql`DELETE FROM thoughts WHERE id = ${corpus[0].id}::uuid`;
-    const perturbed = await replayAndDiff(sql, canarySql, { since: null });
-    assert(perturbed.changed === 1, `deleting one canary row moves exactly the query that returned it (${perturbed.changed} changed)`);
-    const moved = perturbed.diffs[0];
-    assert(moved?.dropped.includes(corpus[0].id) && moved.added.length === 0, "the diff names the dropped id and adds none — a real difference, measured");
 
     // --promote, the data half: it reads the soaked canary's schema_version (044,
     // stamped when the canary migrated) and records it on stable as
@@ -7848,6 +7825,140 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     catch (e) { refusedSamePromote = (e as Error).message; }
     assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
+
+    // SMD-2875: the halves deploy/tier.sh runs in two containers, one on each
+    // brain's network, through the directory they share. The source half dumps
+    // as pg_read_all_data and writes its facts; the target half refuses a
+    // hand-off that is not one, and the source's own database by its identity
+    // (no connection of the target half reaches the source to ask otherwise).
+    {
+      const handDir = join(tmpdir(), `ob1-tier-handoff-${process.pid}`);
+      const toolDir = join(tmpdir(), `ob1-tier-halves-${process.pid}`);
+      const argsLog = join(toolDir, "pg_dump.args");
+      const savedPath = process.env.PATH;
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(toolDir, { recursive: true });
+      for (const tool of ["pg_dump", "pg_restore"]) {
+        writeFileSync(join(toolDir, tool), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${tool} (PostgreSQL) ${major}.0"; exit 0; fi\necho "$*" >> "${argsLog}"\nwhile [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done\nexit 0\n`);
+        chmodSync(join(toolDir, tool), 0o755);
+      }
+      const identityOf = async (s: SQL) => (await s<{ system: string; started: string; database: string }[]>`
+        SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS system,
+               extract(epoch FROM pg_catalog.pg_postmaster_start_time())::text AS started,
+               pg_catalog.current_database() AS database`)[0];
+      const refusedBy = async (run: () => Promise<unknown>) => { try { await run(); return "no refusal"; } catch (e) { return (e as Error).message; } };
+      process.env.PATH = `${toolDir}:${savedPath}`;
+      const savedAllow = process.env[REMOTE_DB_FLAG];
+      try {
+        // Both halves in one process run the target's guards before anything
+        // is dumped: with a usable pg_dump on PATH, a refusal on --to (stable,
+        // stamped tier=stable) leaves no pg_dump call at all (review pass 1:
+        // dumping first passed every check while the tools were absent).
+        const beforeDump = await refusedBy(() => refresh(canaryUrl, URL_!, "canary"));
+        assert(/stamped tier=stable/.test(beforeDump) && !existsSync(argsLog), `a refresh refused on --to calls no pg_dump first (${beforeDump.slice(0, 80)}; pg_dump ${existsSync(argsLog) ? "was called" : "was not called"})`);
+        // Each half asks the URL rules of its own side (review pass 1): the
+        // target half a remote --to without the override, the source half a
+        // --from with no host.
+        delete process.env[REMOTE_DB_FLAG];
+        mkdirSync(handDir);
+        const remoteTo = await refusedBy(() => refreshTarget(handDir, "postgres://u@example.com:5432/b", "canary"));
+        const hostlessFrom = await refusedBy(() => refreshSource("postgres:///b", join(handDir, "never")));
+        rmSync(handDir, { recursive: true, force: true });
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
+        assert(/^--to is not plainly this machine — example\.com is not a loopback host/.test(remoteTo), `the target half refuses a remote --to without OB1_ALLOW_REMOTE_DB (${remoteTo.slice(0, 90)})`);
+        assert(/^--from: .*Refusing: --refresh dumps --from/.test(hostlessFrom), `the source half refuses a --from that names no host (${hostlessFrom.slice(0, 90)})`);
+
+        await refreshSource(URL_!, handDir);
+        const facts = JSON.parse(readFileSync(join(handDir, "source.json"), "utf8"));
+        const dumpArgs = readFileSync(argsLog, "utf8");
+        // SMD-2119: the password reaches pg_dump through its environment, never
+        // its argv: no password= keyword and no URL there. (Not the password's
+        // text: a test server's may also be its database's name, which is.)
+        const carriesPassword = /\bpassword\s*=|postgres(ql)?:\/\//i.test(dumpArgs);
+        assert(parseRefreshSource(facts) !== null && facts.major === major && facts.identity.database === new URL(URL_!).pathname.slice(1)
+            && /--role=pg_read_all_data/.test(dumpArgs) && !carriesPassword
+            && existsSync(join(handDir, "stable.dump")) && (statSync(join(handDir, "source.json")).mode & 0o777) === 0o600 && (statSync(handDir).mode & 0o777) === 0o700,
+          `the source half writes its facts (mode 600) and its dump into a directory it made mode 700, the dump as pg_read_all_data with no password on its argv (${carriesPassword ? "a password= or a URL is on it" : dumpArgs.trim()})`);
+        assert(/--handoff: .* already exists; name a directory this run can make, mode 700/.test(await refusedBy(() => refreshSource(URL_!, handDir))),
+          "the source half refuses a hand-off directory that exists (it keeps its own mode, and the dump goes in it)");
+        // pg_read_all_data does not bypass row-level security, under which
+        // pg_dump refuses to dump: with a table that has it, the dump runs as
+        // the login, as before (review pass 4: the role failed the refresh).
+        {
+          const rlsDir = join(handDir, "..", `ob1-tier-handoff-rls-${process.pid}`);
+          writeFileSync(argsLog, "");
+          await sql`CREATE TABLE ob1_tier_rls_probe (id int)`;
+          try {
+            await sql`ALTER TABLE ob1_tier_rls_probe ENABLE ROW LEVEL SECURITY`;
+            await refreshSource(URL_!, rlsDir);
+            const rlsArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(rlsArgs) && !/--role=/.test(rlsArgs), `with a table under row-level security the dump runs as the login, not pg_read_all_data (${rlsArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`DROP TABLE IF EXISTS ob1_tier_rls_probe`;
+            rmSync(rlsDir, { recursive: true, force: true });
+          }
+          // …nor a large object, which the role may not read (review pass 5: untested).
+          const loDir = join(handDir, "..", `ob1-tier-handoff-lo-${process.pid}`);
+          writeFileSync(argsLog, "");
+          const [{ lo }] = await sql<{ lo: number }[]>`SELECT lo_from_bytea(0, 'tier probe'::bytea)::int AS lo`;
+          try {
+            await refreshSource(URL_!, loDir);
+            const loArgs = readFileSync(argsLog, "utf8");
+            assert(/-Fc/.test(loArgs) && !/--role=/.test(loArgs), `with a large object the dump runs as the login, not pg_read_all_data (${loArgs.trim().replace(/password=\S+/g, "password=…")})`);
+          } finally {
+            await sql`SELECT lo_unlink(${lo}::oid)`;
+            rmSync(loDir, { recursive: true, force: true });
+          }
+        }
+        // The identity's three parts each decide (the halves cannot ask each other's server).
+        const me = facts.identity;
+        assert(sameDatabase(me, { ...me }) && !sameDatabase(me, { ...me, system: `${me.system}1` }) && !sameDatabase(me, { ...me, started: `${me.started}1` }) && !sameDatabase(me, { ...me, database: `${me.database}x` }),
+          "sameDatabase: one database only when the cluster, its start and the database name all agree (a volume copy started at another time is another)");
+        assert(/--from and --to name the same database/.test(await refusedBy(() => refreshTarget(handDir, URL_!, "canary"))),
+          "the target half refuses the source half's own database, by the identity in the hand-off (targetRefusal would refuse it too, in other words)");
+        writeFileSync(join(handDir, "source.json"), JSON.stringify({ ...facts, identity: await identityOf(canarySql) }));
+        assert(/--from and --to name the same database/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "…and the canary when the hand-off names the canary");
+        for (const [what, bad] of [
+          ["a setting name no database has", { ...facts, settings: { "x; DROP SCHEMA public": "1" } }],
+          ["the refresh mark, the target's own", { ...facts, settings: { "ob1.refresh_target": "canary" } }],
+          ["the refresh mark in capitals, which Postgres folds", { ...facts, settings: { "OB1.Refresh_Target": "canary" } }],
+          ["a major that is not a number", { ...facts, major: "16" }],
+          ["no identity", { ...facts, identity: undefined }],
+          ["a setting value that is not text", { ...facts, settings: { "hnsw.ef_search": 5 } }],
+        ] as const) {
+          writeFileSync(join(handDir, "source.json"), JSON.stringify(bad));
+          const why = await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"));
+          assert(/source\.json is not what a --refresh source half writes/.test(why), `the target half refuses a hand-off with ${what} (${why})`);
+        }
+        writeFileSync(join(handDir, "source.json"), JSON.stringify(facts));
+        rmSync(join(handDir, "stable.dump"));
+        assert(/stable\.dump is missing/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "the target half refuses a hand-off without its dump");
+        rmSync(join(handDir, "source.json"));
+        assert(/source\.json could not be read \(ENOENT\)/.test(await refusedBy(() => refreshTarget(handDir, canaryUrl, "canary"))), "…and one without its facts");
+
+        // promote's halves: the canary read, stable stamped.
+        rmSync(handDir, { recursive: true, force: true });
+        await promoteSource(canaryUrl, handDir);
+        const promoted = JSON.parse(readFileSync(join(handDir, "promote.json"), "utf8"));
+        assert(parsePromoteSource(promoted) !== null && promoted.identity.database === canaryDb, `the promote's source half writes the canary's identity and version (${promoted.version})`);
+        const { version: halfVersion } = await promoteTarget(handDir, URL_!);
+        const [{ v }] = await sql<{ v: string | null }[]>`SELECT value AS v FROM ob1_config WHERE key = 'promoted_schema_version'`;
+        assert(halfVersion === promoted.version && v === promoted.version, `the promote's target half stamps stable with the hand-off's version (${v})`);
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ ...promoted, identity: await identityOf(sql) }));
+        assert(/--from and --to name the same database/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "the promote's target half refuses stable as its own canary, by identity");
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ ...promoted, version: 44 }));
+        assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and a hand-off whose version is not text");
+        writeFileSync(join(handDir, "promote.json"), JSON.stringify({ version: promoted.version }));
+        assert(/promote\.json is not what a --promote source half writes/.test(await refusedBy(() => promoteTarget(handDir, URL_!))), "…and one with no identity");
+      } finally {
+        process.env.PATH = savedPath;
+        if (savedAllow !== undefined) process.env[REMOTE_DB_FLAG] = savedAllow;
+        rmSync(handDir, { recursive: true, force: true });
+        rmSync(toolDir, { recursive: true, force: true });
+        await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
+      }
+    }
   } finally {
     if (canarySql) await canarySql.close();
     await sql.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${canaryDb}' AND pid <> pg_backend_pid()`);
@@ -13046,6 +13157,64 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
     assert(false, `[42] stopped: ${(err as Error).stack}`);
   } finally {
     await bsql.close();
+  }
+}
+
+console.log("\n[43] Migration 095: the stated-status label's inputs read the hits, not the log, under either plan — 060's order an index probe for a list (its every-row arm never runs), and the tickets matched by = ANY, with no join filter that pairs each event with each key (SMD-2540)");
+{
+  const tsql = new SQL({ url: URL_!, max: 1 });
+  try {
+    // Sixty ticket rows, each moved through three statuses in place, as board-sync moves them.
+    const KEYS = Array.from({ length: 60 }, (_, i) => `ZS-${1000 + i}`);
+    const ids: string[] = [];
+    for (const key of KEYS) {
+      const [{ id }] = await tsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${`${key} — a ticket (label-inputs fixture)`}, ${{ source: "linear", issue: key, status: "Backlog", status_type: "backlog" }}::jsonb, content_fingerprint_of(${`${key} — a ticket (label-inputs fixture)`})) RETURNING id::text AS id`;
+      for (const [status, status_type] of [["In Progress", "started"], ["Done", "completed"]]) await tsql`UPDATE thoughts SET metadata = metadata || ${{ status, status_type }}::jsonb WHERE id = ${id}::uuid`;
+      ids.push(id);
+    }
+    const plan = async (body: string, types: string, args: string, mode: "force_custom_plan" | "force_generic_plan") =>
+      tsql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
+        await tx.unsafe(`SET LOCAL max_parallel_workers_per_gather = 0`); // ticket_status_inputs' own setting
+        // A small table is scanned whole whatever the body; with that discouraged, only an index-able
+        // filter reaches thought_audit_thought_id_idx — 060's `$1 IS NULL OR …` under a generic plan cannot.
+        await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+        await tx.unsafe(`PREPARE label_inputs_plan(${types}) AS ${body}`);
+        // A generic plan is chosen after the custom ones the planner tries first; five warm calls get there.
+        for (let i = 0; i < 6; i++) await tx.unsafe(`EXECUTE label_inputs_plan(${args})`);
+        const rows = await tx.unsafe(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) EXECUTE label_inputs_plan(${args})`);
+        await tx.unsafe(`DEALLOCATE label_inputs_plan`);
+        return (rows as Record<string, string>[]).map((r) => r["QUERY PLAN"]).join("\n");
+      });
+    const src = async (sig: string) => String((await tsql`SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure(${sig})`)[0].prosrc);
+
+    // 060's order, as 095 redefines it: a list is read by the thought-id index, and the every-row arm never runs.
+    const order = (await src("ob1_thought_events_in_order(uuid[])")).replace(/\bp_thoughts\b/g, "$1");
+    const list = `'{${ids.slice(0, 10).join(",")}}'::uuid[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(order, "uuid[]", list, mode);
+      const seqLines = p.split("\n").filter((l) => /Seq Scan on thought_audit/.test(l));
+      assert(/(Index Scan|Index Only Scan|Bitmap Index Scan) (using|on) thought_audit_thought_id_idx/.test(p) && seqLines.every((l) => /never executed/.test(l)),
+        `${mode.replace("force_", "").replace("_plan", "")} plan, ten ids: ob1_thought_events_in_order reads them by thought_audit_thought_id_idx, and any scan of the whole log is never executed (${seqLines.map((l) => l.trim()).join(" | ") || "no seq scan"})`);
+    }
+
+    // 095's tickets matched by = ANY on each event's fields read once: no join filter pairs every event with every key.
+    const inputs = (await src("ticket_status_inputs(uuid[],text[])")).replace(/\bp_ids\b/g, "$1").replace(/\bp_issues\b/g, "$2");
+    const keys = `ARRAY[${KEYS.map((k) => `'${k}'`).join(",")}]::text[]`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const p = await plan(inputs, "uuid[], text[]", `'{${ids.slice(0, 10).join(",")}}'::uuid[], ${keys}`, mode);
+      const removed = [...p.matchAll(/Rows Removed by Join Filter: (\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+      // The first cut paired every event with every key: 180 events × 60 keys, 5,790 removed on a fresh
+      // database under the generic plan. What the shipped body removes is the brain's other ticket heads,
+      // a count of this database's tickets, not of the keys asked.
+      assert(removed < (KEYS.length * KEYS.length) / 2,
+        `${mode.replace("force_", "").replace("_plan", "")} plan, sixty tickets: ticket_status_inputs removes ${removed} rows by a join filter — not one per event per key, the generic-plan join the first cut made (1,032 keys: 5.3 s)`);
+    }
+  } catch (err) {
+    assert(false, `[43] stopped: ${(err as Error).stack}`);
+  } finally {
+    await tsql`DELETE FROM thoughts WHERE metadata->>'issue' LIKE 'ZS-%' AND content LIKE '% — a ticket (label-inputs fixture)'`;
+    await tsql.close();
   }
 }
 
