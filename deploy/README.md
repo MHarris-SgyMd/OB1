@@ -1811,8 +1811,9 @@ Once newer thoughts have been judged, three cases miss their pairs however
 the passes are run (`db/README.md`, "Consolidation: proposing which thoughts
 supersede which"):
 - an older thought whose extraction failed (`--retry-failed` extracts it);
-- an older thought whose embedding failed (`db/reembed.ts` embeds it; no
-  service runs it);
+- an older thought whose embedding failed (the servers' vector mender embeds
+  it once the provider answers and the gate allows, SMD-2889; `db/reembed.ts`
+  does a whole brain);
 - an import dated older than thoughts already judged.
 
 **Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged
@@ -1870,7 +1871,8 @@ the same as under `workers`, spent only while nobody is using the brain.
 `db/README.md`, "Sleep", has the full rules.
 
 **What wakes it.** A write through a key that is not classified `ingested`
-(board-sync's sync writes are), and a search, but only when the server logs
+(board-sync's sync writes are; the servers' vector mender's are marked
+background and do not wake it either), and a search, but only when the server logs
 searches (`OB1_QUERY_LOG=on`) and the scheduler's role may read the log. This
 stack's database URL is the owner's, which may. A role set up with
 `migrate.ts --grant` may only when granted the opt-in **sleep** group,
@@ -2848,6 +2850,11 @@ lines naming the same one are refused.
        model, oldest first, not only this run's. That is normally just this
        run's. After a model switch it is the whole brain, and imports then
        run to their deadline for as long as that takes.
+     - The servers' vector mender (SMD-2889) embeds the same rows too, 8 a
+       tick per server, within a sweep of their landing. Neither writes over the other's
+       newer text — each write carries the stamp it read — but a row both
+       reach may be embedded and written twice; `OB1_VECTOR_MEND_INTERVAL=off`
+       leaves imports to the runner alone.
 - **Success** means every row of the pipeline's source has a vector.
   reembed's own exit code (1 for any failed row in its job, or another
   pass's leases) does not decide it.
