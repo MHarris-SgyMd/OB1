@@ -3201,17 +3201,21 @@ sleep; and once consolidation has joined, a stalled thought in hand keeps
 its turn, and a capture made then waits for the next sleep, where it goes
 first, as one behind a thought still gaining windows, or a stall or two
 short of the join, waits for its window. While consolidation waits for its
-provider — at its start, or mid-pass past its workers' pauses — its pool
+provider — at its start, or mid-pass (past its workers' pauses for a 5xx,
+at once for a model gone missing or a call no probe answers) — its pool
 cannot drain: extraction is let out for the newer work meanwhile, at most
 once a minute, and set aside again once it reaches the stalled thought(s),
 which wait for consolidation, so the judge, on the same chat endpoint, does
 not queue behind their window when it answers (SMD-3008); the let-out runs
-one worker, its claims read by this process's worker ids so a lease another
-left does not count, and each stalled thought it reaches is stopped, a stop
+one worker, its claims read by this process's worker ids since this run
+began so a lease another left, or this container before a restart, does not
+count, and each stalled thought it reaches is stopped, a stop
 counted on it. If the judge answers and consolidation drains while it is
 out, it goes on with one worker under `--workers 1`, and with more it is
-set aside once it holds nothing, so the drain's resume starts them all. Mid-pass, a judge answering 5xx is waited for only past those
-pauses, a minute and more.
+set aside once it holds nothing, so the drain's resume starts them all. A
+judge model missing at the start is refused, as before. Each sleep's move
+also dates now a forward-dated row that is no longer a stopped thought (one
+finished, then put back by a retry).
 A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
@@ -4651,7 +4655,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2890 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1376 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1377 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
