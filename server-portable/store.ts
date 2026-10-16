@@ -881,7 +881,8 @@ export function ticketList(tickets: string[]): string[] {
  * The stated-status label's read failed (SMD-2540): said once per reason
  * until a read succeeds, so a lock or a timeout under load is one line, not
  * one per search. A brain before 095 (42883; PostgREST's PGRST202) is
- * expected and preflight names it, so it is not said; a missing grant
+ * expected and brain_info's version check names it behind, so it is not
+ * said — nor, so, a 42883 from a callee a role's search_path misses; a missing grant
  * (42501), 098's lock timeout (55P03) or a statement timeout (57014) is.
  */
 const labelUnread = new Set<string>();

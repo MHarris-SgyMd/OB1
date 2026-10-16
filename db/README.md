@@ -1645,7 +1645,9 @@ since the order's every-row arm is estimated at the whole log and JIT compiled
 on every call past ~100,000 audit rows (about 7 ms), and an `OFFSET 0` fence
 that reads each event's diff once instead of four times. It refuses to apply
 without 095; 095 re-applied puts its unbounded body back and 098 after it the
-bounds. test-schema [88], test-upgrade [20ar], test-live [45] (the lock).
+bounds, so after an older tree's `--reapply` over a 098 brain run this tree's
+`--reapply` (a plain run skips 098, recorded as applied). test-schema [88],
+test-upgrade [20ar], test-live [45] (the lock).
 
 ## What changed relative to the guide
 

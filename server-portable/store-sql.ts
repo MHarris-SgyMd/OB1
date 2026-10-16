@@ -942,7 +942,8 @@ export class SqlStore implements ThoughtStore {
           FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
     } catch (e) {
       // Said once (labelReadFailed): a lock 098 gave up on, a grant, a timeout — not a brain before 095.
-      labelReadFailed(String((e as { errno?: unknown })?.errno ?? ""), (e as Error)?.message ?? String(e));
+      // errno is the SQLSTATE; a client-side failure (refused, closed) carries Bun's code instead, as db/ reads it.
+      labelReadFailed(String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? ""), (e as Error)?.message ?? String(e));
       return null;
     }
     labelReadOk();

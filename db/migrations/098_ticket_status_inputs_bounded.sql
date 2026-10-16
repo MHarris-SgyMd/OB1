@@ -18,7 +18,7 @@
 --     under the generic plan its nested body gets, past jit_above_cost once
 --     thought_audit holds roughly 100,000 rows — 18 functions compiled, about
 --     7 ms on every call (10.2 ms against 2.9 ms off, on a seeded brain of
---     151,000 audit rows). 017, 019, 020 and 068's reconcile turn it off.
+--     151,000 audit rows). 017, 020, 040 and 068's reconcile turn it off.
 --   * The diff read four times: the LATERAL that names each event's metadata
 --     was pulled up, so its COALESCE ran in the filter and each of the three
 --     outputs, decompressing the diff each time. An OFFSET 0 fence keeps it
@@ -28,7 +28,9 @@
 -- WHAT
 --   ticket_status_inputs(uuid[], text[]) redefined over the same signature,
 --   rows and order (CREATE OR REPLACE: a --reapply runs 095's body, then this
---   one): SET lock_timeout = '200ms', SET jit = off beside 095's
+--   one; an older tree's --reapply over a 098 brain puts 095's unbounded body
+--   back, so run this tree's --reapply after it — a plain run skips 098,
+--   recorded as applied): SET lock_timeout = '200ms', SET jit = off beside 095's
 --   max_parallel_workers_per_gather = 0, and the fence. A lock not granted in
 --   200 ms fails the call with 55P03, which the store reads as no label
 --   (best-effort, as before 095) and says once (server-portable/store.ts's
